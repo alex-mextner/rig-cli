@@ -22,6 +22,7 @@ from typing import Any
 
 from .catalog import Catalog, Item
 from .config import LoadedConfig
+from .github_ruleset import GITHUB_RULESET_DEFAULTS
 
 
 class PlanError(ValueError):
@@ -65,7 +66,7 @@ _DEFAULT_HARNESS_KIND = "claude-code"
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -496,6 +497,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── agents_md (AGENTS.md canonical + CLAUDE.md symlink) ────────────────────────
     _build_agents_symlink(config, plan)
 
+    # ── github (repository branch ruleset via gh api) ─────────────────────────────
+    _build_github_ruleset(config, plan)
+
     return plan
 
 
@@ -652,6 +656,52 @@ def _build_agents_symlink(config: LoadedConfig, plan: InstallPlan) -> None:
             source=config.repo_root,
             target=config.repo_root,
             options={},
+        )
+    )
+
+
+def _build_github_ruleset(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the GitHub repository branch-ruleset provisioning for the repo.
+
+    Default **ON** (like ``agents_md``): rig reconciles a branch ruleset named
+    ``github.ruleset.name`` (default ``rig-managed``) on the repo's DEFAULT branch via
+    ``gh api``. Opt out with ``github: { ruleset: { enabled: false } }``. The whole
+    GitHub-vs-desired classification lives in ``actions/`` (it depends on the live API), so the
+    plan emits ONE idempotent action carrying the resolved knobs; no carrier in agent-tools,
+    and the repo root is the target the action resolves ``owner/repo`` from.
+
+    The action itself returns ``skipped`` when the repo has no github remote — so "default ON
+    when the repo has a github remote" needs no detection here; a non-github repo is a no-op.
+    The resolved options merge the documented defaults with any ``ruleset`` overrides, so a
+    sparse config still produces the safe default ruleset and the footgun ``update`` rule is
+    never reachable.
+    """
+    gh = config.data.get("github")
+    if gh is None:
+        gh = {}
+    if not isinstance(gh, dict):
+        return  # validate() already fail-closed on a non-mapping block
+    ruleset = gh.get("ruleset", {})
+    if not isinstance(ruleset, dict):
+        return
+    if ruleset.get("enabled") is False:
+        return
+    # `enabled` is a plan-gating meta-key, not a ruleset-body knob — strip it before merging the
+    # overrides onto the canonical defaults so it never leaks into the action options. Also drop
+    # explicit `null` values: a `required_reviews: null` (which validate() tolerates) would
+    # otherwise overlay the `0` default with None and crash `int(None)` in build_ruleset_rules —
+    # and a `null` bool knob would silently disable a guard instead of using its default. A
+    # missing key already falls back to the default; an explicit null must do the same.
+    overrides = {k: v for k, v in ruleset.items() if k != "enabled" and v is not None}
+    options = {**GITHUB_RULESET_DEFAULTS, **overrides}
+    plan.actions.append(
+        Action(
+            kind="provision_github_ruleset",
+            category="github",
+            item="ruleset",
+            source=config.repo_root,
+            target=config.repo_root,
+            options=options,
         )
     )
 

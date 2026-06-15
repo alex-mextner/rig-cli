@@ -37,6 +37,7 @@ mcp: { ... }
 harness: { ... }              # agent harness auto/permission provisioning (auto-mode)
 models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
 agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
+github: { ... }               # GitHub repo branch ruleset via gh api, default ON (no-op without a github remote)
 ```
 
 If `agent_tools_source` is omitted, rig resolves it from `$RIG_AGENT_TOOLS_SOURCE`, then
@@ -377,6 +378,79 @@ sync.
 
 ---
 
+## `github`
+
+Provisions a **GitHub repository branch ruleset** — the modern replacement for branch
+protection — on the repo's **default branch**, declaratively and reconciled like every other
+category. rig owns the ruleset named `ruleset.name` (default `rig-managed`) and converges it
+via `gh api`. Default **ON**: on `rig init` AND `rig apply` rig creates the ruleset if absent,
+updates it if it drifted from config, and no-ops if it already matches. A repo with **no
+github remote is a no-op** (the action reports `skipped`, never an error) — so "default ON when
+the repo has a github remote" needs no extra flag.
+
+```yaml
+github:
+  ruleset:
+    enabled: true                 # provision the ruleset (default ON; false opts out)
+    name: rig-managed             # rig owns rulesets with this name
+    require_pull_request: true    # pull_request rule
+    required_reviews: 0           # required_approving_review_count
+    block_force_push: true        # non_fast_forward rule
+    restrict_deletion: true       # deletion rule
+    require_linear_history: false # required_linear_history rule
+    require_signatures: false     # required_signatures rule
+    required_status_checks: []    # check/context names to require; empty = no rule
+    admin_bypass: true            # add the repo Admin role to bypass_actors
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision the ruleset (set `false` to leave the repo's rulesets untouched) |
+| `name` | str | `rig-managed` | the ruleset rig owns/reconciles (rig only ever touches a ruleset with this name) |
+| `require_pull_request` | bool | `true` | emit the `pull_request` rule (require a PR to merge to the default branch) |
+| `required_reviews` | int ≥ 0 | `0` | `required_approving_review_count` on the `pull_request` rule |
+| `block_force_push` | bool | `true` | emit the `non_fast_forward` rule (block force-push) |
+| `restrict_deletion` | bool | `true` | emit the `deletion` rule (block deleting the branch) |
+| `require_linear_history` | bool | `false` | emit the `required_linear_history` rule |
+| `require_signatures` | bool | `false` | emit the `required_signatures` rule |
+| `required_status_checks` | list[str] | `[]` | contexts for the `required_status_checks` rule; **empty emits no rule** (never a no-op rule) |
+| `admin_bypass` | bool | `true` | add the repo Admin role (`actor_id: 5`, `RepositoryRole`, `always`) to `bypass_actors` |
+
+**The footgun guard — rig never emits the `update` rule.** A hand-made ruleset with the
+`update` ("Restrict updates") rule and **zero bypass actors** locks out *every* merge: each
+merge is an "update" to the protected default branch, so GitHub answers `Cannot update this
+protected ref` and only a repo admin using `--admin` can push past it. rig's rule assembly
+**cannot emit the `update` rule** — there is no config knob and no code path that produces it.
+It likewise never emits a `required_deployments` rule with an empty environment list (a no-op
+smell that can also block). And when `admin_bypass` is on (the default) the repo Admin role is
+a bypass actor, so an active ruleset never locks admins out of merging.
+
+**The default ruleset rig emits:** `pull_request` (0 required reviews) + `non_fast_forward` +
+`deletion`, with the Admin role in `bypass_actors`. Linear history, signatures, and required
+status checks are off/empty. Targets the default branch via the `~DEFAULT_BRANCH` ref token, so
+the ruleset follows a rename of the default branch.
+
+**Reconcile + idempotency.** `github_ruleset_state` is the single classification `rig apply`
+and `rig status` share (so they can never disagree): `create` (no managed ruleset → POST),
+`update` (managed ruleset differs → PUT), `ok` (matches → no-op), `no_remote` (no github origin
+→ no-op, no drift). The desired-vs-actual comparison normalizes both sides (sorted rules,
+sorted check contexts, identity-only bypass actors, order-independent conditions, and EVERY
+managed rule parameter) so a semantic match reads as in sync, not churn. The list call uses
+`includes_parents=false` + `--paginate` so an inherited org ruleset is never mistaken for the
+repo's, and a managed ruleset on a later page is found rather than duplicated.
+
+**When rig can't reach GitHub (`gh` missing / not authed / API error).** `rig apply` returns an
+`error` on the action (it tried to act and couldn't). `rig status` does NOT report the repo as
+"in sync" — it surfaces a visible *could-not-verify* drift item, because a green "in sync" while
+rig was unable to check would mask a genuinely missing/drifted ruleset. (A repo with **no github
+remote** is different: that is a clean no-op, no item.) GitHub Enterprise hosts other than
+`github.com` are treated as no-remote (skipped) — only `github.com` rulesets are managed today.
+
+Set `RIG_GH_DRY_RUN=1` to compute what *would* change (the create/update is reported) but make
+**no `gh` POST/PUT** — for CI, smoke, or a dry inspection where mutating a real repo is unwanted.
+
+---
+
 ## Validation
 
 `apply`/`status`/`init` validate before touching disk and **fail closed** on:
@@ -384,6 +458,8 @@ unknown top-level keys, unsupported `version`, invalid `on_conflict` / ci `tier`
 agent-hook `on_error`, an unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`,
 a non-mapping `harness.hook_bridge` / non-bool `hook_bridge.enabled` / non-string `hook_bridge.python`,
 a malformed/out-of-range `models.schedule.time` or unknown `models` key, a non-bool
-`agents_md.enabled`/`agents_md.symlink` or unknown `agents_md` key, and an
-`agent_tools_source` that is not an agent-tools checkout. `--dry-run` prints the
-resolved plan and exits 0 without writing.
+`agents_md.enabled`/`agents_md.symlink` or unknown `agents_md` key, an unknown
+`github`/`github.ruleset` key, a non-bool `github.ruleset` boolean knob, a
+`github.ruleset.required_reviews` that is not an int ≥ 0, a `github.ruleset.required_status_checks`
+that is not a list of strings, and an `agent_tools_source` that is not an agent-tools checkout.
+`--dry-run` prints the resolved plan and exits 0 without writing.
