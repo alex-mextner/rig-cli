@@ -1,13 +1,25 @@
 # rig
 
-**The dev-environment umbrella driver.** `rig` sets up a repository (and a developer's
-machine) from a committed, declarative `rig.yaml` by applying content from the
-[`agent-tools`](https://github.com/alex-mextner/agent-tools) umbrella repo — skills,
-agent-hooks, the global git-hook dispatcher, CI gates, and MCP registrations. One command
-configures a repo's guardrails the same way, every time, on every machine.
+**One tool. One config. The whole dev culture of the coding-agent era — installed.**
 
-`rig` is a peer to `tg-cli` and `review-cli`: a small standalone Python CLI (`bin/rig`
-shim + a `riglib/` package), uv-runnable, stdlib-only at import time with heavy deps lazy.
+`rig` is the single front door to an entire ecosystem of agent-native tooling. From one
+committed, declarative `rig.yaml` it sets up a repository — and a developer's machine — wiring
+in the **skills**, **agent-hooks**, global **git-hook dispatcher**, **CI gates**, and **MCP
+servers** that keep a team's engineering discipline intact when most of the code is written by
+agents. One command, the same guardrails, every time, on every machine.
+
+In the coding-agent era the bottleneck isn't writing code — it's keeping a hundred parallel
+agent sessions *on-culture*: tests first, secrets never committed, review before merge, an
+auto-mode that's actually safe. `rig` installs and reconciles that culture from the portable
+catalog in [`agent-tools`](https://github.com/alex-mextner/agent-tools) — the **WHAT** (the
+content) to rig's **HOW** (apply it, reconcile it, prove it).
+
+It's a peer to the rest of the ecosystem — [`tg-cli`](https://github.com/alex-mextner/tg-cli),
+[`review-cli`](https://github.com/alex-mextner/review-cli),
+[`draw-cli`](https://github.com/alex-mextner/draw-cli),
+[`3d-cli`](https://github.com/alex-mextner/3d-cli),
+[`task-cli`](https://github.com/alex-mextner/task-cli) — a small standalone Python CLI
+(`bin/rig` shim + a `riglib/` package), uv-runnable, stdlib-only at import time with heavy deps lazy.
 
 ![ecosystem](./docs/img/ecosystem.svg)
 
@@ -106,17 +118,22 @@ so autonomy is part of the reproducible config — not a manual per-machine togg
 harness:
   enabled: true
   kind: claude-code          # claude-code implemented; opencode documented (config-schema.md)
-  auto_mode: true            # RECOMMENDED: writes permissions.defaultMode=bypassPermissions
+  auto_mode: true            # RECOMMENDED: writes permissions.defaultMode=auto
 ```
 
-On `rig apply` this merges `permissions.defaultMode` into `.claude/settings.json` (only that
-key; everything else in the file is preserved), idempotently and with a backup on conflict —
-and `rig status` flags it if the value drifts. **Auto-mode is recommended on by default**
-because the agent-hook guards `rig` installs in the same pass (`block-secrets-write`,
-`block-no-verify`, `enforce-timeout-on-bash`, `block-raw-process-env`, **`block-raw-pr-merge`**)
-catch the dangerous tool calls before the side effect: the guards are what make running
-without permission prompts safe. See [`docs/config-schema.md`](docs/config-schema.md) for the
-full `harness` schema and the opencode equivalent.
+For **claude-code**, `auto_mode: true` writes `permissions.defaultMode=auto` to the **user**
+settings (`~/.claude/settings.json`) — Claude Code honors `auto` only at user scope (it ignores
+it in a repo's project settings), so auto-mode is a **per-machine** setting: declare the
+`harness:` block in the **global** config (`~/.config/rig/config.yaml`), not per repo. `auto`
+(a safety-classifier preview) auto-approves but a classifier blocks anything that escalates
+beyond your request, touches unrecognized infrastructure, or looks prompt-injected — strictly
+safer than `bypassPermissions` (which skips every check; pin `mode: bypassPermissions` to opt
+into full bypass at project scope, e.g. inside a container). `rig apply` merges only that one
+key (everything else is preserved), idempotently with a backup on conflict, and `rig status`
+flags drift. Defense-in-depth: the agent-hook guards `rig` installs in the same pass
+(`block-secrets-write`, `block-no-verify`, `enforce-timeout-on-bash`, `block-raw-process-env`,
+**`block-raw-pr-merge`**) catch dangerous tool calls before the side effect, complementing the
+classifier. See [`docs/config-schema.md`](docs/config-schema.md) for the full `harness` schema.
 
 ### Model-freshness schedule — a daily cron, provisioned by the reconciler
 
@@ -244,6 +261,7 @@ Part of the [HyperIDE.ai](https://hyperide.ai) agent toolchain:
 - **[agent-tools](https://github.com/alex-mextner/agent-tools)** — the shared umbrella: portable agent skills, git/agent hooks, CI gates, and the `agenttools_log` lib that the other CLIs consume
 - **[draw-cli](https://github.com/alex-mextner/draw-cli)** — text-to-image via Hugging Face
 - **[3d-cli](https://github.com/alex-mextner/3d-cli)** — scriptable CLI for the full 3D FDM lifecycle: modeling, mesh repair, slicing, and print monitoring
+- **[task-cli](https://github.com/alex-mextner/task-cli)** — enforced ticket-system CLI for agents (GitHub Issues / Linear): acceptance criteria, motivation, and user-impact gates before work starts
 - **[hyperide.ai](https://hyperide.ai)** — Figma replacement inside VS Code. Edit React components directly through AST/LSP without AI hallucinations, token waste, or context-window limits. Works for indie vibe-coding and for enterprise teams with split design/dev roles.
 
 Each CLI registers a skill into your agent harnesses (`<tool> install-skill`) so agents know it exists — see Install.
