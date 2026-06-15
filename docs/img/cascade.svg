@@ -1,0 +1,31 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 470" width="860" height="470" role="img" aria-label="rig cascade and drift">
+  <title>rig cascade and drift</title>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#8c959f"/>
+    </marker>
+  </defs>
+  <text x="430.0" y="38" font-size="22" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">config cascade + two-way drift</text>
+  <text x="430.0" y="60" font-size="12.5" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">global defaults → per-repo rig.yaml (wins) → disk; drift surfaced BOTH ways, never silently reconciled</text>
+  <rect x="60" y="110" width="240" height="70" rx="10" fill="#f6f8fa" stroke="#57606a" stroke-width="1.5"/>
+  <text x="180" y="138" font-size="12.5" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">~/.config/rig/config.yaml</text>
+  <text x="180" y="160" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">machine-wide defaults</text>
+  <rect x="60" y="220" width="240" height="70" rx="10" fill="#f6f8fa" stroke="#2da44e" stroke-width="1.5"/>
+  <text x="180" y="248" font-size="12.5" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">./rig.yaml  (committed)</text>
+  <text x="180" y="270" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">source of truth — overrides</text>
+  <line x1="180" y1="180" x2="180" y2="220" stroke="#8c959f" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <rect x="370" y="165" width="180" height="80" rx="10" fill="#f6f8fa" stroke="#0969da" stroke-width="1.5"/>
+  <text x="460" y="198" font-size="13" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">cascaded config</text>
+  <text x="460" y="220" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">→ InstallPlan</text>
+  <line x1="300" y1="145" x2="370" y2="195" stroke="#8c959f" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="300" y1="255" x2="370" y2="215" stroke="#8c959f" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="620" y="165" width="180" height="80" rx="10" fill="#f6f8fa" stroke="#bf8700" stroke-width="1.5"/>
+  <text x="710" y="198" font-size="13" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">disk state</text>
+  <text x="710" y="220" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">skills/hooks/CI/mcp</text>
+  <line x1="550" y1="205" x2="620" y2="205" stroke="#8c959f" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="620" y1="235" x2="550" y2="235" stroke="#cf222e" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+  <text x="460" y="300" font-size="12" fill="#0969da" font-weight="600" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">rig apply: converge config→disk</text>
+  <text x="585" y="330" font-size="11.5" fill="#cf222e" font-weight="600" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">rig status: report disk→config extras (you decide)</text>
+  <text x="430.0" y="444" font-size="11.5" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">config→disk drift is converged by `rig apply`; disk→config extras are reported, not deleted.</text>
+</svg>

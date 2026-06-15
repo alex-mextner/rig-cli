@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Python package build artifacts (rig-cli is a real package; pip/pipx build produces
+# these from pyproject.toml — never commit them).
+build/
+dist/
+*.egg-info/
+
+# uv writes a lockfile when run via `uv run`; the dev/CI path is pip, so the lock is a
+# local artifact — never commit it.
+uv.lock

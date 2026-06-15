@@ -1,0 +1,44 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 340" width="980" height="340" role="img" aria-label="rig command dispatch model">
+  <title>rig command dispatch model</title>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#8c959f"/>
+    </marker>
+  </defs>
+  <text x="490.0" y="38" font-size="22" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">rig — commands over one engine</text>
+  <text x="490.0" y="60" font-size="13" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">setup &amp; apply share ONE plan builder + executor — the wizard is a thin front-end, never drifts</text>
+  <rect x="30.0" y="110" width="150" height="84" rx="10" fill="#f6f8fa" stroke="#2da44e" stroke-width="1.5"/>
+  <rect x="30.0" y="110" width="150" height="6" rx="3" fill="#2da44e"/>
+  <text x="105.0" y="136" font-size="14" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">rig setup</text>
+  <text x="105.0" y="156" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">wizard OR</text>
+  <text x="105.0" y="171" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">--config --yes</text>
+  <rect x="222.5" y="110" width="150" height="84" rx="10" fill="#f6f8fa" stroke="#0969da" stroke-width="1.5"/>
+  <rect x="222.5" y="110" width="150" height="6" rx="3" fill="#0969da"/>
+  <text x="297.5" y="136" font-size="14" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">rig apply</text>
+  <text x="297.5" y="156" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">reconcile</text>
+  <text x="297.5" y="171" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">idempotent</text>
+  <rect x="415.0" y="110" width="150" height="84" rx="10" fill="#f6f8fa" stroke="#bf8700" stroke-width="1.5"/>
+  <rect x="415.0" y="110" width="150" height="6" rx="3" fill="#bf8700"/>
+  <text x="490.0" y="136" font-size="14" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">rig status</text>
+  <text x="490.0" y="156" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">two-way</text>
+  <text x="490.0" y="171" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">drift</text>
+  <rect x="607.5" y="110" width="150" height="84" rx="10" fill="#f6f8fa" stroke="#8250df" stroke-width="1.5"/>
+  <rect x="607.5" y="110" width="150" height="6" rx="3" fill="#8250df"/>
+  <text x="682.5" y="136" font-size="14" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">rig doctor</text>
+  <text x="682.5" y="156" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">deps across</text>
+  <text x="682.5" y="171" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">brew/apt/dnf…</text>
+  <rect x="800.0" y="110" width="150" height="84" rx="10" fill="#f6f8fa" stroke="#cf222e" stroke-width="1.5"/>
+  <rect x="800.0" y="110" width="150" height="6" rx="3" fill="#cf222e"/>
+  <text x="875.0" y="136" font-size="14" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">rig export</text>
+  <text x="875.0" y="156" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">write</text>
+  <text x="875.0" y="171" font-size="11" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">rig.yaml</text>
+  <rect x="260.0" y="248" width="460" height="44" rx="10" fill="#f6f8fa" stroke="#5b6470" stroke-width="1.5"/>
+  <text x="490.0" y="267" font-size="13" fill="#1f2328" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">catalog(agent-tools) + config → InstallPlan → executor</text>
+  <text x="490.0" y="284" font-size="10.5" fill="#57606a" font-weight="400" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">idempotent · backs up replaced files · stdlib-only actions</text>
+  <line x1="105.0" y1="194" x2="490.0" y2="246" stroke="#8c959f" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <line x1="297.5" y1="194" x2="490.0" y2="246" stroke="#8c959f" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <line x1="490.0" y1="194" x2="490.0" y2="246" stroke="#8c959f" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <line x1="682.5" y1="194" x2="490.0" y2="246" stroke="#8c959f" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <line x1="875.0" y1="194" x2="490.0" y2="246" stroke="#8c959f" stroke-width="1.3" marker-end="url(#arrow)"/>
+</svg>

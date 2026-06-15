@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+# Thin shim for the legacy symlink install path (install.sh symlinks this into a bin
+# dir; the symlink must resolve back to the repo to find the riglib package). pipx /
+# package installs use [project.scripts] rig = "riglib.cli:main" and never run this file.
+# Keep it MINIMAL: every line here runs before any check, with the user's rights, from a
+# file a ~/.local/bin symlink points at.
+import os
+import sys
+
+# Follow the symlink to the real repo root and add it to sys.path ONLY when the sibling
+# package is actually present there. Never insert blindly and never the cwd: sys.path[0]
+# precedes stdlib for pure-python modules, so a stray riglib/ would otherwise shadow the
+# real one (rig runs in foreign repos it is configuring).
+_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if os.path.isfile(os.path.join(_root, "riglib", "__init__.py")):
+    sys.path.insert(0, _root)
+
+from riglib.cli import main  # noqa: E402
+
+raise SystemExit(main())

@@ -1,0 +1,224 @@
+"""Config cascade loader + schema validation for ``rig.yaml``.
+
+Two layers, cascaded by **location** (no scope flag):
+
+1. **Global** — ``~/.config/rig/config.yaml`` (or ``$XDG_CONFIG_HOME/rig/config.yaml``).
+   Machine-wide defaults a developer carries across repos.
+2. **Per-repo** — ``rig.yaml`` at the repo root. Committed by default; it is the
+   reproducible source of truth and **overrides** the global layer.
+
+The merge is a deep dict merge: per-repo keys win, dicts merge recursively, scalars and
+lists replace wholesale (a list in rig.yaml fully replaces the global list — lists are
+treated as atomic decisions, not appended, to keep the result predictable).
+
+``yaml`` is imported lazily so ``rig --help``/``doctor`` work even if PyYAML is missing.
+Validation is **fail-closed**: unknown top-level keys, unknown categories, and invalid
+enum values abort before anything touches disk.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+CONFIG_FILENAME = "rig.yaml"
+
+_VALID_TOP_KEYS = {
+    "version",
+    "scope",
+    "defaults",
+    "agent_tools_source",
+    "skills",
+    "agent_hooks",
+    "git_hooks",
+    "ci",
+    "mcp",
+}
+_VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
+_VALID_SCOPES = {"user", "repo", "both"}
+_VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
+_VALID_TIERS = {"block", "warn"}
+_VALID_ON_ERROR = {"open", "closed"}
+
+
+class ConfigError(ValueError):
+    """Raised on a malformed/invalid config (fail-closed before any write)."""
+
+
+def global_config_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(base) / "rig" / "config.yaml"
+
+
+def repo_config_path(repo_root: Path) -> Path:
+    return repo_root / CONFIG_FILENAME
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    """Parse a YAML file to a dict. Lazy yaml import; empty file → {}."""
+    import yaml  # lazy: keeps `rig --help` dependency-free
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"cannot read config {path}: {exc}") from exc
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        # fail closed with the usual error message, not a PyYAML traceback
+        raise ConfigError(f"invalid YAML in {path}: {exc}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ConfigError(f"config {path} must be a YAML mapping, got {type(data).__name__}")
+    return data
+
+
+def _deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    """Recursive dict merge; over wins. Lists/scalars replace wholesale."""
+    out = dict(base)
+    for k, v in over.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+@dataclass
+class LoadedConfig:
+    """A cascaded, validated config plus provenance of where each layer came from."""
+
+    data: dict[str, Any]
+    repo_root: Path
+    global_path: Path | None = None
+    repo_path: Path | None = None
+    layers: list[str] = field(default_factory=list)
+
+    @property
+    def agent_tools_source(self) -> str | None:
+        v = self.data.get("agent_tools_source")
+        return str(v) if v else None
+
+    def category(self, name: str) -> dict[str, Any]:
+        cat = self.data.get(name)
+        return cat if isinstance(cat, dict) else {}
+
+    @property
+    def defaults(self) -> dict[str, Any]:
+        d = self.data.get("defaults")
+        return d if isinstance(d, dict) else {}
+
+
+def load(
+    repo_root: Path,
+    *,
+    explicit_config: Path | None = None,
+    include_global: bool = True,
+) -> LoadedConfig:
+    """Cascade-load config for ``repo_root``.
+
+    - ``explicit_config`` (from ``--config P``) replaces the per-repo layer with ``P``.
+    - The global layer is always the base unless ``include_global=False``.
+    - The result is validated (fail-closed) before return.
+    """
+    repo_root = repo_root.resolve()
+    merged: dict[str, Any] = {}
+    layers: list[str] = []
+    gpath: Path | None = None
+    rpath: Path | None = None
+
+    if include_global:
+        gpath = global_config_path()
+        if gpath.is_file():
+            merged = _deep_merge(merged, _load_yaml(gpath))
+            layers.append(f"global:{gpath}")
+
+    if explicit_config is not None:
+        rpath = explicit_config.resolve()
+        if not rpath.is_file():
+            raise ConfigError(f"--config file not found: {rpath}")
+        merged = _deep_merge(merged, _load_yaml(rpath))
+        layers.append(f"config:{rpath}")
+    else:
+        rpath = repo_config_path(repo_root)
+        if rpath.is_file():
+            merged = _deep_merge(merged, _load_yaml(rpath))
+            layers.append(f"repo:{rpath}")
+
+    validate(merged)
+    return LoadedConfig(
+        data=merged,
+        repo_root=repo_root,
+        global_path=gpath if gpath and gpath.is_file() else None,
+        repo_path=rpath if rpath and rpath.is_file() else None,
+        layers=layers,
+    )
+
+
+def validate(data: dict[str, Any]) -> None:
+    """Fail-closed schema validation. Raises :class:`ConfigError` on any violation."""
+    if not isinstance(data, dict):
+        raise ConfigError("config root must be a mapping")
+
+    unknown = set(data) - _VALID_TOP_KEYS
+    if unknown:
+        raise ConfigError(f"unknown top-level key(s): {', '.join(sorted(unknown))}")
+
+    version = data.get("version", 1)
+    if not isinstance(version, int):
+        raise ConfigError(f"version must be an int, got {version!r}")
+    if version != 1:
+        raise ConfigError(f"unsupported config version {version} (this rig supports v1)")
+
+    scope = data.get("scope", "both")
+    if scope not in _VALID_SCOPES:
+        raise ConfigError(f"scope must be one of {sorted(_VALID_SCOPES)}, got {scope!r}")
+
+    defaults = data.get("defaults", {})
+    if not isinstance(defaults, dict):
+        raise ConfigError("defaults must be a mapping")
+    on_conflict = defaults.get("on_conflict", "backup")
+    if on_conflict not in _VALID_ON_CONFLICT:
+        raise ConfigError(
+            f"defaults.on_conflict must be one of {sorted(_VALID_ON_CONFLICT)}, "
+            f"got {on_conflict!r}"
+        )
+
+    for cat in _VALID_CATEGORIES:
+        if cat in data and not isinstance(data[cat], dict):
+            raise ConfigError(f"category '{cat}' must be a mapping")
+
+    _validate_ci(data.get("ci", {}))
+    _validate_agent_hooks(data.get("agent_hooks", {}))
+
+
+def _validate_ci(ci: dict[str, Any]) -> None:
+    items = ci.get("items", {})
+    if not isinstance(items, dict):
+        raise ConfigError("ci.items must be a mapping")
+    for name, spec in items.items():
+        if not isinstance(spec, dict):
+            continue
+        tier = spec.get("tier")
+        if tier is not None and tier not in _VALID_TIERS:
+            raise ConfigError(
+                f"ci.items.{name}.tier must be one of {sorted(_VALID_TIERS)}, got {tier!r}"
+            )
+
+
+def _validate_agent_hooks(ah: dict[str, Any]) -> None:
+    items = ah.get("items", {})
+    if not isinstance(items, dict):
+        raise ConfigError("agent_hooks.items must be a mapping")
+    for name, spec in items.items():
+        if not isinstance(spec, dict):
+            continue
+        on_error = spec.get("on_error")
+        if on_error is not None and on_error not in _VALID_ON_ERROR:
+            raise ConfigError(
+                f"agent_hooks.items.{name}.on_error must be one of "
+                f"{sorted(_VALID_ON_ERROR)}, got {on_error!r}"
+            )

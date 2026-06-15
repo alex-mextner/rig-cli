@@ -1,0 +1,122 @@
+"""SetupState — the in-memory config the wizard edits and (de)serializes to rig.yaml.
+
+This is the single serializer/parser bridging the interactive wizard and the on-disk
+``rig.yaml``. The round-trip invariant: ``setup`` → ``to_yaml`` → ``apply --config`` must
+produce the identical install plan. ``from_dict`` accepts a cascaded config dict (already
+validated by :mod:`riglib.config`).
+
+A v0.1 ``SetupState`` is intentionally a thin wrapper over the config dict — the schema is
+already a faithful representation of the choices, so we don't introduce a parallel object
+graph that could drift. The value this class adds is a known-good default scaffold and the
+``to_yaml`` writer (lazy yaml import).
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+def default_state(
+    *,
+    agent_tools_source: str | None = None,
+    project_type: str = "unknown",
+    scope: str = "both",
+) -> dict[str, Any]:
+    """A sensible default config (opt-out skills, security hooks on, security CI gates).
+
+    The committed rig.yaml must be PORTABLE: it is replayed on other machines. So paths use
+    ``~`` (expanded per-machine at apply time) and ``agent_tools_source`` is omitted for
+    auto-detected sources (the caller only passes it when the user pinned one) — otherwise a
+    machine-specific absolute path would disable the env/default fallback elsewhere.
+    """
+    by_type_enable = [project_type] if project_type and project_type != "unknown" else []
+    # Always the portable ``~/.config/git`` token (no machine-specific path, no env token
+    # that goes unresolved elsewhere). At APPLY time, _expand() maps a ``~/.config`` prefix
+    # to ``$XDG_CONFIG_HOME`` when that is set, so rig installs where the dispatcher runner
+    # actually looks (``${XDG_CONFIG_HOME:-$HOME/.config}``) — matching without pinning.
+    git_cfg = "~/.config/git"
+    return {
+        "version": 1,
+        "scope": scope,
+        "defaults": {
+            "skills_target": "~/.agents/skills",
+            "hooks_target": "~/.claude/hooks",
+            "ci_target": ".github/workflows",
+            "mcp_target": "~/.claude/mcp",
+            "on_conflict": "backup",
+        },
+        **({"agent_tools_source": agent_tools_source} if agent_tools_source else {}),
+        "skills": {
+            "enabled": True,
+            "target": "~/.agents/skills",
+            "universal": {"all": True, "disable": []},
+            "by_type": {"enable": by_type_enable},
+        },
+        "agent_hooks": {
+            "enabled": True,
+            "target": "~/.claude/hooks",
+            "target_kind": "claude-code",
+            "all": True,
+        },
+        "git_hooks": {
+            "dispatcher": {
+                "enabled": True,
+                "dir": os.path.join(git_cfg, "global-hooks.d"),
+                "runner": os.path.join(git_cfg, "run-global-hooks"),
+                "set_global_hooks_path": True,
+                "install_local_retrofit_script": True,
+                "fragments": {"secret-scan": {"enabled": True}},
+            },
+        },
+        "ci": {
+            "enabled": True,
+            "target": ".github/workflows",
+            "all": False,
+            "items": {
+                "secret-scan": {"enabled": True, "tier": "block"},
+                "codeql": {"enabled": True, "tier": "block", "variant": "selfgate"},
+                "dependency-review": {"enabled": True, "tier": "block"},
+                "leftover-grep": {"enabled": True, "tier": "block"},
+                "review-threads": {"enabled": True, "tier": "block"},
+                "ship": {"enabled": True, "install_to": "~/bin", "gh_alias": True},
+            },
+        },
+        "mcp": {
+            "enabled": True,
+            "target": "~/.claude/mcp",
+            "items": {},
+        },
+    }
+
+
+@dataclass
+class SetupState:
+    data: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SetupState":
+        return cls(data=dict(data))
+
+    @classmethod
+    def default(cls, **kwargs: Any) -> "SetupState":
+        return cls(data=default_state(**kwargs))
+
+    def to_yaml(self) -> str:
+        import yaml  # lazy
+
+        return yaml.safe_dump(self.data, sort_keys=False, default_flow_style=False)
+
+    def write(self, path: Path) -> Path:
+        path = Path(os.path.expanduser(str(path)))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = (
+            "# rig.yaml — declarative setup for this repo, applied by `rig apply`.\n"
+            "# COMMITTED BY DEFAULT: this file is the reproducible source of truth.\n"
+            "# Global defaults live at ~/.config/rig/config.yaml; this file overrides them.\n"
+            "# See: rig status (drift), rig apply (converge). Schema: docs/config-schema.md\n\n"
+        )
+        path.write_text(header + self.to_yaml(), encoding="utf-8")
+        return path

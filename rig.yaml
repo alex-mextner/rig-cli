@@ -1,0 +1,69 @@
+# rig.yaml — rig-cli dogfoods its own config.
+# COMMITTED BY DEFAULT: this file is the reproducible source of truth for this repo.
+# Global defaults live at ~/.config/rig/config.yaml; this file overrides them.
+# agent_tools_source is intentionally omitted → auto-detected (RIG_AGENT_TOOLS_SOURCE,
+# then ~/xp/agent-tools / ~/work/agent-tools / ~/agent-tools) so the file stays portable.
+# Apply with: rig apply   ·   Check drift with: rig status   ·   Schema: docs/config-schema.md
+
+version: 1
+scope: both
+
+defaults:
+  skills_target: ~/.agents/skills
+  hooks_target: ~/.claude/hooks
+  ci_target: .github/workflows
+  mcp_target: ~/.claude/mcp
+  on_conflict: backup
+
+# ── Skills — all universal + the cli by-type bundle (this is a Python CLI) ────────
+skills:
+  enabled: true
+  target: ~/.agents/skills
+  universal:
+    all: true
+    disable: []
+  by_type:
+    enable: [cli]
+
+# ── Agent-hooks — the full discipline+security set ───────────────────────────────
+agent_hooks:
+  enabled: true
+  target: ~/.claude/hooks
+  target_kind: claude-code
+  all: true
+
+# ── Git-hooks — the global dispatcher (secret-scan runs in every repo) ────────────
+git_hooks:
+  dispatcher:
+    enabled: true
+    dir: ~/.config/git/global-hooks.d
+    runner: ~/.config/git/run-global-hooks
+    set_global_hooks_path: true
+    install_local_retrofit_script: true
+    fragments:
+      secret-scan: { enabled: true }
+
+# ── CI gates — security baseline + ship (no UI → no screenshots gate) ─────────────
+ci:
+  enabled: true
+  target: .github/workflows
+  all: false
+  items:
+    secret-scan:       { enabled: true,  tier: block }
+    dependency-review: { enabled: true,  tier: block }
+    leftover-grep:     { enabled: true,  tier: block }
+    review-threads:    { enabled: true,  tier: block }
+    pr-title-lint:     { enabled: true,  tier: warn }
+    ship:
+      enabled: true
+      install_to: ~/bin
+      gh_alias: true
+
+# ── MCP — review is the recommended default for AI review-before-commit ───────────
+mcp:
+  enabled: true
+  target: ~/.claude/mcp
+  items:
+    review:
+      enabled: true
+      command: "review --mcp"

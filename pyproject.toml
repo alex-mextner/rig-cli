@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rig-cli"
+version = "0.1.0"
+description = "rig — the dev-environment umbrella driver: set up a repo from a committed rig.yaml by applying agent-tools content (skills, hooks, CI gates, MCP)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Alex Mextner" }]
+# pyyaml is the only hard runtime dep (config parse/serialize). It is imported lazily so
+# `rig --help` and `rig doctor` still run if it is missing; doctor flags it as a gap.
+dependencies = ["pyyaml"]
+
+[project.optional-dependencies]
+# The interactive wizard. Headless `rig setup --config ... --yes`, `rig apply`,
+# `rig status`, and `rig doctor` work WITHOUT textual; only the TUI front-end needs it.
+tui = ["textual>=0.50"]
+test = ["pytest"]
+
+[project.scripts]
+rig = "riglib.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/alex-mextner/rig-cli"
+
+# Explicit package list (NOT setuptools flat-layout autodiscovery, which would silently
+# pull stray top-level dirs into the wheel). actions/ and tui/ are SUBpackages of riglib.
+[tool.setuptools.packages.find]
+include = ["riglib*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

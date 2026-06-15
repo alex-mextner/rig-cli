@@ -1,0 +1,373 @@
+"""Drift detection — compares the config-declared state against on-disk reality.
+
+Drift is surfaced in **both directions** and never silently reconciled:
+
+- **config→disk (missing)**: rig.yaml declares item X but it is absent / differs on disk.
+- **disk→config (extra)**: an installed item Z exists on disk but is not declared in
+  rig.yaml (orphan / hand-added).
+
+The plan tells us what *should* be on disk; this module walks the resolved targets and
+diffs them. ``rig status`` renders the result; ``rig apply`` converges the
+config→disk side (it does not delete extras — extras are reported for the human to
+decide, per the "surface, don't auto-reconcile" rule).
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .actions import fsutil
+from .actions.runner import (
+    _ci_companion_files,
+    _git_global,
+    build_hook_descriptor,
+    descriptor_text,
+    parse_mcp_command,
+    resolve_ci_workflow,
+)
+from .plan import Action, InstallPlan
+
+
+@dataclass
+class DriftItem:
+    direction: str  # "missing" (config→disk) | "extra" (disk→config) | "modified"
+    category: str
+    item: str
+    target: Path
+    detail: str
+
+
+@dataclass
+class DriftReport:
+    items: list[DriftItem] = field(default_factory=list)
+
+    @property
+    def in_sync(self) -> bool:
+        return not self.items
+
+    def by_direction(self, direction: str) -> list[DriftItem]:
+        return [i for i in self.items if i.direction == direction]
+
+
+def detect(
+    plan: InstallPlan,
+    *,
+    scan_skill_dirs: list[Path] | None = None,
+    scan_ci_dirs: list[Path] | None = None,
+    scan_mcp_files: list[Path] | None = None,
+    scan_hook_dirs: list[Path] | None = None,
+) -> DriftReport:
+    """Compute drift for a resolved plan against current disk state.
+
+    The ``scan_*`` arguments are configured target locations that should be scanned for
+    disk→config extras EVEN IF no action targets them (e.g. ``ci: {all: false}`` yields zero
+    CI actions, but undeclared workflows on disk are still drift; an MCP config with no
+    declared servers should still surface undeclared entries). The caller passes the
+    resolved category targets so the extras scan is complete.
+    """
+    report = DriftReport()
+    declared_skill_dirs: dict[Path, set[str]] = {d: set() for d in (scan_skill_dirs or [])}
+    declared_ci_dirs: dict[Path, set[str]] = {d: set() for d in (scan_ci_dirs or [])}
+    declared_mcp: dict[Path, set[str]] = {f: set() for f in (scan_mcp_files or [])}
+    declared_hook_dirs: dict[Path, set[str]] = {d: set() for d in (scan_hook_dirs or [])}
+
+    for action in plan.actions:
+        if action.kind == "copy_skill":
+            declared_skill_dirs.setdefault(action.target.parent, set()).add(action.target.name)
+            _check_copy_skill(action, report)
+        elif action.kind == "install_agent_hook":
+            _check_agent_hook(action, report)
+            descriptor = action.options.get("descriptor")
+            if descriptor:
+                declared_hook_dirs.setdefault(action.target, set()).add(descriptor)
+        elif action.kind == "install_ci":
+            _check_ci(action, report)
+            if action.options.get("slot") != "ship":
+                declared_ci_dirs.setdefault(action.target, set()).add(f"{action.item}.yml")
+        elif action.kind == "install_dispatcher":
+            _check_dispatcher(action, report)
+        elif action.kind == "register_mcp":
+            _check_mcp(action, report)
+            cf = _mcp_config_file(action)
+            server_key = str(action.options.get("server") or action.item)
+            declared_mcp.setdefault(cf, set()).add(server_key)
+
+    _extras_skills(declared_skill_dirs, report)
+    _extras_ci(declared_ci_dirs, report)
+    _extras_mcp(declared_mcp, report)
+    _extras_hooks(declared_hook_dirs, report)
+    return report
+
+
+def _extras_hooks(declared_hook_dirs: dict[Path, set[str]], report: DriftReport) -> None:
+    """Flag agent-hook descriptors on disk (``*.json``) not declared in config.
+
+    Dispatcher *fragments* are intentionally NOT flagged: ``global-hooks.d`` is a shared
+    drop-in namespace where other tools' fragments legitimately coexist, so undeclared
+    fragments there are expected, not drift.
+    """
+    for hook_dir, declared in declared_hook_dirs.items():
+        if not hook_dir.is_dir():
+            continue
+        for entry in sorted(hook_dir.glob("*.json")):
+            if entry.name not in declared:
+                report.items.append(
+                    DriftItem("extra", "agent_hooks", entry.stem, entry, "hook descriptor on disk but not declared in config")
+                )
+
+
+def _extras_skills(declared_skill_dirs: dict[Path, set[str]], report: DriftReport) -> None:
+    for skills_dir, declared in declared_skill_dirs.items():
+        if not skills_dir.is_dir():
+            continue
+        for entry in sorted(skills_dir.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if entry.name in declared:
+                continue
+            if (entry / "SKILL.md").is_file():  # only flag things that look like skills
+                report.items.append(
+                    DriftItem("extra", "skills", entry.name, entry, "installed on disk but not declared in config")
+                )
+
+
+def _extras_ci(declared_ci_dirs: dict[Path, set[str]], report: DriftReport) -> None:
+    for wf_dir, declared in declared_ci_dirs.items():
+        if not wf_dir.is_dir():
+            continue
+        for entry in sorted(wf_dir.iterdir()):
+            if entry.suffix not in (".yml", ".yaml") or not entry.is_file():
+                continue
+            if entry.name in declared:
+                continue
+            report.items.append(
+                DriftItem("extra", "ci", entry.stem, entry, "workflow on disk but not declared in config")
+            )
+
+
+def _extras_mcp(declared_mcp: dict[Path, set[str]], report: DriftReport) -> None:
+    for cf, declared in declared_mcp.items():
+        if not cf.is_file():
+            continue
+        try:
+            data = json.loads(cf.read_text(encoding="utf-8"))
+        except ValueError:
+            continue
+        servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
+        if not isinstance(servers, dict):
+            continue
+        for name in sorted(servers):
+            if name not in declared:
+                report.items.append(
+                    DriftItem("extra", "mcp", name, cf, "MCP entry registered but not declared in config")
+                )
+
+
+def _check_copy_skill(action: Action, report: DriftReport) -> None:
+    if not action.target.exists():
+        report.items.append(
+            DriftItem("missing", "skills", action.item, action.target, "declared, not on disk")
+        )
+    elif not fsutil.dirs_identical(action.source, action.target):
+        report.items.append(
+            DriftItem("modified", "skills", action.item, action.target, "on disk differs from source")
+        )
+
+
+def _check_agent_hook(action: Action, report: DriftReport) -> None:
+    descriptor = action.target / (action.options.get("descriptor") or "")
+    if not descriptor.exists():
+        report.items.append(
+            DriftItem("missing", "agent_hooks", action.item, descriptor, "descriptor not installed")
+        )
+        return
+    # content comparison: an edited cmd/on_error (or a config on_error change) is drift —
+    # apply would replace it. Build the expected descriptor the same way the install does.
+    try:
+        spec, _ = build_hook_descriptor(action)
+        expected = descriptor_text(spec)
+    except (OSError, ValueError):
+        return  # unreadable source — the install action surfaces this, not drift
+    if descriptor.read_text(encoding="utf-8") != expected:
+        report.items.append(
+            DriftItem("modified", "agent_hooks", action.item, descriptor, "descriptor on disk differs from config")
+        )
+
+
+def _check_ci(action: Action, report: DriftReport) -> None:
+    if action.options.get("slot") == "ship":
+        ship = action.target / "ship"
+        if not ship.exists():
+            report.items.append(
+                DriftItem("missing", "ci", "ship", ship, "ship not installed")
+            )
+            return
+        src_ship = action.source / "ship.sh"
+        if src_ship.is_file() and ship.read_text(encoding="utf-8") != src_ship.read_text(encoding="utf-8"):
+            report.items.append(
+                DriftItem("modified", "ci", "ship", ship, "installed ship differs from source")
+            )
+        return
+    wf = action.target / f"{action.item}.yml"
+    if not wf.is_file():
+        # absent, or a stale directory/non-file where the workflow should be — both are
+        # drift apply would resolve (file-vs-dir is a recoverable conflict on apply).
+        report.items.append(
+            DriftItem("missing", "ci", action.item, wf,
+                      "workflow not written" if not wf.exists() else "target is not a regular file")
+        )
+        return
+    # content comparison: a workflow edited in place (e.g. a job disabled) is drift even
+    # though the file still exists — apply would replace it.
+    slot = action.options.get("slot", action.item)
+    src_wf = resolve_ci_workflow(action.source, slot, action.options.get("variant"))
+    if src_wf is None or not src_wf.is_file():
+        return
+    if wf.read_text(encoding="utf-8") != src_wf.read_text(encoding="utf-8"):
+        report.items.append(
+            DriftItem("modified", "ci", action.item, wf, "on disk differs from source workflow")
+        )
+    # vendored companion scripts — a deleted/edited one breaks the gate that apply would
+    # recreate, so it is config→disk drift too. Companions install at their required paths
+    # relative to the checkout root (passed explicitly, independent of ci.target).
+    repo_root = Path(action.options.get("repo_root") or action.target.parent.parent)
+    for comp, rel in _ci_companion_files(action.source, src_wf):
+        dst = repo_root / rel
+        if not dst.exists():
+            report.items.append(
+                DriftItem("missing", "ci", f"{slot}:{comp.name}", dst, "CI companion script not installed")
+            )
+        elif dst.read_text(encoding="utf-8") != comp.read_text(encoding="utf-8"):
+            report.items.append(
+                DriftItem("modified", "ci", f"{slot}:{comp.name}", dst, "CI companion differs from source")
+            )
+
+
+def check_disabled_dispatcher(repo_root: Path, report: DriftReport) -> None:
+    """Flag a still-installed global dispatcher when the config disables it.
+
+    apply never deletes; so a repo that previously installed the dispatcher keeps git's
+    global ``core.hooksPath`` pointing at the composer dir even after the config turns it
+    off. Detect that (the global core.hooksPath dir contains a rig composer that references
+    ``run-global-hooks``) and report it as disk→config drift.
+    """
+    current = _git_global("core.hooksPath")
+    if not current:
+        return
+    pre_commit = Path(current) / "pre-commit"
+    if pre_commit.is_file():
+        try:
+            body = pre_commit.read_text(encoding="utf-8")
+        except OSError:
+            return
+        if "run-global-hooks" in body:
+            report.items.append(
+                DriftItem(
+                    "extra", "git_hooks", "dispatcher", Path(current),
+                    "dispatcher disabled in config but still wired as global core.hooksPath",
+                )
+            )
+
+
+def _check_dispatcher(action: Action, report: DriftReport) -> None:
+    runner = Path(action.options["runner"])
+    src_runner = action.source / "run-global-hooks"
+    if not runner.exists():
+        report.items.append(
+            DriftItem("missing", "git_hooks", "dispatcher", runner, "runner not installed")
+        )
+    elif src_runner.is_file() and runner.read_text(encoding="utf-8") != src_runner.read_text(encoding="utf-8"):
+        report.items.append(
+            DriftItem("modified", "git_hooks", "run-global-hooks", runner, "runner differs from source")
+        )
+    # the composer dir is the real core.hooksPath target — compare EVERY shipped composer
+    # (pre-commit/commit-msg/pre-push/review-gate): a missing or edited one means that hook
+    # event stops invoking the dispatcher even though apply would recreate it.
+    composer = runner.parent / "hooks"
+    src_hooks = action.source / "hooks"
+    if src_hooks.is_dir():
+        for src_composer in sorted(p for p in src_hooks.iterdir() if p.is_file()):
+            dst = composer / src_composer.name
+            if not dst.exists():
+                report.items.append(
+                    DriftItem("missing", "git_hooks", src_composer.name, dst, "composer hook not installed")
+                )
+            elif dst.read_text(encoding="utf-8") != src_composer.read_text(encoding="utf-8"):
+                report.items.append(
+                    DriftItem("modified", "git_hooks", src_composer.name, dst, "composer hook differs from source")
+                )
+    # if the config wired core.hooksPath, verify git still points at the composer dir —
+    # files can exist while git no longer invokes them (someone re-set core.hooksPath).
+    if action.options.get("set_global_hooks_path"):
+        current = _git_global("core.hooksPath")
+        if current != str(composer):
+            report.items.append(
+                DriftItem(
+                    "modified", "git_hooks", "dispatcher", composer,
+                    f"global core.hooksPath is {current or 'unset'}, expected {composer}",
+                )
+            )
+
+    # each enabled, shipped fragment must be present + match the source on disk — a deleted
+    # or edited fragment is config→disk drift that apply would recreate.
+    src_frag = action.source / "global-hooks.d"
+    disabled = {
+        name
+        for name, spec in (action.options.get("fragments", {}) or {}).items()
+        if isinstance(spec, dict) and spec.get("enabled") is False
+    }
+    if src_frag.is_dir():
+        for event_dir in sorted(p for p in src_frag.iterdir() if p.is_dir()):
+            for frag in sorted(event_dir.iterdir()):
+                if not frag.is_file():
+                    continue
+                dst = action.target / event_dir.name / frag.name
+                if any(name in frag.name for name in disabled):
+                    # explicitly disabled — but install doesn't delete; a leftover copy
+                    # still runs in every repo, so surface it as disk→config drift.
+                    if dst.exists():
+                        report.items.append(
+                            DriftItem("extra", "git_hooks", frag.name, dst,
+                                      "fragment disabled in config but still installed (will still run)")
+                        )
+                    continue
+                if not dst.exists():
+                    report.items.append(
+                        DriftItem("missing", "git_hooks", frag.name, dst, "dispatcher fragment not installed")
+                    )
+                elif dst.read_text(encoding="utf-8") != frag.read_text(encoding="utf-8"):
+                    report.items.append(
+                        DriftItem("modified", "git_hooks", frag.name, dst, "dispatcher fragment differs from source")
+                    )
+
+
+def _mcp_config_file(action: Action) -> Path:
+    target = action.target
+    return target if target.suffix == ".json" else target / "mcp.json"
+
+
+def _check_mcp(action: Action, report: DriftReport) -> None:
+    command = str(action.options.get("command", "")).strip()
+    if not command:
+        return
+    server_key = str(action.options.get("server") or action.item)
+    config_file = _mcp_config_file(action)
+    desired = parse_mcp_command(command)
+    existing = None
+    if config_file.is_file():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+            servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
+            existing = servers.get(server_key) if isinstance(servers, dict) else None
+        except ValueError:
+            existing = None
+    if existing is None:
+        report.items.append(
+            DriftItem("missing", "mcp", server_key, config_file, "MCP entry not registered")
+        )
+    elif existing != desired:
+        report.items.append(
+            DriftItem("modified", "mcp", server_key, config_file, "MCP entry differs from config (command/args)")
+        )
