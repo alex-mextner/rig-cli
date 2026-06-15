@@ -200,6 +200,7 @@ def validate(data: dict[str, Any]) -> None:
 
     _validate_ci(data.get("ci", {}))
     _validate_agent_hooks(data.get("agent_hooks", {}))
+    _validate_skills(data.get("skills", {}))
     _validate_harness(data.get("harness", {}))
     _validate_models(data.get("models", {}))
 
@@ -231,6 +232,31 @@ def _validate_agent_hooks(ah: dict[str, Any]) -> None:
                 f"agent_hooks.items.{name}.on_error must be one of "
                 f"{sorted(_VALID_ON_ERROR)}, got {on_error!r}"
             )
+
+
+def _validate_skills(sk: dict[str, Any]) -> None:
+    """Validate the skill-discovery knobs (``harness_link`` / ``harness_skill_dir``).
+
+    Skills land in ``skills_target`` (default ``~/.agents/skills``), but the agent harness
+    discovers Skill-tool skills from its OWN dir (claude-code: ``~/.claude/skills``). Unless
+    each installed skill is symlinked into that dir, the harness never lists/loads it. So
+    ``harness_link`` (default true) maintains an idempotent symlink per enabled skill, and
+    ``harness_skill_dir`` overrides the per-harness default discovery dir. Fail-closed on a
+    non-bool ``harness_link`` and a non-string ``harness_skill_dir`` (typo guard).
+    """
+    # ``validate()`` runs the "category must be a mapping" check before this, so ``sk`` is a
+    # dict here (a bare ``skills:`` → None is rejected there). Guard defensively anyway, then
+    # validate the knobs.
+    if not isinstance(sk, dict):
+        return
+    harness_link = sk.get("harness_link")
+    if harness_link is not None and not isinstance(harness_link, bool):
+        raise ConfigError(f"skills.harness_link must be a bool, got {harness_link!r}")
+    harness_skill_dir = sk.get("harness_skill_dir")
+    if harness_skill_dir is not None and not isinstance(harness_skill_dir, str):
+        raise ConfigError(
+            f"skills.harness_skill_dir must be a string, got {harness_skill_dir!r}"
+        )
 
 
 def _validate_harness(h: dict[str, Any]) -> None:

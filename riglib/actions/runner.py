@@ -94,6 +94,82 @@ def _do_copy_skill(action: Action, on_conflict: str) -> ActionResult:
     return ActionResult(action, out.status, out.detail, out.backup)
 
 
+def skill_harness_link_target(action: Action) -> tuple[Path, Path]:
+    """The (symlink_path, desired_destination) a ``link_skill_harness`` action maintains.
+
+    The symlink lives at ``action.target`` inside the harness skill dir; it should resolve to
+    ``action.source`` (the installed skill in skills_target). Shared with drift so the install
+    and the drift check agree on what "correct" means. The destination is the absolute
+    installed-skill path — an absolute target keeps the link valid regardless of the relative
+    distance between the two dirs.
+    """
+    return action.target, action.source.resolve()
+
+
+def _do_link_skill_harness(action: Action, on_conflict: str) -> ActionResult:
+    """Maintain an idempotent symlink making an installed skill discoverable by the harness.
+
+    The agent harness lists/loads Skill-tool skills from its own dir (claude-code:
+    ``~/.claude/skills``), NOT from ``skills_target`` (``~/.agents/skills``). So for every
+    enabled skill rig symlinks ``<harness_skill_dir>/<skill> -> <skills_target>/<skill>``.
+
+    - already a symlink to the correct destination → no-op (``skipped``).
+    - a symlink to a WRONG destination → re-point it (``updated``); never honors on_conflict
+      backup for a stale symlink (a symlink carries no user data to preserve).
+    - a real (non-symlink) directory/file already there → LEAVE IT (``skipped`` with a
+      warning). Some harness skills are real dirs (h-reason, debate-swarm,
+      moshi-best-practices); clobbering them would destroy real content. on_conflict=overwrite
+      does NOT override this — a real dir at the harness path is never rig's to replace.
+    """
+    link_path, dest = skill_harness_link_target(action)
+    if not dest.exists():
+        # the installed skill the link should point at isn't on disk — the copy_skill action
+        # surfaces that failure; don't create a dangling link on top of it.
+        return ActionResult(action, "error", f"skill-link/{action.item}: install target missing: {dest}")
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if link_path.is_symlink():
+        try:
+            current = link_path.readlink()
+        except OSError as exc:
+            return ActionResult(action, "error", f"skill-link/{action.item}: cannot read symlink {link_path}: {exc}")
+        if _same_link_dest(link_path, current, dest):
+            return ActionResult(action, "skipped", f"skill-link/{action.item}: already linked → {dest}")
+        # stale/wrong symlink — re-point it (a symlink holds no user data; no backup needed).
+        link_path.unlink()
+        link_path.symlink_to(dest)
+        return ActionResult(action, "updated", f"skill-link/{action.item}: re-pointed → {dest}")
+
+    if link_path.exists():
+        # a REAL dir/file already occupies the harness path (not a rig symlink). Never clobber
+        # it — it may be a hand-authored skill (h-reason, debate-swarm). Leave it, warn.
+        kind = "directory" if link_path.is_dir() else "file"
+        return ActionResult(
+            action, "skipped",
+            f"skill-link/{action.item}: a real {kind} already exists at {link_path} "
+            f"(not a rig symlink) — left untouched; skill may shadow the installed one",
+        )
+
+    link_path.symlink_to(dest)
+    return ActionResult(action, "created", f"skill-link/{action.item}: linked {link_path} → {dest}")
+
+
+def _same_link_dest(link_path: Path, current: Path, dest: Path) -> bool:
+    """True when ``current`` (the symlink's stored target) resolves to the desired ``dest``.
+
+    Handles both an absolute stored target and a relative one (resolved against the link's
+    parent), so a correct link written either way is recognized as a no-op.
+    """
+    if current.is_absolute():
+        resolved = current
+    else:
+        resolved = (link_path.parent / current).resolve()
+    try:
+        return resolved.resolve() == dest.resolve()
+    except OSError:
+        return False
+
+
 def build_hook_descriptor(action: Action) -> tuple[dict, str]:
     """Build the descriptor dict + the script's absolute cmd for an agent-hook action.
 
@@ -862,6 +938,7 @@ def _gh_alias_set(name: str, path: str) -> int:
 
 _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "copy_skill": _do_copy_skill,
+    "link_skill_harness": _do_link_skill_harness,
     "install_agent_hook": _do_install_agent_hook,
     "install_dispatcher": _do_install_dispatcher,
     "install_ci": _do_install_ci,

@@ -32,6 +32,7 @@ from .actions.runner import (
     parse_mcp_command,
     resolve_ci_workflow,
     schedule_plan_from_action,
+    skill_harness_link_target,
 )
 from .plan import Action, InstallPlan
 
@@ -83,6 +84,8 @@ def detect(
         if action.kind == "copy_skill":
             declared_skill_dirs.setdefault(action.target.parent, set()).add(action.target.name)
             _check_copy_skill(action, report)
+        elif action.kind == "link_skill_harness":
+            _check_skill_harness_link(action, report)
         elif action.kind == "install_agent_hook":
             _check_agent_hook(action, report)
             descriptor = action.options.get("descriptor")
@@ -184,6 +187,39 @@ def _check_copy_skill(action: Action, report: DriftReport) -> None:
         report.items.append(
             DriftItem("modified", "skills", action.item, action.target, "on disk differs from source")
         )
+
+
+def _check_skill_harness_link(action: Action, report: DriftReport) -> None:
+    """Flag drift on a skill's harness-discovery symlink.
+
+    missing  — no symlink (and no real dir) at the harness path: the harness won't list the
+               skill. apply creates it.
+    modified — a symlink pointing at the WRONG destination: apply re-points it.
+    A REAL (non-symlink) dir/file at the path is NOT flagged — it's a legitimately
+    hand-authored skill rig must not touch, so reporting it as drift (which apply ignores
+    anyway) would be misleading noise.
+    """
+    link_path, dest = skill_harness_link_target(action)
+    if link_path.is_symlink():
+        from .actions.runner import _same_link_dest
+
+        try:
+            current = link_path.readlink()
+        except OSError:
+            return
+        if not _same_link_dest(link_path, current, dest):
+            report.items.append(
+                DriftItem("modified", "skills", f"{action.item} (harness link)", link_path,
+                          f"harness symlink points elsewhere, expected → {dest}")
+            )
+        return
+    if link_path.exists():
+        # a real dir/file occupies the harness path — not rig's to manage; not drift.
+        return
+    report.items.append(
+        DriftItem("missing", "skills", f"{action.item} (harness link)", link_path,
+                  "skill not symlinked into harness dir (harness won't list it)")
+    )
 
 
 def _check_agent_hook(action: Action, report: DriftReport) -> None:

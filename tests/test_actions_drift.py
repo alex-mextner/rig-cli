@@ -25,7 +25,13 @@ def _full_cfg(repo_root: Path, source: Path) -> LoadedConfig:
                 "mcp_target": str(repo_root / "mcp-out"),
                 "on_conflict": "backup",
             },
-            "skills": {"universal": {"all": True}, "by_type": {"enable": ["cli"]}},
+            "skills": {
+                "universal": {"all": True},
+                "by_type": {"enable": ["cli"]},
+                # keep the harness skill-link target inside the repo so tests stay hermetic
+                # (the real default is ~/.claude/skills); dedicated link tests below isolate HOME.
+                "harness_skill_dir": str(repo_root / "harness-skills"),
+            },
             "agent_hooks": {"all": True},
             "ci": {"items": {"codeql": {"enabled": True, "variant": "selfgate"}, "secret-scan": {"enabled": True}}},
             "mcp": {"items": {"review": {"enabled": True, "command": "review --mcp"}}},
@@ -441,6 +447,270 @@ def test_mcp_malformed_config_backed_up_not_discarded(fake_agent_tools, tmp_path
     assert not report.errors, [r.detail for r in report.errors]
     # a backup of the malformed file exists
     assert any(p.name.startswith("mcp.json.rig-bak-") for p in mcp_dir.iterdir())
+
+
+# ── skill → harness-discovery symlink ──────────────────────────────────────────────
+def _skill_link_cfg(repo: Path, source: Path, *, harness_dir: Path | None,
+                    skills_target: Path | None = None, harness_link=None) -> LoadedConfig:
+    skills: dict = {"universal": {"enable": ["naming"], "all": False}, "by_type": {}}
+    if harness_dir is not None:
+        skills["harness_skill_dir"] = str(harness_dir)
+    if harness_link is not None:
+        skills["harness_link"] = harness_link
+    return LoadedConfig(
+        data={
+            "agent_tools_source": str(source),
+            "defaults": {"skills_target": str(skills_target or repo / "skills-out"), "on_conflict": "backup"},
+            "skills": skills,
+            "agent_hooks": {"enabled": False}, "ci": {"enabled": False}, "mcp": {"enabled": False},
+            "git_hooks": {"dispatcher": {"enabled": False}},
+        },
+        repo_root=repo,
+    )
+
+
+def test_skill_harness_link_created_and_resolves(fake_agent_tools, tmp_path):
+    """Apply symlinks each installed skill into the harness dir; the link resolves to it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness-skills"
+    skills_out = repo / "skills-out"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=harness, skills_target=skills_out),
+                 cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    link = harness / "naming"
+    assert link.is_symlink(), "skill not symlinked into the harness dir"
+    assert link.resolve() == (skills_out / "naming").resolve()
+    assert (link / "SKILL.md").is_file()  # the link resolves to a real skill
+
+
+def test_skill_harness_link_idempotent(fake_agent_tools, tmp_path):
+    """A re-apply with a correct existing symlink is a no-op (skipped)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness-skills"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=harness), cat, project_type="unknown")
+    run_plan(plan)
+    second = run_plan(plan)
+    link_results = [r for r in second.results if r.action.kind == "link_skill_harness"]
+    assert link_results, "no link action emitted"
+    assert all(r.status == "skipped" for r in link_results), [r.detail for r in link_results]
+
+
+def test_skill_harness_link_repoints_wrong_symlink(fake_agent_tools, tmp_path):
+    """A symlink pointing at the WRONG destination is re-pointed, not left stale."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness-skills"
+    harness.mkdir()
+    skills_out = repo / "skills-out"
+    bogus = repo / "somewhere-else"
+    bogus.mkdir()
+    (harness / "naming").symlink_to(bogus)  # stale link to the wrong place
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=harness, skills_target=skills_out),
+                 cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    link = harness / "naming"
+    assert link.resolve() == (skills_out / "naming").resolve()  # re-pointed to the real skill
+    link_res = [r for r in report.results if r.action.kind == "link_skill_harness"]
+    assert any(r.status == "updated" for r in link_res), [r.detail for r in link_res]
+
+
+def test_skill_harness_link_leaves_real_dir_untouched(fake_agent_tools, tmp_path):
+    """A REAL (non-symlink) skill dir already at the harness path is never clobbered."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness-skills"
+    harness.mkdir()
+    # a hand-authored skill (like h-reason / debate-swarm) lives at the harness path
+    real_skill = harness / "naming"
+    real_skill.mkdir()
+    (real_skill / "SKILL.md").write_text("hand-authored\n", encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=harness), cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert not real_skill.is_symlink()  # left as a real dir
+    assert (real_skill / "SKILL.md").read_text() == "hand-authored\n"  # content preserved
+    link_res = [r for r in report.results if r.action.kind == "link_skill_harness"]
+    assert all(r.status == "skipped" for r in link_res), [r.detail for r in link_res]
+
+
+def test_skill_harness_link_disabled_emits_no_action(fake_agent_tools, tmp_path):
+    """skills.harness_link: false → no link actions planned at all."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness-skills"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=harness, harness_link=False),
+                 cat, project_type="unknown")
+    assert not [a for a in plan.actions if a.kind == "link_skill_harness"]
+    run_plan(plan)
+    assert not (harness / "naming").exists()  # nothing linked
+
+
+def test_skill_harness_link_default_dir_under_home(fake_agent_tools, tmp_path, monkeypatch):
+    """With no harness_skill_dir set, the default is ~/.claude/skills (HOME-expanded)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=None), cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    link = home / ".claude" / "skills" / "naming"
+    assert link.is_symlink()
+    assert link.resolve() == (repo / "skills-out" / "naming").resolve()
+
+
+def test_skill_harness_link_no_self_link_when_target_is_harness_dir(fake_agent_tools, tmp_path):
+    """If skills_target already IS the harness dir, no self-referential link is planned."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shared = repo / "shared-skills"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=shared, skills_target=shared),
+                 cat, project_type="unknown")
+    assert not [a for a in plan.actions if a.kind == "link_skill_harness"]
+
+
+def test_skill_harness_link_drift_missing_then_synced(fake_agent_tools, tmp_path):
+    """Drift: a missing harness link is config→disk drift; after apply it is in sync."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness-skills"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=harness), cat, project_type="unknown")
+    rep = detect(plan)
+    miss = [d for d in rep.by_direction("missing")
+            if d.category == "skills" and "harness link" in d.item]
+    assert miss, "expected a missing harness-link drift item"
+    run_plan(plan)
+    rep2 = detect(plan)
+    assert not [d for d in rep2.items if "harness link" in d.item]
+
+
+def test_skill_harness_link_drift_wrong_dest_is_modified(fake_agent_tools, tmp_path):
+    """A symlink to the wrong destination surfaces as 'modified' drift."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness-skills"
+    harness.mkdir()
+    bogus = repo / "elsewhere"
+    bogus.mkdir()
+    (harness / "naming").symlink_to(bogus)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=harness), cat, project_type="unknown")
+    rep = detect(plan)
+    mod = [d for d in rep.by_direction("modified")
+           if d.category == "skills" and "harness link" in d.item]
+    assert mod, "expected a modified harness-link drift item for the wrong symlink"
+
+
+def test_skill_harness_link_repoints_broken_symlink(fake_agent_tools, tmp_path):
+    """A BROKEN symlink (target does not exist) is re-pointed to the real installed skill."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness-skills"
+    harness.mkdir()
+    skills_out = repo / "skills-out"
+    (harness / "naming").symlink_to(repo / "ghost")  # dangling — target never created
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=harness, skills_target=skills_out),
+                 cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert (harness / "naming").resolve() == (skills_out / "naming").resolve()
+    link_res = [r for r in report.results if r.action.kind == "link_skill_harness"]
+    assert any(r.status == "updated" for r in link_res), [r.detail for r in link_res]
+
+
+def test_skill_harness_link_errors_when_install_target_missing(fake_agent_tools, tmp_path):
+    """If the installed skill the link should point at is absent, the link action errors
+    (and does not leave a dangling symlink) — exercised by running the link action alone."""
+    from riglib.actions.runner import _do_link_skill_harness
+    from riglib.plan import Action
+
+    repo = tmp_path / "repo"
+    harness = repo / "harness-skills"
+    action = Action(
+        kind="link_skill_harness", category="skills", item="naming",
+        source=repo / "skills-out" / "naming",  # never created
+        target=harness / "naming",
+    )
+    res = _do_link_skill_harness(action, "backup")
+    assert res.status == "error"
+    assert not (harness / "naming").exists()  # no dangling link created
+
+
+def test_skill_harness_link_unknown_kind_emits_no_link(fake_agent_tools, tmp_path):
+    """An unknown harness.kind with no harness_skill_dir → rig does not guess a path."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    # bypass config validation (it would reject an unknown kind) to exercise the plan guard:
+    # the resolver must return None for a kind with no known discovery dir.
+    from riglib.plan import _resolve_harness_skill_dir
+
+    cfg = LoadedConfig(
+        data={"harness": {"kind": "claude-code"}, "skills": {}},  # known kind, link on
+        repo_root=repo,
+    )
+    assert _resolve_harness_skill_dir(cfg) is not None  # known kind resolves
+    cfg_unknown = LoadedConfig(data={"skills": {}}, repo_root=repo)
+    # monkeypatch the kind map to simulate a kind rig knows of but has no dir for
+    import riglib.plan as planmod
+
+    saved = dict(planmod._HARNESS_SKILL_DIRS)
+    try:
+        planmod._HARNESS_SKILL_DIRS.clear()  # no known dir for any kind
+        assert _resolve_harness_skill_dir(cfg_unknown) is None
+        plan = build(LoadedConfig(
+            data={"agent_tools_source": str(fake_agent_tools),
+                  "defaults": {"skills_target": str(repo / "skills-out")},
+                  "skills": {"universal": {"enable": ["naming"], "all": False}, "by_type": {}},
+                  "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
+                  "mcp": {"enabled": False}, "git_hooks": {"dispatcher": {"enabled": False}}},
+            repo_root=repo), cat, project_type="unknown")
+        assert not [a for a in plan.actions if a.kind == "link_skill_harness"]
+    finally:
+        planmod._HARNESS_SKILL_DIRS.clear()
+        planmod._HARNESS_SKILL_DIRS.update(saved)
+
+
+def test_skill_harness_link_follows_harness_kind(fake_agent_tools, tmp_path):
+    """The skill-link discovery dir follows harness.kind when a harness block pins one."""
+    from riglib.plan import _resolve_harness_skill_dir
+
+    repo = tmp_path / "repo"
+    cfg = LoadedConfig(
+        data={"harness": {"kind": "claude-code", "auto_mode": True}, "skills": {}},
+        repo_root=repo,
+    )
+    resolved = _resolve_harness_skill_dir(cfg)
+    assert resolved is not None
+    assert resolved.name == "skills" and ".claude" in str(resolved)
+
+
+def test_skill_harness_link_real_dir_not_flagged_as_drift(fake_agent_tools, tmp_path):
+    """A real dir at the harness path is NOT reported as drift (rig won't touch it)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "harness-skills"
+    harness.mkdir()
+    real = harness / "naming"
+    real.mkdir()
+    (real / "SKILL.md").write_text("real\n", encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_skill_link_cfg(repo, fake_agent_tools, harness_dir=harness), cat, project_type="unknown")
+    rep = detect(plan)
+    assert not [d for d in rep.items if "harness link" in d.item]
 
 
 def test_mcp_command_shell_quoting(fake_agent_tools, tmp_path):
