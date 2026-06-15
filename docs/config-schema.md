@@ -748,6 +748,64 @@ tests/smoke never touch the real launchd domain or delete the predecessor file.
 
 ---
 
+## Editing a single key — `rig config get|set`
+
+The recommended way to read or change one setting without hand-editing YAML. `<dot.path>` is
+dot-notation into the tree above (`harness.auto_mode`, `ci.items.secret-scan.tier`,
+`defaults.on_conflict`). `--global` targets `~/.config/rig/config.yaml` (XDG-aware) instead
+of `./rig.yaml`.
+
+```bash
+rig config get harness.auto_mode                 # read one key (from ./rig.yaml)
+rig config get harness.auto_mode --json          # machine-readable (JSON value)
+rig config get harness                            # a subtree prints as YAML
+rig config get defaults.on_conflict --global      # read the global config instead
+
+rig config set harness.auto_mode false            # write, then RECONCILE (rig apply engine)
+rig config set ci.items.secret-scan.tier warn     # creates intermediate keys as needed
+rig config set defaults.on_conflict overwrite --global   # edit the global config
+rig config set harness.auto_mode false --no-apply        # write only, print the plan, skip apply
+```
+
+- **`get`** reads the single target file (NOT the cascade): `./rig.yaml`, or the global file
+  with `--global`. A missing file or absent path exits non-zero (fail-closed). `--json` emits
+  the raw JSON value; a mapping/list subtree prints as YAML; bools print as `true`/`false`.
+- **`set`** coerces the value conservatively — `true`/`false` → bool, a plain integer → int,
+  `1.5` → float, `null`/`none`/`~` → null, everything else (including `1e3`, `nan`, `1_000`)
+  stays a string. Quote-wrap to force a literal string (`rig config set k '"true"'` stores the
+  string `"true"`). It creates intermediate mappings as needed, then guards the write with two
+  **pre-apply** gates: the schema (`config.validate` — enums/types, e.g. a bad `ci` `tier`) and
+  the catalog-backed plan build (`rig apply`'s engine — when a category is enabled, an unknown
+  item it references; a bad `agent_tools_source`; or any otherwise-unbuildable config). If
+  **either** gate rejects the
+  edit, the target file is rolled back to its prior contents and the command exits non-zero.
+  (Errors *during* the apply itself are reported and set a non-zero exit, but do not revert the
+  already-valid config — same as re-running `rig apply`.) Validation matches `rig apply`: a
+  typo'd nested key in a section *without* strict key-checking (e.g. `harness.aut_mode`) is
+  tolerated and simply has no effect, exactly as a hand-edited `rig.yaml` is; sections that *do*
+  enforce their key set (`models`, `agents_md`) reject an unknown key.
+- A value that **starts with `-`** (and is not a negative number) needs the `--` separator so
+  argparse doesn't read it as a flag: `rig config set k -- -weird`. `get` errors go to stderr,
+  so `rig config get k --json | jq` keeps a clean stdout even when the key is missing.
+- **Dot paths cannot address a key that itself contains a dot.** `<dot.path>` always splits on
+  `.`, so a (hypothetical) item id like `a.b` is unreachable — `ci.items.a.b.tier` nests
+  `items → a → b`. Every real catalog id is dash-cased (`secret-scan`), so this is a
+  non-issue in practice; for such a key, edit `rig.yaml` directly.
+- **A repo-local `set` requires an existing `./rig.yaml`.** It edits a committed config; it does
+  not bootstrap one — run `rig init` (or `rig export -o rig.yaml`) first, so built-in defaults
+  never reconcile onto disk without a committed source of truth (the same guard `rig apply`
+  has). `--global` may create the machine-wide `~/.config/rig/config.yaml` if it is absent.
+- **`set` rewrites the whole file** through rig's serializer, so it normalizes formatting and
+  **drops comments** — the value is the source of truth, not the surrounding YAML prose. It is
+  also **repo-scoped**: even a `--global` edit resolves and reconciles the current repo, so run
+  it from inside one (use `--no-apply` to skip the reconcile, not the repo resolution).
+- After a successful `set`, rig **reconciles**: it runs the same plan + apply engine as
+  `rig apply`, scoped to the repo in front of you, so the change takes effect immediately. A
+  `--global` edit still converges the current repo (it reads the global layer via the cascade).
+  `--no-apply` writes the key and prints the resulting plan without converging.
+
+---
+
 ## Validation
 
 `apply`/`status`/`init` validate before touching disk and **fail closed** on:
@@ -766,3 +824,14 @@ not an int >= 1, a non-bool `tmux` boolean knob, a non-mapping `gitignore` block
 unknown `tg_ctl` key, a non-bool `tg_ctl.enabled`/`tg_ctl.boot`, a non-string
 `tg_ctl.label`/`bun_path`/`tg_ctl_path`/`config_dir`, and an `agent_tools_source` that is not an
 agent-tools checkout. `--dry-run` prints the resolved plan and exits 0 without writing.
+
+`rig config set` validates in two stages: first the schema (`config.validate`) on the edited
+target file, then — after writing — the catalog-backed plan build over the full cascade
+(`rig apply`'s engine: bad `agent_tools_source`, unknown CI item, otherwise-unbuildable plan).
+A malformed dot path, a non-mapping intermediate, a schema-rejected value, a write IO error, or
+a plan-**build** failure aborts; the write is kept only if both stages pass — otherwise the file
+is rolled back to its prior contents (a freshly-created file, and the immediate dir `set` created
+for it, are removed). The second stage builds the same plan as `rig apply`, so a config that
+cannot even be *planned* never persists. Errors that surface only while *executing* the plan
+(a permission denied on a copy, say) are reported with a non-zero exit but leave the
+already-valid config in place — identical to re-running `rig apply`.

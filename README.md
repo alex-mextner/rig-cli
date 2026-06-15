@@ -51,6 +51,7 @@ Or run straight from a checkout — `uv run bin/rig …` / `python3 bin/rig …`
 | `rig status` | Detect + report **drift in both directions** (config says X but disk has Y; disk has Z not in config). |
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
 | `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
+| `rig config get\|set` | **The recommended way to read/change one setting.** `get <dot.path>` reads a nested key (e.g. `harness.auto_mode`); `set <dot.path> <value>` writes it (sensible scalar coercion, fail-closed validation) and **reconciles** (runs the `apply` engine) so the change takes effect immediately. `--global` targets `~/.config/rig/config.yaml`; `--no-apply` writes only. |
 | `rig install-skill` | Register the `rig` agent skill so harnesses auto-discover it. |
 | `rig stats show` | **Tool-adoption analytics.** Parse the session logs of every agent harness on the machine and report how often each tool is invoked, bucketed into baseline / ours / external-advertised / other — so you can see whether the rig + agent-tools ecosystem is actually being used vs the built-in baseline. `` `--format json|tui|web` ``, breakdowns by repo/harness, a daily trend (the `json` output additionally exposes the weekly series). |
 

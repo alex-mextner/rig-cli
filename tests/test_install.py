@@ -29,6 +29,17 @@ def test_install_skill_writes_md_and_harness_link(tmp_path, monkeypatch, capsys)
     assert (link / "SKILL.md").is_file()  # the link resolves to the real skill
 
 
+def test_install_skill_md_lists_config_command(tmp_path, monkeypatch):
+    # the embedded SKILL.md is the agent-facing command catalog — it must mention `rig config`
+    # so agents discover the recommended single-key edit path (help-docs-sync across files).
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    assert install_skill() == 0
+    md = (home / ".agents" / "skills" / SKILL_NAME / "SKILL.md").read_text(encoding="utf-8")
+    assert "rig config" in md
+    assert "rig config set" in md
+
+
 def test_install_skill_idempotent(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
