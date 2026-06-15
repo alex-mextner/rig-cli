@@ -35,6 +35,7 @@ agent_hooks: { ... }
 git_hooks: { ... }
 ci: { ... }
 mcp: { ... }
+harness: { ... }              # agent harness auto/permission provisioning (auto-mode)
 ```
 
 If `agent_tools_source` is omitted, rig resolves it from `$RIG_AGENT_TOOLS_SOURCE`, then
@@ -186,9 +187,54 @@ existing differing entry unless `defaults.on_conflict: overwrite`.
 
 ---
 
+## `harness`
+
+Provisions the **agent harness's auto/permission mode** as part of the reconciler. With a
+`harness:` block, `rig apply` writes the harness's permission setting so **auto-mode**
+(the agent runs autonomously, auto-accepting tool calls, with minimum babysitting) is part
+of the reproducible config — not a manual per-machine toggle. **Recommended on by default**:
+auto-mode is safe because the agent-hook guards (`block-secrets-write`, `block-no-verify`,
+`enforce-timeout-on-bash`, `block-raw-process-env`, `block-raw-pr-merge`) are installed in
+the same apply and catch the dangerous tool calls before the side effect.
+
+```yaml
+harness:
+  enabled: true
+  kind: claude-code            # claude-code (implemented) | opencode (documented, reserved)
+  auto_mode: true              # true → auto-accept tool calls; false → interactive prompts
+  # mode: bypassPermissions    # optional: pin the exact mode value (overrides the auto_mode map)
+  # settings_path: .claude/settings.json   # where to write (repo-local default; committed)
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision the harness setting (set `false` to leave the harness config untouched) |
+| `kind` | `claude-code` | `claude-code` | which harness to write. `opencode` is documented-but-reserved → fails closed until implemented |
+| `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
+| `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
+| `settings_path` | path | `.claude/settings.json` | the settings file to merge into (repo-relative default keeps it committed/reproducible) |
+
+**What gets written.** For `kind: claude-code`, rig merges `permissions.defaultMode` into
+the settings JSON — `auto_mode: true` → `bypassPermissions` (auto-accepts every tool call),
+`auto_mode: false` → `default` (interactive prompts). Only that one key is touched; every
+other setting in the file is preserved. The write is **idempotent** (a re-apply with the
+same value is a no-op) and **backup-noted** (a differing prior value is backed up per
+`defaults.on_conflict` before converging). `rig status` reports drift if the on-disk value
+no longer matches the config.
+
+**opencode equivalent (documented, not yet written by rig).** opencode expresses the same
+intent through a `permission` block in its `opencode.json` — e.g.
+`"permission": { "edit": "allow", "bash": "allow" }` for auto-accept, vs `"ask"` for
+interactive. A config with `kind: opencode` is rejected with a clear "not implemented yet"
+message rather than silently doing nothing, so you are never misled into thinking rig wrote
+a setting it didn't.
+
+---
+
 ## Validation
 
-`apply`/`status`/`setup` validate before touching disk and **fail closed** on: unknown
-top-level keys, unsupported `version`, invalid `scope` / `on_conflict` / ci `tier` /
-agent-hook `on_error`, and an `agent_tools_source` that is not an agent-tools checkout.
-`--dry-run` prints the resolved plan and exits 0 without writing.
+`apply`/`status`/`setup`/`init` validate before touching disk and **fail closed** on:
+unknown top-level keys, unsupported `version`, invalid `scope` / `on_conflict` / ci `tier` /
+agent-hook `on_error`, an unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`,
+and an `agent_tools_source` that is not an agent-tools checkout. `--dry-run` prints the
+resolved plan and exits 0 without writing.

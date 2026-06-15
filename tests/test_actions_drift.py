@@ -463,6 +463,99 @@ def test_mcp_command_shell_quoting(fake_agent_tools, tmp_path):
     assert entry["args"] == ["--flag", "a b"]  # quotes consumed, inner spaces preserved
 
 
+# ── harness (auto-mode / permission provisioning) ─────────────────────────────────
+def _harness_cfg(repo: Path, source: Path, **harness) -> LoadedConfig:
+    return LoadedConfig(
+        data={
+            "agent_tools_source": str(source),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False},
+            "ci": {"enabled": False}, "mcp": {"enabled": False},
+            "git_hooks": {"dispatcher": {"enabled": False}},
+            "harness": {"kind": "claude-code", "settings_path": str(repo / ".claude/settings.json"), **harness},
+        },
+        repo_root=repo,
+    )
+
+
+def test_harness_apply_writes_bypass_and_is_idempotent(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_harness_cfg(repo, fake_agent_tools, auto_mode=True), cat, project_type="unknown")
+
+    first = run_plan(plan)
+    assert not first.errors, [r.detail for r in first.errors]
+    settings = repo / ".claude" / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert data["permissions"]["defaultMode"] == "bypassPermissions"
+    assert any(r.status == "created" for r in first.results if r.action.category == "harness")
+
+    second = run_plan(plan)  # idempotent: same value → skipped, no change
+    h2 = [r for r in second.results if r.action.category == "harness"]
+    assert h2 and all(r.status == "skipped" for r in h2)
+
+
+def test_harness_apply_preserves_other_keys(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".claude").mkdir(parents=True)
+    settings = repo / ".claude" / "settings.json"
+    settings.write_text(
+        json.dumps({"model": "opus", "permissions": {"allow": ["Bash"]}}), encoding="utf-8"
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_harness_cfg(repo, fake_agent_tools, auto_mode=True), cat, project_type="unknown")
+    run_plan(plan)
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    # the managed key is set; unrelated keys survive
+    assert data["permissions"]["defaultMode"] == "bypassPermissions"
+    assert data["permissions"]["allow"] == ["Bash"]
+    assert data["model"] == "opus"
+
+
+def test_harness_conflicting_value_backed_up(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".claude").mkdir(parents=True)
+    settings = repo / ".claude" / "settings.json"
+    settings.write_text(
+        json.dumps({"permissions": {"defaultMode": "default"}}), encoding="utf-8"
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_harness_cfg(repo, fake_agent_tools, auto_mode=True), cat, project_type="unknown")
+    report = run_plan(plan)  # default on_conflict=backup
+    assert not report.errors
+    # a differing prior value is backed up before converging (default policy = backup)
+    assert any(p.name.startswith("settings.json.rig-bak-") for p in (repo / ".claude").iterdir())
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert data["permissions"]["defaultMode"] == "bypassPermissions"
+
+
+def test_harness_drift_missing_then_modified(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_harness_cfg(repo, fake_agent_tools, auto_mode=True), cat, project_type="unknown")
+
+    # nothing on disk yet → missing
+    rep = detect(plan)
+    miss = [d for d in rep.by_direction("missing") if d.category == "harness"]
+    assert miss, "expected a missing harness drift item"
+
+    # apply, then flip the value → modified drift
+    run_plan(plan)
+    settings = repo / ".claude" / "settings.json"
+    d = json.loads(settings.read_text(encoding="utf-8"))
+    d["permissions"]["defaultMode"] = "default"
+    settings.write_text(json.dumps(d), encoding="utf-8")
+    rep2 = detect(plan)
+    mod = [x for x in rep2.by_direction("modified") if x.category == "harness"]
+    assert mod and "bypassPermissions" in mod[0].detail
+
+    # re-apply converges, back in sync
+    run_plan(plan)
+    rep3 = detect(plan)
+    assert not [x for x in rep3.items if x.category == "harness"]
+
+
 def test_mcp_registers_under_configured_server_name(fake_agent_tools, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

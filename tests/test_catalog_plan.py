@@ -198,3 +198,72 @@ def test_plan_disabled_category(fake_agent_tools, tmp_path):
     cfg = _cfg({"skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False}, "mcp": {"enabled": False}}, tmp_path)
     plan = build(cfg, cat, project_type="cli")
     assert len(plan) == 0
+
+
+# ── harness (auto-mode / permission provisioning) ─────────────────────────────────
+def _harness_action(plan):
+    return next((a for a in plan.actions if a.category == "harness"), None)
+
+
+def test_plan_no_harness_block_no_action(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"skills": {"enabled": False}}, tmp_path)  # no harness key at all
+    plan = build(cfg, cat, project_type="unknown")
+    assert _harness_action(plan) is None
+
+
+def test_plan_harness_auto_mode_on_maps_to_bypass(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"skills": {"enabled": False}, "harness": {"kind": "claude-code", "auto_mode": True}},
+        tmp_path,
+    )
+    a = _harness_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.options["mode_value"] == "bypassPermissions"
+    assert a.options["auto_mode"] is True
+    # default target is the repo-local committed .claude/settings.json
+    assert a.target == (tmp_path / ".claude" / "settings.json")
+
+
+def test_plan_harness_auto_mode_off_maps_to_default(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"skills": {"enabled": False}, "harness": {"auto_mode": False}},
+        tmp_path,
+    )
+    a = _harness_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None and a.options["mode_value"] == "default"
+
+
+def test_plan_harness_explicit_mode_overrides_auto_mapping(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"skills": {"enabled": False}, "harness": {"auto_mode": True, "mode": "acceptEdits"}},
+        tmp_path,
+    )
+    a = _harness_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None and a.options["mode_value"] == "acceptEdits"
+
+
+def test_plan_harness_disabled_no_action(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"skills": {"enabled": False}, "harness": {"enabled": False, "auto_mode": True}},
+        tmp_path,
+    )
+    assert _harness_action(build(cfg, cat, project_type="unknown")) is None
+
+
+def test_plan_harness_custom_settings_path(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"skills": {"enabled": False},
+         "harness": {"auto_mode": True, "settings_path": "~/.claude/settings.json"}},
+        tmp_path,
+    )
+    a = _harness_action(build(cfg, cat, project_type="unknown"))
+    import os
+
+    assert a is not None
+    assert a.target == Path(os.path.expanduser("~/.claude/settings.json"))

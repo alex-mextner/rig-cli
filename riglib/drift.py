@@ -24,6 +24,8 @@ from .actions.runner import (
     _git_global,
     build_hook_descriptor,
     descriptor_text,
+    desired_harness_value,
+    harness_settings_file,
     parse_mcp_command,
     resolve_ci_workflow,
 )
@@ -93,6 +95,8 @@ def detect(
             cf = _mcp_config_file(action)
             server_key = str(action.options.get("server") or action.item)
             declared_mcp.setdefault(cf, set()).add(server_key)
+        elif action.kind == "apply_harness":
+            _check_harness(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -341,6 +345,43 @@ def _check_dispatcher(action: Action, report: DriftReport) -> None:
                     report.items.append(
                         DriftItem("modified", "git_hooks", frag.name, dst, "dispatcher fragment differs from source")
                     )
+
+
+def _check_harness(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured harness auto/permission mode and the file on disk.
+
+    missing  — the settings file or the managed key is absent.
+    modified — the managed key on disk has a different value than the config declares
+               (someone flipped auto-mode off, or the harness rewrote it). apply converges.
+    Only the single managed key is compared; other settings in the file are irrelevant here.
+    """
+    (section, key), value = desired_harness_value(action)
+    config_file = harness_settings_file(action)
+    if not config_file.is_file():
+        report.items.append(
+            DriftItem("missing", "harness", action.item, config_file, "harness settings file not written")
+        )
+        return
+    try:
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+    except ValueError:
+        report.items.append(
+            DriftItem("modified", "harness", action.item, config_file, "harness settings file is malformed JSON")
+        )
+        return
+    sect = data.get(section, {}) if isinstance(data, dict) else {}
+    current = sect.get(key) if isinstance(sect, dict) else None
+    if current is None:
+        report.items.append(
+            DriftItem("missing", "harness", action.item, config_file, f"{section}.{key} not set")
+        )
+    elif current != value:
+        report.items.append(
+            DriftItem(
+                "modified", "harness", action.item, config_file,
+                f"{section}.{key} is '{current}', config declares '{value}'",
+            )
+        )
 
 
 def _mcp_config_file(action: Action) -> Path:

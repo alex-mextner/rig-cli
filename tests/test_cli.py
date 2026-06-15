@@ -196,6 +196,34 @@ def test_apply_relative_config_resolves_under_C(tmp_path, capsys, fake_agent_too
     assert "Plan:" in out
 
 
+def test_init_and_setup_share_one_engine_dryrun(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    # `rig init` is the canonical onboarding front door; `setup` is its back-compat alias —
+    # they dispatch to one engine, so init must build the same plan setup would.
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    rc = main(["init", "-C", str(tmp_path), "--yes", "--dry-run"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Plan:" in out
+    assert not (tmp_path / "rig.yaml").exists()  # dry-run writes nothing
+
+
+def test_init_default_scaffold_includes_harness_auto_mode(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    # the default scaffold `rig init --yes` writes recommends auto-mode ON (the front door
+    # provisions autonomy, made safe by the agent-hook guards it also installs).
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo), "--yes"])
+    assert rc == 0
+    written = (repo / "rig.yaml").read_text(encoding="utf-8")
+    assert "harness:" in written
+    assert "auto_mode: true" in written
+
+
 def test_export_writes_file(tmp_path, capsys, fake_agent_tools, monkeypatch):
     monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

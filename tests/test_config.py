@@ -92,3 +92,25 @@ def test_invalid_yaml_wrapped_as_configerror(tmp_path, monkeypatch):
     _w(repo / "rig.yaml", "version: 1\n  bad: : indent\n:::\n")
     with pytest.raises(config.ConfigError, match="invalid YAML"):
         config.load(repo)
+
+
+# ── harness block ────────────────────────────────────────────────────────────────
+def test_validate_accepts_harness_block():
+    # a well-formed harness block passes (claude-code is the supported kind)
+    config.validate({"version": 1, "harness": {"kind": "claude-code", "auto_mode": True}})
+
+
+def test_validate_rejects_unknown_harness_kind():
+    with pytest.raises(config.ConfigError, match="harness.kind"):
+        config.validate({"version": 1, "harness": {"kind": "bogus-harness"}})
+
+
+def test_validate_rejects_reserved_harness_kind_with_clear_message():
+    # opencode is documented but not implemented → fail closed with a helpful message
+    with pytest.raises(config.ConfigError, match="not implemented"):
+        config.validate({"version": 1, "harness": {"kind": "opencode", "auto_mode": True}})
+
+
+def test_validate_rejects_non_bool_auto_mode():
+    with pytest.raises(config.ConfigError, match="auto_mode"):
+        config.validate({"version": 1, "harness": {"auto_mode": "yes"}})

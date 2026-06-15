@@ -89,6 +89,19 @@ def default_state(
             "target": "~/.claude/mcp",
             "items": {},
         },
+        # Auto-mode is recommended ON by default — the agent runs autonomously with minimum
+        # babysitting (the harness auto-accepts tool calls). This is only safe BECAUSE the
+        # agent-hook guards above are installed (agent_hooks.all: true): block-secrets-write,
+        # block-no-verify, enforce-timeout-on-bash, block-raw-process-env, and
+        # block-raw-pr-merge intercept the dangerous calls before the side effect. Turn it
+        # off with auto_mode: false (writes 'default' → interactive permission prompts).
+        "harness": {
+            "enabled": True,
+            "kind": "claude-code",
+            "auto_mode": True,
+            # settings_path defaults to .claude/settings.json (repo-local, committed →
+            # reproducible). Override to ~/.claude/settings.json for a machine-wide setting.
+        },
     }
 
 

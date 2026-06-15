@@ -52,7 +52,7 @@ _DEFAULTS_KEY = {
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | install_agent_hook | install_dispatcher | install_ci | register_mcp
+    kind: str  # copy_skill | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -408,4 +408,58 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
                     )
                 )
 
+    # ── harness (auto-mode / permission provisioning) ─────────────────────────────
+    _build_harness(config, plan)
+
     return plan
+
+
+# Default per-machine path for each supported harness's settings file. The harness block
+# writes/merges the auto/permission setting HERE. Repo-relative defaults keep the committed
+# rig.yaml reproducible (the auto-mode choice travels with the repo).
+_HARNESS_SETTINGS = {
+    "claude-code": ".claude/settings.json",
+}
+# The permission-mode value each harness uses for auto-accept / non-interactive mode, keyed
+# by (kind, auto_mode). claude-code: `permissions.defaultMode` = bypassPermissions auto-
+# accepts every tool call (true non-interactive); `default` restores prompts.
+_HARNESS_AUTO_MODE = {
+    "claude-code": {True: "bypassPermissions", False: "default"},
+}
+
+
+def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the harness auto/permission write, if a ``harness`` block is present.
+
+    No harness block → no action (rig leaves the harness config untouched). With a block,
+    one ``apply_harness`` action carries the resolved settings file + the permission-mode
+    key/value to merge. The plan stays pure; the merge happens in ``actions/``.
+    """
+    h = config.data.get("harness")
+    if not isinstance(h, dict) or not h:
+        return
+    if h.get("enabled") is False:
+        return
+    kind = str(h.get("kind", "claude-code"))
+    if kind not in _HARNESS_SETTINGS:
+        # validate() already fail-closed on unknown/reserved kinds; defensive guard only.
+        return
+    auto_mode = bool(h.get("auto_mode", False))
+    # an explicit `mode:` override wins over the auto_mode → mode mapping (lets a config pin
+    # e.g. `acceptEdits` instead of full bypass while staying non-interactive for edits).
+    mode_value = h.get("mode") or _HARNESS_AUTO_MODE[kind][auto_mode]
+    settings_path = h.get("settings_path") or _HARNESS_SETTINGS[kind]
+    plan.actions.append(
+        Action(
+            kind="apply_harness",
+            category="harness",
+            item=kind,
+            source=config.repo_root,  # no carrier in agent-tools; anchor on the repo
+            target=_expand(str(settings_path), config.repo_root),
+            options={
+                "kind": kind,
+                "auto_mode": auto_mode,
+                "mode_value": str(mode_value),
+            },
+        )
+    )

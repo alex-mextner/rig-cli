@@ -6,8 +6,18 @@ Rules for agents working in this repo. English only (no Cyrillic anywhere in rep
 
 `rig` is the dev-environment umbrella driver: a standalone Python CLI that sets up a repo
 from a committed `rig.yaml` by applying `agent-tools` content (skills, agent-hooks,
-git-hook dispatcher, CI gates, MCP). It is a peer to `tg-cli` / `review-cli`, not part of
-`agent-tools` — it *consumes* agent-tools read-only.
+git-hook dispatcher, CI gates, MCP) and provisioning the agent harness's auto/permission
+mode. It is a peer to `tg-cli` / `review-cli`, not part of `agent-tools` — it *consumes*
+agent-tools read-only.
+
+**`rig init` and `rig apply` are the two real commands.** `init` is first-run onboarding
+(no config yet → scaffold `rig.yaml` + wire the catalog in, walking the user through it);
+`apply` is the steady-state declarative reconcile (config exists → converge the disk to it).
+They are distinct, NOT synonyms. Interactivity (full TUI / semi / non-interactive `--yes`) is
+**orthogonal** to the command — both `init` and `apply` run in any of the three modes,
+decided by TTY + config + flags. `rig setup` is a back-compat alias of `init` (rig's earlier
+name): it dispatches to init's handler so it can never drift — but `init`, not `setup`, is the
+canonical onboarding command. Keep `setup` working; never make it a second engine.
 
 ## Hard rules
 
@@ -17,7 +27,15 @@ git-hook dispatcher, CI gates, MCP). It is a peer to `tg-cli` / `review-cli`, no
   imports. Do not add a top-level `import yaml`/`import textual`.
 - **One engine, two front-ends.** `rig setup` (wizard) and `rig apply` must share the same
   `plan.build` + `actions.run_plan`. Never fork the executor for the TUI. If you add a
-  capability, add it to the headless engine first and let the wizard call it.
+  capability, add it to the headless engine first and let the wizard call it. `rig setup` is
+  a back-compat alias of `rig init` over the SAME onboarding handler — not a third path.
+- **Harness auto-mode is provisioned through the reconciler, like every other target.** The
+  `harness:` block flows config → `plan.build` (one `apply_harness` action) → `run_plan`
+  (`actions/runner.py::_do_apply_harness`), writing only the managed permission key into the
+  harness settings JSON, idempotent + backup-on-conflict, with drift surfaced by `rig
+  status`. Recommend `auto_mode: true` by default — it is safe *because* the agent-hook
+  guards (incl. `block-raw-pr-merge`) are installed in the same apply. claude-code is
+  implemented; opencode is documented-but-reserved (validation fails closed on it).
 - **`rig.yaml` is committed by default.** It is the reproducible source of truth. Do not
   add an "is rig.yaml optional?" flag. Global config lives at `~/.config/rig/config.yaml`;
   per-repo `rig.yaml` overrides it; scope is by location, never a flag.

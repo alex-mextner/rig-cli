@@ -507,6 +507,96 @@ def _do_register_mcp(action: Action, on_conflict: str) -> ActionResult:
     return ActionResult(action, status, f"mcp/{server_key} registered → {config_file}{backup_note}")
 
 
+# ── harness auto-mode / permission provisioning ───────────────────────────────────
+# The JSON key each supported harness uses for its permission mode. Keep this beside the
+# handler so the runner and the drift check (which imports these) agree on the on-disk shape.
+_HARNESS_MODE_KEY = {
+    "claude-code": ("permissions", "defaultMode"),
+}
+
+
+def harness_settings_file(action: Action) -> Path:
+    """The settings file an ``apply_harness`` action targets (shared with drift)."""
+    target = action.target
+    return target if target.suffix == ".json" else target / "settings.json"
+
+
+def desired_harness_value(action: Action) -> tuple[tuple[str, str], str]:
+    """Return ((section, key), value) the harness settings file should contain.
+
+    Shared by the install action and drift so both agree on what auto-mode writes. Raises
+    ``KeyError`` for an unsupported kind — the plan only emits supported kinds.
+    """
+    kind = str(action.options.get("kind", "claude-code"))
+    section, key = _HARNESS_MODE_KEY[kind]
+    value = str(action.options.get("mode_value", ""))
+    return (section, key), value
+
+
+def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
+    """Merge the harness auto/permission setting into the harness settings JSON.
+
+    Idempotent (a re-apply with the same value is a no-op) and backup-noted: an existing
+    settings file with a DIFFERENT value for the managed key is backed up before converging
+    under ``on_conflict=backup`` (skip leaves it; overwrite replaces without a backup). Only
+    the single managed key is touched — every other setting in the file is preserved.
+    """
+    (section, key), value = desired_harness_value(action)
+    config_file = harness_settings_file(action)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict = {}
+    backup_note = ""
+    if config_file.is_file():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+        except ValueError:
+            # never silently discard an existing settings file (it holds the user's harness
+            # config). skip leaves it untouched; others back it up before rewriting.
+            if on_conflict == "skip":
+                return ActionResult(
+                    action, "skipped",
+                    f"harness/{action.item}: existing {config_file} is malformed JSON "
+                    "(on_conflict=skip), left untouched",
+                )
+            bak = fsutil.backup_path(config_file)
+            shutil.copy2(str(config_file), str(bak))
+            data = {}
+            backup_note = f" (backed up malformed config → {bak})"
+    if not isinstance(data, dict):
+        return ActionResult(action, "error", f"harness/{action.item}: {config_file} is not a JSON object")
+
+    sect = data.get(section, {})
+    if not isinstance(sect, dict):
+        return ActionResult(action, "error", f"harness/{action.item}: '{section}' is not an object in {config_file}")
+    current = sect.get(key)
+    if current == value:
+        return ActionResult(action, "skipped", f"harness/{action.item}: {section}.{key} already '{value}'")
+
+    status = "created" if current is None else "updated"
+    if current is not None and current != value:
+        if on_conflict == "skip":
+            return ActionResult(
+                action, "skipped",
+                f"harness/{action.item}: {section}.{key}='{current}' exists "
+                f"(on_conflict=skip), left untouched",
+            )
+        if on_conflict == "backup" and backup_note == "":
+            bak = fsutil.backup_path(config_file)
+            shutil.copy2(str(config_file), str(bak))
+            backup_note = f" (backed up prior → {bak})"
+        status = "backed_up" if on_conflict == "backup" else "updated"
+
+    sect[key] = value
+    data[section] = sect
+    config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    auto = "auto-mode ON" if action.options.get("auto_mode") else "interactive"
+    return ActionResult(
+        action, status,
+        f"harness/{action.item}: {section}.{key} → '{value}' ({auto}) in {config_file}{backup_note}",
+    )
+
+
 # ── git/gh shells (isolated for testability) ──────────────────────────────────────
 def _git_global(key: str) -> str | None:
     try:
@@ -546,4 +636,5 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "install_dispatcher": _do_install_dispatcher,
     "install_ci": _do_install_ci,
     "register_mcp": _do_register_mcp,
+    "apply_harness": _do_apply_harness,
 }
