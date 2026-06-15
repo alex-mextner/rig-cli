@@ -374,6 +374,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         from .drift import check_disabled_dispatcher
 
         check_disabled_dispatcher(loaded.repo_root, report)
+    # surface the model-freshness schedule explicitly (installed / drifted / not configured),
+    # so `rig status` answers "is the daily checker cron there?" at a glance.
+    _print_schedule_status(plan, report)
+
     if report.in_sync:
         print(_ok("\n  in sync — config and disk agree"))
         return 0
@@ -390,6 +394,24 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"    {_warn('▸')} {d.category}/{d.item}: {d.detail}  [{d.target}]")
     print(_dim("\n  run `rig apply` to converge config→disk (extras are left for you to decide)"))
     return 3
+
+
+def _print_schedule_status(plan, report) -> None:
+    """Report the model-freshness daily schedule: installed / drifted / not configured."""
+    sched_actions = [a for a in plan.actions if a.kind == "provision_schedule"]
+    if not sched_actions:
+        return
+    action = sched_actions[0]
+    opts = action.options
+    when = f"{int(opts.get('hour', 12)):02d}:{int(opts.get('minute', 0)):02d}"
+    platform = opts.get("platform", "?")
+    drifted = [d for d in report.items if d.category == "models"]
+    if drifted:
+        state = _warn(f"drifted ({drifted[0].detail})")
+    else:
+        state = _ok("installed")
+    print(f"\n  model-freshness schedule: {state}  "
+          + _dim(f"(daily {when}, {platform}, '{opts.get('label', '')}')"))
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:

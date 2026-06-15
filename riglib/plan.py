@@ -52,7 +52,7 @@ _DEFAULTS_KEY = {
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness
+    kind: str  # copy_skill | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_schedule
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -411,6 +411,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── harness (auto-mode / permission provisioning) ─────────────────────────────
     _build_harness(config, plan)
 
+    # ── models (daily model-freshness checker schedule) ───────────────────────────
+    _build_models(config, catalog, plan)
+
     return plan
 
 
@@ -460,6 +463,77 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
                 "kind": kind,
                 "auto_mode": auto_mode,
                 "mode_value": str(mode_value),
+            },
+        )
+    )
+
+
+def _build_models(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) -> None:
+    """Plan the daily model-freshness checker schedule, if a ``models`` block enables it.
+
+    The CTO's #3685 direction: on ``rig init`` AND ``rig apply``, check whether the daily
+    checker cron is installed and install it if missing. The action carries the
+    platform-resolved desired schedule (launchd plist on macOS / crontab line on Linux); the
+    install-if-missing + idempotency live in ``actions/runner.py``, so the plan stays pure.
+
+    No ``models`` block (or ``enabled: false``) → no action (rig leaves the system cron
+    alone). The checker command is anchored on the resolved ``agent_tools_source`` (rig runs
+    agent-tools content read-only from the checkout) unless ``checker_path`` pins one.
+    """
+    from .config import _DEFAULT_SCHEDULE_TIME, parse_hhmm
+    from .schedule import DEFAULT_LABEL, build_schedule, default_checker_path
+
+    m = config.data.get("models")
+    if not isinstance(m, dict) or not m:
+        return
+    if m.get("enabled") is False:
+        return
+
+    schedule_cfg = m.get("schedule", {}) if isinstance(m.get("schedule"), dict) else {}
+    hour, minute = parse_hhmm(schedule_cfg.get("time", _DEFAULT_SCHEDULE_TIME))
+    label = str(schedule_cfg.get("label") or DEFAULT_LABEL)
+
+    # checker path: an explicit ``checker_path`` wins; else the model_freshness.py inside the
+    # resolved agent-tools checkout. If neither resolves, plan a note (not a crash) — the
+    # schedule can't run a checker that doesn't exist.
+    checker_raw = m.get("checker_path")
+    if checker_raw:
+        checker_path = _expand(str(checker_raw), config.repo_root)
+    else:
+        checker_path = default_checker_path(catalog.source)
+    if checker_path is None:
+        plan.notes.append(
+            "models: schedule skipped — no checker_path and agent_tools_source did not resolve "
+            "a checker (set models.checker_path or agent_tools_source)"
+        )
+        return
+    # Don't provision a schedule that runs a checker that isn't on disk — that would install a
+    # cron firing a missing script daily. Skip with a note so the operator fixes the path.
+    if not checker_path.is_file():
+        plan.notes.append(
+            f"models: schedule skipped — checker not found at {checker_path} "
+            "(set models.checker_path, or point agent_tools_source at a checkout that ships "
+            "lib/checker/model_freshness.py)"
+        )
+        return
+
+    sched = build_schedule(checker_path=checker_path, hour=hour, minute=minute, label=label)
+    # the action target is the artifact path the install/drift code keys off: the plist on
+    # macOS, or the user's crontab (a sentinel-conceptual target) on Linux.
+    target = sched.plist_path if sched.platform == "launchd" else config.repo_root
+    plan.actions.append(
+        Action(
+            kind="provision_schedule",
+            category="models",
+            item="model-freshness",
+            source=config.repo_root,  # no carrier; anchor on the repo
+            target=target,  # type: ignore[arg-type]
+            options={
+                "platform": sched.platform,
+                "label": label,
+                "hour": hour,
+                "minute": minute,
+                "checker_path": str(checker_path),
             },
         )
     )

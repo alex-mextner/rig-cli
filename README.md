@@ -120,6 +120,25 @@ catch the dangerous tool calls before the side effect: the guards are what make 
 without permission prompts safe. See [`docs/config-schema.md`](docs/config-schema.md) for the
 full `harness` schema and the opencode equivalent.
 
+### Model-freshness schedule — a daily cron, provisioned by the reconciler
+
+A `models:` block tells rig to provision a **daily cron that runs the agent-tools
+model-freshness checker** (`lib/checker/model_freshness.py`) — which polls provider
+model-list endpoints and proposes version bumps to the model board. On **`rig init` AND
+`rig apply`**, rig checks whether the schedule is installed and installs it if missing
+(idempotent):
+
+```yaml
+models:
+  enabled: true
+  schedule: { time: "12:00" }    # daily at noon (default)
+```
+
+Cross-platform: **macOS → launchd** (a `~/Library/LaunchAgents/ai.hyperide.model-freshness.plist`
+loaded via `launchctl`), **Linux → crontab** (a sentinel-fenced managed line). `rig status`
+reports whether the schedule is installed or drifted; `rig doctor` flags a missing scheduler
+binary. See [`docs/config-schema.md`](docs/config-schema.md#models) for the full schema.
+
 ### Drift — surfaced both ways, never silently reconciled
 
 `rig status` reports two directions:
@@ -159,6 +178,7 @@ riglib/
   config.py         cascade loader + fail-closed schema validation
   detect.py         env/project + OS/package-manager detection
   plan.py           (config + catalog) → ordered InstallPlan       ← shared by setup & apply
+  schedule.py       pure planning of the model-freshness cron artifact (launchd/crontab)
   drift.py          two-way drift detection
   doctor.py         dependency diagnosis + bootstrap across package managers
   state.py          SetupState ⇄ rig.yaml (the single serializer)
@@ -166,7 +186,8 @@ riglib/
   logging.py        opt-in JSONL structured logging (stdlib)
   actions/          stdlib-only install actions (the executor)
     runner.py         run_plan: copy_skill / install_agent_hook / install_dispatcher /
-                      install_ci / register_mcp / apply_harness — idempotent, backup-noted
+                      install_ci / register_mcp / apply_harness / provision_schedule —
+                      idempotent, backup-noted
     fsutil.py         conflict-policy + idempotency + backup helpers
   tui/app.py        the textual wizard — a thin front-end over the same engine
 ```

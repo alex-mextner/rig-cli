@@ -22,12 +22,16 @@ from .actions import fsutil
 from .actions.runner import (
     _ci_companion_files,
     _git_global,
+    _launchctl_loaded,
+    _read_crontab,
     build_hook_descriptor,
+    crontab_with_managed,
     descriptor_text,
     desired_harness_value,
     harness_settings_file,
     parse_mcp_command,
     resolve_ci_workflow,
+    schedule_plan_from_action,
 )
 from .plan import Action, InstallPlan
 
@@ -97,6 +101,8 @@ def detect(
             declared_mcp.setdefault(cf, set()).add(server_key)
         elif action.kind == "apply_harness":
             _check_harness(action, report)
+        elif action.kind == "provision_schedule":
+            _check_schedule(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -381,6 +387,49 @@ def _check_harness(action: Action, report: DriftReport) -> None:
                 "modified", "harness", action.item, config_file,
                 f"{section}.{key} is '{current}', config declares '{value}'",
             )
+        )
+
+
+def _check_schedule(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured daily model-freshness schedule and disk.
+
+    missing  — the launchd plist / crontab managed line is absent (or, on macOS, the plist
+               exists but the job is not loaded into launchd).
+    modified — the artifact on disk differs from the desired one (e.g. someone changed the
+               run time, or the checker path). ``rig apply`` converges.
+    Cross-platform: launchd plist content + loaded state on macOS; the sentinel-fenced
+    crontab pair on Linux. Shares the desired-artifact computation with the install handler.
+    """
+    sched = schedule_plan_from_action(action)
+    if sched.platform == "launchd":
+        plist = sched.plist_path
+        if plist is None or not plist.is_file():
+            report.items.append(
+                DriftItem("missing", "models", action.item, plist or action.target, "launchd plist not installed")
+            )
+            return
+        if plist.read_text(encoding="utf-8") != sched.plist_xml():
+            report.items.append(
+                DriftItem("modified", "models", action.item, plist, "launchd plist differs from configured schedule")
+            )
+            return
+        if not _launchctl_loaded(sched.label):
+            report.items.append(
+                DriftItem("missing", "models", action.item, plist, f"launchd job '{sched.label}' not loaded")
+            )
+        return
+    # crontab branch — position-preserving (a user's lines after rig's block are NOT drift).
+    # `crontab_with_managed` returns None iff our managed pair is already present unchanged at
+    # its position; a non-None result means an apply WOULD change something → drift.
+    _has, current = _read_crontab()
+    desired_pair = sched.crontab_lines()
+    if not any(sched.label in ln for ln in current.splitlines()):
+        report.items.append(
+            DriftItem("missing", "models", action.item, action.target, f"crontab line for '{sched.label}' not installed")
+        )
+    elif crontab_with_managed(current, sched.label, desired_pair) is not None:
+        report.items.append(
+            DriftItem("modified", "models", action.item, action.target, "crontab schedule differs from configured time/checker")
         )
 
 

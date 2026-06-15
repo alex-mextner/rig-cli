@@ -36,6 +36,7 @@ git_hooks: { ... }
 ci: { ... }
 mcp: { ... }
 harness: { ... }              # agent harness auto/permission provisioning (auto-mode)
+models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
 ```
 
 If `agent_tools_source` is omitted, rig resolves it from `$RIG_AGENT_TOOLS_SOURCE`, then
@@ -231,10 +232,58 @@ a setting it didn't.
 
 ---
 
+## `models`
+
+Provisions a **daily cron that runs the agent-tools model-freshness checker**
+(`lib/checker/model_freshness.py`), which polls provider model-list endpoints and proposes
+version bumps to the model board (`agent-tools/lib/contracts/models.yaml`). Per the
+provisioning rule, on **`rig init` AND `rig apply`** rig **checks whether the schedule is
+installed and installs it if missing** (idempotent — a re-apply that finds it present and
+current is a no-op).
+
+```yaml
+models:
+  enabled: true                # provision the daily checker schedule (false → leave system cron alone)
+  schedule:
+    time: "12:00"              # daily run time, HH:MM 24h (default: noon)
+    # label: ai.hyperide.model-freshness   # launchd Label / crontab sentinel (advanced)
+  # checker_path: ~/xp/agent-tools/lib/checker/model_freshness.py   # default: resolved from agent_tools_source
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` (scaffold) | provision the daily schedule (set `false` to leave the system cron untouched) |
+| `schedule.time` | `HH:MM` | `12:00` (noon) | daily run time, 24-hour; fail-closed on a malformed/out-of-range value |
+| `schedule.label` | str | `ai.hyperide.model-freshness` | the launchd Label / crontab sentinel identity (one string across platforms) |
+| `checker_path` | path | resolved from `agent_tools_source` | the `model_freshness.py` the schedule runs |
+
+**Cross-platform.** The CTO asked for a "cron"; rig provisions the platform-native
+equivalent:
+
+- **macOS → launchd.** A `~/Library/LaunchAgents/<label>.plist` with a daily
+  `StartCalendarInterval` (Hour/Minute), loaded via `launchctl load`. (cron is
+  deprecated/unmanaged on macOS; launchd is the supported scheduler.)
+- **Linux → crontab.** A single managed crontab line `MIN HOUR * * * python3 <checker>`,
+  fenced by a `# rig-managed: <label>` sentinel comment so it is idempotent (re-apply finds
+  it by sentinel) and removable, and so it never disturbs the user's other crontab lines.
+
+**Idempotency (the "check whether the cron exists and install it if missing" rule).** Both `init` and `apply`
+run this. A present-and-current schedule re-applies as a no-op (`skipped`); a missing or
+drifted one is (re)installed. `rig status` reports the schedule explicitly (installed /
+drifted / not configured) and surfaces a wrong run time or checker path as drift; `rig
+doctor` flags a missing scheduler binary (`launchctl`/`crontab`).
+
+Set `RIG_SCHEDULE_DRY_RUN=1` to write the artifact file but **skip the live daemon mutation**
+(no `launchctl load`, no `crontab` write) — for CI, containers, or smoke tests where touching
+the real per-user scheduler is unwanted.
+
+---
+
 ## Validation
 
 `apply`/`status`/`setup`/`init` validate before touching disk and **fail closed** on:
 unknown top-level keys, unsupported `version`, invalid `scope` / `on_conflict` / ci `tier` /
 agent-hook `on_error`, an unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`,
-and an `agent_tools_source` that is not an agent-tools checkout. `--dry-run` prints the
+a malformed/out-of-range `models.schedule.time` or unknown `models` key, and an
+`agent_tools_source` that is not an agent-tools checkout. `--dry-run` prints the
 resolved plan and exits 0 without writing.
