@@ -28,7 +28,9 @@ from .actions.runner import (
     crontab_with_managed,
     descriptor_text,
     desired_harness_value,
+    find_managed_bridge_hook,
     harness_settings_file,
+    hook_bridge_entries,
     parse_mcp_command,
     resolve_ci_workflow,
     schedule_plan_from_action,
@@ -104,6 +106,8 @@ def detect(
             declared_mcp.setdefault(cf, set()).add(server_key)
         elif action.kind == "apply_harness":
             _check_harness(action, report)
+        elif action.kind == "register_hook_bridge":
+            _check_hook_bridge(action, report)
         elif action.kind == "provision_schedule":
             _check_schedule(action, report)
 
@@ -424,6 +428,49 @@ def _check_harness(action: Action, report: DriftReport) -> None:
                 f"{section}.{key} is '{current}', config declares '{value}'",
             )
         )
+
+
+def _check_hook_bridge(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured cc_hook_bridge wiring and the settings file.
+
+    missing  — the settings file is absent, or a managed dispatcher hook (one whose command
+               carries ``cc_hook_bridge``) is not present for an (event, matcher) we ship.
+    modified — the settings file is malformed JSON, OR a managed hook is present but its
+               COMMAND differs from what apply would write (stale PYTHONPATH / moved
+               checkout / changed ``hook_bridge.python``). ``rig apply`` rewrites it.
+    Drift and apply share ``find_managed_bridge_hook`` + ``hook_bridge_entries`` so they
+    never diverge. Only OUR managed blocks are checked; the user's other hooks are ignored.
+    """
+    config_file = harness_settings_file(action)
+    if not config_file.is_file():
+        report.items.append(
+            DriftItem("missing", "harness", action.item, config_file, "harness settings file not written")
+        )
+        return
+    try:
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+    except ValueError:
+        report.items.append(
+            DriftItem("modified", "harness", action.item, config_file, "harness settings file is malformed JSON")
+        )
+        return
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    hooks = hooks if isinstance(hooks, dict) else {}
+    for event, pairs in hook_bridge_entries(action).items():
+        blocks = hooks.get(event)
+        for matcher, command in pairs:
+            label = f"{event}[{matcher or '*'}]"
+            hk = find_managed_bridge_hook(blocks, matcher)
+            if hk is None:
+                report.items.append(
+                    DriftItem("missing", "harness", action.item, config_file,
+                              f"cc_hook_bridge not wired for {label}")
+                )
+            elif str(hk.get("command", "")) != command:
+                report.items.append(
+                    DriftItem("modified", "harness", action.item, config_file,
+                              f"cc_hook_bridge command for {label} is stale (apply will rewrite)")
+                )
 
 
 def _check_schedule(action: Action, report: DriftReport) -> None:

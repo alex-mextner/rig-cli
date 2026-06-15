@@ -143,4 +143,8 @@ def fake_agent_tools(tmp_path: Path) -> Path:
     # plan._build_models before it provisions a cron).
     _write(root / "lib" / "checker" / "model_freshness.py", "#!/usr/bin/env python3\n")
 
+    # the cc_hook_bridge dispatcher the `harness.hook_bridge` wiring points at (its presence
+    # is checked by plan._build_hook_bridge before it registers the settings.json hooks).
+    _write(root / "lib" / "cc_hook_bridge" / "dispatch.py", "#!/usr/bin/env python3\n")
+
     return root

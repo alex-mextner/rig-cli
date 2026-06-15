@@ -487,6 +487,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── harness (auto-mode / permission provisioning) ─────────────────────────────
     _build_harness(config, plan)
 
+    # ── hook bridge (make agents-hooks/v1 descriptors FIRE in the harness) ─────────
+    _build_hook_bridge(config, catalog, plan)
+
     # ── models (daily model-freshness checker schedule) ───────────────────────────
     _build_models(config, catalog, plan)
 
@@ -540,6 +543,71 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
                 "auto_mode": auto_mode,
                 "mode_value": str(mode_value),
             },
+        )
+    )
+
+
+# Harnesses whose settings file CC's hook contract applies to. Only claude-code today —
+# other harnesses don't use the settings.json PreToolUse/Stop mechanism this bridge targets.
+_HOOK_BRIDGE_HARNESSES = {"claude-code"}
+
+
+def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) -> None:
+    """Plan the agents-hooks/v1 → harness bridge registration, if applicable.
+
+    Claude Code never runs the ``~/.claude/hooks/*.json`` descriptors rig installs; it only
+    runs hooks declared in ``settings.json``. Without this, every agent-hook is INERT in CC
+    (agent-tools#18). This emits one ``register_hook_bridge`` action that wires the
+    ``cc_hook_bridge`` dispatcher into the SAME settings file the ``harness`` block writes.
+
+    Gated on a harness block being present, enabled, of a supported kind, AND
+    ``agent_hooks`` being enabled (a bridge with no installed descriptors is pointless) AND
+    ``harness.hook_bridge`` not turned off. Anchored on the resolved agent-tools checkout so
+    the dispatcher command imports ``cc_hook_bridge`` from ``<checkout>/lib``.
+    """
+    h = config.data.get("harness")
+    if not isinstance(h, dict) or not h or h.get("enabled") is False:
+        return
+    kind = str(h.get("kind", _DEFAULT_HARNESS_KIND))
+    if kind not in _HOOK_BRIDGE_HARNESSES or kind not in _HARNESS_SETTINGS:
+        return
+    bridge_cfg = h.get("hook_bridge")
+    if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is False:
+        return
+    # No installed descriptors → the bridge would be a no-op carrier. Skip rather than wire
+    # a dispatcher that has nothing to dispatch (and surface why in a note).
+    ah = config.category("agent_hooks")
+    if ah.get("enabled") is False:
+        plan.notes.append(
+            "hook_bridge: skipped — agent_hooks disabled, so no descriptors to dispatch"
+        )
+        return
+    lib_dir = catalog.source / "lib"
+    # Fail-CLOSED: never wire a settings.json command that would error at runtime. The
+    # catalog only checks for skills/ + agent-hooks/, so an older agent-tools checkout can
+    # lack lib/cc_hook_bridge — wiring it anyway means every CC tool call hits a broken hook
+    # (which, fail-open, is harmless but noisy). Skip with a clear, actionable note instead.
+    if not (lib_dir / "cc_hook_bridge" / "dispatch.py").is_file():
+        plan.notes.append(
+            f"hook_bridge: skipped — {lib_dir}/cc_hook_bridge not found in this agent-tools "
+            "checkout (update agent-tools to a version that ships the dispatcher)"
+        )
+        return
+    settings_path = h.get("settings_path") or _HARNESS_SETTINGS[kind]
+    options: dict[str, Any] = {
+        "kind": kind,
+        "lib_dir": str(lib_dir),
+    }
+    if isinstance(bridge_cfg, dict) and bridge_cfg.get("python"):
+        options["python"] = str(bridge_cfg["python"])
+    plan.actions.append(
+        Action(
+            kind="register_hook_bridge",
+            category="harness",
+            item="hook-bridge",
+            source=catalog.source,
+            target=_expand(str(settings_path), config.repo_root),
+            options=options,
         )
     )
 

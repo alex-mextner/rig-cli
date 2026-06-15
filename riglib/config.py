@@ -287,6 +287,19 @@ def _validate_harness(h: dict[str, Any]) -> None:
     mode = h.get("mode")
     if mode is not None and not isinstance(mode, str):
         raise ConfigError(f"harness.mode must be a string, got {mode!r}")
+    # harness.hook_bridge — wires the agents-hooks/v1 → CC dispatcher into settings.json so
+    # installed agent-hooks actually FIRE (agent-tools#18). enabled defaults true; a custom
+    # python interpreter is optional. Fail-closed on the wrong types (typo guard).
+    bridge = h.get("hook_bridge")
+    if bridge is not None:
+        if not isinstance(bridge, dict):
+            raise ConfigError(f"harness.hook_bridge must be a mapping, got {bridge!r}")
+        enabled = bridge.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ConfigError(f"harness.hook_bridge.enabled must be a bool, got {enabled!r}")
+        py = bridge.get("python")
+        if py is not None and not isinstance(py, str):
+            raise ConfigError(f"harness.hook_bridge.python must be a string, got {py!r}")
 
 
 # The model-freshness schedule defaults to NOON (run once a day, at noon). A `time:` override

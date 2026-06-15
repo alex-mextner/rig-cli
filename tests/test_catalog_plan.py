@@ -267,3 +267,71 @@ def test_plan_harness_custom_settings_path(fake_agent_tools, tmp_path):
 
     assert a is not None
     assert a.target == Path(os.path.expanduser("~/.claude/settings.json"))
+
+
+# ── hook bridge (agents-hooks/v1 → CC settings.json) ──────────────────────────────
+def _bridge_action(plan):
+    return next((a for a in plan.actions if a.kind == "register_hook_bridge"), None)
+
+
+def test_plan_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"harness": {"kind": "claude-code", "auto_mode": True}}, tmp_path)
+    a = _bridge_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    # anchored on the resolved agent-tools checkout's lib/ for PYTHONPATH
+    assert a.options["lib_dir"] == str(fake_agent_tools / "lib")
+    assert a.target == (tmp_path / ".claude" / "settings.json")
+
+
+def test_plan_hook_bridge_skipped_without_harness(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"skills": {"enabled": False}}, tmp_path)  # no harness block
+    assert _bridge_action(build(cfg, cat, project_type="unknown")) is None
+
+
+def test_plan_hook_bridge_disabled_explicitly(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"harness": {"auto_mode": True, "hook_bridge": {"enabled": False}}},
+        tmp_path,
+    )
+    assert _bridge_action(build(cfg, cat, project_type="unknown")) is None
+
+
+def test_plan_hook_bridge_skipped_when_agent_hooks_disabled(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"harness": {"auto_mode": True}, "agent_hooks": {"enabled": False}},
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    assert _bridge_action(plan) is None
+    assert any("agent_hooks disabled" in n for n in plan.notes)
+
+
+def test_plan_hook_bridge_honors_settings_path_and_python(fake_agent_tools, tmp_path):
+    import os
+
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"harness": {"auto_mode": True, "settings_path": "~/.claude/settings.json",
+                     "hook_bridge": {"python": "/opt/py/bin/python3"}}},
+        tmp_path,
+    )
+    a = _bridge_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.target == Path(os.path.expanduser("~/.claude/settings.json"))
+    assert a.options["python"] == "/opt/py/bin/python3"
+
+
+def test_plan_hook_bridge_skipped_when_dispatcher_module_absent(fake_agent_tools, tmp_path):
+    """Fail-closed: an agent-tools checkout without lib/cc_hook_bridge must NOT wire a
+    settings.json command that would error at runtime — skip with an actionable note."""
+    # remove the dispatcher the fixture ships
+    (fake_agent_tools / "lib" / "cc_hook_bridge" / "dispatch.py").unlink()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"harness": {"auto_mode": True}}, tmp_path)
+    plan = build(cfg, cat, project_type="unknown")
+    assert _bridge_action(plan) is None
+    assert any("cc_hook_bridge not found" in n for n in plan.notes), plan.notes

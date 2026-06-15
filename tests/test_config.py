@@ -116,6 +116,27 @@ def test_validate_rejects_non_bool_auto_mode():
         config.validate({"version": 1, "harness": {"auto_mode": "yes"}})
 
 
+def test_validate_accepts_hook_bridge_block():
+    config.validate({"version": 1, "harness": {
+        "kind": "claude-code", "hook_bridge": {"enabled": True, "python": "python3.12"}}})
+    config.validate({"version": 1, "harness": {"hook_bridge": {"enabled": False}}})
+
+
+def test_validate_rejects_non_bool_hook_bridge_enabled():
+    with pytest.raises(config.ConfigError, match="hook_bridge.enabled"):
+        config.validate({"version": 1, "harness": {"hook_bridge": {"enabled": "yes"}}})
+
+
+def test_validate_rejects_non_string_hook_bridge_python():
+    with pytest.raises(config.ConfigError, match="hook_bridge.python"):
+        config.validate({"version": 1, "harness": {"hook_bridge": {"python": 3}}})
+
+
+def test_validate_rejects_non_mapping_hook_bridge():
+    with pytest.raises(config.ConfigError, match="hook_bridge must be a mapping"):
+        config.validate({"version": 1, "harness": {"hook_bridge": "on"}})
+
+
 # ── skill harness-link knobs ───────────────────────────────────────────────────────
 def test_validate_accepts_skill_harness_link_knobs():
     config.validate(
