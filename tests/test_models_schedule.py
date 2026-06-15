@@ -253,6 +253,36 @@ def test_launchd_reinstall_when_unloaded(tmp_path, monkeypatch):
     assert res.status in ("created", "updated")
 
 
+def test_launchd_conflict_skip_does_not_touch_daemon(tmp_path, monkeypatch):
+    """on_conflict=skip + a plist that DIFFERS → report 'skipped', never (re)load launchd.
+
+    The desired schedule was not written (write_file skipped on the conflict), so unloading
+    /loading the stale plist would mutate launchd with the WRONG schedule and reporting
+    'updated' would mask the unresolved drift. We must surface 'skipped' and leave the daemon
+    untouched.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    calls = []
+    monkeypatch.setattr(runner, "_launchctl", lambda verb, arg: calls.append((verb, arg)) or 0)
+    # not loaded — so without the conflict-skip guard the code would proceed to (re)load.
+    monkeypatch.setattr(runner, "_launchctl_loaded", lambda label: False)
+
+    action = _launchd_action(home)
+    plist = action.target
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    # an EXISTING plist that differs from desired (a stale, hand-edited schedule).
+    stale = runner.schedule_plan_from_action(action).plist_xml().replace("<integer>12</integer>", "<integer>6</integer>")
+    plist.write_text(stale, encoding="utf-8")
+
+    res = runner._do_provision_schedule(action, "skip")
+    assert res.status == "skipped", res.detail
+    assert calls == []  # daemon never mutated
+    # the stale plist on disk is left exactly as-is (drift NOT silently reconciled).
+    assert plist.read_text(encoding="utf-8") == stale
+
+
 # ── install (crontab) — idempotent install-if-missing ───────────────────────────────────
 def _crontab_action(repo_root: Path):
     from riglib.plan import Action

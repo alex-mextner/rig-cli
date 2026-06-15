@@ -2,7 +2,7 @@
 
 The CTO's #3685 direction: rig should install a cron that runs the agent-tools model-currency
 checker **once a day, e.g. at noon**, and on `rig init` AND `rig apply` should **check whether
-the cron is installed and install it if missing** ("проверять есть ли крон и устанавливать").
+the cron is installed and install it if missing**.
 
 Cross-platform:
   - **macOS → launchd**. A ``~/Library/LaunchAgents/<label>.plist`` loaded via ``launchctl``

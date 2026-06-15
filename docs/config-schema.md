@@ -267,7 +267,7 @@ equivalent:
   fenced by a `# rig-managed: <label>` sentinel comment so it is idempotent (re-apply finds
   it by sentinel) and removable, and so it never disturbs the user's other crontab lines.
 
-**Idempotency (the "проверять есть ли крон и устанавливать" rule).** Both `init` and `apply`
+**Idempotency (the "check whether the cron exists and install it if missing" rule).** Both `init` and `apply`
 run this. A present-and-current schedule re-applies as a no-op (`skipped`); a missing or
 drifted one is (re)installed. `rig status` reports the schedule explicitly (installed /
 drifted / not configured) and surfaces a wrong run time or checker path as drift; `rig

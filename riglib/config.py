@@ -263,7 +263,7 @@ def _validate_harness(h: dict[str, Any]) -> None:
         raise ConfigError(f"harness.mode must be a string, got {mode!r}")
 
 
-# The model-freshness schedule defaults to NOON (the CTO's "в полдень"). A `time:` override
+# The model-freshness schedule defaults to NOON (run once a day, at noon). A `time:` override
 # is "HH:MM" 24h. Keeping the parse here (not just in plan/actions) makes a malformed time a
 # fail-closed config error, consistent with every other block.
 _DEFAULT_SCHEDULE_TIME = "12:00"

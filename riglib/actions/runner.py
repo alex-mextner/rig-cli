@@ -714,7 +714,7 @@ def _schedule_dry_run() -> bool:
 def _do_provision_schedule(action: Action, on_conflict: str) -> ActionResult:
     """Install the daily model-freshness schedule IF MISSING (idempotent).
 
-    The CTO's "проверять есть ли крон и устанавливать": a re-apply that finds the schedule
+    The "check whether the cron exists and install it if missing" rule: a re-apply that finds the schedule
     already present and current is a no-op (``skipped``); a missing/drifted schedule is
     (re)installed. Cross-platform: launchd plist + ``launchctl load`` on macOS, a managed
     sentinel-fenced crontab line on Linux. ``on_conflict`` is honored for the macOS plist
@@ -745,6 +745,18 @@ def _provision_launchd(action: Action, sched, on_conflict: str) -> ActionResult:
     out = fsutil.write_file(plist_path, desired, on_conflict)
     if out.status == "error":
         return ActionResult(action, "error", f"models/{action.item}: {out.detail}", out.backup)
+    # Conflict-skip: the existing plist DIFFERS from desired but on_conflict=skip told us not to
+    # write it. The desired schedule never hit disk, so we must NOT unload/load the stale plist
+    # (that would mutate launchd with the wrong schedule) and must NOT report 'updated' (that
+    # would mask the unresolved drift). Surface 'skipped' so the drift is visible. We reach this
+    # only when `desired != current` (the byte-identical case took the early-return no-op above
+    # or write_file's identical-bytes path, which still proceeds to a needed (re)load below).
+    if out.status == "skipped" and already and current != desired:
+        return ActionResult(
+            action, "skipped",
+            f"models/{action.item}: launchd plist {plist_path} differs but on_conflict=skip — "
+            f"left unchanged (drift NOT reconciled; re-run with on_conflict=backup/overwrite)",
+        )
     if _schedule_dry_run():
         return ActionResult(
             action, out.status if out.status != "skipped" else "created",
