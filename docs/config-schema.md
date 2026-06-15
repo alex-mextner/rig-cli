@@ -36,6 +36,7 @@ ci: { ... }
 mcp: { ... }
 harness: { ... }              # agent harness auto/permission provisioning (auto-mode)
 models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
+agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
 ```
 
 If `agent_tools_source` is omitted, rig resolves it from `$RIG_AGENT_TOOLS_SOURCE`, then
@@ -326,12 +327,63 @@ the real per-user scheduler is unwanted.
 
 ---
 
+## `agents_md`
+
+Provisions one **canonical agent-guide file** in the repo, exposed under both conventional
+names so every harness reads the same instructions: **`AGENTS.md`** is the real file
+(Codex/most agents read it) and **`CLAUDE.md`** is a relative symlink to it (Claude Code
+reads it). Default **ON** — on `rig init` AND `rig apply`, rig converges the repo to this
+invariant; idempotent (a re-apply that finds it already correct is a no-op).
+
+```yaml
+agents_md:
+  enabled: true     # provision AGENTS.md (canonical) + CLAUDE.md (symlink). Default ON.
+  # symlink: false  # equivalent opt-out (leave the repo's files untouched)
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision the canonical + symlink pair (set `false` to opt out) |
+| `symlink` | bool | `true` | alias opt-out — `false` is equivalent to `enabled: false` |
+
+**Canonical direction.** `AGENTS.md` is canonical by convention. A **real file always wins**:
+a repo that already has a real `CLAUDE.md` and no real `AGENTS.md` keeps `CLAUDE.md` as the
+source of truth and makes `AGENTS.md` the symlink — rig never demotes a real file to a link.
+rig **writes a relative symlink** (just the filename) so the link it creates stays valid when
+the repo moves.
+
+**Safety-first.** rig only ever (a) creates into an **empty** slot, (b) collapses two
+**identical real** files to a symlink, or (c) no-ops an already-correct pair. Every other
+shape is a **conflict** that rig leaves completely untouched and surfaces via `rig status` —
+it never clobbers a real file, a user-placed symlink, or a directory.
+
+**On-disk cases (idempotent, never destructive):**
+
+- **both absent** → create `AGENTS.md` (a minimal placeholder) + `CLAUDE.md` symlink.
+- **one real, the other absent** → symlink the other → the real one.
+- **one real, the other already the correct symlink** → no-op (in sync).
+- **both real & identical content** → converge the link side (`CLAUDE.md`) to a symlink,
+  honoring `on_conflict` (`backup` keeps a `CLAUDE.md.rig-bak-*` copy; `skip` leaves both real
+  files). `rig status` reports the un-converged pair as drift.
+- **conflict — left untouched, reported as drift:** both real with **different** content; a
+  real file on one side with a **foreign symlink or a directory** on the other; **neither**
+  slot a real file (a stray symlink/dir occupies one, e.g. an `AGENTS.md → CLAUDE.md` peer
+  link). rig won't pick a winner or risk a symlink loop — reconcile to one real file (or a
+  correct symlink) and re-apply.
+
+`rig status` flags every state in which `rig apply` *would* act (missing pair, missing link,
+un-converged identical files) plus the conflicts above; a correct canonical+symlink pair is in
+sync.
+
+---
+
 ## Validation
 
 `apply`/`status`/`init` validate before touching disk and **fail closed** on:
 unknown top-level keys, unsupported `version`, invalid `on_conflict` / ci `tier` /
 agent-hook `on_error`, an unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`,
 a non-mapping `harness.hook_bridge` / non-bool `hook_bridge.enabled` / non-string `hook_bridge.python`,
-a malformed/out-of-range `models.schedule.time` or unknown `models` key, and an
+a malformed/out-of-range `models.schedule.time` or unknown `models` key, a non-bool
+`agents_md.enabled`/`agents_md.symlink` or unknown `agents_md` key, and an
 `agent_tools_source` that is not an agent-tools checkout. `--dry-run` prints the
 resolved plan and exits 0 without writing.

@@ -65,7 +65,7 @@ _DEFAULT_HARNESS_KIND = "claude-code"
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_schedule
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -493,6 +493,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── models (daily model-freshness checker schedule) ───────────────────────────
     _build_models(config, catalog, plan)
 
+    # ── agents_md (AGENTS.md canonical + CLAUDE.md symlink) ────────────────────────
+    _build_agents_symlink(config, plan)
+
     return plan
 
 
@@ -621,6 +624,34 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
             source=catalog.source,
             target=_expand(str(settings_path), config.repo_root),
             options=options,
+        )
+    )
+
+
+def _build_agents_symlink(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the AGENTS.md (canonical) + CLAUDE.md (symlink) provisioning for the repo.
+
+    Default **ON**: every repo should expose one agent-guide file under both names so every
+    harness reads the same instructions. Opt out with ``agents_md: { enabled: false }`` (or
+    ``{ symlink: false }``). The classify-and-converge logic lives in ``actions/`` (it depends
+    on what is already on disk), so the plan emits one idempotent action anchored at the repo
+    root; no carrier in agent-tools.
+    """
+    am = config.data.get("agents_md")
+    if am is None:
+        am = {}
+    if not isinstance(am, dict):
+        return  # validate() already fail-closed on a non-mapping block
+    if am.get("enabled") is False or am.get("symlink") is False:
+        return
+    plan.actions.append(
+        Action(
+            kind="provision_agents_symlink",
+            category="agents_md",
+            item="symlink",
+            source=config.repo_root,
+            target=config.repo_root,
+            options={},
         )
     )
 

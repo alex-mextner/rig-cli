@@ -1099,6 +1099,183 @@ def _gh_alias_set(name: str, path: str) -> int:
     return res.returncode
 
 
+# ── AGENTS.md / CLAUDE.md canonical + symlink ─────────────────────────────────────
+# One file is the real source of truth; the other is a relative symlink to it, so every
+# agent harness (Claude Code reads CLAUDE.md; Codex/others read AGENTS.md) sees identical
+# guidance. apply and drift BOTH go through `resolve_agents_md` so they can never disagree
+# on canonical direction or on what counts as in-sync.
+_AGENTS_MD_PLACEHOLDER = (
+    "# Agent guide\n\n"
+    "Repository instructions for coding agents (Claude Code, Codex, etc.). This is the\n"
+    "canonical file; the other agent-guide filename is a symlink to it, so every agent\n"
+    "reads the same guide.\n\n"
+    "Replace this placeholder with the conventions, commands, and guardrails for this repo.\n"
+)
+
+
+def agents_md_paths(repo_root: Path) -> tuple[Path, Path]:
+    """The (AGENTS.md, CLAUDE.md) pair at a repo root."""
+    return repo_root / "AGENTS.md", repo_root / "CLAUDE.md"
+
+
+def _is_real_file(p: Path) -> bool:
+    """True for a regular file that is NOT a symlink (a real source of truth, not a link)."""
+    return p.is_file() and not p.is_symlink()
+
+
+def symlink_points_to(link: Path, canonical_name: str) -> bool:
+    """True when ``link`` is a symlink already resolving to ``canonical_name`` (same dir).
+
+    Accepts either a relative stored target (just the filename) or an absolute one that
+    resolves to the same path, so a correct link written either way is a no-op. Shared by the
+    install action and the drift check so both agree on "already correct".
+    """
+    if not link.is_symlink():
+        return False
+    current = link.readlink()
+    if str(current) == canonical_name:
+        return True
+    try:
+        return (link.parent / current).resolve() == (link.parent / canonical_name).resolve()
+    except OSError:
+        return False
+
+
+@dataclass(frozen=True)
+class AgentsMdResolution:
+    """The desired AGENTS.md/CLAUDE.md outcome for a repo — the one source apply + drift share.
+
+    ``state`` is the single discriminator both consumers switch on, so they can never disagree
+    about what is in sync:
+
+    - ``ok``          — already a real canonical + a correct symlink: no-op.
+    - ``create_both`` — both slots empty: write ``canonical`` placeholder + symlink the other.
+    - ``create_link`` — one real canonical, the other empty: symlink the other → canonical.
+    - ``converge``    — both real & identical: collapse ``link`` to a symlink (honors on_conflict).
+    - ``conflict``    — anything ambiguous/unsafe (both real & different, a real file at one slot
+                        with a foreign symlink/dir at the other, peer-link loops, neither-real
+                        with a stray symlink/dir): rig NEVER mutates these; ``detail`` says why.
+
+    ``canonical`` is the real source-of-truth filename; ``link`` is the slot that should be a
+    symlink → canonical (for ``converge`` that is ``CLAUDE.md``).
+    """
+
+    agents: Path
+    claude: Path
+    state: str
+    canonical: str
+    canonical_path: Path
+    link: Path
+    detail: str = ""
+
+
+def resolve_agents_md(repo_root: Path) -> AgentsMdResolution:
+    """Classify the on-disk AGENTS.md/CLAUDE.md state into one desired ``state`` (pure, no writes).
+
+    Safety-first: rig only ever (a) creates into an EMPTY slot, (b) collapses two identical
+    REAL files to a symlink, or (c) no-ops a correct pair. Every other shape — a foreign
+    symlink, a directory, divergent real files, a peer-link loop — is a ``conflict`` rig leaves
+    untouched and surfaces, so it can never clobber a real file or a user-placed symlink.
+    """
+    agents, claude = agents_md_paths(repo_root)
+    agents_real = _is_real_file(agents)
+    claude_real = _is_real_file(claude)
+
+    def _r(state, canonical, canonical_path, link, detail=""):
+        return AgentsMdResolution(agents, claude, state, canonical, canonical_path, link, detail)
+
+    if agents_real and claude_real:
+        try:
+            identical = agents.read_bytes() == claude.read_bytes()
+        except OSError as exc:
+            return _r("conflict", "AGENTS.md", agents, claude,
+                      detail=f"cannot read AGENTS.md/CLAUDE.md to compare: {exc}")
+        if identical:
+            return _r("converge", "AGENTS.md", agents, claude)  # link = CLAUDE.md
+        return _r("conflict", "AGENTS.md", agents, claude,
+                  detail="AGENTS.md and CLAUDE.md are both real files with different content "
+                         "— reconcile into one (keep the canonical), then re-run")
+
+    if agents_real or claude_real:
+        if agents_real:
+            canonical, canonical_path, link = "AGENTS.md", agents, claude
+        else:
+            canonical, canonical_path, link = "CLAUDE.md", claude, agents
+        if link.is_symlink():
+            if symlink_points_to(link, canonical):
+                return _r("ok", canonical, canonical_path, link)
+            return _r("conflict", canonical, canonical_path, link,
+                      detail=f"{link.name} is a symlink to something other than {canonical} "
+                             f"— left untouched; remove it to let rig manage the pair")
+        if link.exists():  # not real (canonical is the only real file) and not a symlink → a dir
+            return _r("conflict", canonical, canonical_path, link,
+                      detail=f"{link.name} exists but is not a regular file — left untouched")
+        return _r("create_link", canonical, canonical_path, link)
+
+    # neither slot is a real file
+    agents_present = agents.is_symlink() or agents.exists()
+    claude_present = claude.is_symlink() or claude.exists()
+    if not agents_present and not claude_present:
+        return _r("create_both", "AGENTS.md", agents, claude)
+    return _r("conflict", "AGENTS.md", agents, claude,
+              detail="AGENTS.md/CLAUDE.md present but neither is a real file (a symlink or "
+                     "directory occupies a slot) — reconcile to one real file, then re-run")
+
+
+def _do_provision_agents_symlink(action: Action, on_conflict: str) -> ActionResult:
+    """Provision the AGENTS.md (canonical, real) + CLAUDE.md (symlink) invariant in a repo.
+
+    Switches on the shared :func:`resolve_agents_md` ``state`` — apply and drift read the same
+    classification, so ``status`` never misreports the on-disk state. Only ``create_*`` and
+    ``converge`` mutate disk (``converge`` only when ``on_conflict`` is not ``skip``); ``ok``
+    and ``conflict`` never touch a file. As elsewhere in rig, ``on_conflict`` decides whether
+    apply *reconciles* a reported drift, not whether status reports it.
+    """
+    r = resolve_agents_md(action.target)
+
+    if r.state == "ok":
+        return ActionResult(action, "skipped", f"agents-md: {r.link.name} already links → {r.canonical}")
+
+    if r.state == "conflict":
+        return ActionResult(action, "skipped", f"agents-md: {r.detail}")
+
+    if r.state == "create_link":
+        r.link.symlink_to(r.canonical)
+        return ActionResult(action, "created", f"agents-md: {r.link.name} → {r.canonical}")
+
+    if r.state == "create_both":
+        r.canonical_path.write_text(_AGENTS_MD_PLACEHOLDER, encoding="utf-8")
+        r.link.symlink_to(r.canonical)
+        return ActionResult(
+            action, "created",
+            f"agents-md: created {r.canonical_path.name} (canonical) + {r.link.name} → {r.canonical}",
+        )
+
+    if r.state == "converge":
+        if on_conflict == "skip":
+            return ActionResult(
+                action, "skipped",
+                "agents-md: AGENTS.md and CLAUDE.md are identical real files; on_conflict=skip "
+                "— left as two real files (set on_conflict=backup/overwrite to converge to a symlink)",
+            )
+        backup = None
+        if on_conflict == "backup":
+            backup = fsutil.backup_path(r.link)
+            shutil.copy2(r.link, backup)
+        r.link.unlink()
+        r.link.symlink_to(r.canonical)
+        suffix = f"; backed up → {backup.name}" if backup else ""
+        # match the handler status contract: a replacement that kept a backup is "backed_up"
+        # (CLI summaries/icons key off it), a clean overwrite is "updated".
+        return ActionResult(
+            action, "backed_up" if backup else "updated",
+            f"agents-md: converged {r.link.name} → {r.canonical} (identical content{suffix})",
+            backup,
+        )
+
+    return ActionResult(action, "error", f"agents-md: unhandled state {r.state!r}")
+
+
 _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "copy_skill": _do_copy_skill,
     "link_skill_harness": _do_link_skill_harness,
@@ -1109,4 +1286,5 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "apply_harness": _do_apply_harness,
     "register_hook_bridge": _do_register_hook_bridge,
     "provision_schedule": _do_provision_schedule,
+    "provision_agents_symlink": _do_provision_agents_symlink,
 }

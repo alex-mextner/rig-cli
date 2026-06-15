@@ -195,7 +195,17 @@ def test_xdg_config_home_maps_dispatcher_dir(fake_agent_tools, tmp_path, monkeyp
 
 def test_plan_disabled_category(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
-    cfg = _cfg({"skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False}, "mcp": {"enabled": False}}, tmp_path)
+    # agents_md provisioning is default-ON, so turn it off too to assert a truly empty plan.
+    cfg = _cfg(
+        {
+            "skills": {"enabled": False},
+            "agent_hooks": {"enabled": False},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "agents_md": {"enabled": False},
+        },
+        tmp_path,
+    )
     plan = build(cfg, cat, project_type="cli")
     assert len(plan) == 0
 

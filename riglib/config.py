@@ -36,6 +36,7 @@ _VALID_TOP_KEYS = {
     "mcp",
     "harness",
     "models",
+    "agents_md",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
@@ -202,6 +203,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_skills(data.get("skills", {}))
     _validate_harness(data.get("harness", {}))
     _validate_models(data.get("models", {}))
+    _validate_agents_md(data.get("agents_md", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -353,3 +355,25 @@ def _validate_models(m: dict[str, Any]) -> None:
     label = schedule.get("label")
     if label is not None and not isinstance(label, str):
         raise ConfigError(f"models.schedule.label must be a string, got {label!r}")
+
+
+def _validate_agents_md(am: dict[str, Any]) -> None:
+    """Validate the ``agents_md`` block — AGENTS.md/CLAUDE.md canonical+symlink provisioning.
+
+    Default **ON**: every repo gets one canonical agent-guide file (``AGENTS.md``) plus a
+    ``CLAUDE.md`` symlink to it, so every harness reads the same instructions. Opt out with
+    ``agents_md: { enabled: false }`` (or the equivalent ``{ symlink: false }``). An absent
+    block means "provision it" — there is nothing to validate then. Fail-closed on non-bool
+    knobs and unknown keys (typo guard), consistent with every other block.
+    """
+    if not isinstance(am, dict):
+        raise ConfigError("agents_md must be a mapping")
+    if not am:
+        return
+    unknown = set(am) - {"enabled", "symlink"}
+    if unknown:
+        raise ConfigError(f"unknown agents_md key(s): {', '.join(sorted(unknown))}")
+    for knob in ("enabled", "symlink"):
+        value = am.get(knob)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(f"agents_md.{knob} must be a bool, got {value!r}")
