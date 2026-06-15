@@ -597,6 +597,224 @@ def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
     )
 
 
+# ── model-freshness schedule provisioning (launchd / crontab) ──────────────────────
+def schedule_plan_from_action(action: Action):
+    """Rebuild the pure :class:`~riglib.schedule.SchedulePlan` an action describes.
+
+    Shared by the install handler and the drift check so both agree on the exact desired
+    artifact (plist XML / crontab line) from the action's options. Lazy import keeps the
+    actions package import-light.
+    """
+    from ..schedule import build_schedule
+
+    opts = action.options
+    return build_schedule(
+        checker_path=Path(opts["checker_path"]),
+        hour=int(opts.get("hour", 12)),
+        minute=int(opts.get("minute", 0)),
+        label=str(opts.get("label", "")),
+        platform=str(opts.get("platform", "")) or None,
+    )
+
+
+def _read_crontab() -> tuple[bool, str]:
+    """Return (has_crontab, contents). A missing crontab is (False, "") — not an error."""
+    try:
+        res = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    if res.returncode != 0:
+        # `crontab -l` exits non-zero when no crontab exists for the user — treat as empty.
+        return False, ""
+    return True, res.stdout
+
+
+def _write_crontab(contents: str) -> int:
+    try:
+        res = subprocess.run(
+            ["crontab", "-"], input=contents, capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 1
+    return res.returncode
+
+
+def _crontab_without_managed(contents: str, label: str) -> list[str]:
+    """Strip rig's managed sentinel pair (comment + following cron line) for ``label``.
+
+    Removes the ``# rig-managed: <label>`` comment AND the cron line immediately after it,
+    leaving every other (user) line untouched. The basis for idempotent re-write + removal.
+    """
+    from ..schedule import CRON_SENTINEL_PREFIX
+
+    sentinel = f"{CRON_SENTINEL_PREFIX} {label}"
+    lines = contents.splitlines()
+    out: list[str] = []
+    skip_next = False
+    for line in lines:
+        if skip_next:
+            skip_next = False
+            continue
+        if line.strip() == sentinel:
+            skip_next = True  # drop the cron line that follows the sentinel
+            continue
+        out.append(line)
+    return out
+
+
+def crontab_with_managed(contents: str, label: str, desired_pair: list[str]) -> list[str] | None:
+    """Return the crontab lines with rig's managed pair updated IN PLACE — or None if no
+    change is needed (already exactly present at its current position).
+
+    Position-preserving: if the managed pair already exists, the cron line is replaced where
+    it sits (keeping any user lines that follow it); if absent, the pair is appended. This
+    avoids the spurious "drift → reorder-to-end" churn that a strip-then-append would cause
+    when the user has their own crontab lines after rig's block. Returns None when the desired
+    pair is already present unchanged (the idempotent no-op).
+    """
+    from ..schedule import CRON_SENTINEL_PREFIX
+
+    sentinel = f"{CRON_SENTINEL_PREFIX} {label}"
+    lines = contents.splitlines()
+    out: list[str] = []
+    replaced = False
+    changed = False
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == sentinel:
+            # found our block: emit the desired pair here (in place), skip the old cron line
+            out.extend(desired_pair)
+            old_cron = lines[i + 1] if i + 1 < len(lines) else ""
+            if old_cron.strip() != desired_pair[1].strip():
+                changed = True
+            replaced = True
+            i += 2  # consume the sentinel + the cron line that followed it
+            continue
+        out.append(lines[i])
+        i += 1
+    if not replaced:
+        # append our block (drop a trailing blank so the file stays tidy)
+        while out and not out[-1].strip():
+            out.pop()
+        out.extend(desired_pair)
+        changed = True
+    return out if changed else None
+
+
+def _schedule_dry_run() -> bool:
+    """Honor RIG_SCHEDULE_DRY_RUN — write the artifact file but DON'T touch the live daemon.
+
+    For CI / containers / smoke where a real ``launchctl load`` (a per-user daemon mutation
+    HOME can't redirect) or a real ``crontab`` write is unwanted. The plist file still lands
+    (in the configured/HOME path), but the daemon load / crontab write is skipped.
+    """
+    return os.environ.get("RIG_SCHEDULE_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+
+
+def _do_provision_schedule(action: Action, on_conflict: str) -> ActionResult:
+    """Install the daily model-freshness schedule IF MISSING (idempotent).
+
+    The CTO's "проверять есть ли крон и устанавливать": a re-apply that finds the schedule
+    already present and current is a no-op (``skipped``); a missing/drifted schedule is
+    (re)installed. Cross-platform: launchd plist + ``launchctl load`` on macOS, a managed
+    sentinel-fenced crontab line on Linux. ``on_conflict`` is honored for the macOS plist
+    (a user-modified plist at the path is backed up before rewrite under ``backup``).
+    ``RIG_SCHEDULE_DRY_RUN`` writes the artifact file but skips the live daemon mutation.
+    """
+    sched = schedule_plan_from_action(action)
+    if sched.platform == "launchd":
+        return _provision_launchd(action, sched, on_conflict)
+    return _provision_crontab(action, sched)
+
+
+def _provision_launchd(action: Action, sched, on_conflict: str) -> ActionResult:
+    plist_path = sched.plist_path
+    if plist_path is None:
+        return ActionResult(action, "error", "launchd: no plist path resolved")
+    desired = sched.plist_xml()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    log_dir = (sched.log_path or Path.home() / "Library" / "Logs").parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    already = plist_path.is_file()
+    current = plist_path.read_text(encoding="utf-8") if already else ""
+    if already and current == desired and _launchctl_loaded(sched.label):
+        # present AND current AND loaded → nothing to do (the install-if-missing no-op).
+        return ActionResult(action, "skipped", f"models/{action.item}: launchd job '{sched.label}' already installed at {sched.human_time}")
+
+    out = fsutil.write_file(plist_path, desired, on_conflict)
+    if out.status == "error":
+        return ActionResult(action, "error", f"models/{action.item}: {out.detail}", out.backup)
+    if _schedule_dry_run():
+        return ActionResult(
+            action, out.status if out.status != "skipped" else "created",
+            f"models/{action.item}: wrote plist {plist_path} (RIG_SCHEDULE_DRY_RUN — skipped launchctl load)",
+            out.backup,
+        )
+    # (re)load the agent so launchd picks up the (possibly new) calendar interval. unload
+    # first is safe — it is a no-op when the label isn't loaded.
+    _launchctl("unload", str(plist_path))
+    rc = _launchctl("load", str(plist_path))
+    if rc != 0:
+        return ActionResult(
+            action, "error",
+            f"models/{action.item}: wrote {plist_path} but `launchctl load` failed (rc={rc})",
+            out.backup,
+        )
+    # We reach here only when the early-return no-op did NOT fire — i.e. the plist was
+    # written/changed OR the job was not loaded. So the run made a real change: report the
+    # file-write status, but never a misleading 'skipped' (the file may be byte-identical yet
+    # we still (re)loaded the job into launchd, which IS the change).
+    status = out.status if out.status in ("created", "backed_up") else "updated"
+    verb = "installed" if not already else "updated"
+    return ActionResult(
+        action, status,
+        f"models/{action.item}: launchd job '{sched.label}' {verb} → daily {sched.human_time} ({plist_path})",
+        out.backup,
+    )
+
+
+def _provision_crontab(action: Action, sched) -> ActionResult:
+    desired_pair = sched.crontab_lines()
+    _has, current = _read_crontab()
+    # Position-preserving update: replace our block where it sits (or append if absent), so a
+    # user's own crontab lines that come AFTER rig's block don't trigger a spurious reorder.
+    new_lines = crontab_with_managed(current, sched.label, desired_pair)
+    if new_lines is None:
+        # already present and current at its position → idempotent no-op.
+        return ActionResult(action, "skipped", f"models/{action.item}: crontab line for '{sched.label}' already installed at {sched.human_time}")
+    if _schedule_dry_run():
+        return ActionResult(
+            action, "created",
+            f"models/{action.item}: RIG_SCHEDULE_DRY_RUN — would install crontab line '{sched.label}' at {sched.human_time} (not written)",
+        )
+    new_contents = "\n".join(new_lines).rstrip("\n") + "\n"
+    rc = _write_crontab(new_contents)
+    if rc != 0:
+        return ActionResult(action, "error", f"models/{action.item}: `crontab -` write failed (rc={rc})")
+    verb = "installed" if not any(sched.label in ln for ln in current.splitlines()) else "updated"
+    return ActionResult(
+        action, "created",
+        f"models/{action.item}: crontab line '{sched.label}' {verb} → daily {sched.human_time}",
+    )
+
+
+def _launchctl(verb: str, arg: str) -> int:
+    try:
+        res = subprocess.run(["launchctl", verb, arg], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return 1
+    return res.returncode
+
+
+def _launchctl_loaded(label: str) -> bool:
+    try:
+        res = subprocess.run(["launchctl", "list", label], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0
+
+
 # ── git/gh shells (isolated for testability) ──────────────────────────────────────
 def _git_global(key: str) -> str | None:
     try:
@@ -637,4 +855,5 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "install_ci": _do_install_ci,
     "register_mcp": _do_register_mcp,
     "apply_harness": _do_apply_harness,
+    "provision_schedule": _do_provision_schedule,
 }

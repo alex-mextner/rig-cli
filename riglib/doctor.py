@@ -64,6 +64,14 @@ DEPENDENCIES: list[Dependency] = [
         kind="python",
         pkg={"brew": "", "apt": "", "dnf": "", "pacman": "python-textual"},
     ),
+    # The daily model-freshness schedule (models:) is provisioned via the platform-native
+    # scheduler: launchd (launchctl) on macOS, crontab on Linux. Both ship with the OS; this
+    # entry surfaces the one rig will actually use so a stripped container without crontab is
+    # flagged. The probe is for the scheduler binary the CURRENT platform uses.
+    Dependency(
+        "launchctl" if sys.platform == "darwin" else "crontab",
+        "model-freshness daily schedule (models:) — launchd on macOS, crontab on Linux",
+    ),
 ]
 
 

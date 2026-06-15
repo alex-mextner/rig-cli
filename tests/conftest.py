@@ -13,6 +13,55 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_scheduler(monkeypatch):
+    """Never let a test touch the REAL launchd / crontab — or write a real plist file.
+
+    The model-freshness schedule (models:) is in the DEFAULT scaffold, so any e2e test that
+    runs `rig setup --yes` / `rig init` end-to-end would otherwise (1) write a real
+    `~/Library/LaunchAgents/...plist` (the file write follows `Path.home()`, which HOME
+    isolation doesn't always cover) and (2) shell out to the real `launchctl` / `crontab`.
+
+    So this guard NEUTRALIZES the whole `provision_schedule` action suite-wide: it becomes a
+    no-op returning a `skipped` result. The DEDICATED schedule tests
+    (test_models_schedule.py) call `runner._do_provision_schedule` / `_provision_*` and
+    install their OWN mocks (HOME-isolated tmp dirs + stubbed daemon seams), which override
+    this autouse stub for those tests — so they exercise the real install logic safely while
+    every OTHER test is fully insulated from the host scheduler.
+
+    It ALSO stubs the daemon/crontab seams on BOTH the `runner` and `drift` modules (drift
+    imports them by name, so patching only `runner` would leave `drift`'s bindings live).
+    """
+    from riglib import drift as driftmod
+    from riglib.actions import runner
+    from riglib.plan import Action  # noqa: F401 — imported for the stub's type clarity
+
+    crontab_store = {"has": False, "content": ""}
+
+    def _noop_provision(action, on_conflict):
+        from riglib.actions.runner import ActionResult
+
+        return ActionResult(action, "skipped", "models/model-freshness: scheduler stubbed in tests")
+
+    # Patch BOTH the module attr and the dispatch-table entry: `run_plan` resolves the handler
+    # from `_HANDLERS` (a dict built at import with a direct function reference), so patching
+    # only the module attr would leave the e2e `run_plan` path calling the real installer.
+    monkeypatch.setattr(runner, "_do_provision_schedule", _noop_provision)
+    monkeypatch.setitem(runner._HANDLERS, "provision_schedule", _noop_provision)
+
+    for mod in (runner, driftmod):
+        monkeypatch.setattr(mod, "_launchctl", lambda verb, arg: 0, raising=False)
+        monkeypatch.setattr(mod, "_launchctl_loaded", lambda label: False, raising=False)
+        monkeypatch.setattr(mod, "_read_crontab", lambda: (crontab_store["has"], crontab_store["content"]))
+
+    def _fake_write_crontab(contents):
+        crontab_store["has"] = True
+        crontab_store["content"] = contents
+        return 0
+
+    monkeypatch.setattr(runner, "_write_crontab", _fake_write_crontab)
+
+
 @pytest.fixture
 def fake_agent_tools(tmp_path: Path) -> Path:
     """A minimal but structurally-valid agent-tools checkout."""
@@ -73,5 +122,9 @@ def fake_agent_tools(tmp_path: Path) -> Path:
 
     # mcp
     _write(root / "mcp" / "review" / "README.md", "# review\nmulti-model review\n")
+
+    # the model-freshness checker the `models:` schedule runs (its presence is checked by
+    # plan._build_models before it provisions a cron).
+    _write(root / "lib" / "checker" / "model_freshness.py", "#!/usr/bin/env python3\n")
 
     return root

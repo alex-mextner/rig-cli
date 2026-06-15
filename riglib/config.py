@@ -36,6 +36,7 @@ _VALID_TOP_KEYS = {
     "ci",
     "mcp",
     "harness",
+    "models",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_SCOPES = {"user", "repo", "both"}
@@ -200,6 +201,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_ci(data.get("ci", {}))
     _validate_agent_hooks(data.get("agent_hooks", {}))
     _validate_harness(data.get("harness", {}))
+    _validate_models(data.get("models", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -259,3 +261,57 @@ def _validate_harness(h: dict[str, Any]) -> None:
     mode = h.get("mode")
     if mode is not None and not isinstance(mode, str):
         raise ConfigError(f"harness.mode must be a string, got {mode!r}")
+
+
+# The model-freshness schedule defaults to NOON (the CTO's "в полдень"). A `time:` override
+# is "HH:MM" 24h. Keeping the parse here (not just in plan/actions) makes a malformed time a
+# fail-closed config error, consistent with every other block.
+_DEFAULT_SCHEDULE_TIME = "12:00"
+
+
+def parse_hhmm(value: str) -> tuple[int, int]:
+    """Parse an "HH:MM" 24-hour time → (hour, minute). Raises ConfigError on a bad value.
+
+    Shared by config validation and the plan builder so the accepted format never drifts.
+    """
+    parts = str(value).split(":")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        raise ConfigError(f"models.schedule.time must be 'HH:MM', got {value!r}")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ConfigError(f"models.schedule.time out of range (00:00–23:59), got {value!r}")
+    return hour, minute
+
+
+def _validate_models(m: dict[str, Any]) -> None:
+    """Validate the ``models`` block — the model-freshness checker's daily schedule.
+
+    The block provisions a daily cron (launchd on macOS, crontab on Linux) that runs the
+    agent-tools checker. Fail-closed on: a non-mapping block, a non-bool ``enabled``, a
+    malformed ``schedule.time`` (must be ``HH:MM``), and unknown keys (typo guard). An
+    EMPTY/absent block means "no schedule provisioned" — rig leaves the system cron alone.
+    """
+    if not isinstance(m, dict):
+        raise ConfigError("models must be a mapping")
+    if not m:
+        return
+    unknown = set(m) - {"enabled", "schedule", "checker_path"}
+    if unknown:
+        raise ConfigError(f"unknown models key(s): {', '.join(sorted(unknown))}")
+    enabled = m.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"models.enabled must be a bool, got {enabled!r}")
+    checker_path = m.get("checker_path")
+    if checker_path is not None and not isinstance(checker_path, str):
+        raise ConfigError(f"models.checker_path must be a string, got {checker_path!r}")
+    schedule = m.get("schedule", {})
+    if not isinstance(schedule, dict):
+        raise ConfigError("models.schedule must be a mapping")
+    unknown_sched = set(schedule) - {"time", "label"}
+    if unknown_sched:
+        raise ConfigError(f"unknown models.schedule key(s): {', '.join(sorted(unknown_sched))}")
+    if "time" in schedule:
+        parse_hhmm(schedule["time"])  # fail-closed on a bad time
+    label = schedule.get("label")
+    if label is not None and not isinstance(label, str):
+        raise ConfigError(f"models.schedule.label must be a string, got {label!r}")
