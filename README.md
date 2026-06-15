@@ -149,6 +149,50 @@ bash tests/smoke.sh          # end-to-end smoke (needs an agent-tools checkout)
 python docs/gen_svgs.py      # regenerate the diagrams
 ```
 
+## How rig compares
+
+Most setup tools fall into three buckets. **Dotfile managers** (chezmoi, yadm) version a
+*person's* config across machines — `~/.gitconfig`, shell rc, secrets. **Scaffolders**
+(cookiecutter) stamp a project once from a template and walk away. **Config-as-code**
+(Projen, Nix home-manager) regenerate managed files from a typed/declarative source and
+keep them in sync.
+
+`rig` is config-as-code, but aimed at a different target: **a repository's agent
+guardrails** — skills, agent-hooks, the global git-hook dispatcher, CI gates, and MCP
+registrations — sourced live from the [`agent-tools`](https://github.com/alex-mextner/agent-tools)
+umbrella. It is **declarative + idempotent** (one `rig.yaml`, re-apply identically on any
+machine), it **detects drift in both directions** (config→disk *and* orphan disk→config,
+reported not silently overwritten), and it **bootstraps the dependencies** those guards
+need across brew/apt/dnf/pacman/zypper.
+
+| Tool | Target | Declarative config | Idempotent re-apply | Bidirectional drift | Agent skills / hooks / CI gates | Dep bootstrap |
+|---|---|---|---|---|---|---|
+| **rig** | a repo's agent guardrails | ✓ (`rig.yaml`) | ✓ | ✓ (both ways, reported) | ✓ | ✓ (multi-PM) |
+| chezmoi | personal dotfiles | ✓ | ✓ | ~ (diff vs source) | — | — |
+| yadm | personal dotfiles | ~ (git + alt files) | ✓ | ~ (git status) | — | — |
+| cookiecutter | new project from template | — (prompts once) | — (one-shot) | — | — | — |
+| Projen | project build/CI config | ✓ (typed JS) | ✓ (synth) | — (overwrites) | — | — |
+| Nix home-manager | a user's whole env | ✓ (Nix) | ✓ | ~ (rebuild) | — | ✓ (Nix store) |
+
+`~` = partial. Dotfile managers and home-manager are *per-user*; cookiecutter is *one-shot*;
+Projen reconciles build config but overwrites rather than reporting drift and knows nothing
+of agent skills/hooks. `rig` is the only one of these whose unit of work is a repo's
+agent-facing guardrails — and the only one that surfaces hand-added orphans instead of
+clobbering them.
+
+## Ecosystem
+
+Part of the [HyperIDE.ai](https://hyperide.ai) agent toolchain:
+
+- **[tg-cli](https://github.com/alex-mextner/tg-cli)** — Telegram bridge for agents: push reports, two-way control, Q→buttons
+- **[review-cli](https://github.com/alex-mextner/review-cli)** — multi-model read-only code review
+- **[agent-tools](https://github.com/alex-mextner/agent-tools)** — the shared umbrella: portable agent skills, git/agent hooks, CI gates, and the `agenttools_log` lib that the other CLIs consume
+- **[draw-cli](https://github.com/alex-mextner/draw-cli)** — text-to-image via Hugging Face
+- **[3d-cli](https://github.com/alex-mextner/3d-cli)** — scriptable CLI for the full 3D FDM lifecycle: modeling, mesh repair, slicing, and print monitoring
+- **[hyperide.ai](https://hyperide.ai)** — Figma replacement inside VS Code. Edit React components directly through AST/LSP without AI hallucinations, token waste, or context-window limits. Works for indie vibe-coding and for enterprise teams with split design/dev roles.
+
+Each CLI registers a skill into your agent harnesses (`<tool> install-skill`) so agents know it exists — see Install.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
