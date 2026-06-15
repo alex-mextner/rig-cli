@@ -60,6 +60,8 @@ the default candidates (`~/xp/agent-tools`, `~/work/agent-tools`, `~/agent-tools
 skills:
   enabled: true
   target: ~/.agents/skills          # or ~/.claude/skills | ./.agents/skills | custom
+  harness_link: true                # symlink each skill into the harness discovery dir
+  harness_skill_dir: ~/.claude/skills   # override the per-harness default discovery dir
   universal:
     all: true                       # all universal skills (opt-out model)
     disable: [push-regularly]       # ...except these
@@ -73,6 +75,8 @@ skills:
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | install skills at all |
 | `target` | path | `~/.agents/skills` | where SKILL.md dirs are copied |
+| `harness_link` | bool | `true` | also symlink each installed skill into the harness's skill-discovery dir |
+| `harness_skill_dir` | path | per-harness default | where the harness discovers skills (claude-code: `~/.claude/skills`) |
 | `universal.all` | bool | `true` | enable all universal skills (opt-out) |
 | `universal.disable` / `universal.enable` | list[str] | `[]` | deltas on `all` |
 | `by_type.enable` | list[str] | the detected project type | which `by-type/<kind>` bundles to install whole |
@@ -80,6 +84,30 @@ skills:
 
 If `by_type.enable` is empty and the detected project type is known, that type's bundle is
 auto-pulled.
+
+### Harness skill discovery (why `harness_link`)
+
+The agent harness lists/loads Skill-tool skills from its **own** dir, not from `target`.
+For **claude-code** that is `~/.claude/skills` (its userSettings skill dir; symlinks there
+resolve to the real skill). A skill copied into `~/.agents/skills` (the default `target`) is
+therefore invisible to the harness until it is also present in the discovery dir. With
+`harness_link: true` (the default), `rig apply` maintains an idempotent symlink
+`<harness_skill_dir>/<skill> → <target>/<skill>` for every enabled skill:
+
+- an existing **correct** symlink is a no-op;
+- a symlink to the **wrong** destination is re-pointed;
+- a **real** (non-symlink) dir/file already at the path is **left untouched** — some skills
+  are hand-authored real dirs (e.g. `h-reason`, `debate-swarm`), and rig must not clobber
+  them. `rig status` reports a missing/wrong link as drift; a real dir is not flagged.
+
+The discovery dir is keyed by the harness `kind` (defaulting to claude-code, or following
+`harness.kind` when a `harness:` block pins one). Set `harness_link: false` to opt out, or
+`harness_skill_dir` to point at a non-default location.
+
+The harness symlink is the **one action that does not consult `on_conflict`**: a wrong
+symlink is always re-pointed (a symlink carries no user data to back up), and a real dir is
+always left alone (no policy ever clobbers hand-authored content). `on_conflict` governs file
+and directory *content*, which a discovery symlink has neither of.
 
 ---
 

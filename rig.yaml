@@ -16,6 +16,8 @@ defaults:
   on_conflict: backup
 
 # ── Skills — all universal + the cli by-type bundle (this is a Python CLI) ────────
+# harness_link defaults to true: each installed skill is also symlinked into the harness
+# discovery dir (~/.claude/skills) so the agent harness actually lists/loads it.
 skills:
   enabled: true
   target: ~/.agents/skills

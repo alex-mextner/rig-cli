@@ -114,3 +114,21 @@ def test_validate_rejects_reserved_harness_kind_with_clear_message():
 def test_validate_rejects_non_bool_auto_mode():
     with pytest.raises(config.ConfigError, match="auto_mode"):
         config.validate({"version": 1, "harness": {"auto_mode": "yes"}})
+
+
+# ── skill harness-link knobs ───────────────────────────────────────────────────────
+def test_validate_accepts_skill_harness_link_knobs():
+    config.validate(
+        {"version": 1, "skills": {"harness_link": True, "harness_skill_dir": "~/.claude/skills"}}
+    )
+    config.validate({"version": 1, "skills": {"harness_link": False}})
+
+
+def test_validate_rejects_non_bool_harness_link():
+    with pytest.raises(config.ConfigError, match="harness_link"):
+        config.validate({"version": 1, "skills": {"harness_link": "yes"}})
+
+
+def test_validate_rejects_non_string_harness_skill_dir():
+    with pytest.raises(config.ConfigError, match="harness_skill_dir"):
+        config.validate({"version": 1, "skills": {"harness_skill_dir": 42}})

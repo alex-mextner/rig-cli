@@ -48,11 +48,24 @@ _DEFAULTS_KEY = {
 }
 
 
+# Where each supported harness DISCOVERS Skill-tool skills. A skill installed into
+# ``skills_target`` (default ``~/.agents/skills``) is invisible to the harness unless it is
+# also present in this dir — claude-code lists/loads skills from ``~/.claude/skills`` (its
+# userSettings skill dir; symlinks there resolve to the real skill). So rig maintains an
+# idempotent symlink per enabled skill into the harness dir for the configured kind. Other
+# harnesses (documented for when they're implemented): opencode discovers skills from its
+# own config dir — add the path here when that kind is wired in plan/validation.
+_HARNESS_SKILL_DIRS = {
+    "claude-code": "~/.claude/skills",
+}
+_DEFAULT_HARNESS_KIND = "claude-code"
+
+
 @dataclass
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_schedule
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_schedule
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -96,6 +109,49 @@ def _resolve_target(config: LoadedConfig, category: str) -> Path:
     if not target:
         target = _BUILTIN_TARGETS[category]
     return _expand(str(target), config.repo_root)
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    """True when two paths denote the same directory, resolving symlinks/`..` where possible.
+
+    Falls back to a lexical compare if ``resolve()`` raises (e.g. a path under a non-existent
+    parent on a platform that resolves strictly) — never raises.
+    """
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return a == b
+
+
+def _harness_kind_for_skills(config: LoadedConfig) -> str:
+    """The harness kind whose skill-discovery dir rig links into.
+
+    Follows the ``harness.kind`` if a harness block pins one (so the skill links target the
+    same harness the auto-mode write does); else the built-in default (claude-code).
+    """
+    h = config.data.get("harness")
+    if isinstance(h, dict) and h.get("kind"):
+        return str(h["kind"])
+    return _DEFAULT_HARNESS_KIND
+
+
+def _resolve_harness_skill_dir(config: LoadedConfig) -> Path | None:
+    """Resolve the harness skill-discovery dir to symlink installed skills into.
+
+    Returns ``None`` when ``skills.harness_link`` is disabled or the harness kind has no
+    known discovery dir (don't guess a path). An explicit ``skills.harness_skill_dir``
+    overrides the per-harness default.
+    """
+    sk = config.category("skills")
+    if sk.get("harness_link") is False:
+        return None
+    raw = sk.get("harness_skill_dir")
+    if not raw:
+        kind = _harness_kind_for_skills(config)
+        raw = _HARNESS_SKILL_DIRS.get(kind)
+        if not raw:
+            return None
+    return _expand(str(raw), config.repo_root)
 
 
 def resolve_category_target(config: LoadedConfig, category: str) -> Path | None:
@@ -250,16 +306,36 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
 
     # ── skills ───────────────────────────────────────────────────────────────────
     skills_target = _resolve_target(config, "skills")
+    harness_link_dir = _resolve_harness_skill_dir(config)
+    # Whether to emit harness-discovery symlinks: only when a dir is configured AND it is not
+    # the install dir itself (no self-link). Compare resolved paths so a HOME symlink or a
+    # ``..`` segment that makes the two dirs textually differ but point at the same place is
+    # still recognized as the same dir (avoids a spurious self-link → real-dir warning).
+    link_into_harness = harness_link_dir is not None and not _same_dir(harness_link_dir, skills_target)
     for item in _skills_enabled(config, catalog, project_type):
+        installed = skills_target / item.path.name
         plan.actions.append(
             Action(
                 kind="copy_skill",
                 category="skills",
                 item=item.name,
                 source=item.path,
-                target=skills_target / item.path.name,
+                target=installed,
             )
         )
+        # Make the installed skill discoverable by the harness: symlink it into the harness's
+        # skill dir (claude-code: ~/.claude/skills). Without this the skill sits in
+        # skills_target but the harness never lists/loads it.
+        if link_into_harness:
+            plan.actions.append(
+                Action(
+                    kind="link_skill_harness",
+                    category="skills",
+                    item=item.name,
+                    source=installed,  # the installed skill the symlink points at
+                    target=harness_link_dir / item.path.name,
+                )
+            )
 
     # ── agent_hooks ──────────────────────────────────────────────────────────────
     ah = config.category("agent_hooks")

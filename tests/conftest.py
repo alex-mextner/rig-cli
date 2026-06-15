@@ -14,6 +14,22 @@ def _write(path: Path, content: str) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_home(monkeypatch, tmp_path):
+    """Never let a test write into the REAL ``$HOME`` via a HOME-relative default path.
+
+    The skill harness-link default discovery dir is ``~/.claude/skills`` (HOME-expanded at
+    apply time). A test that builds a plan with skills enabled but no ``harness_skill_dir``
+    pinned would otherwise symlink into the developer's real ``~/.claude/skills``. Point HOME
+    at a throwaway dir suite-wide so no plan/apply can ever touch the real home — tests that
+    need a specific HOME (the dispatcher/schedule/CLI tests) override this with their own
+    ``monkeypatch.setenv("HOME", ...)``, which wins because it runs inside the test body.
+    """
+    home = tmp_path / "isolated-home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_scheduler(monkeypatch):
     """Never let a test touch the REAL launchd / crontab — or write a real plist file.
 
