@@ -1,0 +1,68 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 486" width="860" height="486" role="img" aria-label="rig apply converges to rig.yaml; rig status reports drift both ways">
+  <title>rig apply + status — reconciliation in action</title>
+  <rect x="0" y="0" width="860" height="486" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
+  <path d="M0,12 a12,12 0 0 1 12,-12 h836 a12,12 0 0 1 12,12 v22 h-860 z" fill="#161b22"/>
+  <circle cx="22" cy="17" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="17" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="17" r="6" fill="#27c93f"/>
+  <text x="430.0" y="22" font-size="12.5" fill="#8b949e" text-anchor="middle" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace">rig — reconcile</text>
+  <text x="24" y="64" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#7ee787">$ </tspan>
+    <tspan fill="#e6edf3">rig apply</tspan>
+  </text>
+  <text x="24" y="88" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#3fb950">  ✔ created </tspan>
+    <tspan fill="#e6edf3">skills/shell-timeouts        </tspan>
+    <tspan fill="#8b949e">→ ~/.agents/skills</tspan>
+  </text>
+  <text x="24" y="112" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#3fb950">  ✔ created </tspan>
+    <tspan fill="#e6edf3">agent-hooks/block-no-verify  </tspan>
+    <tspan fill="#8b949e">→ ~/.claude/hooks</tspan>
+  </text>
+  <text x="24" y="136" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#3fb950">  ✔ created </tspan>
+    <tspan fill="#e6edf3">ci/secret-scan               </tspan>
+    <tspan fill="#8b949e">→ .github/workflows</tspan>
+  </text>
+  <text x="24" y="160" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#d29922">  ✔ updated </tspan>
+    <tspan fill="#e6edf3">harness/claude-code          </tspan>
+    <tspan fill="#8b949e">defaultMode → auto</tspan>
+  </text>
+  <text x="24" y="184" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#6e7681">  · skipped </tspan>
+    <tspan fill="#e6edf3">skills/naming                </tspan>
+    <tspan fill="#8b949e">already current</tspan>
+  </text>
+  <text x="24" y="208" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#8b949e">  Summary: </tspan>
+    <tspan fill="#8b949e">created=12  updated=1  skipped=2  backed_up=0</tspan>
+  </text>
+  <text x="24" y="246" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#7ee787">$ </tspan>
+    <tspan fill="#e6edf3">rig status</tspan>
+    <tspan fill="#6e7681">    # later — a hand-edit drifted the repo</tspan>
+  </text>
+  <text x="24" y="270" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#f85149">  drift detected</tspan>
+    <tspan fill="#8b949e">  (exit 3)</tspan>
+  </text>
+  <text x="24" y="294" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#d29922">  ~ </tspan>
+    <tspan fill="#e6edf3">ci/secret-scan          </tspan>
+    <tspan fill="#8b949e">on disk differs from rig.yaml</tspan>
+  </text>
+  <text x="24" y="318" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#f85149">  - </tspan>
+    <tspan fill="#e6edf3">skills/push-regularly   </tspan>
+    <tspan fill="#8b949e">declared, missing on disk</tspan>
+  </text>
+  <text x="24" y="342" font-size="13.5" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace" xml:space="preserve">
+    <tspan fill="#58a6ff">  + </tspan>
+    <tspan fill="#e6edf3">.github/workflows/rogue.yml  </tspan>
+    <tspan fill="#8b949e">on disk, not in config</tspan>
+  </text>
+  <text x="24" y="466" font-size="12" fill="#8b949e" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace">apply converges config → disk · status reports drift BOTH ways, never silently reconciling</text>
+</svg>
