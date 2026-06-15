@@ -29,6 +29,7 @@ from .actions.runner import (
     descriptor_text,
     desired_harness_value,
     find_managed_bridge_hook,
+    github_ruleset_state,
     harness_settings_file,
     hook_bridge_entries,
     parse_mcp_command,
@@ -37,6 +38,7 @@ from .actions.runner import (
     schedule_plan_from_action,
     skill_harness_link_target,
 )
+from .github_ruleset import DEFAULT_RULESET_NAME
 from .plan import Action, InstallPlan
 
 
@@ -113,6 +115,8 @@ def detect(
             _check_schedule(action, report)
         elif action.kind == "provision_agents_symlink":
             _check_agents_symlink(action, report)
+        elif action.kind == "provision_github_ruleset":
+            _check_github_ruleset(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -262,6 +266,48 @@ def _check_agents_symlink(action: Action, report: DriftReport) -> None:
     elif r.state == "conflict":
         report.items.append(
             DriftItem("modified", "agents_md", "symlink", r.link, r.detail)
+        )
+
+
+def _check_github_ruleset(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured GitHub branch ruleset and the live repo.
+
+    Switches on the SAME :func:`github_ruleset_state` apply uses (one classification, shared via
+    the runner), so status and apply can never disagree on what "in sync" means:
+
+    - ``create``   → ``missing``: no rig-managed ruleset on the repo (apply POSTs one).
+    - ``update``   → ``modified``: a rig-managed ruleset exists but its rules/bypass/enforcement
+                     differ from config (apply PUTs the desired body).
+    - ``ok``       → no drift item (in sync).
+    - ``no_remote``→ no drift item (a repo with no github origin has nothing to reconcile).
+    - ``gh_error`` → a VISIBLE "could not verify" item (not silent in-sync): rig genuinely
+                     couldn't reach the ruleset (gh missing / not authed / API error), so it must
+                     NOT report the repo as in sync — that would mask a real missing/drifted
+                     ruleset behind a green status. It is not a ``missing``/``modified`` (we
+                     don't know the on-repo state), but it surfaces so the operator sees rig
+                     couldn't check (and `rig apply` would error on the same state).
+    """
+    state, info = github_ruleset_state(action)
+    desired = info.get("desired", {})
+    name = desired.get("name", DEFAULT_RULESET_NAME)
+    # owner/repo are guaranteed present for the create/update/gh_error states (no_remote never
+    # reaches the branches below), so index directly — a future contract break surfaces as a
+    # real KeyError instead of a misleading "None/None" in the message.
+    if state == "create":
+        report.items.append(
+            DriftItem("missing", "github", "ruleset", action.target,
+                      f"no rig-managed ruleset '{name}' on {info['owner']}/{info['repo']} (apply creates it)")
+        )
+    elif state == "update":
+        report.items.append(
+            DriftItem("modified", "github", "ruleset", action.target,
+                      f"ruleset '{name}' on {info['owner']}/{info['repo']} differs from config (apply converges it)")
+        )
+    elif state == "gh_error":
+        report.items.append(
+            DriftItem("modified", "github", "ruleset", action.target,
+                      f"could not verify ruleset '{name}' on {info.get('owner')}/{info.get('repo')} "
+                      f"({info.get('detail', 'gh api failed')}) — status unknown, not confirmed in sync")
         )
 
 

@@ -37,6 +37,7 @@ _VALID_TOP_KEYS = {
     "harness",
     "models",
     "agents_md",
+    "github",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
@@ -204,6 +205,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_harness(data.get("harness", {}))
     _validate_models(data.get("models", {}))
     _validate_agents_md(data.get("agents_md", {}))
+    _validate_github(data.get("github", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -377,3 +379,73 @@ def _validate_agents_md(am: dict[str, Any]) -> None:
         value = am.get(knob)
         if value is not None and not isinstance(value, bool):
             raise ConfigError(f"agents_md.{knob} must be a bool, got {value!r}")
+
+
+# The ruleset knobs that are plain booleans (typo + type guard). Listed once so the
+# validator and the action builder reference the SAME knob set.
+_GITHUB_RULESET_BOOL_KNOBS = (
+    "enabled",
+    "require_pull_request",
+    "block_force_push",
+    "restrict_deletion",
+    "require_linear_history",
+    "require_signatures",
+    "admin_bypass",
+)
+_GITHUB_RULESET_KEYS = {
+    *_GITHUB_RULESET_BOOL_KNOBS,
+    "name",
+    "required_reviews",
+    "required_status_checks",
+}
+
+
+def _validate_github(gh: dict[str, Any]) -> None:
+    """Validate the ``github`` block — the GitHub repository ruleset rig provisions.
+
+    rig reconciles a branch ruleset (the modern replacement for branch protection) on the
+    repo's default branch via ``gh api``, named by ``ruleset.name`` (rig owns rulesets with
+    that name). Default **ON** when the repo has a github remote; a repo without one is a
+    no-op (the action skips, never errors). Fail-closed, consistent with every other block,
+    on: a non-mapping block, an unknown ``github`` / ``github.ruleset`` key (typo guard), a
+    non-bool boolean knob, a ``required_reviews`` that is not an int >= 0, and a
+    ``required_status_checks`` that is not a list of strings.
+
+    The footgun guard is structural, not a config knob: rig NEVER emits the ``update``
+    ("Restrict updates") rule (it locks out every merge to a protected default branch), and
+    never emits a ``required_deployments`` rule with an empty environment list — so neither is
+    expressible here at all.
+    """
+    if not isinstance(gh, dict):
+        raise ConfigError("github must be a mapping")
+    if not gh:
+        return
+    unknown = set(gh) - {"ruleset"}
+    if unknown:
+        raise ConfigError(f"unknown github key(s): {', '.join(sorted(unknown))}")
+    ruleset = gh.get("ruleset", {})
+    if not isinstance(ruleset, dict):
+        raise ConfigError("github.ruleset must be a mapping")
+    unknown_rs = set(ruleset) - _GITHUB_RULESET_KEYS
+    if unknown_rs:
+        raise ConfigError(f"unknown github.ruleset key(s): {', '.join(sorted(unknown_rs))}")
+    for knob in _GITHUB_RULESET_BOOL_KNOBS:
+        value = ruleset.get(knob)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(f"github.ruleset.{knob} must be a bool, got {value!r}")
+    name = ruleset.get("name")
+    if name is not None and not isinstance(name, str):
+        raise ConfigError(f"github.ruleset.name must be a string, got {name!r}")
+    reviews = ruleset.get("required_reviews")
+    # NB: bool is an int subclass in Python — reject it explicitly so `true` can't masquerade
+    # as a review count.
+    if reviews is not None and (isinstance(reviews, bool) or not isinstance(reviews, int) or reviews < 0):
+        raise ConfigError(
+            f"github.ruleset.required_reviews must be an int >= 0, got {reviews!r}"
+        )
+    checks = ruleset.get("required_status_checks")
+    if checks is not None:
+        if not isinstance(checks, list) or not all(isinstance(c, str) for c in checks):
+            raise ConfigError(
+                f"github.ruleset.required_status_checks must be a list of strings, got {checks!r}"
+            )

@@ -17,6 +17,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from ..github_ruleset import (
+    build_ruleset_body,
+    find_managed_ruleset,
+    normalize_ruleset,
+    parse_github_remote,
+)
 from ..logging import log_event
 from ..plan import Action, InstallPlan
 from . import fsutil
@@ -1276,6 +1282,183 @@ def _do_provision_agents_symlink(action: Action, on_conflict: str) -> ActionResu
     return ActionResult(action, "error", f"agents-md: unhandled state {r.state!r}")
 
 
+# ── GitHub repository ruleset (gh api) ─────────────────────────────────────────────
+# rig reconciles a branch ruleset on the repo's DEFAULT branch — the modern replacement for
+# branch protection — declaratively, the same way every other category is reconciled. The
+# DESIRED body, the rule assembly, the normalized desired-vs-actual comparison, and the
+# merge-lockout guard (rig never emits the `update` rule) all live in `riglib/github_ruleset.py`
+# (pure, no Action dependency, so plan/state import them without a cycle); this module holds
+# only the `gh` subprocess seams, the live-API classification, and the Action handler. apply and
+# drift share `github_ruleset_state` + the pure builders, so they can never disagree on
+# "in sync". All `gh` invocations go through `_gh_api` so tests can monkeypatch one seam; the
+# RIG_GH_DRY_RUN env seam (mirrors RIG_SCHEDULE_DRY_RUN) computes what WOULD change without any
+# POST/PUT, so CI and tests never mutate a real repo or hit the network.
+def github_owner_repo(repo_root: Path) -> tuple[str, str] | None:
+    """Resolve ``(owner, repo)`` from the repo's ``origin`` remote, or None if not on github.
+
+    Shells out to ``git -C <repo_root> remote get-url origin`` and parses an SSH or HTTPS
+    github.com URL via :func:`github_ruleset.parse_github_remote`. A repo with no remote, a
+    non-github remote, or no git at all → None (the caller treats that as "nothing to
+    provision", never an error). Isolated so tests can monkeypatch it without a real git remote.
+    """
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    return parse_github_remote(res.stdout.strip())
+
+
+def _gh_api(args: list[str], *, input_text: str | None = None) -> tuple[int, str, str]:
+    """Run ``gh api <args>`` and return ``(returncode, stdout, stderr)``.
+
+    The single seam every ruleset call funnels through — tests monkeypatch THIS, so no test
+    ever spawns ``gh`` or touches the network. A missing ``gh`` binary returns a non-zero rc
+    with a clear message (the caller surfaces it as a skipped/error result, never a crash).
+    """
+    if not shutil.which("gh"):
+        return 127, "", "gh CLI not found on PATH"
+    try:
+        res = subprocess.run(
+            ["gh", "api", *args],
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, "", f"gh api failed: {exc}"
+    return res.returncode, res.stdout, res.stderr
+
+
+def _gh_dry_run() -> bool:
+    """Honor RIG_GH_DRY_RUN — compute what WOULD change but make no POST/PUT to GitHub.
+
+    Mirrors RIG_SCHEDULE_DRY_RUN: GET requests (read-only) still run so drift/apply can see
+    the current rulesets, but the mutating create/update is skipped. CI and the test suite set
+    this (or monkeypatch ``_gh_api`` wholesale) so a real repo is never mutated.
+    """
+    return os.environ.get("RIG_GH_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+
+
+def _gh_list_rulesets(owner: str, repo: str) -> tuple[list | None, str]:
+    """GET ALL the repo's OWN rulesets (paginated). Returns ``(list_or_None, error_detail)``.
+
+    ``includes_parents=false`` excludes inherited org/enterprise rulesets, so the list holds
+    only this repo's rulesets — `find_managed_ruleset` then never picks up a same-named parent.
+    ``--paginate`` + ``per_page=100`` is LOAD-BEARING for idempotency: the endpoint returns only
+    30 rulesets per page by default, so a repo with >30 rulesets where the managed one sits on a
+    later page would otherwise look absent → apply would POST a DUPLICATE ``rig-managed`` ruleset
+    on every run. With ``--paginate`` gh concatenates every page's JSON array into one.
+    """
+    rc, out, err = _gh_api(
+        [f"repos/{owner}/{repo}/rulesets?includes_parents=false&per_page=100", "--paginate"]
+    )
+    if rc != 0:
+        return None, (err.strip() or out.strip() or f"gh api exited {rc}")
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return None, "gh api returned non-JSON ruleset list"
+    return (data if isinstance(data, list) else []), ""
+
+
+def github_ruleset_state(action: Action) -> tuple[str, dict]:
+    """Classify the on-disk-vs-desired ruleset state — the one source apply + drift share.
+
+    Returns ``(state, info)`` where ``state`` is one of:
+      - ``no_remote``  — the repo has no github origin remote: nothing to provision.
+      - ``gh_error``   — listing rulesets failed (gh missing / not authed / API error).
+      - ``create``     — no rig-managed ruleset exists: apply POSTs one.
+      - ``update``     — a rig-managed ruleset exists but its rules/bypass/enforcement differ.
+      - ``ok``         — a rig-managed ruleset exists and matches the desired body.
+    ``info`` carries ``owner``/``repo``/``desired`` and, when present, the existing ruleset's
+    ``id`` and ``detail`` (the error string for ``gh_error``).
+    """
+    owner_repo = github_owner_repo(action.target)
+    desired = build_ruleset_body(action.options)
+    if owner_repo is None:
+        return "no_remote", {"desired": desired}
+    owner, repo = owner_repo
+    info: dict = {"owner": owner, "repo": repo, "desired": desired}
+    rulesets, err = _gh_list_rulesets(owner, repo)
+    if rulesets is None:
+        info["detail"] = err
+        return "gh_error", info
+    existing = find_managed_ruleset(rulesets, desired["name"])
+    if existing is None:
+        return "create", info
+    rs_id = existing.get("id")
+    if rs_id is None:
+        # a listed ruleset with no id can't be fetched/updated — don't GET .../rulesets/None.
+        info["detail"] = f"managed ruleset '{desired['name']}' has no id in the API response"
+        return "gh_error", info
+    info["id"] = rs_id
+    # the list endpoint omits rules/bypass_actors; fetch the full ruleset to compare.
+    rc, out, gerr = _gh_api([f"repos/{owner}/{repo}/rulesets/{rs_id}"])
+    if rc != 0:
+        info["detail"] = gerr.strip() or out.strip() or f"gh api exited {rc}"
+        return "gh_error", info
+    try:
+        current = json.loads(out)
+    except ValueError:
+        info["detail"] = "gh api returned non-JSON ruleset"
+        return "gh_error", info
+    if normalize_ruleset(current) == normalize_ruleset(desired):
+        return "ok", info
+    return "update", info
+
+
+def _do_provision_github_ruleset(action: Action, on_conflict: str) -> ActionResult:
+    """Provision (create/update) the rig-managed GitHub branch ruleset via ``gh api``.
+
+    Shares :func:`github_ruleset_state` with drift, so status and apply read one
+    classification. No github remote → ``skipped`` (never an error). ``RIG_GH_DRY_RUN``
+    computes the create/update but skips the POST/PUT, returning what WOULD change. ``gh``
+    failures (missing binary, not authed) surface as an ``error`` result with the detail.
+    """
+    state, info = github_ruleset_state(action)
+    if state == "no_remote":
+        return ActionResult(action, "skipped", "github-ruleset: no github origin remote — nothing to provision")
+    if state == "gh_error":
+        return ActionResult(action, "error", f"github-ruleset: {info.get('detail', 'gh api failed')}")
+
+    owner, repo, desired = info["owner"], info["repo"], info["desired"]
+    name = desired["name"]
+    if state == "ok":
+        return ActionResult(action, "skipped", f"github-ruleset: '{name}' already matches on {owner}/{repo}")
+
+    body = json.dumps(desired)
+    if state == "create":
+        if _gh_dry_run():
+            return ActionResult(action, "created", f"github-ruleset: RIG_GH_DRY_RUN — would CREATE '{name}' on {owner}/{repo} (not posted)")
+        rc, out, err = _gh_api(
+            ["--method", "POST", f"repos/{owner}/{repo}/rulesets", "--input", "-"],
+            input_text=body,
+        )
+        if rc != 0:
+            return ActionResult(action, "error", f"github-ruleset: create failed: {err.strip() or out.strip()}")
+        return ActionResult(action, "created", f"github-ruleset: created '{name}' on {owner}/{repo}")
+
+    # state == "update"
+    rs_id = info.get("id")
+    if _gh_dry_run():
+        return ActionResult(action, "updated", f"github-ruleset: RIG_GH_DRY_RUN — would UPDATE '{name}' (id={rs_id}) on {owner}/{repo} (not put)")
+    rc, out, err = _gh_api(
+        ["--method", "PUT", f"repos/{owner}/{repo}/rulesets/{rs_id}", "--input", "-"],
+        input_text=body,
+    )
+    if rc != 0:
+        return ActionResult(action, "error", f"github-ruleset: update failed: {err.strip() or out.strip()}")
+    return ActionResult(action, "updated", f"github-ruleset: updated '{name}' (id={rs_id}) on {owner}/{repo}")
+
+
 _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "copy_skill": _do_copy_skill,
     "link_skill_harness": _do_link_skill_harness,
@@ -1287,4 +1470,5 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "register_hook_bridge": _do_register_hook_bridge,
     "provision_schedule": _do_provision_schedule,
     "provision_agents_symlink": _do_provision_agents_symlink,
+    "provision_github_ruleset": _do_provision_github_ruleset,
 }

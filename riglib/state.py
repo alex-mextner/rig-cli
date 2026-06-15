@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .github_ruleset import GITHUB_RULESET_DEFAULTS
+
 
 def default_state(
     *,
@@ -31,6 +33,11 @@ def default_state(
     auto-detected sources (the caller only passes it when the user pinned one) — otherwise a
     machine-specific absolute path would disable the env/default fallback elsewhere.
     """
+    # The github ruleset scaffold mirrors the action's sensible defaults exactly (one source),
+    # plus the plan-gating `enabled` flag — so the committed rig.yaml and the action can never
+    # drift apart.
+    github_ruleset = {"enabled": True, **GITHUB_RULESET_DEFAULTS}
+
     by_type_enable = [project_type] if project_type and project_type != "unknown" else []
     # Always the portable ``~/.config/git`` token (no machine-specific path, no env token
     # that goes unresolved elsewhere). At APPLY time, _expand() maps a ``~/.config`` prefix
@@ -110,6 +117,16 @@ def default_state(
             "enabled": True,
             "schedule": {"time": "12:00"},
         },
+        # GitHub repository branch ruleset (the modern branch-protection replacement). On `rig
+        # init` AND `rig apply`, rig reconciles a ruleset named `rig-managed` on the repo's
+        # default branch via `gh api` — a no-op on a repo with no github remote. The SENSIBLE
+        # default keeps merges WORKING: a PR is required (zero required reviews), force-push and
+        # branch deletion are blocked, and the repo Admin role is a bypass actor so admins are
+        # never locked out. rig NEVER emits the `update` ("Restrict updates") rule — a
+        # hand-made ruleset with it + zero bypass actors blocks every merge to main. Opt out
+        # with ruleset.enabled: false. Add status checks with required_status_checks: [names].
+        # The knobs come straight from the action's GITHUB_RULESET_DEFAULTS (one source).
+        "github": {"ruleset": github_ruleset},
     }
 
 
