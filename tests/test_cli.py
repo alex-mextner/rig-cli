@@ -196,8 +196,9 @@ def test_apply_relative_config_resolves_under_C(tmp_path, capsys, fake_agent_too
     assert "Plan:" in out
 
 
-def test_init_is_setup_synonym_dryrun(tmp_path, capsys, fake_agent_tools, monkeypatch):
-    # `rig init` is THE front door — a thin synonym of `setup`. It must build the same plan.
+def test_init_and_setup_share_one_engine_dryrun(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    # `rig init` is the canonical onboarding front door; `setup` is its back-compat alias —
+    # they dispatch to one engine, so init must build the same plan setup would.
     monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

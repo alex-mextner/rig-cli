@@ -44,36 +44,42 @@ pip install 'rig-cli[tui]'        # or: rig doctor --yes (installs missing deps)
 
 | Command | One-line |
 | --- | --- |
-| `rig init` | **THE front door.** First-run setup: scaffold `rig.yaml` → apply the agent-tools catalog. A thin synonym of `rig setup` (one engine, two names). Start here. |
-| `rig setup` | Set up a repo from config — an interactive wizard, **or** headless `--config rig.yaml --yes`. Writes `rig.yaml` (committed by default), then applies. (`rig init` is its synonym.) |
-| `rig apply` | Declarative reconcile: read `rig.yaml`, compute the diff vs the repo's state, converge. Idempotent. `--dry-run` previews. `--only skills,ci` scopes. |
+| `rig init` | **First-run onboarding.** Scaffold `rig.yaml` and wire in the agent-tools catalog — walking you through what's available (with opt-out). The front door for a repo/machine that has no config yet. |
+| `rig apply` | **Declarative reconcile** (kubectl-style): read `rig.yaml`, compute the diff vs the repo's state, converge, idempotently. The steady-state command you re-run on every machine; hand-edits that drift from the config are surfaced by `rig status`. `--dry-run` previews; `--only skills,ci` scopes. |
+| `rig setup` | Back-compat alias of `rig init` (rig's earlier name for onboarding). |
 | `rig status` | Detect + report **drift in both directions** (config says X but disk has Y; disk has Z not in config). |
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
 | `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
 | `rig install-skill` | Register the `rig` agent skill so harnesses auto-discover it. |
 
-### Quick start — the single front door
+### Quick start — `init` then `apply`
 
-`rig init` is the one command you run first: it scaffolds a `rig.yaml`, wires in the
-agent-tools catalog, and provisions **auto-mode** (the agent runs autonomously with minimum
-babysitting) — recommended on by default, *and safe because the agent-hook guards are
-installed alongside it.*
+There are two commands, and they are **not** the same thing: `rig init` is first-run
+onboarding (no config yet → scaffold one + wire the catalog in, walking you through it);
+`rig apply` is the steady-state reconcile (config exists → converge the disk to it). You run
+`init` once, `apply` forever after. `init` provisions **auto-mode** (the agent runs
+autonomously with minimum babysitting) — recommended on by default, *and safe because the
+agent-hook guards are installed alongside it.*
+
+**Interactivity is orthogonal to the command.** Both `init` and `apply` run fully
+interactive (TUI wizard), semi-interactive (some answers pre-supplied by config/flags, the
+rest prompted), or non-interactive (`--yes` / `--config … --yes`). The mode is decided by
+TTY + config + flags, *not* by which command you picked.
 
 ```bash
 rig doctor                                    # check deps; rig doctor --yes to install
-rig init                                       # THE front door: scaffold rig.yaml + apply the catalog
-rig apply                                      # re-apply on every machine, identically
-rig status                                     # later: is the repo still in sync?
+rig init                                       # first-run onboarding: scaffold rig.yaml + wire the catalog
+rig apply                                      # steady state: re-apply on every machine, identically
+rig status                                     # later: has the repo drifted from rig.yaml?
 ```
 
-`rig setup` is the same engine under another name. To edit the config before applying,
-`rig export -o rig.yaml`, tweak it, then `rig apply`.
+To edit the config before applying: `rig export -o rig.yaml`, tweak it, then `rig apply`.
+(`rig setup` is a back-compat alias of `rig init`.)
 
 Headless / agent path (no TUI):
 
 ```bash
-rig init --yes                                 # first-run scaffold + apply, non-interactive
-rig setup --config rig.yaml --yes              # ...or set up from an already-committed config
+rig init --yes                                 # first-run onboarding, non-interactive
 rig apply                                      # re-apply identically on every machine
 ```
 

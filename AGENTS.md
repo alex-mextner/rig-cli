@@ -10,9 +10,14 @@ git-hook dispatcher, CI gates, MCP) and provisioning the agent harness's auto/pe
 mode. It is a peer to `tg-cli` / `review-cli`, not part of `agent-tools` — it *consumes*
 agent-tools read-only.
 
-**`rig init` is THE documented front door** — first-run setup (scaffold `rig.yaml` →
-apply). It is a thin synonym of `rig setup`: both dispatch to the same handler, so init can
-never drift from setup. Keep `setup` working; never make `init` a second engine.
+**`rig init` and `rig apply` are the two real commands.** `init` is first-run onboarding
+(no config yet → scaffold `rig.yaml` + wire the catalog in, walking the user through it);
+`apply` is the steady-state declarative reconcile (config exists → converge the disk to it).
+They are distinct, NOT synonyms. Interactivity (full TUI / semi / non-interactive `--yes`) is
+**orthogonal** to the command — both `init` and `apply` run in any of the three modes,
+decided by TTY + config + flags. `rig setup` is a back-compat alias of `init` (rig's earlier
+name): it dispatches to init's handler so it can never drift — but `init`, not `setup`, is the
+canonical onboarding command. Keep `setup` working; never make it a second engine.
 
 ## Hard rules
 
@@ -22,8 +27,8 @@ never drift from setup. Keep `setup` working; never make `init` a second engine.
   imports. Do not add a top-level `import yaml`/`import textual`.
 - **One engine, two front-ends.** `rig setup` (wizard) and `rig apply` must share the same
   `plan.build` + `actions.run_plan`. Never fork the executor for the TUI. If you add a
-  capability, add it to the headless engine first and let the wizard call it. `rig init` is
-  a name alias of `setup` over the SAME handler — not a third path.
+  capability, add it to the headless engine first and let the wizard call it. `rig setup` is
+  a back-compat alias of `rig init` over the SAME onboarding handler — not a third path.
 - **Harness auto-mode is provisioned through the reconciler, like every other target.** The
   `harness:` block flows config → `plan.build` (one `apply_harness` action) → `run_plan`
   (`actions/runner.py::_do_apply_harness`), writing only the managed permission key into the
