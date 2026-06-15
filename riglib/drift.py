@@ -32,6 +32,7 @@ from .actions.runner import (
     harness_settings_file,
     hook_bridge_entries,
     parse_mcp_command,
+    resolve_agents_md,
     resolve_ci_workflow,
     schedule_plan_from_action,
     skill_harness_link_target,
@@ -110,6 +111,8 @@ def detect(
             _check_hook_bridge(action, report)
         elif action.kind == "provision_schedule":
             _check_schedule(action, report)
+        elif action.kind == "provision_agents_symlink":
+            _check_agents_symlink(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -224,6 +227,42 @@ def _check_skill_harness_link(action: Action, report: DriftReport) -> None:
         DriftItem("missing", "skills", f"{action.item} (harness link)", link_path,
                   "skill not symlinked into harness dir (harness won't list it)")
     )
+
+
+def _check_agents_symlink(action: Action, report: DriftReport) -> None:
+    """Flag drift on the AGENTS.md (canonical) + CLAUDE.md (symlink) invariant.
+
+    Switches on the SAME :func:`resolve_agents_md` ``state`` apply uses, so status and apply read
+    one classification. Any non-``ok`` state is drift: the desired end-state is one real
+    canonical + a correct symlink, and a repo that isn't there is out of sync. As everywhere
+    else in rig, ``on_conflict`` governs only whether ``apply`` *reconciles* the drift, not
+    whether ``status`` *reports* it — so two identical real files (``converge``) read as drift
+    even though an ``on_conflict: skip`` apply would decline to collapse them (same as a
+    skip'd modified skill staying visible as drift).
+    """
+    r = resolve_agents_md(action.target)
+    if r.state == "ok":
+        return
+    if r.state == "create_both":
+        report.items.append(
+            DriftItem("missing", "agents_md", "symlink", r.canonical_path,
+                      "AGENTS.md/CLAUDE.md not present (apply creates canonical + symlink)")
+        )
+    elif r.state == "create_link":
+        report.items.append(
+            DriftItem("missing", "agents_md", "symlink", r.link,
+                      f"{r.link.name} missing (apply symlinks it → {r.canonical})")
+        )
+    elif r.state == "converge":
+        report.items.append(
+            DriftItem("modified", "agents_md", "symlink", r.link,
+                      "AGENTS.md and CLAUDE.md are identical real files "
+                      "(apply converges to a symlink under on_conflict=backup/overwrite)")
+        )
+    elif r.state == "conflict":
+        report.items.append(
+            DriftItem("modified", "agents_md", "symlink", r.link, r.detail)
+        )
 
 
 def _check_agent_hook(action: Action, report: DriftReport) -> None:
