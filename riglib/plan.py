@@ -493,17 +493,23 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     return plan
 
 
-# Default per-machine path for each supported harness's settings file. The harness block
-# writes/merges the auto/permission setting HERE. Repo-relative defaults keep the committed
-# rig.yaml reproducible (the auto-mode choice travels with the repo).
+# Per-harness settings file. NON-auto modes are written to the repo's PROJECT settings
+# (committed, travels with the repo). `auto` is special: Claude Code IGNORES
+# `permissions.defaultMode: auto` from project/local settings (v2.1.142+) and honors it ONLY
+# from the user's machine settings — so auto-mode is provisioned per-MACHINE, not per-repo.
 _HARNESS_SETTINGS = {
     "claude-code": ".claude/settings.json",
 }
-# The permission-mode value each harness uses for auto-accept / non-interactive mode, keyed
-# by (kind, auto_mode). claude-code: `permissions.defaultMode` = bypassPermissions auto-
-# accepts every tool call (true non-interactive); `default` restores prompts.
+_HARNESS_AUTO_USER_SETTINGS = {
+    "claude-code": "~/.claude/settings.json",
+}
+# The permission-mode value each harness uses for auto-accept, keyed by (kind, auto_mode).
+# claude-code: `auto` (research preview) auto-approves WITH a safety classifier — preferred
+# over `bypassPermissions` (which skips every check; container/VM only). `default` restores
+# prompts. Pin `harness.mode: bypassPermissions` to opt back into full bypass (non-qualifying
+# account / container) — that value IS committable at project scope.
 _HARNESS_AUTO_MODE = {
-    "claude-code": {True: "bypassPermissions", False: "default"},
+    "claude-code": {True: "auto", False: "default"},
 }
 
 
@@ -527,7 +533,14 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
     # an explicit `mode:` override wins over the auto_mode → mode mapping (lets a config pin
     # e.g. `acceptEdits` instead of full bypass while staying non-interactive for edits).
     mode_value = h.get("mode") or _HARNESS_AUTO_MODE[kind][auto_mode]
-    settings_path = h.get("settings_path") or _HARNESS_SETTINGS[kind]
+    # `auto` is honored only from the user's machine settings (CC strips it from project/local
+    # scope); every other mode writes to the repo's project settings. Explicit settings_path wins.
+    if h.get("settings_path"):
+        settings_path = h["settings_path"]
+    elif mode_value == "auto":
+        settings_path = _HARNESS_AUTO_USER_SETTINGS[kind]
+    else:
+        settings_path = _HARNESS_SETTINGS[kind]
     plan.actions.append(
         Action(
             kind="apply_harness",

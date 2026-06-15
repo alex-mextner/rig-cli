@@ -74,8 +74,10 @@ mcp:
 # The agent runs autonomously (the harness auto-accepts tool calls) with minimum
 # babysitting. SAFE because the agent-hooks above are installed (all: true) — they block
 # secret writes, --no-verify bypasses, un-timed shell, raw process.env, and a raw
-# `gh pr merge` that skips the ship gates. rig writes permissions.defaultMode into
-# .claude/settings.json. Set auto_mode: false for interactive permission prompts.
+# `gh pr merge` that skips the ship gates. For claude-code, auto_mode:true writes
+# permissions.defaultMode=auto to the USER settings (~/.claude/settings.json) — CC honors
+# `auto` only at user scope (it ignores it in project settings). Pin `mode: bypassPermissions`
+# to commit full bypass at PROJECT scope (container/VM). Set auto_mode: false for prompts.
 harness:
   enabled: true
   kind: claude-code
