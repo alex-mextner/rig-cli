@@ -212,7 +212,7 @@ def test_plan_no_harness_block_no_action(fake_agent_tools, tmp_path):
     assert _harness_action(plan) is None
 
 
-def test_plan_harness_auto_mode_on_maps_to_bypass(fake_agent_tools, tmp_path):
+def test_plan_harness_auto_mode_on_maps_to_user_auto(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
     cfg = _cfg(
         {"skills": {"enabled": False}, "harness": {"kind": "claude-code", "auto_mode": True}},
@@ -220,9 +220,26 @@ def test_plan_harness_auto_mode_on_maps_to_bypass(fake_agent_tools, tmp_path):
     )
     a = _harness_action(build(cfg, cat, project_type="unknown"))
     assert a is not None
-    assert a.options["mode_value"] == "bypassPermissions"
+    assert a.options["mode_value"] == "auto"
     assert a.options["auto_mode"] is True
-    # default target is the repo-local committed .claude/settings.json
+    # `auto` is honored only from the user's machine settings (CC strips it from project
+    # scope), so the default target is ~/.claude/settings.json, NOT the repo.
+    import os
+
+    assert a.target == Path(os.path.expanduser("~/.claude/settings.json"))
+
+
+def test_plan_harness_nonauto_mode_writes_project(fake_agent_tools, tmp_path):
+    # a non-auto mode IS committable at project scope → target stays the repo settings file
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"skills": {"enabled": False},
+         "harness": {"kind": "claude-code", "mode": "acceptEdits"}},
+        tmp_path,
+    )
+    a = _harness_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.options["mode_value"] == "acceptEdits"
     assert a.target == (tmp_path / ".claude" / "settings.json")
 
 
