@@ -46,7 +46,6 @@ pip install 'rig-cli[tui]'        # or: rig doctor --yes (installs missing deps)
 | --- | --- |
 | `rig init` | **First-run onboarding.** Scaffold `rig.yaml` and wire in the agent-tools catalog — walking you through what's available (with opt-out). The front door for a repo/machine that has no config yet. |
 | `rig apply` | **Declarative reconcile** (kubectl-style): read `rig.yaml`, compute the diff vs the repo's state, converge, idempotently. The steady-state command you re-run on every machine; hand-edits that drift from the config are surfaced by `rig status`. `--dry-run` previews; `--only skills,ci` scopes. |
-| `rig setup` | Back-compat alias of `rig init` (rig's earlier name for onboarding). |
 | `rig status` | Detect + report **drift in both directions** (config says X but disk has Y; disk has Z not in config). |
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
 | `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
@@ -74,7 +73,6 @@ rig status                                     # later: has the repo drifted fro
 ```
 
 To edit the config before applying: `rig export -o rig.yaml`, tweak it, then `rig apply`.
-(`rig setup` is a back-compat alias of `rig init`.)
 
 Headless / agent path (no TUI):
 
@@ -177,7 +175,7 @@ riglib/
   catalog.py        scan an agent-tools checkout → item registry  ← the integration seam
   config.py         cascade loader + fail-closed schema validation
   detect.py         env/project + OS/package-manager detection
-  plan.py           (config + catalog) → ordered InstallPlan       ← shared by setup & apply
+  plan.py           (config + catalog) → ordered InstallPlan       ← shared by init & apply
   schedule.py       pure planning of the model-freshness cron artifact (launchd/crontab)
   drift.py          two-way drift detection
   doctor.py         dependency diagnosis + bootstrap across package managers

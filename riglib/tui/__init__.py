@@ -1,4 +1,4 @@
-"""The interactive setup wizard (textual). Imported lazily — only `rig setup` pulls it in.
+"""The interactive setup wizard (textual). Imported lazily — only `rig init` pulls it in.
 
 The wizard is a thin front-end over the proven headless engine: it builds the same
 :class:`~riglib.plan.InstallPlan` and runs the same :func:`~riglib.actions.run_plan`, so

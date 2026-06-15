@@ -8,7 +8,6 @@ needs them so ``rig --help`` and ``rig doctor`` stay fast and dependency-light.
 Subcommands:
 
     rig init     first-run onboarding — scaffold rig.yaml + wire the catalog in (the front door)
-    rig setup    back-compat alias of init (interactive wizard OR --config/--yes headless)
     rig apply    declarative reconcile: read rig.yaml, converge disk to it (idempotent)
     rig status   detect + report drift in BOTH directions (config↔disk)
     rig doctor   detect + (offer to) install required/optional dependencies
@@ -70,14 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
         # source of truth and is NOT optional (AGENTS.md). Use --dry-run for a no-write preview.
         parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
 
-    # `init` is the canonical first-run onboarding command (the front door). `setup` is a
-    # back-compat alias that dispatches to init's handler — one engine, so it can never drift.
-    # init/apply are the two real commands; interactivity (TUI/semi/--yes) is orthogonal to both.
+    # `init` is the canonical first-run onboarding command (the front door). init/apply are
+    # the two real commands; interactivity (TUI/semi/--yes) is orthogonal to both.
     ip = sub.add_parser("init", help="first-run onboarding: scaffold rig.yaml + wire the catalog in (the front door)")
     _add_setup_args(ip)
-
-    sp = sub.add_parser("setup", help="back-compat alias of init (wizard or --config/--yes headless)")
-    _add_setup_args(sp)
 
     ap = sub.add_parser("apply", help="reconcile the repo to rig.yaml (idempotent)")
     ap.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
@@ -111,8 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     handlers = {
-        "init": cmd_setup,  # init = canonical onboarding; setup is its back-compat alias (one engine)
-        "setup": cmd_setup,
+        "init": cmd_setup,  # init = the canonical onboarding command (the front door)
         "apply": cmd_apply,
         "status": cmd_status,
         "doctor": cmd_doctor,
@@ -185,7 +179,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             print(
                 _warn("textual not installed — falling back to a non-interactive default setup.\n")
                 + _dim("  Install the wizard with: pip install 'rig-cli[tui]'\n")
-                + _dim("  Or run headless: rig setup --yes  /  rig setup --config rig.yaml --yes")
+                + _dim("  Or run headless: rig init --yes  /  rig init --config rig.yaml --yes")
             )
             return _setup_headless(args, use_default=True)
 
@@ -297,10 +291,10 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
     # fail-closed: with NO config layer (no --config, no ./rig.yaml, no global), the empty
     # config resolves to built-in defaults and would mutate HOME with no committed source
-    # of truth. Refuse — `rig setup`/`rig export` create the rig.yaml first.
+    # of truth. Refuse — `rig init`/`rig export` create the rig.yaml first.
     if not loaded.layers:
         print(_err("error: no rig.yaml found (and no --config / global config)."))
-        print(_dim("  run `rig setup` (or `rig export -o rig.yaml`) to create one first."))
+        print(_dim("  run `rig init` (or `rig export -o rig.yaml`) to create one first."))
         return 2
 
     if args.only:

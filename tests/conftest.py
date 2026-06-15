@@ -34,7 +34,7 @@ def _isolate_scheduler(monkeypatch):
     """Never let a test touch the REAL launchd / crontab — or write a real plist file.
 
     The model-freshness schedule (models:) is in the DEFAULT scaffold, so any e2e test that
-    runs `rig setup --yes` / `rig init` end-to-end would otherwise (1) write a real
+    runs `rig init --yes` end-to-end would otherwise (1) write a real
     `~/Library/LaunchAgents/...plist` (the file write follows `Path.home()`, which HOME
     isolation doesn't always cover) and (2) shell out to the real `launchctl` / `crontab`.
 
