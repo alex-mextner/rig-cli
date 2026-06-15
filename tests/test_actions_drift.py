@@ -1161,3 +1161,227 @@ def test_drift_detects_modified_skill(fake_agent_tools, tmp_path):
     (repo / "skills-out" / "shell-timeouts" / "SKILL.md").write_text("changed\n", encoding="utf-8")
     report = detect(plan)
     assert any(i.direction == "modified" and i.item == "shell-timeouts" for i in report.items)
+
+
+# ── hook bridge: register the cc_hook_bridge dispatcher in settings.json ─────────────
+def _bridge_cfg(repo_root: Path, source: Path, *, settings_path: Path,
+                hook_bridge: dict | None = None) -> LoadedConfig:
+    harness: dict = {"kind": "claude-code", "auto_mode": True,
+                     "settings_path": str(settings_path)}
+    if hook_bridge is not None:
+        harness["hook_bridge"] = hook_bridge
+    return LoadedConfig(
+        data={
+            "agent_tools_source": str(source),
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": harness,
+        },
+        repo_root=repo_root,
+    )
+
+
+def _bridge_results(report):
+    return [r for r in report.results if r.action.kind == "register_hook_bridge"]
+
+
+def test_hook_bridge_registers_dispatcher_in_settings(fake_agent_tools, tmp_path):
+    """Apply wires PreToolUse (Bash + write tools) and Stop hooks into settings.json."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert _bridge_results(report), "no register_hook_bridge action ran"
+
+    data = json.loads(settings.read_text())
+    hooks = data["hooks"]
+    # PreToolUse: two matchers (Bash + the write-tool alternation), both → cc_hook_bridge
+    pre = hooks["PreToolUse"]
+    matchers = {b["matcher"] for b in pre}
+    assert "Bash" in matchers
+    assert "Edit|Write|MultiEdit|NotebookEdit" in matchers
+    for b in pre:
+        cmd = b["hooks"][0]["command"]
+        assert "cc_hook_bridge PreToolUse" in cmd
+        # PYTHONPATH anchors on the agent-tools checkout lib/
+        assert str(fake_agent_tools / "lib") in cmd
+    # Stop: one block, no matcher (match-all), → cc_hook_bridge Stop
+    stop = hooks["Stop"]
+    assert len(stop) == 1 and "matcher" not in stop[0]
+    assert "cc_hook_bridge Stop" in stop[0]["hooks"][0]["command"]
+
+
+def test_hook_bridge_idempotent_reapply(fake_agent_tools, tmp_path):
+    """A second apply is a no-op (skipped) — no duplicate hook blocks."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
+    run_plan(plan)
+    second = run_plan(plan)
+    res = _bridge_results(second)
+    assert res and all(r.status == "skipped" for r in res), [r.detail for r in res]
+    # exactly one Bash block, not duplicated
+    data = json.loads(settings.read_text())
+    bash_blocks = [b for b in data["hooks"]["PreToolUse"] if b.get("matcher") == "Bash"]
+    assert len(bash_blocks) == 1
+
+
+def test_hook_bridge_preserves_existing_unrelated_hooks(fake_agent_tools, tmp_path):
+    """The user's own hooks (rtk-rewrite, tg-ctl) survive registration untouched."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({
+        "permissions": {"defaultMode": "default"},
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "/Users/x/.claude/hooks/rtk-rewrite.sh"}]},
+            ],
+            "Notification": [
+                {"matcher": "idle_prompt", "hooks": [{"type": "command", "command": "afplay glass.aiff"}]},
+            ],
+        },
+    }, indent=2))
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    data = json.loads(settings.read_text())
+    # the rtk hook is still there (now ALONGSIDE our Bash block, not replacing it)
+    bash_cmds = [hk["command"] for b in data["hooks"]["PreToolUse"]
+                 for hk in b["hooks"] if b.get("matcher") == "Bash"]
+    assert any("rtk-rewrite.sh" in c for c in bash_cmds), bash_cmds
+    assert any("cc_hook_bridge PreToolUse" in c for c in bash_cmds), bash_cmds
+    # unrelated event preserved verbatim
+    assert data["hooks"]["Notification"][0]["hooks"][0]["command"] == "afplay glass.aiff"
+    # the permissions block survives the hooks merge (apply_harness, which also runs under
+    # auto_mode, may set its mode — the point here is the hook-bridge merge doesn't drop it).
+    assert "permissions" in data
+
+
+def test_hook_bridge_repoints_drifted_command(fake_agent_tools, tmp_path):
+    """A managed block whose command's lib path drifted is rewritten in place (not dup'd)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    # a stale managed entry pointing at an OLD lib path
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": "Bash", "hooks": [{"type": "command",
+         "command": "PYTHONPATH=/old/path/lib python3 -m cc_hook_bridge PreToolUse"}]},
+    ]}}, indent=2))
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
+    run_plan(plan)
+    data = json.loads(settings.read_text())
+    bash_blocks = [b for b in data["hooks"]["PreToolUse"] if b.get("matcher") == "Bash"]
+    assert len(bash_blocks) == 1  # rewritten, not duplicated
+    cmd = bash_blocks[0]["hooks"][0]["command"]
+    assert "/old/path/lib" not in cmd
+    assert str(fake_agent_tools / "lib") in cmd
+
+
+def test_hook_bridge_drift_missing_then_synced(fake_agent_tools, tmp_path):
+    """Before apply the bridge is missing drift; after apply, in sync."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
+    before = detect(plan)
+    assert any(i.item == "hook-bridge" and i.direction == "missing" for i in before.items), \
+        [i.detail for i in before.items]
+    run_plan(plan)
+    after = detect(plan)
+    assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
+
+
+def test_hook_bridge_drift_detects_stale_command(fake_agent_tools, tmp_path):
+    """A managed hook whose command drifted (old lib path) is reported MODIFIED, not in-sync."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {
+        "PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command",
+             "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"}]},
+            {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command",
+             "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"}]},
+        ],
+        "Stop": [{"hooks": [{"type": "command",
+                  "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge Stop"}]}],
+    }}, indent=2))
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
+    report = detect(plan)
+    modified = [i for i in report.items if i.item == "hook-bridge" and i.direction == "modified"]
+    assert modified, [i.detail for i in report.items if i.item == "hook-bridge"]
+    # and apply converges it back to in-sync
+    run_plan(plan)
+    after = detect(plan)
+    assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
+
+
+def test_hook_bridge_skip_leaves_stale_command_untouched(fake_agent_tools, tmp_path):
+    """on_conflict=skip must NOT rewrite a drifted managed command (file-level skip parity)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    stale = "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": "Bash", "hooks": [{"type": "command", "command": stale}]},
+        {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": stale}]},
+    ], "Stop": [{"hooks": [{"type": "command", "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge Stop"}]}]}}, indent=2))
+    cfg = _bridge_cfg(repo, fake_agent_tools, settings_path=settings)
+    cfg.data["defaults"] = {"on_conflict": "skip"}
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(cfg, cat, project_type="unknown")
+    report = run_plan(plan)
+    res = _bridge_results(report)
+    assert res and all(r.status == "skipped" for r in res), [r.detail for r in res]
+    data = json.loads(settings.read_text())
+    bash_cmd = next(b["hooks"][0]["command"] for b in data["hooks"]["PreToolUse"] if b["matcher"] == "Bash")
+    assert bash_cmd == stale  # left untouched under skip
+
+
+def test_hook_bridge_skip_leaves_malformed_settings_untouched(fake_agent_tools, tmp_path):
+    """on_conflict=skip leaves a malformed settings.json untouched (returns skipped)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{ this is not json")
+    cfg = _bridge_cfg(repo, fake_agent_tools, settings_path=settings)
+    cfg.data["defaults"] = {"on_conflict": "skip"}
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(cfg, cat, project_type="unknown")
+    report = run_plan(plan)
+    res = _bridge_results(report)
+    assert res and all(r.status == "skipped" for r in res), [r.detail for r in res]
+    assert settings.read_text() == "{ this is not json"  # untouched
+
+
+def test_hook_bridge_quotes_python_interpreter(fake_agent_tools, tmp_path):
+    """A configured python path is shlex-quoted in the command (spaces / injection safe)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    cfg = _bridge_cfg(repo, fake_agent_tools, settings_path=settings,
+                      hook_bridge={"python": "/opt/my py/bin/python3"})
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(cfg, cat, project_type="unknown")
+    run_plan(plan)
+    data = json.loads(settings.read_text())
+    bash_cmd = next(b["hooks"][0]["command"] for b in data["hooks"]["PreToolUse"] if b["matcher"] == "Bash")
+    # the space-containing interpreter path must be quoted, not left bare
+    assert "'/opt/my py/bin/python3'" in bash_cmd, bash_cmd

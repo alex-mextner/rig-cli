@@ -232,6 +232,9 @@ harness:
   auto_mode: true              # true → auto-accept tool calls; false → interactive prompts
   # mode: bypassPermissions    # optional: pin the exact mode value (overrides the auto_mode map)
   # settings_path: .claude/settings.json   # where to write (repo-local default; committed)
+  hook_bridge:                 # wire the agents-hooks/v1 → CC dispatcher (default ON)
+    enabled: true              # set false to skip wiring the dispatcher into settings.json
+    # python: python3          # optional: the interpreter the dispatcher runs under
 ```
 
 | Key | Type | Default | Meaning |
@@ -241,6 +244,8 @@ harness:
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
 | `settings_path` | path | `.claude/settings.json` | the settings file to merge into (repo-relative default keeps it committed/reproducible) |
+| `hook_bridge.enabled` | bool | `true` | wire the `cc_hook_bridge` dispatcher into `settings.json` so installed agent-hooks actually fire (claude-code only) |
+| `hook_bridge.python` | str | `python3` | the Python interpreter the dispatcher command runs under |
 
 **What gets written.** For `kind: claude-code`, rig merges `permissions.defaultMode` into
 the settings JSON — `auto_mode: true` → `bypassPermissions` (auto-accepts every tool call),
@@ -256,6 +261,21 @@ intent through a `permission` block in its `opencode.json` — e.g.
 interactive. A config with `kind: opencode` is rejected with a clear "not implemented yet"
 message rather than silently doing nothing, so you are never misled into thinking rig wrote
 a setting it didn't.
+
+**The hook bridge (`hook_bridge`).** Claude Code only runs hooks declared in
+`settings.json` (`PreToolUse`/`Stop`) — it never reads the `~/.claude/hooks/*.json`
+`agents-hooks/v1` descriptors `agent_hooks` installs. Without a bridge, **every installed
+agent-hook is inert in CC** (agent-tools#18) and the "auto-mode is safe because the guards
+intercept" claim above is false. So when a `claude-code` harness block is present (and
+`agent_hooks` is enabled), `rig apply` also registers the `cc_hook_bridge` dispatcher
+(shipped in `agent-tools/lib/cc_hook_bridge`) into the same `settings.json`:
+`PreToolUse` (matchers `Bash` and `Edit|Write|MultiEdit|NotebookEdit`) and `Stop`, each
+running `PYTHONPATH=<agent-tools>/lib python3 -m cc_hook_bridge <Event>`. The dispatcher
+runs the matching descriptors and translates their exit-10 BLOCK into CC's
+`permissionDecision: "deny"` / `decision: "block"`. The merge is **additive and
+idempotent** — your other hooks (rtk-rewrite, tg-ctl, …) are preserved; a re-apply is a
+no-op; a drifted managed command (e.g. the checkout path moved) is rewritten in place.
+`rig status` reports the bridge as missing drift if a managed hook is absent.
 
 ---
 
@@ -311,6 +331,7 @@ the real per-user scheduler is unwanted.
 `apply`/`status`/`init` validate before touching disk and **fail closed** on:
 unknown top-level keys, unsupported `version`, invalid `on_conflict` / ci `tier` /
 agent-hook `on_error`, an unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`,
+a non-mapping `harness.hook_bridge` / non-bool `hook_bridge.enabled` / non-string `hook_bridge.python`,
 a malformed/out-of-range `models.schedule.time` or unknown `models` key, and an
 `agent_tools_source` that is not an agent-tools checkout. `--dry-run` prints the
 resolved plan and exits 0 without writing.

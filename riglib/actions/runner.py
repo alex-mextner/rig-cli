@@ -673,6 +673,169 @@ def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
     )
 
 
+# ── agents-hooks/v1 → Claude Code bridge (settings.json hook registration) ──────────
+# A managed cc_hook_bridge command is identified by this substring — so we can find,
+# update, and de-dup OUR entries without ever touching the user's other hooks.
+_BRIDGE_MARKER = "cc_hook_bridge"
+
+
+def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
+    """The (matcher, command) pairs the bridge maintains per CC hook event.
+
+    Single source of truth shared by the install handler and drift, so both agree on what
+    ``settings.json`` should contain. The command runs the dispatcher with the agent-tools
+    ``lib/`` on PYTHONPATH so ``cc_hook_bridge`` resolves against the same checkout whose
+    ``agent-hooks/`` scripts the installed descriptors point at.
+
+    Only PreToolUse (real prevention) and Stop are wired — PostToolUse cannot block a tool
+    that already ran (see lib/cc_hook_bridge/README.md). pre-write covers every CC
+    file-mutating tool via a `|`-alternation matcher.
+    """
+    lib_dir = str(action.options["lib_dir"])
+    py = str(action.options.get("python", "python3"))
+
+    def cmd(event: str) -> str:
+        # quote BOTH the lib path and the interpreter: a path with spaces would break the
+        # hook, and an unquoted config-supplied `python` would let shell syntax be injected
+        # into every CC hook command. `-m {_BRIDGE_MARKER}` keeps the run command and the
+        # presence-marker in lockstep (rename the module → both change together).
+        return f"PYTHONPATH={shlex.quote(lib_dir)} {shlex.quote(py)} -m {_BRIDGE_MARKER} {event}"
+
+    return {
+        "PreToolUse": [
+            ("Bash", cmd("PreToolUse")),
+            ("Edit|Write|MultiEdit|NotebookEdit", cmd("PreToolUse")),
+        ],
+        "Stop": [("", cmd("Stop"))],
+    }
+
+
+def find_managed_bridge_hook(blocks, matcher: str) -> dict | None:
+    """Return OUR managed hook dict for ``matcher`` in an event's block list, else None.
+
+    Single source of truth for "where is the cc_hook_bridge entry" — shared by apply
+    (upsert) and drift (compare command), so both agree on what counts as the managed hook
+    and never diverge. A managed hook is one whose ``command`` carries the bridge marker.
+    """
+    if not isinstance(blocks, list):
+        return None
+    for block in blocks:
+        if not isinstance(block, dict) or str(block.get("matcher", "")) != matcher:
+            continue
+        for hk in block.get("hooks", []) or []:
+            if isinstance(hk, dict) and _BRIDGE_MARKER in str(hk.get("command", "")):
+                return hk
+    return None
+
+
+def _bridge_block(matcher: str, command: str) -> dict:
+    """One settings.json hook block for an (matcher, command) pair."""
+    block: dict = {"hooks": [{"type": "command", "command": command}]}
+    if matcher:
+        # an empty matcher (Stop) is omitted entirely → CC treats it as "match all".
+        block = {"matcher": matcher, "hooks": block["hooks"]}
+    return block
+
+
+def _should_backup(on_conflict: str) -> bool:
+    """One predicate for "back up settings.json before mutating it", applied uniformly."""
+    return on_conflict == "backup"
+
+
+def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
+    """Register the cc_hook_bridge dispatcher in the harness ``settings.json`` hooks.
+
+    Idempotent and additive: each (event, matcher) gets OUR managed block appended only if
+    an equivalent managed block (command contains ``cc_hook_bridge``) is not already there.
+    Every other hook in the file — the user's rtk-rewrite, tg-ctl, etc. — is preserved
+    untouched: ``hooks`` is a SHARED namespace, so we never rewrite a whole event array.
+
+    A managed block whose COMMAND drifted (e.g. the agent-tools lib path moved) is rewritten
+    in place — UNLESS ``on_conflict=skip``, which leaves the stale command untouched (matching
+    the file-level skip semantics; ``rig status`` still surfaces it as drift). Removing an
+    unmanaged matcher's hooks, or a matcher we no longer ship, is left to ``rig status``.
+    """
+    config_file = harness_settings_file(action)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict = {}
+    backup_note = ""
+    if config_file.is_file():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+        except ValueError:
+            if on_conflict == "skip":
+                return ActionResult(
+                    action, "skipped",
+                    f"hook_bridge/{action.item}: existing {config_file} is malformed JSON "
+                    "(on_conflict=skip), left untouched",
+                )
+            bak = fsutil.backup_path(config_file)
+            shutil.copy2(str(config_file), str(bak))
+            data = {}
+            backup_note = f" (backed up malformed config → {bak})"
+    if not isinstance(data, dict):
+        return ActionResult(action, "error", f"hook_bridge/{action.item}: {config_file} is not a JSON object")
+
+    hooks = data.get("hooks")
+    if hooks is None:
+        hooks = {}
+    if not isinstance(hooks, dict):
+        return ActionResult(action, "error", f"hook_bridge/{action.item}: 'hooks' is not an object in {config_file}")
+
+    changed = 0
+    skipped_stale = 0
+    for event, pairs in hook_bridge_entries(action).items():
+        blocks = hooks.get(event)
+        if not isinstance(blocks, list):
+            blocks = []
+        for matcher, command in pairs:
+            outcome = _upsert_bridge(blocks, matcher, command, on_conflict)
+            if outcome == "changed":
+                changed += 1
+            elif outcome == "skipped-stale":
+                skipped_stale += 1
+        hooks[event] = blocks
+
+    if changed == 0:
+        note = "dispatcher already wired"
+        if skipped_stale:
+            note = f"{skipped_stale} managed hook(s) drifted but left untouched (on_conflict=skip)"
+        return ActionResult(action, "skipped", f"hook_bridge/{action.item}: {note} in {config_file}")
+
+    data["hooks"] = hooks
+    if _should_backup(on_conflict) and backup_note == "" and config_file.is_file():
+        bak = fsutil.backup_path(config_file)
+        shutil.copy2(str(config_file), str(bak))
+        backup_note = f" (backed up prior → {bak})"
+    config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    status = "backed_up" if backup_note else "created"
+    return ActionResult(
+        action, status,
+        f"hook_bridge/{action.item}: wired {changed} dispatcher hook(s) in {config_file}{backup_note}",
+    )
+
+
+def _upsert_bridge(blocks: list, matcher: str, command: str, on_conflict: str) -> str:
+    """Insert/refresh OUR managed block for (matcher, command). Returns the outcome.
+
+    - already present with the SAME command → ``"noop"`` (idempotent).
+    - present with a DIFFERENT command (path drift) → rewrite in place → ``"changed"``,
+      UNLESS ``on_conflict=skip`` → leave it, return ``"skipped-stale"``.
+    - absent → append a fresh managed block → ``"changed"``.
+    """
+    hk = find_managed_bridge_hook(blocks, matcher)
+    if hk is not None:
+        if str(hk.get("command", "")) == command:
+            return "noop"
+        if on_conflict == "skip":
+            return "skipped-stale"
+        hk["command"] = command
+        return "changed"
+    blocks.append(_bridge_block(matcher, command))
+    return "changed"
+
+
 # ── model-freshness schedule provisioning (launchd / crontab) ──────────────────────
 def schedule_plan_from_action(action: Action):
     """Rebuild the pure :class:`~riglib.schedule.SchedulePlan` an action describes.
@@ -944,5 +1107,6 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "install_ci": _do_install_ci,
     "register_mcp": _do_register_mcp,
     "apply_harness": _do_apply_harness,
+    "register_hook_bridge": _do_register_hook_bridge,
     "provision_schedule": _do_provision_schedule,
 }

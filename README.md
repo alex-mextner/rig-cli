@@ -107,6 +107,7 @@ harness:
   enabled: true
   kind: claude-code          # claude-code implemented; opencode documented (config-schema.md)
   auto_mode: true            # RECOMMENDED: writes permissions.defaultMode=bypassPermissions
+  hook_bridge: { enabled: true }   # wire the agents-hooks/v1 → CC dispatcher (default ON)
 ```
 
 On `rig apply` this merges `permissions.defaultMode` into `.claude/settings.json` (only that
@@ -115,8 +116,17 @@ and `rig status` flags it if the value drifts. **Auto-mode is recommended on by 
 because the agent-hook guards `rig` installs in the same pass (`block-secrets-write`,
 `block-no-verify`, `enforce-timeout-on-bash`, `block-raw-process-env`, **`block-raw-pr-merge`**)
 catch the dangerous tool calls before the side effect: the guards are what make running
-without permission prompts safe. See [`docs/config-schema.md`](docs/config-schema.md) for the
-full `harness` schema and the opencode equivalent.
+without permission prompts safe.
+
+**Those guards only fire because of the hook bridge.** Claude Code runs hooks declared in
+`settings.json`, not the `~/.claude/hooks/*.json` descriptors `agent_hooks` installs — so a
+bridge is required to make the descriptors actually execute (agent-tools#18). The same
+`harness` block therefore also registers the `cc_hook_bridge` dispatcher into `settings.json`
+(`PreToolUse` for Bash + the file-edit tools, `Stop`), which runs the matching descriptors
+and translates their exit-10 BLOCK into CC's `permissionDecision: "deny"`. Without it the
+guards above would be inert files. Set `hook_bridge: { enabled: false }` to opt out. See
+[`docs/config-schema.md`](docs/config-schema.md) for the full `harness` schema and the
+opencode equivalent.
 
 ### Model-freshness schedule — a daily cron, provisioned by the reconciler
 
