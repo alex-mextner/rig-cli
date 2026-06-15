@@ -33,7 +33,7 @@ def test_setup_dryrun_default(tmp_path, capsys, fake_agent_tools, monkeypatch):
     monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    rc = main(["setup", "-C", str(tmp_path), "--yes", "--dry-run"])
+    rc = main(["init", "-C", str(tmp_path), "--yes", "--dry-run"])
     out = capsys.readouterr().out
     assert "Plan:" in out
     assert rc == 0
@@ -69,7 +69,7 @@ def test_setup_dryrun_never_launches_wizard(tmp_path, capsys, fake_agent_tools, 
         return 0
 
     monkeypatch.setattr("riglib.tui.app.run_wizard", _boom, raising=False)
-    rc = main(["setup", "-C", str(tmp_path), "--dry-run"])
+    rc = main(["init", "-C", str(tmp_path), "--dry-run"])
     assert rc == 0
     assert not called["wizard"]
     assert "Plan:" in capsys.readouterr().out
@@ -83,7 +83,7 @@ def test_setup_default_refuses_existing_config(tmp_path, capsys, fake_agent_tool
     repo.mkdir()
     existing = "version: 1\n# my customized config\nskills: {enabled: false}\n"
     (repo / "rig.yaml").write_text(existing, encoding="utf-8")
-    rc = main(["setup", "-C", str(repo), "--yes"])
+    rc = main(["init", "-C", str(repo), "--yes"])
     out = capsys.readouterr().out
     assert rc == 2
     assert "already exists" in out
@@ -101,7 +101,7 @@ def test_setup_failclosed_leaves_no_config(tmp_path, capsys, fake_agent_tools, m
         "ci: {items: {nonexistent_gate: {enabled: true}}}\n",
         encoding="utf-8",
     )
-    rc = main(["setup", "-C", str(repo), "--config", str(template), "--yes"])
+    rc = main(["init", "-C", str(repo), "--config", str(template), "--yes"])
     assert rc == 2
     assert not (repo / "rig.yaml").exists()  # fail-closed: no invalid config written
 
@@ -121,7 +121,7 @@ def test_setup_external_config_backs_up_existing(tmp_path, capsys, fake_agent_to
         "git_hooks: {dispatcher: {enabled: false}}\n",
         encoding="utf-8",
     )
-    rc = main(["setup", "-C", str(repo), "--config", str(template), "--yes"])
+    rc = main(["init", "-C", str(repo), "--config", str(template), "--yes"])
     assert rc == 0
     # the old config was backed up, not silently discarded
     assert any(p.name.startswith("rig.yaml.rig-bak-") for p in repo.iterdir())
@@ -140,7 +140,7 @@ def test_setup_with_external_config_persists_repo_yaml(tmp_path, capsys, fake_ag
         "git_hooks: {dispatcher: {enabled: false}}\n",
         encoding="utf-8",
     )
-    rc = main(["setup", "-C", str(repo), "--config", str(template), "--yes"])
+    rc = main(["init", "-C", str(repo), "--config", str(template), "--yes"])
     assert rc == 0
     # the external template is now committed into the repo as rig.yaml
     assert (repo / "rig.yaml").is_file()
@@ -196,9 +196,8 @@ def test_apply_relative_config_resolves_under_C(tmp_path, capsys, fake_agent_too
     assert "Plan:" in out
 
 
-def test_init_and_setup_share_one_engine_dryrun(tmp_path, capsys, fake_agent_tools, monkeypatch):
-    # `rig init` is the canonical onboarding front door; `setup` is its back-compat alias —
-    # they dispatch to one engine, so init must build the same plan setup would.
+def test_init_dryrun_writes_nothing(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    # `rig init` is the canonical onboarding front door; --dry-run prints the plan, writes nothing.
     monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

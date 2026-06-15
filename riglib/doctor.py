@@ -60,7 +60,7 @@ DEPENDENCIES: list[Dependency] = [
     ),
     Dependency(
         "textual",
-        "the interactive setup wizard (rig setup TUI)",
+        "the interactive setup wizard (rig init TUI)",
         kind="python",
         pkg={"brew": "", "apt": "", "dnf": "", "pacman": "python-textual"},
     ),

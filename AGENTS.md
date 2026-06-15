@@ -15,9 +15,8 @@ agent-tools read-only.
 `apply` is the steady-state declarative reconcile (config exists → converge the disk to it).
 They are distinct, NOT synonyms. Interactivity (full TUI / semi / non-interactive `--yes`) is
 **orthogonal** to the command — both `init` and `apply` run in any of the three modes,
-decided by TTY + config + flags. `rig setup` is a back-compat alias of `init` (rig's earlier
-name): it dispatches to init's handler so it can never drift — but `init`, not `setup`, is the
-canonical onboarding command. Keep `setup` working; never make it a second engine.
+decided by TTY + config + flags. `init` is the canonical onboarding command (the front door).
+(The old `setup` back-compat alias has been removed — `init` is the one onboarding command.)
 
 ## Hard rules
 
@@ -25,10 +24,9 @@ canonical onboarding command. Keep `setup` working; never make it a second engin
   when loaded. Heavy/optional deps — `yaml`, `textual` — are imported lazily inside the
   function that needs them. `rig --help` and `rig doctor` must run with zero third-party
   imports. Do not add a top-level `import yaml`/`import textual`.
-- **One engine, two front-ends.** `rig setup` (wizard) and `rig apply` must share the same
+- **One engine, two front-ends.** `rig init` (wizard) and `rig apply` must share the same
   `plan.build` + `actions.run_plan`. Never fork the executor for the TUI. If you add a
-  capability, add it to the headless engine first and let the wizard call it. `rig setup` is
-  a back-compat alias of `rig init` over the SAME onboarding handler — not a third path.
+  capability, add it to the headless engine first and let the wizard call it.
 - **Harness auto-mode is provisioned through the reconciler, like every other target.** The
   `harness:` block flows config → `plan.build` (one `apply_harness` action) → `run_plan`
   (`actions/runner.py::_do_apply_harness`), writing only the managed permission key into the
@@ -61,7 +59,7 @@ should hard-code agent-tools paths.
 - `python -m pytest -q` — the unit suite. Fast, hermetic; uses a fake agent-tools checkout
   (`tests/conftest.py::fake_agent_tools`) and `tmp_path` — tests never touch the real HOME
   or a real agent-tools checkout.
-- `bash tests/smoke.sh` — end-to-end: `--help`, `doctor`, a headless `setup` against a
+- `bash tests/smoke.sh` — end-to-end: `--help`, `doctor`, a headless `init` against a
   sample config in a throwaway repo with an isolated `HOME`, idempotency, status, pytest.
   Needs a real agent-tools checkout (`RIG_AGENT_TOOLS_SOURCE`); self-skips the apply leg
   without one.

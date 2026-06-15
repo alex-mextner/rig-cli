@@ -57,13 +57,13 @@ mcp:
 YAML
 
   # dry-run first (must write nothing)
-  $RIG setup -C "$TMP" --config "$TMP/rig.yaml" --yes --dry-run >/dev/null || fail "setup --dry-run"
+  $RIG init -C "$TMP" --config "$TMP/rig.yaml" --yes --dry-run >/dev/null || fail "init --dry-run"
   [[ -d "$HOME/.agents/skills" ]] && fail "dry-run wrote skills"
   [[ -e "$HOME/.claude/skills" ]] && fail "dry-run wrote harness skill links"
-  pass "rig setup --dry-run wrote nothing"
+  pass "rig init --dry-run wrote nothing"
 
   # real apply
-  $RIG setup -C "$TMP" --config "$TMP/rig.yaml" --yes >/dev/null || fail "setup --yes"
+  $RIG init -C "$TMP" --config "$TMP/rig.yaml" --yes >/dev/null || fail "init --yes"
   [[ -d "$HOME/.agents/skills" ]] || fail "skills not installed"
   [[ -f "$TMP/.github/workflows/secret-scan.yml" ]] || fail "secret-scan workflow not written"
   [[ -x "$HOME/.config/git/run-global-hooks" ]] || fail "dispatcher runner not installed"
@@ -72,7 +72,7 @@ YAML
   sk_name="$(basename "$one_skill")"
   [[ -L "$HOME/.claude/skills/$sk_name" ]] || fail "skill '$sk_name' not symlinked into harness dir"
   [[ -f "$HOME/.claude/skills/$sk_name/SKILL.md" ]] || fail "harness skill link does not resolve"
-  pass "rig setup --yes installed skills + CI + dispatcher + harness skill links"
+  pass "rig init --yes installed skills + CI + dispatcher + harness skill links"
 
   # idempotency: a second apply changes nothing (no created/updated/backed_up in summary)
   out="$($RIG apply -C "$TMP" --config "$TMP/rig.yaml" 2>&1)"

@@ -94,7 +94,7 @@ def dispatcher():
     b.append(text(W / 2, 60, "setup & apply share ONE plan builder + executor — the wizard "
                   "is a thin front-end, never drifts", 13, PAL["muted"]))
     cmds = [
-        ("rig setup", "wizard OR\n--config --yes", PAL["skills"]),
+        ("rig init", "wizard OR\n--config --yes", PAL["skills"]),
         ("rig apply", "reconcile\nidempotent", PAL["ci"]),
         ("rig status", "two-way\ndrift", PAL["ghook"]),
         ("rig doctor", "deps across\nbrew/apt/dnf…", PAL["ahook"]),

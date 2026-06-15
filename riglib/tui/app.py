@@ -115,7 +115,7 @@ def _build_wizard_class():
             yield Footer()
 
         def on_mount(self) -> None:
-            self.title = "rig setup"
+            self.title = "rig init"
             self.sub_title = "dev-environment umbrella driver"
             if self._catalog_error:
                 self.query_one("#log", RichLog).write(

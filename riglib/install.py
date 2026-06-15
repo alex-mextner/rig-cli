@@ -23,7 +23,7 @@ description: >-
   agent-tools content — skills, agent-hooks, git-hooks/dispatcher, CI gates, MCP. Use
   when the user wants to bootstrap a repo's guardrails, reconcile it to its config,
   check for config/disk drift, or install the toolchain dependencies. Commands:
-  `rig setup` (wizard or --config/--yes), `rig apply` (idempotent reconcile),
+  `rig init` (wizard or --config/--yes), `rig apply` (idempotent reconcile),
   `rig status` (two-way drift), `rig doctor` (dependency bootstrap).
 metadata:
   author: alex-mextner
@@ -37,8 +37,8 @@ reproducible source of truth) by applying content from the `agent-tools` umbrell
 
 ## Commands
 ```
-rig setup                       # interactive wizard (or fallback default if no TUI)
-rig setup --config rig.yaml --yes   # headless, non-interactive
+rig init                        # interactive wizard (or fallback default if no TUI)
+rig init --config rig.yaml --yes    # headless, non-interactive
 rig apply                       # reconcile the repo to rig.yaml (idempotent)
 rig apply --dry-run             # print the resolved plan, write nothing
 rig status                      # report drift BOTH ways (config↔disk)

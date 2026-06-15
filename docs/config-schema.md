@@ -1,7 +1,7 @@
 # `rig.yaml` — declarative config schema
 
 `rig.yaml` is the committed, reproducible source of truth for a repo's setup. `rig apply`
-reads it, computes the diff vs disk, and converges. `rig setup` writes it.
+reads it, computes the diff vs disk, and converges. `rig init` writes it.
 
 **Cascade (by location, no scope flag):**
 
@@ -12,7 +12,7 @@ Dicts merge recursively (per-repo wins); lists and scalars replace wholesale. Th
 is validated **fail-closed** before any write: unknown top-level keys, unknown categories,
 bad enum values, and unknown item names abort.
 
-**Round-trip invariant:** `setup` → `rig.yaml` → `apply --config` produces the same plan.
+**Round-trip invariant:** `init` → `rig.yaml` → `apply --config` produces the same plan.
 `riglib/state.py` (`SetupState`) is the single serializer; `riglib/config.py` the loader.
 
 ## Top-level shape
@@ -309,7 +309,7 @@ the real per-user scheduler is unwanted.
 
 ## Validation
 
-`apply`/`status`/`setup`/`init` validate before touching disk and **fail closed** on:
+`apply`/`status`/`init` validate before touching disk and **fail closed** on:
 unknown top-level keys, unsupported `version`, invalid `scope` / `on_conflict` / ci `tier` /
 agent-hook `on_error`, an unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`,
 a malformed/out-of-range `models.schedule.time` or unknown `models` key, and an
