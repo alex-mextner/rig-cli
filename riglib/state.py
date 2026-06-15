@@ -23,7 +23,6 @@ def default_state(
     *,
     agent_tools_source: str | None = None,
     project_type: str = "unknown",
-    scope: str = "both",
 ) -> dict[str, Any]:
     """A sensible default config (opt-out skills, security hooks on, security CI gates).
 
@@ -40,7 +39,6 @@ def default_state(
     git_cfg = "~/.config/git"
     return {
         "version": 1,
-        "scope": scope,
         "defaults": {
             "skills_target": "~/.agents/skills",
             "hooks_target": "~/.claude/hooks",

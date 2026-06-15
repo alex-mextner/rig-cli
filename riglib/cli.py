@@ -227,7 +227,7 @@ def _setup_headless(args: argparse.Namespace, *, use_default: bool) -> int:
                 print(_err(f"error: {exc}"))
                 return 2
             state = SetupState.default(
-                agent_tools_source=None, project_type=env.project_type, scope="both"
+                agent_tools_source=None, project_type=env.project_type
             )
             # Build the plan from the GENERATED state, not from disk: with --dry-run there
             # may be no rig.yaml on disk yet, so loading from disk would preview an
