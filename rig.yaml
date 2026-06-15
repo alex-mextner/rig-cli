@@ -67,3 +67,14 @@ mcp:
     review:
       enabled: true
       command: "review --mcp"
+
+# ── Harness — recommend auto-mode ON by default ───────────────────────────────────
+# The agent runs autonomously (the harness auto-accepts tool calls) with minimum
+# babysitting. SAFE because the agent-hooks above are installed (all: true) — they block
+# secret writes, --no-verify bypasses, un-timed shell, raw process.env, and a raw
+# `gh pr merge` that skips the ship gates. rig writes permissions.defaultMode into
+# .claude/settings.json. Set auto_mode: false for interactive permission prompts.
+harness:
+  enabled: true
+  kind: claude-code
+  auto_mode: true

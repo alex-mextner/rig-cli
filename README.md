@@ -44,28 +44,37 @@ pip install 'rig-cli[tui]'        # or: rig doctor --yes (installs missing deps)
 
 | Command | One-line |
 | --- | --- |
-| `rig setup` | Set up a repo from config — an interactive wizard, **or** headless `--config rig.yaml --yes`. Writes `rig.yaml` (committed by default), then applies. |
+| `rig init` | **THE front door.** First-run setup: scaffold `rig.yaml` → apply the agent-tools catalog. A thin synonym of `rig setup` (one engine, two names). Start here. |
+| `rig setup` | Set up a repo from config — an interactive wizard, **or** headless `--config rig.yaml --yes`. Writes `rig.yaml` (committed by default), then applies. (`rig init` is its synonym.) |
 | `rig apply` | Declarative reconcile: read `rig.yaml`, compute the diff vs the repo's state, converge. Idempotent. `--dry-run` previews. `--only skills,ci` scopes. |
 | `rig status` | Detect + report **drift in both directions** (config says X but disk has Y; disk has Z not in config). |
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
-| `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI. |
+| `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
 | `rig install-skill` | Register the `rig` agent skill so harnesses auto-discover it. |
 
-### Quick start
+### Quick start — the single front door
+
+`rig init` is the one command you run first: it scaffolds a `rig.yaml`, wires in the
+agent-tools catalog, and provisions **auto-mode** (the agent runs autonomously with minimum
+babysitting) — recommended on by default, *and safe because the agent-hook guards are
+installed alongside it.*
 
 ```bash
-rig doctor                                   # check deps; rig doctor --yes to install
-rig export -o rig.yaml                        # write a starter config (edit it)
-rig apply --dry-run                           # preview the resolved plan, write nothing
-rig apply                                     # converge the repo to rig.yaml
+rig doctor                                    # check deps; rig doctor --yes to install
+rig init                                       # THE front door: scaffold rig.yaml + apply the catalog
+rig apply                                      # re-apply on every machine, identically
 rig status                                     # later: is the repo still in sync?
 ```
+
+`rig setup` is the same engine under another name. To edit the config before applying,
+`rig export -o rig.yaml`, tweak it, then `rig apply`.
 
 Headless / agent path (no TUI):
 
 ```bash
-rig setup --config rig.yaml --yes             # first-run setup from a committed config
-rig apply                                      # re-apply on every machine, identically
+rig init --yes                                 # first-run scaffold + apply, non-interactive
+rig setup --config rig.yaml --yes              # ...or set up from an already-committed config
+rig apply                                      # re-apply identically on every machine
 ```
 
 ## Config — `rig.yaml`
@@ -83,6 +92,27 @@ The config **cascades by location** (no scope flag):
 Dicts merge recursively (per-repo wins); lists/scalars replace wholesale. See
 [`docs/config-schema.md`](docs/config-schema.md) for every key. A worked example is
 [`rig.yaml`](./rig.yaml) at the repo root (this repo dogfoods its own config).
+
+### Auto-mode — provisioned by the reconciler
+
+A `harness:` block tells `rig apply` to write the agent harness's auto/permission setting,
+so autonomy is part of the reproducible config — not a manual per-machine toggle:
+
+```yaml
+harness:
+  enabled: true
+  kind: claude-code          # claude-code implemented; opencode documented (config-schema.md)
+  auto_mode: true            # RECOMMENDED: writes permissions.defaultMode=bypassPermissions
+```
+
+On `rig apply` this merges `permissions.defaultMode` into `.claude/settings.json` (only that
+key; everything else in the file is preserved), idempotently and with a backup on conflict —
+and `rig status` flags it if the value drifts. **Auto-mode is recommended on by default**
+because the agent-hook guards `rig` installs in the same pass (`block-secrets-write`,
+`block-no-verify`, `enforce-timeout-on-bash`, `block-raw-process-env`, **`block-raw-pr-merge`**)
+catch the dangerous tool calls before the side effect: the guards are what make running
+without permission prompts safe. See [`docs/config-schema.md`](docs/config-schema.md) for the
+full `harness` schema and the opencode equivalent.
 
 ### Drift — surfaced both ways, never silently reconciled
 
@@ -130,7 +160,7 @@ riglib/
   logging.py        opt-in JSONL structured logging (stdlib)
   actions/          stdlib-only install actions (the executor)
     runner.py         run_plan: copy_skill / install_agent_hook / install_dispatcher /
-                      install_ci / register_mcp — idempotent, backup-noted
+                      install_ci / register_mcp / apply_harness — idempotent, backup-noted
     fsutil.py         conflict-policy + idempotency + backup helpers
   tui/app.py        the textual wizard — a thin front-end over the same engine
 ```

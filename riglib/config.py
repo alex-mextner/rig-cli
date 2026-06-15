@@ -35,12 +35,18 @@ _VALID_TOP_KEYS = {
     "git_hooks",
     "ci",
     "mcp",
+    "harness",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_SCOPES = {"user", "repo", "both"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
 _VALID_TIERS = {"block", "warn"}
 _VALID_ON_ERROR = {"open", "closed"}
+# Harness kinds rig can provision an auto/permission setting for. claude-code is the only
+# one IMPLEMENTED in v0.1; opencode is reserved (documented in docs/config-schema.md) so a
+# config naming it fails closed with a clear message rather than silently doing nothing.
+_VALID_HARNESS_KINDS = {"claude-code"}
+_RESERVED_HARNESS_KINDS = {"opencode"}
 
 
 class ConfigError(ValueError):
@@ -193,6 +199,7 @@ def validate(data: dict[str, Any]) -> None:
 
     _validate_ci(data.get("ci", {}))
     _validate_agent_hooks(data.get("agent_hooks", {}))
+    _validate_harness(data.get("harness", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -222,3 +229,33 @@ def _validate_agent_hooks(ah: dict[str, Any]) -> None:
                 f"agent_hooks.items.{name}.on_error must be one of "
                 f"{sorted(_VALID_ON_ERROR)}, got {on_error!r}"
             )
+
+
+def _validate_harness(h: dict[str, Any]) -> None:
+    """Validate the ``harness`` block — the agent harness's auto/permission provisioning.
+
+    Fail-closed on an unknown ``kind`` (typo guard) and a non-bool ``auto_mode``. A
+    *reserved* kind (opencode) is rejected with an explicit "not implemented yet" message
+    so the config author isn't left thinking rig wrote a setting it didn't.
+    """
+    if not isinstance(h, dict):
+        raise ConfigError("harness must be a mapping")
+    if not h:
+        return
+    kind = h.get("kind", "claude-code")
+    if kind in _RESERVED_HARNESS_KINDS:
+        raise ConfigError(
+            f"harness.kind '{kind}' is documented but not implemented in this rig "
+            f"(supported: {sorted(_VALID_HARNESS_KINDS)}). Remove the harness block or "
+            f"use a supported kind."
+        )
+    if kind not in _VALID_HARNESS_KINDS:
+        raise ConfigError(
+            f"harness.kind must be one of {sorted(_VALID_HARNESS_KINDS)}, got {kind!r}"
+        )
+    auto_mode = h.get("auto_mode")
+    if auto_mode is not None and not isinstance(auto_mode, bool):
+        raise ConfigError(f"harness.auto_mode must be a bool, got {auto_mode!r}")
+    mode = h.get("mode")
+    if mode is not None and not isinstance(mode, str):
+        raise ConfigError(f"harness.mode must be a string, got {mode!r}")

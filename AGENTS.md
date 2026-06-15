@@ -6,8 +6,13 @@ Rules for agents working in this repo. English only (no Cyrillic anywhere in rep
 
 `rig` is the dev-environment umbrella driver: a standalone Python CLI that sets up a repo
 from a committed `rig.yaml` by applying `agent-tools` content (skills, agent-hooks,
-git-hook dispatcher, CI gates, MCP). It is a peer to `tg-cli` / `review-cli`, not part of
-`agent-tools` — it *consumes* agent-tools read-only.
+git-hook dispatcher, CI gates, MCP) and provisioning the agent harness's auto/permission
+mode. It is a peer to `tg-cli` / `review-cli`, not part of `agent-tools` — it *consumes*
+agent-tools read-only.
+
+**`rig init` is THE documented front door** — first-run setup (scaffold `rig.yaml` →
+apply). It is a thin synonym of `rig setup`: both dispatch to the same handler, so init can
+never drift from setup. Keep `setup` working; never make `init` a second engine.
 
 ## Hard rules
 
@@ -17,7 +22,15 @@ git-hook dispatcher, CI gates, MCP). It is a peer to `tg-cli` / `review-cli`, no
   imports. Do not add a top-level `import yaml`/`import textual`.
 - **One engine, two front-ends.** `rig setup` (wizard) and `rig apply` must share the same
   `plan.build` + `actions.run_plan`. Never fork the executor for the TUI. If you add a
-  capability, add it to the headless engine first and let the wizard call it.
+  capability, add it to the headless engine first and let the wizard call it. `rig init` is
+  a name alias of `setup` over the SAME handler — not a third path.
+- **Harness auto-mode is provisioned through the reconciler, like every other target.** The
+  `harness:` block flows config → `plan.build` (one `apply_harness` action) → `run_plan`
+  (`actions/runner.py::_do_apply_harness`), writing only the managed permission key into the
+  harness settings JSON, idempotent + backup-on-conflict, with drift surfaced by `rig
+  status`. Recommend `auto_mode: true` by default — it is safe *because* the agent-hook
+  guards (incl. `block-raw-pr-merge`) are installed in the same apply. claude-code is
+  implemented; opencode is documented-but-reserved (validation fails closed on it).
 - **`rig.yaml` is committed by default.** It is the reproducible source of truth. Do not
   add an "is rig.yaml optional?" flag. Global config lives at `~/.config/rig/config.yaml`;
   per-repo `rig.yaml` overrides it; scope is by location, never a flag.

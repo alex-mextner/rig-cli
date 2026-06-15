@@ -7,6 +7,7 @@ needs them so ``rig --help`` and ``rig doctor`` stay fast and dependency-light.
 
 Subcommands:
 
+    rig init     THE front door — first-run setup (scaffold rig.yaml → apply). Synonym of setup.
     rig setup    set up a repo from config — interactive wizard OR --config/--yes headless
     rig apply    declarative reconcile: read rig.yaml, converge disk to it (idempotent)
     rig status   detect + report drift in BOTH directions (config↔disk)
@@ -61,13 +62,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"rig {__version__}")
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
-    sp = sub.add_parser("setup", help="set up a repo from config (wizard or --config/--yes)")
-    sp.add_argument("-C", "--cwd", default=".", help="repo root to operate on (default: cwd)")
-    sp.add_argument("--config", help="apply this config file headlessly (non-interactive)")
-    sp.add_argument("--yes", action="store_true", help="non-interactive; assume yes")
-    # NOTE: there is intentionally NO --no-write-config flag. rig.yaml is the committed
-    # source of truth and is NOT optional (AGENTS.md). Use --dry-run for a no-write preview.
-    sp.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    def _add_setup_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("-C", "--cwd", default=".", help="repo root to operate on (default: cwd)")
+        parser.add_argument("--config", help="apply this config file headlessly (non-interactive)")
+        parser.add_argument("--yes", action="store_true", help="non-interactive; assume yes")
+        # NOTE: there is intentionally NO --no-write-config flag. rig.yaml is the committed
+        # source of truth and is NOT optional (AGENTS.md). Use --dry-run for a no-write preview.
+        parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+
+    # `init` is THE documented front door: a thin synonym of `setup` (scaffold rig.yaml →
+    # apply on first run). One engine, two names — it dispatches to the same handler, so it
+    # can never drift from setup/apply (the AGENTS.md "one engine" rule).
+    ip = sub.add_parser("init", help="THE front door: first-run setup (scaffold rig.yaml → apply). Synonym of setup.")
+    _add_setup_args(ip)
+
+    sp = sub.add_parser("setup", help="set up a repo from config (wizard or --config/--yes); synonym of init")
+    _add_setup_args(sp)
 
     ap = sub.add_parser("apply", help="reconcile the repo to rig.yaml (idempotent)")
     ap.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
@@ -101,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     handlers = {
+        "init": cmd_setup,  # init is the front-door synonym of setup (one engine, two names)
         "setup": cmd_setup,
         "apply": cmd_apply,
         "status": cmd_status,
