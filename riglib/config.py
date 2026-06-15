@@ -27,7 +27,6 @@ CONFIG_FILENAME = "rig.yaml"
 
 _VALID_TOP_KEYS = {
     "version",
-    "scope",
     "defaults",
     "agent_tools_source",
     "skills",
@@ -39,7 +38,6 @@ _VALID_TOP_KEYS = {
     "models",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
-_VALID_SCOPES = {"user", "repo", "both"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
 _VALID_TIERS = {"block", "warn"}
 _VALID_ON_ERROR = {"open", "closed"}
@@ -156,6 +154,8 @@ def load(
             layers.append(f"repo:{rpath}")
 
     validate(merged)
+    merged.pop("scope", None)  # `scope` is a removed legacy key — drop it so it never
+    # lingers in loaded.data, gets re-serialized, or is mistaken for a live setting.
     return LoadedConfig(
         data=merged,
         repo_root=repo_root,
@@ -170,7 +170,10 @@ def validate(data: dict[str, Any]) -> None:
     if not isinstance(data, dict):
         raise ConfigError("config root must be a mapping")
 
-    unknown = set(data) - _VALID_TOP_KEYS
+    # `scope` was removed (the two layers cascade by LOCATION — a repo rig.yaml is repo-scoped,
+    # the global config is global; see the module docstring). Tolerate a legacy `scope` key so
+    # existing committed rig.yaml files don't break before they're cleaned up — it is ignored.
+    unknown = set(data) - _VALID_TOP_KEYS - {"scope"}
     if unknown:
         raise ConfigError(f"unknown top-level key(s): {', '.join(sorted(unknown))}")
 
@@ -179,10 +182,6 @@ def validate(data: dict[str, Any]) -> None:
         raise ConfigError(f"version must be an int, got {version!r}")
     if version != 1:
         raise ConfigError(f"unsupported config version {version} (this rig supports v1)")
-
-    scope = data.get("scope", "both")
-    if scope not in _VALID_SCOPES:
-        raise ConfigError(f"scope must be one of {sorted(_VALID_SCOPES)}, got {scope!r}")
 
     defaults = data.get("defaults", {})
     if not isinstance(defaults, dict):

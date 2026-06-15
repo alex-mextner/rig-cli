@@ -19,14 +19,13 @@ def test_repo_overrides_global(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     _w(
         config.global_config_path(),
-        "version: 1\nscope: user\ndefaults: {on_conflict: skip}\nskills: {enabled: false}\n",
+        "version: 1\ndefaults: {on_conflict: skip}\nskills: {enabled: false}\n",
     )
     repo = tmp_path / "repo"
-    _w(repo / "rig.yaml", "scope: repo\ndefaults: {on_conflict: backup}\nskills: {enabled: true}\n")
+    _w(repo / "rig.yaml", "defaults: {on_conflict: backup}\nskills: {enabled: true}\n")
 
     loaded = config.load(repo)
     # per-repo wins for overlapping keys
-    assert loaded.data["scope"] == "repo"
     assert loaded.data["defaults"]["on_conflict"] == "backup"
     assert loaded.data["skills"]["enabled"] is True
     # both layers recorded
@@ -61,9 +60,19 @@ def test_validate_rejects_unknown_top_key():
         config.validate({"version": 1, "bogus": 1})
 
 
-def test_validate_rejects_bad_scope():
-    with pytest.raises(config.ConfigError, match="scope"):
-        config.validate({"version": 1, "scope": "everywhere"})
+def test_validate_ignores_legacy_scope():
+    # `scope` was removed (location-based cascade); a legacy key is tolerated, not rejected.
+    config.validate({"version": 1, "scope": "everywhere"})
+
+
+def test_load_drops_legacy_scope(tmp_path, monkeypatch):
+    # a committed rig.yaml that still carries the removed `scope` key loads fine, and the key
+    # is dropped from the result so it never lingers/re-serializes or reads as a live setting.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    repo = tmp_path / "repo"
+    _w(repo / "rig.yaml", "version: 1\nscope: both\nskills: {enabled: false}\n")
+    loaded = config.load(repo)
+    assert "scope" not in loaded.data
 
 
 def test_validate_rejects_bad_on_conflict():

@@ -6,7 +6,6 @@
 # Apply with: rig apply   ·   Check drift with: rig status   ·   Schema: docs/config-schema.md
 
 version: 1
-scope: both
 
 defaults:
   skills_target: ~/.agents/skills

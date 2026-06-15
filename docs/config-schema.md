@@ -19,7 +19,6 @@ bad enum values, and unknown item names abort.
 
 ```yaml
 version: 1                      # schema version (int, required; only 1 supported)
-scope: user | repo | both       # advisory label for where installs default (default: both)
 
 defaults:                       # cross-category fallback targets/policy
   skills_target: ~/.agents/skills
@@ -310,7 +309,7 @@ the real per-user scheduler is unwanted.
 ## Validation
 
 `apply`/`status`/`setup`/`init` validate before touching disk and **fail closed** on:
-unknown top-level keys, unsupported `version`, invalid `scope` / `on_conflict` / ci `tier` /
+unknown top-level keys, unsupported `version`, invalid `on_conflict` / ci `tier` /
 agent-hook `on_error`, an unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`,
 a malformed/out-of-range `models.schedule.time` or unknown `models` key, and an
 `agent_tools_source` that is not an agent-tools checkout. `--dry-run` prints the
