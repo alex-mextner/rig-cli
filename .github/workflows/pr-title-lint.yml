@@ -1,0 +1,64 @@
+# PR-title lint — enforce Conventional Commits on the PR TITLE.
+#
+# With squash-merge, the PR title becomes the commit subject on the default branch, so a
+# consistent title format gives you a clean, machine-parseable history (and lets tools like
+# semantic-release / changelog generators work). This validates the title against the
+# Conventional Commits spec: `type(optional-scope)!: subject`.
+#
+# Standard engine = amannn/action-semantic-pull-request (the de-facto action for this).
+#
+# INSTALL: copy to .github/workflows/pr-title-lint.yml.
+#
+# KNOBS: edit `types` / `scopes` / `requireScope` below. Default types are the Conventional
+# Commits set. Leave `scopes` unset to allow any scope.
+#
+# Note: a sibling check on the commit MESSAGES themselves (not just the PR title) belongs in
+# a commit-msg git-hook — see ../../git-hooks/. This gate is specifically the squash-title.
+#
+# Triggered by `pull_request_target` so it can post a helpful failure comment on the PR; it
+# reads ONLY the title from the event payload — it never checks out or runs PR code.
+
+name: pr-title-lint
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-title-lint:
+    name: pr-title-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title (Conventional Commits)
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Conventional Commit types. Trim/extend to taste.
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          # Allowed scopes — leave commented to allow ANY scope.
+          # scopes: |
+          #   api
+          #   ui
+          #   deps
+          requireScope: false
+          # Subject must not start uppercase / end with a period (Conventional style).
+          subjectPattern: ^(?![A-Z])(?!.*\.$).+$
+          subjectPatternError: |
+            The PR title subject "{subject}" is invalid: it must start lowercase and not
+            end with a period. Example: feat(api): add pagination to list endpoints
