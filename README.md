@@ -36,8 +36,8 @@ curl -fsSL https://raw.githubusercontent.com/alex-mextner/rig-cli/main/install.s
 **Isolated env via pipx:**
 
 ```bash
-pipx install git+https://github.com/alex-mextner/rig-cli      # adds the `rig` command
-pipx install 'git+https://github.com/alex-mextner/rig-cli#egg=rig-cli[tui]'   # + interactive wizard
+pipx install git+https://github.com/alex-mextner/rig-cli              # adds the `rig` command
+pipx install 'rig-cli[tui] @ git+https://github.com/alex-mextner/rig-cli'   # + interactive wizard
 ```
 
 Or run straight from a checkout — `uv run bin/rig …` / `python3 bin/rig …`.
