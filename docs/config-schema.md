@@ -40,6 +40,7 @@ agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), def
 github: { ... }               # GitHub repo branch ruleset via gh api, default ON (no-op without a github remote)
 tmux: { ... }                 # rig-managed tmux config (generate + migrate ~/.tmux.conf), opt-in
 gitignore: { ... }            # rig-managed block in the GLOBAL git excludesfile (ignores **/.claude/worktrees/ in EVERY repo), default ON
+tg_ctl: { ... }               # tg-ctl inbound daemon as a macOS boot LaunchAgent, default ON (macOS-only)
 ```
 
 If `agent_tools_source` is omitted, rig resolves it from `$RIG_AGENT_TOOLS_SOURCE`, then
@@ -679,6 +680,65 @@ reconciles. Shown in the **global** section of status (not the repo section).
 
 ---
 
+## `tg_ctl`
+
+rig provisions the **tg-ctl inbound control daemon** (tg-cli's long-poll / inject-into-tmux /
+voice→text daemon, run as `tg-ctl run`) as a **macOS boot LaunchAgent** so it auto-starts at
+login/boot — exactly like the tmux boot service. **Default ON** (an absent or empty `tg_ctl:`
+block still provisions it, so `rig init` on a clean machine sets it up with no config). This is a
+**per-MACHINE** concern (one inbound daemon per machine), so the block belongs in the **GLOBAL**
+layer (`~/.config/rig/config.yaml`) — never a committed repo `rig.yaml`. **macOS-only** (launchd);
+off darwin it is a no-op.
+
+```yaml
+tg_ctl:
+  enabled: true                       # provision the tg-ctl LaunchAgent (default true; false = off)
+  boot: true                          # write + load the boot agent (default true)
+  # everything below is auto-discovered per-machine — override only if non-standard:
+  label: ai.hyperide.tg-ctl           # launchd Label / plist filename stem (advanced)
+  bun_path: ~/.bun/bin/bun            # the bun binary (default: `which bun` → ~/.bun fallback)
+  tg_ctl_path: ~/.files/bin/tg-ctl    # the tg-ctl Bun script
+  config_dir: ~/.config/tg-cli        # tg-cli config + launchd logs (default honors $TG_CTL_CONFIG_DIR)
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `enabled` | bool | `true` | `false` = **don't touch tg-ctl at all** — rig emits no action, so it neither provisions NOR cleans up NOR reports drift (a hands-off opt-out). Use `boot: false` instead to keep rig tracking a leftover plist. |
+| `boot` | bool | `true` | `false` = provisioned-but-no-boot: rig writes/loads nothing, but a leftover plist (or the stale predecessor) IS still surfaced as drift so you see the orphan |
+| `label` | str | `ai.hyperide.tg-ctl` | launchd Label / plist filename stem (one identity for install/drift/remove) |
+| `bun_path` | str | discovered | the bun binary; default `which bun`, else `~/.bun/bin/bun` |
+| `tg_ctl_path` | str | `~/.files/bin/tg-ctl` | the tg-ctl Bun script launchd runs (`bun <path> run`) |
+| `config_dir` | str | `~/.config/tg-cli` | tg-cli config dir; the launchd out/err logs land here (honors `$TG_CTL_CONFIG_DIR`) |
+
+> **`enabled: false` vs `boot: false`.** `enabled: false` is a complete opt-out — rig stops
+> emitting the action, so a previously-installed plist is NOT cleaned up or flagged (rig is
+> hands-off). If you want rig to keep watching for / flagging a leftover plist while not running
+> the daemon, use `boot: false` (the action still runs; drift surfaces the orphan).
+
+**What rig writes.** `~/Library/LaunchAgents/ai.hyperide.tg-ctl.plist` — a `RunAtLoad` +
+`KeepAlive` agent that runs `bun ~/.files/bin/tg-ctl run` with a login PATH and the tg-cli config
+dir's logs. The plist is **byte-exact** to a hand-created working file, so `rig apply` against an
+already-correct live plist is a true **no-op** (`skipped`), never a spurious rewrite.
+
+**(Re)load mechanism.** Unlike tmux-boot (which only writes the plist), rig **(re)loads** the agent
+via `launchctl bootout`/`bootstrap` in the per-user `gui/<uid>` domain, so a clean `rig init` starts
+the daemon without a reboot, and a changed plist is picked up on the next `apply`.
+
+**Stale-predecessor teardown.** If the dead predecessor service
+`~/Library/LaunchAgents/com.ultra.codex-tg-bot.plist` exists, `rig apply` **boots it out**, backs it
+up (timestamped), and removes it.
+
+**Drift.** `rig status` flags (in the **GLOBAL** section) when the agent is missing, divergent, or
+written-but-not-loaded; a leftover plist when `boot: false`, or the stale predecessor, surfaces as a
+disk→config **extra**. `rig apply` reconciles.
+
+**Dry-run seam.** `RIG_TG_CTL_DRY_RUN=1` writes the managed plist into the configured (HOME-isolated)
+path but skips every live/destructive mutation — the gui-domain `launchctl bootstrap`/`bootout` AND
+the stale-predecessor teardown (its bootout and the on-disk backup+remove of its plist) — so
+tests/smoke never touch the real launchd domain or delete the predecessor file.
+
+---
+
 ## Validation
 
 `apply`/`status`/`init` validate before touching disk and **fail closed** on:
@@ -693,6 +753,7 @@ that is not a list of strings, an unknown `tmux`/`tmux.<sub>` key, a bad `tmux.a
 `tmux.resurrect.processes` that is not a list of strings, a `tmux.continuum.save_interval` that is
 not an int >= 1, a non-bool `tmux` boolean knob, a non-mapping `gitignore` block / non-bool
 `gitignore.enabled` / unknown `gitignore` key / non-string `gitignore.excludesfile` / a
-`gitignore.entries` that is not a list of strings or that contains a rig-managed marker line, and an
-`agent_tools_source` that is not an agent-tools checkout. `--dry-run` prints the resolved plan and
-exits 0 without writing.
+`gitignore.entries` that is not a list of strings or that contains a rig-managed marker line, an
+unknown `tg_ctl` key, a non-bool `tg_ctl.enabled`/`tg_ctl.boot`, a non-string
+`tg_ctl.label`/`bun_path`/`tg_ctl_path`/`config_dir`, and an `agent_tools_source` that is not an
+agent-tools checkout. `--dry-run` prints the resolved plan and exits 0 without writing.
