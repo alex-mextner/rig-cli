@@ -74,6 +74,8 @@ tmux:
   anti_sprawl: { enabled: true, session: main }
   boot: { enabled: true }
   login_shell: { enabled: true }
+gitignore:
+  enabled: true
 YAML
 
   # dry-run first (must write nothing)
@@ -105,6 +107,18 @@ YAML
     || fail "tmux: login-shell 'set -g default-command' (DEFECT 3) not in generated config"
   pass "rig init --yes generated tmux v2 config + boot script (login-shell, new-session -d)"
 
+  # ── global git-excludes (core.excludesfile) — clean-machine path ────────────────
+  # core.excludesfile was UNSET in this isolated HOME, so apply must (1) set it to the XDG
+  # default and (2) write the rig-managed block there. Everything stays under the throwaway
+  # HOME; the real global git config is never touched.
+  excludes_val="$(git config --global core.excludesfile || true)"
+  [[ "$excludes_val" == "~/.config/git/ignore" ]] || fail "core.excludesfile not set to XDG default (got '$excludes_val')"
+  excludes_file="$HOME/.config/git/ignore"
+  [[ -f "$excludes_file" ]] || fail "global excludes file not written at $excludes_file"
+  grep -q "rig-managed" "$excludes_file" || fail "rig-managed marker missing from global excludes file"
+  grep -q "\.claude/worktrees/" "$excludes_file" || fail "worktrees entry missing from global excludes file"
+  pass "rig init --yes set core.excludesfile + wrote the rig-managed global-excludes block"
+
   # idempotency: a second apply changes nothing (no created/updated/backed_up in summary)
   out="$($RIG apply -C "$TMP" --config "$TMP/rig.yaml" 2>&1)"
   summary="$(echo "$out" | grep '^Summary:' || true)"
@@ -112,6 +126,11 @@ YAML
     fail "second apply was not idempotent: $summary"
   fi
   pass "rig apply is idempotent ($summary)"
+
+  # the second apply must not have duplicated the managed block: exactly one begin + one end.
+  marker_count="$(grep -c "rig-managed" "$excludes_file" || true)"
+  [[ "$marker_count" -eq 2 ]] || fail "global-excludes block churned/duplicated on re-apply (markers=$marker_count, want 2)"
+  pass "global-excludes block is byte-stable across re-apply (markers=2)"
 
   # status reports in sync
   $RIG status -C "$TMP" --config "$TMP/rig.yaml" >/dev/null || fail "status nonzero when in sync"
@@ -155,6 +174,7 @@ ci: { enabled: false }
 git_hooks: { dispatcher: { enabled: false } }
 mcp: { enabled: false }
 agents_md: { enabled: false }
+gitignore: { enabled: false }
 YAML
   CLEANREPO="$TMP/clean-repo"; mkdir -p "$CLEANREPO"; ( cd "$CLEANREPO" && git init -q )
   cp "$CLEAN" "$CLEANREPO/rig.yaml"

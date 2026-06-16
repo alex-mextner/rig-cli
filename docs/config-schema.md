@@ -39,6 +39,7 @@ models: { ... }               # daily model-freshness checker schedule (launchd/
 agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
 github: { ... }               # GitHub repo branch ruleset via gh api, default ON (no-op without a github remote)
 tmux: { ... }                 # rig-managed tmux config (generate + migrate ~/.tmux.conf), opt-in
+gitignore: { ... }            # rig-managed block in the GLOBAL git excludesfile (ignores **/.claude/worktrees/ in EVERY repo), default ON
 ```
 
 If `agent_tools_source` is omitted, rig resolves it from `$RIG_AGENT_TOOLS_SOURCE`, then
@@ -615,6 +616,69 @@ boot-from-cold path can only be fully proven by an actual reboot.
 
 ---
 
+## `gitignore`
+
+Maintains a **rig-managed block** in git's **GLOBAL excludes file** (`core.excludesfile`) so
+harness artifacts are ignored in **EVERY repo on the machine** — with **zero per-repo commits**
+and no per-repo `rig apply`. The motivating case: Claude Code creates throwaway worktrees under
+each repo's `.claude/worktrees/`; those must be gitignored everywhere, and rig owns that ignore
+**globally** (one managed block, machine-wide) rather than per-repo. This is **GLOBAL config** —
+it belongs in the global rig layer (`~/.config/rig/config.yaml`), wired like the git-hooks
+`dispatcher` (a `git config --global` setting plus a managed file). Default **ON** — on `rig init`
+AND `rig apply` rig converges the block; idempotent (a re-apply that finds it correct is a no-op).
+
+```yaml
+gitignore:
+  enabled: true                 # provision the managed block (default ON; false opts out)
+  entries:                      # the ignored paths inside the managed block
+    - "**/.claude/worktrees/"   # default: Claude Code's throwaway worktrees (every repo)
+  # excludesfile: ~/.gitignore  # rare: force a specific file instead of honoring core.excludesfile
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision the managed block (set `false` to leave the global excludes file untouched) |
+| `entries` | list[str] | `["**/.claude/worktrees/"]` | the paths ignored inside the managed block; an empty/absent list uses the default |
+| `excludesfile` | str | *(unset)* | force a specific file; by default rig honors `core.excludesfile` (or sets it — see below) |
+
+**Target resolution (the headline behavior).** rig decides WHICH file holds the block at apply
+time, honoring the user's existing choice:
+
+- **`core.excludesfile` is already set** (e.g. `~/.gitignore`): rig manages the block **in that
+  file** and leaves the git config alone — your choice is respected, the block is not moved.
+- **`core.excludesfile` is unset**: rig **sets** it to the XDG default `~/.config/git/ignore`
+  **and** writes the block there. So on a **clean machine** `rig init` does everything itself
+  (set the git config if absent + write/reconcile the block) — no manual `git config` step.
+- **`excludesfile:` override set**: rig reconciles the block in that file and points
+  `core.excludesfile` at it when git's value doesn't already match.
+
+**`.serena/` is intentionally NOT ignored.** Serena state is **committed** shared project memory
+(project memories travel with the repo), so it is never in the default entries — only throwaway
+harness artifacts are.
+
+**The managed block.** rig fences its lines with explicit markers and a fixed explanatory comment,
+and touches **only** what is between them — every other line in the excludes file (the user's or
+another tool's) is preserved verbatim (CRLF, trailing blanks, no-final-newline all survive):
+
+```
+# >>> rig-managed (do not edit) >>>
+# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/; rig ignores them globally.
+**/.claude/worktrees/
+# <<< rig-managed (do not edit) <<<
+```
+
+**Strict idempotency.** A re-apply is a **byte-identical no-op** when the block is already correct.
+If a prior non-idempotent tool appended the block **more than once**, rig **collapses the entire
+rig-managed region to one correct block** (it never duplicates, and never edits lines outside the
+markers). An **unbalanced** marker pair (a begin with no end, an end before a begin) is a
+`conflict` rig leaves untouched and surfaces for manual reconcile.
+
+**Drift.** `rig status` flags the GLOBAL block as drift when it is missing, divergent, or
+duplicated — **and** when `core.excludesfile` is unset and rig would set it. `rig apply`
+reconciles. Shown in the **global** section of status (not the repo section).
+
+---
+
 ## Validation
 
 `apply`/`status`/`init` validate before touching disk and **fail closed** on:
@@ -627,5 +691,8 @@ a malformed/out-of-range `models.schedule.time` or unknown `models` key, a non-b
 `github.ruleset.required_reviews` that is not an int ≥ 0, a `github.ruleset.required_status_checks`
 that is not a list of strings, an unknown `tmux`/`tmux.<sub>` key, a bad `tmux.apply` enum, a
 `tmux.resurrect.processes` that is not a list of strings, a `tmux.continuum.save_interval` that is
-not an int >= 1, a non-bool `tmux` boolean knob, and an `agent_tools_source` that is not an
-agent-tools checkout. `--dry-run` prints the resolved plan and exits 0 without writing.
+not an int >= 1, a non-bool `tmux` boolean knob, a non-mapping `gitignore` block / non-bool
+`gitignore.enabled` / unknown `gitignore` key / non-string `gitignore.excludesfile` / a
+`gitignore.entries` that is not a list of strings or that contains a rig-managed marker line, and an
+`agent_tools_source` that is not an agent-tools checkout. `--dry-run` prints the resolved plan and
+exits 0 without writing.

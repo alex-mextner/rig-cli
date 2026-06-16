@@ -27,6 +27,12 @@ def _isolate_home(monkeypatch, tmp_path):
     home = tmp_path / "isolated-home"
     home.mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    # Also pin XDG_CONFIG_HOME under the throwaway home. The global-excludes default
+    # (``~/.config/git/ignore``) expands ``~/.config`` via ``$XDG_CONFIG_HOME`` when set — so a
+    # developer who exports XDG_CONFIG_HOME globally would otherwise have a full-plan e2e test
+    # write into their REAL ``$XDG_CONFIG_HOME/git/ignore``. Force it under the isolated home so no
+    # test can ever touch a real XDG config dir. Tests that need a specific XDG override it inline.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
 
 
 @pytest.fixture(autouse=True)
@@ -76,6 +82,37 @@ def _isolate_scheduler(monkeypatch):
         return 0
 
     monkeypatch.setattr(runner, "_write_crontab", _fake_write_crontab)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_git_config(monkeypatch):
+    """Never let a test read or WRITE the real ``git config --global``.
+
+    The global-excludes block (gitignore:) is in the DEFAULT scaffold, so any e2e test that runs
+    a full ``build`` + ``run_plan`` would otherwise shell out to real ``git config --global
+    core.excludesfile`` — and, on a machine where that is UNSET, would WRITE the real global
+    config. That is a hard-fail (a test must never mutate the user's git config). So this guard
+    stubs both git-config seams suite-wide on BOTH the runner and drift modules (drift imports
+    ``_git_global`` by name):
+
+      - reads (``_git_global``) return ``None`` — i.e. ``core.excludesfile`` is UNSET — so e2e
+        apply takes the clean-machine path: set it to the XDG default and write the block. With
+        HOME isolated, the XDG default expands UNDER the throwaway home, never the real one.
+      - writes (``_set_git_global``) are captured in an in-memory store (so a subsequent read
+        could see them if a test wants), never touching real git config.
+
+    The DEDICATED global-excludes tests (test_global_excludes.py) install their OWN seam mocks in
+    the test body — those run after this autouse fixture and win — so they can exercise both the
+    set-vs-unset target resolution explicitly.
+    """
+    from riglib import drift as driftmod
+    from riglib.actions import runner
+
+    store: dict[str, str] = {}
+
+    for mod in (runner, driftmod):
+        monkeypatch.setattr(mod, "_git_global", lambda key: store.get(key), raising=False)
+    monkeypatch.setattr(runner, "_set_git_global", lambda key, value: store.__setitem__(key, value) or 0)
 
 
 @pytest.fixture(autouse=True)
