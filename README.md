@@ -47,7 +47,7 @@ Or run from a checkout without installing — `python3 bin/rig …` / `uv run bi
 The interactive wizard needs `textual`:
 
 ```bash
-pip install 'rig-cli[tui]'        # or: rig doctor --yes (installs missing deps)
+pip install 'rig-cli[tui]'        # or: rig doctor --yes --optional (textual/rich are optional deps)
 ```
 
 ## Commands
@@ -62,6 +62,7 @@ pip install 'rig-cli[tui]'        # or: rig doctor --yes (installs missing deps)
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
 | `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
 | `rig install-skill` | Register the `rig` agent skill so harnesses auto-discover it. |
+| `rig stats show` | **Tool-adoption analytics.** Parse the session logs of every agent harness on the machine and report how often each tool is invoked, bucketed into baseline / ours / external-advertised / other — so you can see whether the rig + agent-tools ecosystem is actually being used vs the built-in baseline. `` `--format json|tui|web` ``, breakdowns by repo/harness, a daily trend (the `json` output additionally exposes the weekly series). |
 
 ### Quick start — `init` then `apply`
 
@@ -92,6 +93,46 @@ Headless / agent path (no TUI):
 rig init --yes                                 # first-run onboarding, non-interactive
 rig apply                                      # re-apply identically on every machine
 ```
+
+## `rig stats` — is the ecosystem actually being adopted?
+
+`rig apply` installs the tooling; `rig stats` tells you whether anyone is *using* it. It
+reads the on-disk session logs of every agent harness on the machine and counts how often
+each tool is invoked, sorting every invocation into four buckets:
+
+- **baseline** — the harness built-ins (`Bash`, `Read`, `Write`, `Edit`/`MultiEdit`,
+  `Grep`, `Glob`, `NotebookEdit`, `Task`/`Agent`, `WebFetch`/`WebSearch`). The yardstick.
+- **ours** — the agent-tools ecosystem: the CLIs `rig` / `review` / `tg` / `draw` / `3d` /
+  `task` (detected **inside** a shell command — a `Bash` call running `review …` is pulled
+  out of the baseline shell count and re-labelled `review (cli)`), our skills, and our
+  `review` MCP.
+- **external-advertised** — the third-party tooling we ship/recommend: MCP servers (serena,
+  sverklo, context7, playwright, …) via the `mcp__<server>__<tool>` prefix, plus external
+  skills (agent-browser, superpowers, h-*, debate-swarm, …).
+- **other** — everything else.
+
+```bash
+rig stats show                                  # default: rich terminal UI (tui)
+rig stats show --format json                    # canonical machine-readable data
+rig stats show --format web                     # self-contained local HTML dashboard
+rig stats show --since 2026-06-01 --until 2026-06-15   # window + period comparison
+rig stats show --harness claude-code --repo /path/to/repo   # filter by harness / repo
+```
+
+**Harnesses parsed:** Claude Code (`~/.claude/projects/<enc>/<session>.jsonl` — the richest
+source), Codex (`~/.codex/sessions/.../rollout-*.jsonl`), Gemini
+(`~/.gemini/tmp/<hash>/chats/session-*.json`), and opencode
+(`~/.local/share/opencode/storage/`). The supported-harness list is data-driven: each
+parser self-registers, and a harness whose logs aren't on the machine is reported as
+"not found" rather than failing. Adding a harness is one file in `riglib/stats/sources/`.
+
+**Outputs:** `json` is the canonical shape every other renderer draws from; `tui` (default)
+is a rich table-and-bar-chart report that degrades to plain text if `rich` isn't installed;
+`web` serves a self-contained HTML page (inline SVG charts, no CDN, no JS deps) on a local
+port (`--web-port`, default auto). All three break the counts down **by repo** and **by
+harness** and render a **daily** trend; the `json` document additionally exposes the
+**weekly** series. `--since` yields a before/after period comparison: the selected window
+against the equally-long window immediately before it.
 
 ## Config — `rig.yaml`
 
@@ -215,6 +256,12 @@ riglib/
                       install_ci / register_mcp / apply_harness / provision_schedule —
                       idempotent, backup-noted
     fsutil.py         conflict-policy + idempotency + backup helpers
+  stats/            tool-adoption analytics (`rig stats show`) — a 3-stage pipeline
+    sources/          one pluggable parser per harness (@register); CC / codex / gemini /
+                      opencode → a normalized ToolInvocation stream
+    taxonomy.py       the data-driven baseline / ours / external-advertised / other rules
+    aggregate.py      pure reductions → counts / breakdowns / day+week trend series
+    render/           json (canonical) / tui (rich, lazy) / web (http.server + inline SVG)
   tui/app.py        the textual wizard — a thin front-end over the same engine
 ```
 

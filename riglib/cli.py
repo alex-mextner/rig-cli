@@ -12,6 +12,7 @@ Subcommands:
     rig status   detect + report drift in BOTH directions (config↔disk)
     rig doctor   detect + (offer to) install required/optional dependencies
     rig export   serialize default/current config to rig.yaml without a TUI
+    rig stats    tool-adoption analytics over agent-harness session logs (sub: `show`)
 """
 
 from __future__ import annotations
@@ -95,7 +96,47 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("install-skill", help="register the rig agent skill with harnesses")
 
+    _add_stats_parser(sub)
+
     return p
+
+
+def _add_stats_parser(sub: "argparse._SubParsersAction") -> None:
+    """`rig stats <action>` — analytics over agent-harness session logs.
+
+    Nested sub-actions (currently just `show`) so the surface has room to grow
+    (`rig stats export`, `rig stats compare`, …) without reshaping the top-level CLI.
+    """
+    sp = sub.add_parser("stats", help="tool-adoption analytics over agent-harness session logs")
+    # stash the subparser so `cmd_stats` can print ITS help on a bare `rig stats` (one source
+    # of truth for the usage text — no hand-retyped duplicate).
+    sp.set_defaults(_stats_parser=sp)
+    sact = sp.add_subparsers(dest="stats_action", metavar="<action>")
+
+    show = sact.add_parser("show", help="report how often each tool is invoked, by category/repo/harness")
+    show.add_argument(
+        "--harness", action="append", metavar="NAME",
+        # kept generic (not an exhaustive list) so it can't drift as parsers are added; the
+        # authoritative set is data-driven from the registered sources at run time.
+        help="limit to a harness (repeatable), e.g. claude-code / codex / gemini / opencode",
+    )
+    show.add_argument(
+        "--repo", action="append", metavar="PATH",
+        help="limit to a repo/cwd absolute path (repeatable)",
+    )
+    show.add_argument("--since", metavar="YYYY-MM-DD", help="only invocations on/after this date")
+    show.add_argument("--until", metavar="YYYY-MM-DD", help="only invocations on/before this date")
+    show.add_argument(
+        "--format", choices=("json", "tui", "web"), default="tui",
+        help="output mode (default: tui — rich terminal UI)",
+    )
+    show.add_argument("--web-port", type=int, default=0, help="port for --format web (default: auto)")
+    show.add_argument(
+        "--baseline", action="store_true",
+        help="narrow the report to the baseline-vs-ours buckets (drop external/other noise)",
+    )
+    # hidden seam: tests/scripts can point the whole pipeline at a sandbox HOME.
+    show.add_argument("--home", help=argparse.SUPPRESS)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         "doctor": cmd_doctor,
         "export": cmd_export,
         "install-skill": cmd_install_skill,
+        "stats": cmd_stats,
     }
     return handlers[args.command](args)
 
@@ -469,6 +511,19 @@ def cmd_install_skill(args: argparse.Namespace) -> int:
     from .install import install_skill
 
     return install_skill()
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    # `rig stats` with no action → print the stats subparser's own help (mirrors top-level
+    # `rig` behaviour; no hand-retyped usage to drift from the real flags).
+    if getattr(args, "stats_action", None) != "show":
+        parser = getattr(args, "_stats_parser", None)
+        if parser is not None:
+            parser.print_help()
+        return 0
+    from .stats import run as stats_run
+
+    return stats_run(args)
 
 
 if __name__ == "__main__":

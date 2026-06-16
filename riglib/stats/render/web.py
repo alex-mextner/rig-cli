@@ -1,0 +1,220 @@
+"""Web renderer — a self-contained local HTML page served by stdlib ``http.server``.
+
+No CDN, no JS deps: charts are inline SVG ``<rect>`` bars generated server-side from the
+Aggregate. ``build_html`` returns the whole page as one string (tested directly, no socket);
+``serve`` binds a one-shot-ish local server and opens a browser. ``http.server`` and
+``webbrowser`` are imported lazily inside ``serve`` so the package stays import-light.
+"""
+
+from __future__ import annotations
+
+import html
+
+from ..aggregate import Aggregate, TrendComparison
+from ..model import CATEGORIES
+from ._util import shorten
+
+# the SAME four categories as tui._CAT_COLOR, expressed in CSS hex (the tui table is a rich
+# terminal palette). Keep the two in sync by meaning when adding a category.
+_CAT_COLOR = {
+    "baseline": "#9aa0a6",
+    "ours": "#34a853",
+    "external-advertised": "#fbbc04",
+    "other": "#5f6368",
+}
+
+
+def _svg_bars(items: list[tuple[str, int, str]], width: int = 520, row_h: int = 26) -> str:
+    """A horizontal bar chart from (label, count, color) rows. Pure inline SVG."""
+    if not items:
+        return "<p class='empty'>no data</p>"
+    maxc = max((c for _, c, _ in items), default=1) or 1
+    label_w, bar_w, pad = 200, width - 260, 6
+    height = len(items) * row_h + pad
+    rows = []
+    for i, (label, count, color) in enumerate(items):
+        y = i * row_h + pad
+        w = max(1, round(bar_w * count / maxc)) if count else 0
+        safe = html.escape(label)
+        rows.append(
+            f'<text x="0" y="{y + 16}" class="lbl">{safe}</text>'
+            f'<rect x="{label_w}" y="{y + 4}" width="{w}" height="16" fill="{color}" rx="3"/>'
+            f'<text x="{label_w + w + 6}" y="{y + 16}" class="num">{count}</text>'
+        )
+    return f'<svg width="{width}" height="{height}" role="img">{"".join(rows)}</svg>'
+
+
+def build_html(agg: Aggregate, *, meta: dict | None = None, trend: TrendComparison | None = None) -> str:
+    meta = meta or {}
+    cat_rows = [(c, agg.by_category.get(c, 0), _CAT_COLOR[c]) for c in CATEGORIES]
+    tool_rows = [
+        (t, n, _CAT_COLOR.get(agg.tool_category.get(t, "other"), "#888"))
+        for t, n in agg.by_tool.most_common(20)
+    ]
+    harness_rows = [(h, n, "#4285f4") for h, n in sorted(agg.by_harness.items(), key=lambda kv: -kv[1])]
+    repo_rows = [
+        (shorten(r, 42), n, "#a142f4") for r, n in agg.by_repo.most_common(15)
+    ]
+
+    trend_svg = _trend_svg(agg)
+    comparison_html = _comparison_html(trend) if trend else ""
+    breakdown_html = _category_breakdown_html(agg)
+
+    note = html.escape(str(meta.get("note", "")))
+    span = ""
+    if agg.span_start and agg.span_end:
+        span = f"{agg.span_start.date()} &rarr; {agg.span_end.date()}"
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rig stats — tool adoption</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ font: 14px/1.5 -apple-system, system-ui, sans-serif; background:#16181c; color:#e8eaed;
+          margin:0; padding:24px; }}
+  h1 {{ font-size:20px; margin:0 0 4px; }} h2 {{ font-size:15px; margin:28px 0 8px; color:#9aa0a6; }}
+  .sub {{ color:#9aa0a6; margin:0 0 16px; }}
+  .cards {{ display:flex; gap:16px; flex-wrap:wrap; margin-bottom:8px; }}
+  .card {{ background:#202124; border:1px solid #2d2f34; border-radius:10px; padding:14px 18px; }}
+  .card .big {{ font-size:26px; font-weight:600; }}
+  .card.adopt .big {{ color:#34a853; }}
+  text.lbl {{ fill:#cdd1d6; font-size:12px; }} text.num {{ fill:#9aa0a6; font-size:12px; }}
+  svg {{ background:#202124; border:1px solid #2d2f34; border-radius:10px; padding:10px; }}
+  table {{ border-collapse:collapse; }} td,th {{ padding:3px 12px 3px 0; text-align:left; }}
+  .empty {{ color:#5f6368; }} .legend span {{ margin-right:14px; font-size:12px; }}
+  .legend i {{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }}
+</style></head><body>
+<h1>rig stats — tool adoption</h1>
+<p class="sub">{span}{(' · ' + note) if note else ''}</p>
+<div class="cards">
+  <div class="card"><div>total tool calls</div><div class="big">{agg.total}</div></div>
+  <div class="card adopt"><div>adoption (ours / ours+baseline)</div>
+       <div class="big">{agg.adoption_ratio():.1%}</div></div>
+  <div class="card"><div>harnesses</div><div class="big">{len(agg.by_harness)}</div></div>
+  <div class="card"><div>repos</div><div class="big">{len(agg.by_repo)}</div></div>
+</div>
+<p class="legend">{_legend()}</p>
+<h2>Categories</h2>{_svg_bars(cat_rows)}
+<h2>By harness</h2>{_svg_bars(harness_rows)}
+<h2>Top tools</h2>{_svg_bars(tool_rows)}
+<h2>Top repos</h2>{_svg_bars(repo_rows)}
+<h2>By category &amp; harness</h2>{breakdown_html}
+<h2>Daily trend (ours vs baseline)</h2>{trend_svg}
+{comparison_html}
+<p class="sub" style="margin-top:32px">generated by <code>rig stats show --format web</code> · self-contained, no external assets</p>
+</body></html>"""
+
+
+def _legend() -> str:
+    return "".join(
+        f'<span class="leg"><i style="background:{_CAT_COLOR[c]}"></i>{html.escape(c)}</span>'
+        for c in CATEGORIES
+    )
+
+
+def _category_breakdown_html(agg: Aggregate) -> str:
+    rows = ["<table><tr><th>harness</th>" + "".join(f"<th>{c}</th>" for c in CATEGORIES) + "</tr>"]
+    for h, cats in sorted(agg.harness_category.items(), key=lambda kv: -sum(kv[1].values())):
+        cells = "".join(f"<td>{cats.get(c, 0)}</td>" for c in CATEGORIES)
+        rows.append(f"<tr><td>{html.escape(h)}</td>{cells}</tr>")
+    rows.append("</table>")
+    return "".join(rows)
+
+
+def _trend_svg(agg: Aggregate, width: int = 720, height: int = 180) -> str:
+    days = sorted(agg.by_day)
+    if not days:
+        return "<p class='empty'>no timestamps in range — trend unavailable</p>"
+    days = days[-30:]
+    series_ours = [agg.by_day[d].get("ours", 0) for d in days]
+    series_base = [agg.by_day[d].get("baseline", 0) for d in days]
+    maxv = max([*series_ours, *series_base, 1])
+    pad_l, pad_b = 32, 20
+    plot_w, plot_h = width - pad_l - 10, height - pad_b - 10
+    n = len(days)
+    gap = plot_w / max(1, n)
+    bw = max(2, gap * 0.38)
+
+    def bars(series: list[int], color: str, offset: float) -> str:
+        out = []
+        for i, v in enumerate(series):
+            bar_h = float(round(plot_h * v / maxv)) if v else 0.0
+            x = pad_l + i * gap + offset
+            y = 10 + plot_h - bar_h
+            out.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{bar_h:.1f}" '
+                f'fill="{color}" rx="1"/>'
+            )
+        return "".join(out)
+
+    axis = (
+        f'<line x1="{pad_l}" y1="{10 + plot_h}" x2="{width - 10}" y2="{10 + plot_h}" stroke="#3c4043"/>'
+        f'<text x="0" y="16" class="num">{maxv}</text>'
+        f'<text x="{pad_l}" y="{height - 4}" class="num">{days[0]}</text>'
+        f'<text x="{width - 80}" y="{height - 4}" class="num">{days[-1]}</text>'
+    )
+    return (
+        f'<svg width="{width}" height="{height}" role="img">{axis}'
+        f'{bars(series_base, _CAT_COLOR["baseline"], 0)}'
+        f'{bars(series_ours, _CAT_COLOR["ours"], bw + 1)}</svg>'
+    )
+
+
+def _comparison_html(trend: TrendComparison) -> str:
+    rows = [
+        "<h2>Period comparison</h2><table>"
+        f"<tr><th>category</th><th>{html.escape(trend.earlier_label)}</th>"
+        f"<th>{html.escape(trend.later_label)}</th><th>Δ</th></tr>"
+    ]
+    for c in CATEGORIES:
+        early, late = trend.earlier.get(c, 0), trend.later.get(c, 0)
+        rows.append(f"<tr><td>{c}</td><td>{early}</td><td>{late}</td><td>{late - early:+d}</td></tr>")
+    rows.append(
+        f"<tr><td><b>adoption</b></td><td></td><td></td><td><b>{trend.adoption_delta():+.1%}</b></td></tr></table>"
+    )
+    return "".join(rows)
+
+
+def serve(
+    agg: Aggregate,
+    *,
+    meta: dict | None = None,
+    trend: TrendComparison | None = None,
+    port: int = 0,
+    open_browser: bool = True,
+) -> int:
+    """Serve the report on localhost and (optionally) open a browser. Blocks until Ctrl-C.
+
+    ``port=0`` lets the OS pick a free port. Returns the bound port (after serving ends).
+    """
+    import http.server
+    import threading
+    import webbrowser
+
+    page = build_html(agg, meta=meta, trend=trend).encode("utf-8")
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 (stdlib naming)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+
+        def log_message(self, *args):  # silence the default stderr access log
+            return
+
+    httpd = http.server.HTTPServer(("127.0.0.1", port), _Handler)
+    bound = httpd.server_address[1]
+    url = f"http://127.0.0.1:{bound}/"
+    print(f"rig stats — serving report at {url}  (Ctrl-C to stop)")
+    if open_browser:
+        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped.")
+    finally:
+        httpd.server_close()
+    return bound
