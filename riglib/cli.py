@@ -56,8 +56,22 @@ def _bold(s: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="rig",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description="rig — the dev-environment umbrella driver. Set up a repo from a "
         "committed rig.yaml by applying agent-tools content (skills, hooks, CI gates, MCP).",
+        # Exit codes are a PUBLIC CONTRACT (scripts/CI branch on them). Documented here per the
+        # structured-exit-codes skill; the constants live in riglib/errors.py.
+        epilog=(
+            "exit codes:\n"
+            "  0    success\n"
+            "  1    internal error (an unexpected failure / bug)\n"
+            "  2    invalid config (a malformed value, type, or unknown key)\n"
+            "  3    drift (rig status found config↔disk drift)\n"
+            "  4    unknown item (config names a catalog item that doesn't exist / was removed)\n"
+            "  5    missing target (config references a path/binary that's gone on disk)\n"
+            "  6    not a git repository (a repo-scoped command run outside a repo)\n"
+            "  127  missing dependency (a required external tool isn't installed)\n"
+        ),
     )
     p.add_argument("--version", action="version", version=f"rig {__version__}")
     sub = p.add_subparsers(dest="command", metavar="<command>")
@@ -75,7 +89,14 @@ def build_parser() -> argparse.ArgumentParser:
     ip = sub.add_parser("init", help="first-run onboarding: scaffold rig.yaml + wire the catalog in (the front door)")
     _add_setup_args(ip)
 
-    ap = sub.add_parser("apply", help="reconcile the repo to rig.yaml (idempotent)")
+    ap = sub.add_parser(
+        "apply",
+        help="reconcile the repo to rig.yaml (idempotent)",
+        description="Reconcile disk to rig.yaml (idempotent). apply only ADDS/UPDATES the "
+        "items your config declares — it NEVER deletes on-disk extras. Items present on disk "
+        "but not declared in any layer (e.g. a hand-added skill) are reported by `rig status` "
+        "and left untouched; apply will not nuke them.",
+    )
     ap.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
     ap.add_argument("--config", help="config file to apply (default: ./rig.yaml + global)")
     ap.add_argument("--dry-run", action="store_true", help="print the resolved plan, write nothing")
@@ -155,7 +176,12 @@ def main(argv: list[str] | None = None) -> int:
         "install-skill": cmd_install_skill,
         "stats": cmd_stats,
     }
-    return handlers[args.command](args)
+    # The single top-level error handler (error-system v2): any structured RigError a command
+    # raises is rendered as the consistent what/why/fix block + its stable per-class exit code.
+    # A non-RigError (a real bug) propagates so its traceback is visible.
+    from . import errors
+
+    return errors.guard(lambda: handlers[args.command](args))
 
 
 # ── shared helpers ────────────────────────────────────────────────────────────────
@@ -352,7 +378,61 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 1 if report.errors else 0
 
 
+def _scan_missing_targets() -> list:
+    """Scan the harness settings.json for hook commands pointing at files that are gone.
+
+    Resolves the claude-code harness settings file under HOME (``~/.claude/settings.json``) and
+    returns the missing-target findings. Kept a thin wrapper so cmd_status reads cleanly and a
+    future multi-harness expansion has one place to add settings paths.
+    """
+    from .missing_target import scan_settings_hooks
+
+    settings = Path(_os.path.expanduser("~/.claude/settings.json"))
+    return scan_settings_hooks(settings)
+
+
+def _print_non_git_note() -> None:
+    """The one-line 'this is not a git repository' note shown under the status header.
+
+    Single source for the wording so the normal status path and the catalog-failed fallback
+    (``_print_non_git_status``) can never drift apart — the smoke greps for "not a git
+    repository", and only one of two phrasings would be a regression waiting to happen.
+    """
+    print(_dim("  (not a git repository — repo layer / rig.yaml N/A here)"))
+
+
+def _print_non_git_status(env, config: str | None = None) -> int:
+    """Render a minimal `rig status` for a non-git dir when the catalog couldn't be resolved.
+
+    The catalog scan feeds the REPO layer (what this repo would install); a non-git dir has no
+    repo layer, so its failure is irrelevant here. We still owe the user the header + the
+    explicit "not a git repository" note (never the "should be committed" nag). Returns 0 — a
+    non-git dir is a valid place to ask "what's my status?", not an error.
+
+    Config loading precedes the (failed) catalog scan, so the layer provenance is still
+    reportable; we re-load it here rather than thread `loaded` through the exception path.
+    """
+    from .config import ConfigError, load
+
+    print(_bold("rig status"))
+    print(f"  repo: {env.repo_root}")
+    print(f"  stack: {env.stack}  type: {env.project_type}")
+    layers = "(none — built-in defaults)"
+    try:
+        explicit = None
+        if config:
+            cp = Path(config)
+            explicit = (cp if cp.is_absolute() else env.repo_root / cp).resolve()
+        layers = ", ".join(load(env.repo_root, explicit_config=explicit).layers) or layers
+    except ConfigError:
+        pass  # a malformed config still shouldn't stop us reporting "not a git repository"
+    print(f"  config layers: {layers}")
+    _print_non_git_note()
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
+    from . import errors
     from .catalog import CatalogError
     from .config import ConfigError
     from .drift import detect
@@ -360,7 +440,20 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     try:
         plan, loaded, env = _load_plan(args.cwd, args.config)
-    except (ConfigError, CatalogError, PlanError) as exc:
+    except CatalogError as exc:
+        # The catalog only matters for the REPO layer (what this repo would install). A non-git
+        # dir (e.g. ~) has no repo layer at all, so an unresolved agent-tools checkout must NOT
+        # mask the one thing status owes that user: "you're not in a git repository". Detecting
+        # the env is independent of (and cheap relative to) the catalog scan that just failed.
+        from .detect import detect_environment
+
+        env = detect_environment(Path(args.cwd).resolve())
+        if not env.is_git_repo:
+            return _print_non_git_status(env, args.config)
+        # A real repo with a broken/missing agent-tools source IS a genuine config failure.
+        print(_err(f"error: {exc}"))
+        return 2
+    except (ConfigError, PlanError) as exc:
         print(_err(f"error: {exc}"))
         return 2
 
@@ -369,8 +462,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  stack: {env.stack}  type: {env.project_type}")
     cfg_src = ", ".join(loaded.layers) or "(none — built-in defaults)"
     print(f"  config layers: {cfg_src}")
-    if loaded.repo_path is None:
-        print(_warn("  warning: no rig.yaml in this repo (it should be committed)"))
+
+    # The REPO layer only exists inside a git repository. In a non-git dir (e.g. ~) there is no
+    # repo at all — do NOT nag "no rig.yaml, should be committed" (that advice applies only in a
+    # real repo). Show that the repo layer is N/A and report the GLOBAL layer only.
+    if not env.is_git_repo:
+        _print_non_git_note()
+    elif loaded.repo_path is None:
+        # A REAL repo with no committed rig.yaml: make the fix PROMINENT, not a one-liner
+        # buried above a long drift dump.
+        print()
+        print(_warn(_bold("  ▸ no committed rig.yaml in this repository")))
+        print(_warn("    rig.yaml is the committed source of truth for this repo's setup."))
+        print(_ok("    fix: run `rig init` to create one"))
 
     # scan the configured target dirs for extras even if no action targets them.
     # CI + MCP targets are REPO-LOCAL with clear ownership → scan even when the category is
@@ -389,10 +493,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         h = resolve_category_target(loaded, "agent_hooks")
         if h and loaded.category("agent_hooks").get("enabled") is not False:
             scan_hook_dirs.append(h)
-    d = resolve_category_target(loaded, "ci")  # CI: scan unconditionally (repo-local)
-    if d:
-        scan_ci_dirs.append(d)
-    d = resolve_category_target(loaded, "mcp")  # MCP: scan unconditionally
+    # CI + MCP are REPO-LOCAL — only scan them when this IS a repo (a non-git dir has no repo
+    # layer; scanning a cwd-relative .github there would be meaningless).
+    if env.is_git_repo:
+        d = resolve_category_target(loaded, "ci")  # CI: scan unconditionally (repo-local)
+        if d:
+            scan_ci_dirs.append(d)
+    d = resolve_category_target(loaded, "mcp")  # MCP: scan unconditionally (global)
     if d:
         scan_mcp_files.append(d if d.suffix == ".json" else d / "mcp.json")
     report = detect(
@@ -414,22 +521,98 @@ def cmd_status(args: argparse.Namespace) -> int:
     # so `rig status` answers "is the daily checker cron there?" at a glance.
     _print_schedule_status(plan, report)
 
-    if report.in_sync:
+    # missing-target: a hook command in the harness settings.json that points at a file gone
+    # from disk (the dead-rtk-hook case) surfaces PROACTIVELY here, before it bites at runtime
+    # as a generic "PreToolUse error". This is independent of config↔disk drift.
+    dead_targets = _scan_missing_targets()
+    if dead_targets:
+        print()
+        print(_err(_bold(f"  ▸ missing targets ({len(dead_targets)}) — config points at files that are gone:")))
+        for f in dead_targets:
+            print(f"    {_err('✗')} {f.what}")
+            print(f"      {_dim('why:')} {f.why}")
+            print(f"      {_ok('fix:')} {f.fix}")
+
+    if report.in_sync and not dead_targets:
         print(_ok("\n  in sync — config and disk agree"))
         return 0
 
+    if dead_targets and report.in_sync:
+        # no config↔disk drift, but a dead hook reference IS a problem worth a non-zero exit.
+        print(_dim("\n  (no config↔disk drift, but a missing target above needs attention)"))
+        return errors.EXIT_MISSING_TARGET
+
+    _render_drift_by_layer(report, loaded, env)
+    # LOUD reassurance: apply NEVER deletes on-disk-not-declared items. A user must not fear
+    # `rig apply` will nuke a hand-added skill (it won't — extras are surfaced, never removed).
+    print()
+    print(_ok("  ✔ safe: `rig apply` NEVER deletes on-disk extras — items present on disk but"))
+    print(_ok("    not declared in any layer are left for you to decide. apply only ADDS/UPDATES."))
+    print(_dim("\n  run `rig apply` to converge config→disk (extras above are left as-is)"))
+    return 3
+
+
+def _declaring_config(category: str, loaded) -> str:
+    """Name the config FILE that declares a drift item's layer (or 'not declared in any layer').
+
+    GLOBAL categories are declared in ``~/.config/rig/config.yaml``; REPO categories in the
+    repo's ``./rig.yaml``. If that layer file isn't loaded (the category drifted from a default
+    or an orphaned on-disk extra with no backing config), say so plainly instead of pointing at
+    a file that doesn't declare it.
+    """
+    from .layers import GLOBAL, layer_for_category
+
+    layer = layer_for_category(category)
+    path = loaded.global_path if layer == GLOBAL else loaded.repo_path
+    return str(path) if path is not None else "not declared in any layer"
+
+
+def _render_drift_by_layer(report, loaded, env) -> None:
+    """Render drift GROUPED by GLOBAL vs REPO, each item naming its declaring config file.
+
+    The pre-v2 status flattened machine-wide GLOBAL drift (skills/hooks/harness/mcp) together
+    with this repo's REPO drift (CI/symlinks) into one undifferentiated dump — so a global
+    skills drift looked like the repo's problem. Grouping by layer + naming the source file
+    makes each item's ownership unambiguous.
+    """
+    from .layers import GLOBAL, REPO, layer_for_category
+
+    # bucket every drift item by its owning layer, preserving missing-before-extra ordering.
     missing = report.by_direction("missing") + report.by_direction("modified")
     extra = report.by_direction("extra")
-    if missing:
-        print(_warn(f"\n  config→disk drift ({len(missing)}) — declared but missing/modified:"))
-        for d in missing:
-            print(f"    {_warn('▸')} {d.category}/{d.item}: {d.detail}")
-    if extra:
-        print(_warn(f"\n  disk→config drift ({len(extra)}) — on disk, not declared:"))
-        for d in extra:
-            print(f"    {_warn('▸')} {d.category}/{d.item}: {d.detail}  [{d.target}]")
-    print(_dim("\n  run `rig apply` to converge config→disk (extras are left for you to decide)"))
-    return 3
+    buckets: dict[str, dict[str, list]] = {
+        GLOBAL: {"missing": [], "extra": []},
+        REPO: {"missing": [], "extra": []},
+    }
+    for d in missing:
+        buckets[layer_for_category(d.category)]["missing"].append(d)
+    for d in extra:
+        buckets[layer_for_category(d.category)]["extra"].append(d)
+
+    headers = {
+        GLOBAL: "GLOBAL — machine-wide (from ~/.config/rig/config.yaml)",
+        REPO: "REPO — this repository (from ./rig.yaml)",
+    }
+    for layer in (GLOBAL, REPO):
+        miss = buckets[layer]["missing"]
+        ext = buckets[layer]["extra"]
+        if not miss and not ext:
+            continue
+        # the REPO layer is meaningless outside a git repo — never print it there.
+        if layer == REPO and not env.is_git_repo:
+            continue
+        print()
+        print(_bold(f"  {headers[layer]}"))
+        if miss:
+            print(_warn(f"    config→disk drift ({len(miss)}) — declared but missing/modified:"))
+            for d in miss:
+                src = _declaring_config(d.category, loaded)
+                print(f"      {_warn('▸')} {d.category}/{d.item}: {d.detail}  {_dim('[declared in ' + src + ']')}")
+        if ext:
+            print(_warn(f"    disk→config drift ({len(ext)}) — on disk, not declared:"))
+            for d in ext:
+                src = _declaring_config(d.category, loaded)
+                print(f"      {_warn('▸')} {d.category}/{d.item}: {d.detail}  {_dim('[' + str(d.target) + '; ' + src + ']')}")
 
 
 def _print_schedule_status(plan, report) -> None:
@@ -468,22 +651,49 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             else:
                 print(f"      {_dim('install: (no package mapping for this OS — install manually)')}")
 
+    # missing-target: proactively flag a dead hook reference in the harness settings.json (the
+    # rtk-hook case) so it's caught here, not at runtime as a generic harness error.
+    dead_targets = _scan_missing_targets()
+    if dead_targets:
+        print(_err(_bold(f"\n  ▸ missing targets ({len(dead_targets)}) — config points at files that are gone:")))
+        for f in dead_targets:
+            print(f"    {_err('✗')} {f.what}")
+            print(f"      {_ok('fix:')} {f.fix}")
+
     missing_req = report.missing_required
-    if not missing_req and not (args.optional and report.missing_optional):
+    if not missing_req and not (args.optional and report.missing_optional) and not dead_targets:
         print(_ok("\n  all required dependencies present"))
         return 0
+    # a dead target (but no missing dep) is still a problem worth a non-zero exit.
+    if not missing_req and not (args.optional and report.missing_optional) and dead_targets:
+        from . import errors
+
+        print(_warn("\n  a missing target above needs attention (re-run `rig apply` or remove the stale entry)"))
+        return errors.EXIT_MISSING_TARGET
 
     if not args.yes:
+        from . import errors
+
         print(_warn("\n  missing dependencies above. Re-run with --yes to install them"))
         print(_dim("  (add --optional to also install optional deps)"))
-        return 1
+        # honor the documented exit-code contract: a missing REQUIRED dep is the 127 class
+        # (shell convention). A shortfall of only OPTIONAL deps (under --optional) is advisory,
+        # not a hard "required tool absent", so it stays the generic non-zero.
+        return errors.EXIT_MISSING_DEP if missing_req else 1
 
     print(_bold("\n  installing missing dependencies..."))
     results = bootstrap(report, assume_yes=True, include_optional=args.optional)
     failed = [name for name, rc in results if rc not in (0,)]
     for name, rc in results:
         print(f"    {_ok('✔') if rc == 0 else _err('✗')} {name} (rc={rc})")
-    return 1 if failed else 0
+    if failed:
+        from . import errors
+
+        # an install that left a REQUIRED dep absent is still the missing-dependency class;
+        # a failed optional install is advisory (generic non-zero).
+        req_names = {st.dep.name for st in report.statuses if st.dep.required and not st.present}
+        return errors.EXIT_MISSING_DEP if (set(failed) & req_names) else 1
+    return 0
 
 
 def cmd_export(args: argparse.Namespace) -> int:

@@ -120,6 +120,20 @@ class LoadedConfig:
         d = self.data.get("defaults")
         return d if isinstance(d, dict) else {}
 
+    @property
+    def primary_config_path(self) -> Path:
+        """The most-specific config file backing this config, for naming in error messages.
+
+        The repo ``rig.yaml`` OVERRIDES the global config, so an invalid key is most likely
+        the repo one — name it first; fall back to the global path, then to a notional repo
+        path so an error always points somewhere concrete to edit.
+        """
+        if self.repo_path is not None:
+            return self.repo_path
+        if self.global_path is not None:
+            return self.global_path
+        return repo_config_path(self.repo_root)
+
 
 def load(
     repo_root: Path,

@@ -249,12 +249,26 @@ def _validate_item_names(config: LoadedConfig, catalog: Catalog) -> None:
     universal/by_type are separate groups, and by_type uses fully-qualified
     ``by-type/<kind>/<name>`` keys plus bare ``<kind>`` bundle names in ``by_type.enable``.
     """
-    def _check(category: str, names: set[str], known: set[str], label: str) -> None:
-        unknown = names - known
+    from . import errors
+
+    config_path = str(config.primary_config_path)
+
+    def _check(category: str, names: set[str], known: set[str], key_prefix: str) -> None:
+        """Raise a structured :class:`errors.UnknownItemError` for the first unknown name.
+
+        ``category`` is the catalog category used for the removed-slot lookup + did-you-mean;
+        ``key_prefix`` is the dotted config-key path (e.g. ``mcp.items``) the bad name hangs
+        off, so the error names the EXACT offending key (``mcp.items.review``) + its file.
+        """
+        unknown = sorted(names - known)
         if unknown:
-            raise PlanError(
-                f"unknown {label} item(s): {', '.join(sorted(unknown))} "
-                f"(known: {', '.join(sorted(known)) or 'none'})"
+            bad = unknown[0]
+            raise errors.unknown_item_error(
+                category=category,
+                key=f"{key_prefix}.{bad}",
+                bad=bad,
+                known=known,
+                config_path=config_path,
             )
 
     # skills — universal group
@@ -264,7 +278,7 @@ def _validate_item_names(config: LoadedConfig, catalog: Catalog) -> None:
         uni_known = {i.name for i in catalog.by_category("skills") if i.group == "universal"}
         refs = set(uni.get("enable", []) or []) | set(uni.get("disable", []) or [])
         refs |= set(k for k in uni.get("items", {}) if isinstance(uni.get("items"), dict))
-        _check("skills", refs, uni_known, "universal skill")
+        _check("skills", refs, uni_known, "skills.universal")
     # skills — by_type group (fully-qualified item keys; bundle names checked separately)
     bt = sk.get("by_type", {}) if isinstance(sk, dict) else {}
     if isinstance(bt, dict):
@@ -272,8 +286,8 @@ def _validate_item_names(config: LoadedConfig, catalog: Catalog) -> None:
         bt_kinds = {i.meta.get("kind", "") for i in catalog.by_category("skills") if i.group.startswith("by-type/")}
         bt_items = bt.get("items", {})
         if isinstance(bt_items, dict):
-            _check("skills", set(bt_items), bt_known, "by-type skill")
-        _check("skills", set(bt.get("enable", []) or []), bt_kinds, "by-type bundle")
+            _check("skills", set(bt_items), bt_known, "skills.by_type.items")
+        _check("skills", set(bt.get("enable", []) or []), bt_kinds, "skills.by_type.enable")
 
     # agent_hooks + mcp — flat items/enable/disable
     for cat_name in ("agent_hooks", "mcp"):
@@ -285,19 +299,14 @@ def _validate_item_names(config: LoadedConfig, catalog: Catalog) -> None:
         items = cfg.get("items", {})
         if isinstance(items, dict):
             refs |= set(items)
-        _check(cat_name, refs, known, cat_name)
+        _check(cat_name, refs, known, f"{cat_name}.items")
 
     # git_hooks — nested sub-groups (only 'dispatcher' is shipped in v0.1). A typo like
     # 'dispatcherr' must fail closed, not silently build no dispatcher action.
     gh = config.category("git_hooks")
     if isinstance(gh, dict):
         gh_known = catalog.names("git_hooks") | {"templates"}  # templates reserved for v0.2
-        unknown_gh = set(gh) - gh_known
-        if unknown_gh:
-            raise PlanError(
-                f"unknown git_hooks key(s): {', '.join(sorted(unknown_gh))} "
-                f"(known: {', '.join(sorted(gh_known))})"
-            )
+        _check("git_hooks", set(gh), gh_known, "git_hooks")
 
 
 def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknown") -> InstallPlan:
@@ -404,11 +413,17 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
         # config enabling ship against a minimal checkout fails closed instead of dropping.
         known = catalog.names("ci")
         referenced = set(ci_items) | set(ci.get("enable", []) or []) | set(ci.get("disable", []) or [])
-        unknown = referenced - known
+        unknown = sorted(referenced - known)
         if unknown:
-            raise PlanError(
-                f"unknown ci item(s): {', '.join(sorted(unknown))} "
-                f"(known: {', '.join(sorted(known))})"
+            from . import errors
+
+            bad = unknown[0]
+            raise errors.unknown_item_error(
+                category="ci",
+                key=f"ci.items.{bad}",
+                bad=bad,
+                known=known,
+                config_path=str(config.primary_config_path),
             )
 
         # resolve which slots are enabled: per-item override > enable/disable > all > off.
