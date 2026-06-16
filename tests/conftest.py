@@ -65,15 +65,39 @@ def _isolate_scheduler(monkeypatch):
 
         return ActionResult(action, "skipped", "models/model-freshness: scheduler stubbed in tests")
 
+    def _noop_tg_ctl(action, on_conflict):
+        from riglib.actions.runner import ActionResult
+
+        return ActionResult(action, "skipped", "tg_ctl/boot: daemon provisioner stubbed in tests")
+
     # Patch BOTH the module attr and the dispatch-table entry: `run_plan` resolves the handler
     # from `_HANDLERS` (a dict built at import with a direct function reference), so patching
     # only the module attr would leave the e2e `run_plan` path calling the real installer.
     monkeypatch.setattr(runner, "_do_provision_schedule", _noop_provision)
     monkeypatch.setitem(runner._HANDLERS, "provision_schedule", _noop_provision)
+    # tg_ctl: (boot:) is ALSO in the DEFAULT scaffold (default-on), so an e2e `rig init --yes`
+    # would otherwise write a real ~/Library/LaunchAgents/ai.hyperide.tg-ctl.plist AND shell out
+    # to the real `launchctl bootstrap`. Neutralize it suite-wide exactly like the schedule; the
+    # dedicated tests (test_tg_ctl.py) call `_do_provision_tg_ctl` with their own HOME-isolated
+    # tmp dirs + stubbed launchctl seams, which override this stub for those tests.
+    monkeypatch.setattr(runner, "_do_provision_tg_ctl", _noop_tg_ctl)
+    monkeypatch.setitem(runner._HANDLERS, "provision_tg_ctl", _noop_tg_ctl)
+    # tg_ctl is default-on, so a provision_tg_ctl action exists in EVERY e2e plan. Its drift
+    # check reads the REAL ``_on_darwin()`` (true on a macOS dev box) and would flag the missing
+    # plist — but the provisioner above is stubbed, so apply never writes it, leaving a permanent
+    # phantom drift in e2e tests. Neutralize the drift check suite-wide too (the dedicated
+    # test_tg_ctl.py restores the real one). Symmetric with the provisioner stub.
+    monkeypatch.setattr(driftmod, "_check_tg_ctl", lambda action, report: None)
 
     for mod in (runner, driftmod):
         monkeypatch.setattr(mod, "_launchctl", lambda verb, arg: 0, raising=False)
         monkeypatch.setattr(mod, "_launchctl_loaded", lambda label: False, raising=False)
+        # the gui-domain verbs the tg-ctl provisioner uses — stub them so neither runner nor
+        # drift can EVER reach the real launchd domain in any test (a test that mutates the real
+        # launchd domain is a FAIL). Dedicated tg-ctl tests install their own stubs/spies.
+        monkeypatch.setattr(mod, "_launchctl_bootstrap", lambda plist: 0, raising=False)
+        monkeypatch.setattr(mod, "_launchctl_bootout", lambda plist: 0, raising=False)
+        monkeypatch.setattr(mod, "_launchctl_gui_loaded", lambda label: False, raising=False)
         monkeypatch.setattr(mod, "_read_crontab", lambda: (crontab_store["has"], crontab_store["content"]))
 
     def _fake_write_crontab(contents):

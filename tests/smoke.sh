@@ -15,6 +15,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RIG="python3 $ROOT/bin/rig"
 
+# Provision tg-ctl in DRY-RUN for the WHOLE smoke: tg_ctl is default-on, so the apply legs below
+# would otherwise (on macOS) shell out to the real `launchctl bootstrap` and write the real
+# user's launchd domain. RIG_TG_CTL_DRY_RUN writes the plist into the (HOME-isolated) path but
+# NEVER touches the live launchd domain — the hard isolation rule. (The dedicated tg-ctl leg
+# below relies on this too.)
+export RIG_TG_CTL_DRY_RUN=1
+
+# Resolve an agent-tools checkout ONCE, up front, against the REAL HOME — the apply leg below
+# overwrites $HOME with an isolated tmp dir, so any later HOME-relative discovery would miss it.
+AGENT_TOOLS="${RIG_AGENT_TOOLS_SOURCE:-}"
+for cand in "$AGENT_TOOLS" "$HOME/xp/agent-tools" "$HOME/work/agent-tools" "$HOME/agent-tools"; do
+  if [[ -n "$cand" && -d "$cand/skills" && -d "$cand/agent-hooks" ]]; then AGENT_TOOLS="$cand"; break; fi
+done
+
 pass() { printf '  \033[32m✔\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31m✗ %s\033[0m\n' "$1"; exit 1; }
 
@@ -30,11 +44,8 @@ $RIG doctor >/dev/null 2>&1 || true
 pass "rig doctor"
 
 # ── 3. headless setup against a sample config, isolated HOME ──────────────────
-# Locate an agent-tools checkout to apply FROM. Prefer the env override, then defaults.
-SRC="${RIG_AGENT_TOOLS_SOURCE:-}"
-for cand in "$SRC" "$HOME/xp/agent-tools" "$HOME/work/agent-tools" "$HOME/agent-tools"; do
-  if [[ -n "$cand" && -d "$cand/skills" && -d "$cand/agent-hooks" ]]; then SRC="$cand"; break; fi
-done
+# Apply FROM the agent-tools checkout resolved up top (before HOME gets isolated).
+SRC="$AGENT_TOOLS"
 if [[ -z "$SRC" || ! -d "$SRC/skills" ]]; then
   printf '  \033[33m○ skip\033[0m apply smoke — no agent-tools checkout found (set RIG_AGENT_TOOLS_SOURCE)\n'
 else
@@ -77,6 +88,16 @@ tmux:
 gitignore:
   enabled: true
 YAML
+  # the review MCP server is only declarable when the agent-tools checkout actually carries it
+  # (a README-only mcp/ dir — an incomplete checkout — would make `review` an unknown item and
+  # fail the whole apply on an env unrelated to what this smoke proves). Include it only if present.
+  if [[ -d "$SRC/mcp/review" ]]; then
+    cat >> "$TMP/rig.yaml" <<YAML
+mcp:
+  items:
+    review: { enabled: true, command: "review --mcp" }
+YAML
+  fi
 
   # dry-run first (must write nothing)
   $RIG init -C "$TMP" --config "$TMP/rig.yaml" --yes --dry-run >/dev/null || fail "init --dry-run"
@@ -199,6 +220,57 @@ YAML
   echo "$nongit_out" | grep -qi "should be committed" && fail "non-git: still nags 'should be committed'"
   echo "$nongit_out" | grep -qi "not a git repository" || fail "non-git: does not say 'not a git repository'"
   pass "rig status: non-git dir → no 'should be committed', repo layer N/A"
+fi
+
+# ── 3b. tg-ctl inbound-daemon LaunchAgent provisioning (macOS, dry-run isolated) ──
+# Proves the tg_ctl boot LaunchAgent is provisioned by `rig apply` with the plist landing under
+# the ISOLATED HOME and NO real `launchctl` call (RIG_TG_CTL_DRY_RUN, exported at the top).
+# macOS-only (launchd); skipped off darwin and when no agent-tools checkout is found (rig's plan
+# build requires a source even when carrier categories are off). Uses the source resolved up top.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '  \033[33m○ skip\033[0m tg-ctl leg — not macOS (launchd-only)\n'
+elif [[ -z "$AGENT_TOOLS" || ! -d "$AGENT_TOOLS/skills" ]]; then
+  printf '  \033[33m○ skip\033[0m tg-ctl leg — no agent-tools checkout (set RIG_AGENT_TOOLS_SOURCE)\n'
+else
+  TG_TMP="$(mktemp -d)"
+  TG_HOME="$TG_TMP/home"; mkdir -p "$TG_HOME"
+  ( cd "$TG_TMP" && git init -q )
+  # a FOCUSED tg-ctl config: every other default-on category off (incl. models, whose cron would
+  # otherwise shell out to launchctl) so the leg exercises ONLY tg-ctl.
+  cat > "$TG_TMP/rig.yaml" <<YAML
+version: 1
+agent_tools_source: $AGENT_TOOLS
+skills:      { enabled: false }
+agent_hooks: { enabled: false }
+ci:          { enabled: false }
+mcp:         { enabled: false }
+agents_md:   { enabled: false }
+github:      { ruleset: { enabled: false } }
+models:      { enabled: false }
+tg_ctl:
+  enabled: true
+  bun_path: /usr/bin/true
+  tg_ctl_path: $TG_HOME/.files/bin/tg-ctl
+  config_dir: $TG_HOME/.config/tg-cli
+YAML
+  PLIST="$TG_HOME/Library/LaunchAgents/ai.hyperide.tg-ctl.plist"
+  HOME="$TG_HOME" $RIG apply -C "$TG_TMP" --config "$TG_TMP/rig.yaml" >/dev/null 2>&1 \
+    || { rm -rf "$TG_TMP"; fail "tg-ctl apply (dry-run) nonzero"; }
+  [[ -f "$PLIST" ]] || { rm -rf "$TG_TMP"; fail "tg-ctl plist not written under isolated HOME"; }
+  grep -q "<string>ai.hyperide.tg-ctl</string>" "$PLIST" \
+    || { rm -rf "$TG_TMP"; fail "tg-ctl plist missing Label"; }
+  # idempotency: a second apply against the now-current plist must change NOTHING — the summary
+  # must carry no non-zero created/updated/backed_up count. (We do NOT assert `rig status` in-sync
+  # here: under dry-run the plist is written but never bootstrapped, and drift's loaded-state check
+  # queries the REAL launchd domain — a machine-dependent result the smoke can't control. The
+  # deterministic drift/in-sync coverage lives in test_tg_ctl.py with the launchctl seams stubbed.)
+  out="$(HOME="$TG_HOME" $RIG apply -C "$TG_TMP" --config "$TG_TMP/rig.yaml" 2>&1)"
+  summary="$(echo "$out" | grep '^Summary:' || true)"
+  if echo "$summary" | grep -Eq "(created|updated|backed_up)=[1-9]"; then
+    rm -rf "$TG_TMP"; fail "tg-ctl second apply was not idempotent: $summary"
+  fi
+  rm -rf "$TG_TMP"
+  pass "rig provisions tg-ctl boot LaunchAgent (dry-run, isolated, idempotent)"
 fi
 
 # ── 4. unit suite ─────────────────────────────────────────────────────────────
