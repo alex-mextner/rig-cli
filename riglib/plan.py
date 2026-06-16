@@ -66,7 +66,7 @@ _DEFAULT_HARNESS_KIND = "claude-code"
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_tmux
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -500,6 +500,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── github (repository branch ruleset via gh api) ─────────────────────────────
     _build_github_ruleset(config, plan)
 
+    # ── tmux (rig-managed tmux configuration) ──────────────────────────────────────
+    _build_tmux(config, plan)
+
     return plan
 
 
@@ -772,6 +775,57 @@ def _build_models(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) -> 
                 "hour": hour,
                 "minute": minute,
                 "checker_path": str(checker_path),
+            },
+        )
+    )
+
+
+def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the rig-managed tmux configuration provisioning, if a ``tmux`` block enables it.
+
+    NOT default-on: tmux config is opt-in (a ``tmux:`` block with ``enabled`` not false). The
+    whole generate-and-migrate logic depends on what is already on disk (an existing hand-
+    written ``~/.tmux.conf``), so the plan emits ONE idempotent ``provision_tmux`` action
+    carrying the validated config sub-blocks; the runner resolves the :class:`TmuxPlan` and
+    writes the artifacts. No carrier in agent-tools — rig generates the config itself.
+
+    The conf path is resolved at apply time (HOME-relative ``~/.tmux.conf`` stays portable in a
+    committed rig.yaml), so the action target is the conf path expanded against the repo root.
+    """
+    t = config.data.get("tmux")
+    # A PRESENT `tmux:` block opts in (the docs: a block with `enabled` not false provisions) —
+    # including an explicit empty mapping `tmux: {}` (which yields all the safe defaults). Only an
+    # ABSENT key (None) or `enabled: false` is a no-op. `t == {}` must NOT be treated as absent.
+    if t is None or not isinstance(t, dict):
+        return
+    if t.get("enabled") is False:
+        return
+
+    from .tmux import DEFAULT_APPLY_MODE
+
+    # Resolve conf_path / generated_dir HERE against the repo root, so a relative path is
+    # anchored to the `-C` repo (never the process CWD) and ~/ stays home-anchored. The runner
+    # gets ABSOLUTE paths and never re-resolves against CWD. (Mirrors how every other action's
+    # target is plan-resolved.)
+    conf_path = _expand(str(t.get("conf_path", "~/.tmux.conf")), config.repo_root)
+    generated_dir = _expand(str(t.get("generated_dir", "~/.config/rig/tmux")), config.repo_root)
+    plan.actions.append(
+        Action(
+            kind="provision_tmux",
+            category="tmux",
+            item="config",
+            source=config.repo_root,  # no carrier; rig generates the config
+            target=conf_path,
+            options={
+                "apply_mode": str(t.get("apply", DEFAULT_APPLY_MODE)),
+                "conf_path": str(conf_path),
+                "generated_dir": str(generated_dir),
+                "resurrect": dict(t.get("resurrect", {}) or {}),
+                "continuum": dict(t.get("continuum", {}) or {}),
+                "moshi": dict(t.get("moshi", {}) or {}),
+                "cc_restore": dict(t.get("cc_restore", {}) or {}),
+                "anti_sprawl": dict(t.get("anti_sprawl", {}) or {}),
+                "boot": dict(t.get("boot", {}) or {}),
             },
         )
     )

@@ -46,6 +46,12 @@ decided by TTY + config + flags. `init` is the canonical onboarding command (the
 - **Agent-hook `cmd` is always written absolute.** The `agents-hooks/v1` runner rejects
   relative paths; the install action rewrites the `/ABSOLUTE/PATH/TO/...` placeholder to
   the real script path in the agent-tools checkout.
+- **Never mutate a LIVE running service.** rig prepares on-disk artifacts; the user reloads.
+  The `tmux` block writes `rig.tmux.conf` + the managed scripts + a boot launchd plist and
+  wires `~/.tmux.conf`, but NEVER runs `tmux source-file` against the user's live server and
+  NEVER `launchctl load`s the boot plist (that would disrupt an active session). The `models`
+  schedule is the one exception (a non-interactive cron is safe to (re)load). Migration backs
+  up the original (`~/.tmux.conf.rig-bak`) and never overwrites an existing backup.
 
 ## The integration seam (agent-tools)
 
