@@ -38,6 +38,7 @@ harness: { ... }              # agent harness auto/permission provisioning (auto
 models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
 agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
 github: { ... }               # GitHub repo branch ruleset via gh api, default ON (no-op without a github remote)
+tmux: { ... }                 # rig-managed tmux config (generate + migrate ~/.tmux.conf), opt-in
 ```
 
 If `agent_tools_source` is omitted, rig resolves it from `$RIG_AGENT_TOOLS_SOURCE`, then
@@ -451,6 +452,139 @@ Set `RIG_GH_DRY_RUN=1` to compute what *would* change (the create/update is repo
 
 ---
 
+## `tmux`
+
+rig **MANAGES tmux configuration declaratively** from this block — generating the config from
+`rig.yaml` and **MIGRATING** an existing hand-written `~/.tmux.conf` instead of clobbering it.
+Because rig *generates* the managed region it can **GUARANTEE plugin-init ordering** — the
+root-cause fix for a stale-session-on-reboot bug (below). **Opt-in:** a `tmux:` block with
+`enabled` not `false`; an absent block leaves tmux alone.
+
+```yaml
+tmux:
+  enabled: true                 # provision the rig-managed tmux config (opt-in)
+  apply: import                 # import (preferred) | block (sentinel-fenced fallback)
+  conf_path: ~/.tmux.conf       # the file rig migrates/wires
+  generated_dir: ~/.config/rig/tmux   # where rig writes rig.tmux.conf + the managed scripts
+  resurrect:
+    # do NOT list `claude` here while cc_restore is on — cc-restore owns the exact resume
+    # (see "Why claude is NOT in the default @resurrect-processes" below).
+    processes: [ssh, psql, mysql, sqlite3]
+    capture_pane_contents: true
+  continuum:
+    restore: true               # @continuum-restore on
+    save_interval: 15           # @continuum-save-interval (minutes)
+    boot: true                  # NO-OP: rig's launchd agent owns boot (see boot.enabled); rig
+                                # never emits @continuum-boot 'on' (it would install continuum's
+                                # own untracked iTerm Tmux.Start.plist — the path rig replaces)
+  moshi:
+    enabled: false              # opt-in Moshi (iOS client) status-line tweaks — see below
+  cc_restore:
+    enabled: true               # per-window Claude Code resume by exact session id
+  anti_sprawl:
+    enabled: true               # install an attach-or-create entry (one canonical session)
+    session: main               # the canonical session name
+  boot:
+    enabled: true               # a launchd agent that brings tmux up after a macOS reboot
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | — (opt-in) | provision the rig-managed tmux config (`false`/absent → leave tmux alone) |
+| `apply` | enum | `import` | apply mechanism: `import` (preferred) or `block` (managed-block fallback) |
+| `conf_path` | path | `~/.tmux.conf` | the user's tmux config rig migrates and wires |
+| `generated_dir` | path | `~/.config/rig/tmux` | where rig writes `rig.tmux.conf` + cc-save/cc-restore/tmux-attach scripts |
+| `resurrect.processes` | list[str] | `[ssh, psql, mysql, sqlite3]` | `@resurrect-processes`. `claude` is **omitted by default while cc_restore is on** (cc-restore owns the exact resume); rig adds it only when cc_restore is off (fallback). List it explicitly to force it. |
+| `resurrect.capture_pane_contents` | bool | `true` | `@resurrect-capture-pane-contents on` |
+| `continuum.restore` | bool | `true` | `@continuum-restore on` |
+| `continuum.save_interval` | int ≥ 1 | `15` | `@continuum-save-interval` (minutes) |
+| `continuum.boot` | bool | `true` | **no-op** — rig always emits `@continuum-boot 'off'` (its own launchd agent owns boot; see `boot.enabled`). Kept for forward-compat. |
+| `moshi.enabled` | bool | `false` | opt-in Moshi status-line tweaks, emitted **before** continuum init |
+| `cc_restore.enabled` | bool | `true` | wire cc-save/cc-restore via resurrect post-save/post-restore hooks |
+| `anti_sprawl.enabled` | bool | `true` | install the attach-or-create entry script |
+| `anti_sprawl.session` | str | `main` | the one canonical session name |
+| `boot.enabled` | bool | `true` | write a launchd agent (macOS) that starts tmux after a reboot |
+
+**Apply mechanism — import-preferred, managed-block fallback.**
+
+- **`import` (preferred).** rig owns `~/.config/rig/tmux/rig.tmux.conf` (built wholesale from
+  this block on every apply, idempotent) and `~/.tmux.conf` carries a **single `source-file`
+  import line** appended after the user's own lines. rig rewrites only its own file and the one
+  import line — every hand-written line in `~/.tmux.conf` is left untouched.
+- **`block` (fallback).** rig splices the generated body between sentinel markers
+  `# === rig-managed (tmux) BEGIN ===` / `# === rig-managed (tmux) END ===`, replacing **only**
+  between the markers (conda-init style). Lines before and after the block are preserved.
+
+**First apply / migration.** When the existing `~/.tmux.conf` carries rig-owned settings inline
+(resurrect/continuum/tpm/Moshi), rig backs the **original** up to `~/.tmux.conf.rig-bak` before
+wiring the managed region — and **never overwrites an existing backup** (the true original is
+preserved). The migration is deliberately **conservative**: it neutralizes (comments out, with a
+`# rig-migrated (now in rig.tmux.conf):` marker) **only the inline Moshi `status-left`/
+`status-right` wipe** — the one line that is *actively harmful* (if it runs after the user's own
+continuum init it wipes continuum's autosave hook). **Every other line stays live**, including
+options rig does not model (e.g. `@resurrect-strategy-vim`, `@continuum-boot-options`) — so a
+migration never silently drops a user-tuned setting. rig's sourced `rig.tmux.conf` re-runs the
+plugin inits in the correct order *last*, so the surviving inline lines are harmless duplicates
+and the correctly-ordered tail wins. `rig status` reports drift on the **managed region only**
+(the generated file, the scripts, the boot plist, the import line / managed block) — never on the
+user's hand-written lines.
+
+**The root-cause ordering guarantee.** tmux-continuum's autosave timer lives in `status-right`.
+A hand-written conf that ran `set -g status-right ''` (a Moshi tweak) **after**
+`run-shell …/continuum.tmux` silently wiped continuum's hook → autosave died → a reboot restored
+a weeks-stale session. rig's generator pins the order: plugin options → cc-restore hooks → the
+**Moshi tweak (opt-in, BEFORE continuum init)** → resurrect init → **continuum init LAST** → tpm
+init last-of-all. So the Moshi tweak can never wipe continuum's hook again.
+
+**cc-restore — per-window Claude Code resume by exact session id.** rig installs two managed
+scripts and wires them via `@resurrect-hook-post-save-all` / `@resurrect-hook-post-restore-all`:
+
+- **`cc-save.sh`** — for every pane whose command is `claude`, take its cwd, find the **newest**
+  session id under `~/.claude/projects/<encoded-cwd>/`, and write a `window/pane → cwd →
+  session_id` map. **Encoding (verified against real on-disk dirs):** the projects-dir name is
+  the cwd with **every `/` and `.` replaced by `-`** (e.g. `/Users/u/.files` →
+  `-Users-u--files`).
+- **`cc-restore.sh`** — after a reboot, for each mapped window run `claude --resume <id>` —
+  **only into a fresh shell pane** (never on top of a running `claude`). A stale/missing id
+  falls back to `claude --continue` (most-recent session in that cwd) so a reboot is never left
+  with a dead pane.
+
+**Why `claude` is NOT in the default `@resurrect-processes`.** When `cc_restore` is on, cc-restore
+owns the resume, so rig **deliberately leaves `claude` OUT** of `@resurrect-processes`: if it were
+in the list, tmux-resurrect would restart the pane as a *bare* `claude` (a new/default session)
+**before** the cc-restore hook runs, and cc-restore — which only ever resumes a *fresh shell* —
+would then skip that pane, leaving the wrong session. So resurrect brings the **shell** back and
+cc-restore does the exact `claude --resume <id>`. (With `cc_restore: { enabled: false }`, `claude`
+*is* added to `@resurrect-processes` as the best-effort fallback. You can also list `claude`
+explicitly in `resurrect.processes` to force it in.)
+
+**Known limitation — per-cwd, not strictly per-pane.** Claude Code does not expose its session id
+per tmux pane, so cc-save records the **newest** session id for each pane's **cwd**. Two `claude`
+panes in the **same** directory therefore map to the same session id and cc-restore resumes both
+into it. Per-window exact resume holds when each claude pane is in a **distinct** cwd (the common
+case).
+
+**anti-sprawl — one canonical session.** A Moshi/iTerm reconnect that ran a bare `tmux` spawned
+a **duplicate** session. rig installs `tmux-attach.sh` (attach `<session>` if it exists, else
+create it). Wire it from the login shell (documented, **not** auto-wired — rig never edits the
+user's shell rc): `[ -z "$TMUX" ] && exec ~/.config/rig/tmux/tmux-attach.sh`. On this machine
+there is **one** canonical tmux path — the rumored second wrapper (`ln`/`.ln.conf`) does not
+exist here (`/bin/ln` is coreutils; no `~/.ln.conf`), so there is nothing to reconcile against.
+
+**boot.** rig's launchd agent is the **single** boot path. It writes
+`~/Library/LaunchAgents/ai.hyperide.tmux-boot.plist` (`RunAtLoad`) that runs `tmux start-server`
+at login; `@continuum-restore 'on'` then restores the saved session into it — less iTerm-coupled
+than the old `osx_iterm_start_tmux.sh` approach. **rig deliberately keeps `@continuum-boot 'off'`
+in the generated config:** `@continuum-boot 'on'` would make tmux-continuum install its OWN,
+untracked boot artifact (the iTerm-coupled `Tmux.Start.plist` on macOS / a systemd user unit on
+Linux) — a second, competing boot path rig can't manage. So continuum handles *restore*, rig's
+launchd agent handles *boot*. **rig writes the plist but does NOT `launchctl load` it,** and never
+runs `tmux source-file` against the user's **live** server — the on-disk result is prepared; the
+**user reloads / reboots** when ready (so an active session is never disrupted). The boot path can
+only be fully proven by an actual reboot.
+
+---
+
 ## Validation
 
 `apply`/`status`/`init` validate before touching disk and **fail closed** on:
@@ -461,5 +595,7 @@ a malformed/out-of-range `models.schedule.time` or unknown `models` key, a non-b
 `agents_md.enabled`/`agents_md.symlink` or unknown `agents_md` key, an unknown
 `github`/`github.ruleset` key, a non-bool `github.ruleset` boolean knob, a
 `github.ruleset.required_reviews` that is not an int ≥ 0, a `github.ruleset.required_status_checks`
-that is not a list of strings, and an `agent_tools_source` that is not an agent-tools checkout.
-`--dry-run` prints the resolved plan and exits 0 without writing.
+that is not a list of strings, an unknown `tmux`/`tmux.<sub>` key, a bad `tmux.apply` enum, a
+`tmux.resurrect.processes` that is not a list of strings, a `tmux.continuum.save_interval` that is
+not an int >= 1, a non-bool `tmux` boolean knob, and an `agent_tools_source` that is not an
+agent-tools checkout. `--dry-run` prints the resolved plan and exits 0 without writing.

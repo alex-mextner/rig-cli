@@ -38,11 +38,13 @@ _VALID_TOP_KEYS = {
     "models",
     "agents_md",
     "github",
+    "tmux",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
 _VALID_TIERS = {"block", "warn"}
 _VALID_ON_ERROR = {"open", "closed"}
+_VALID_TMUX_APPLY = {"import", "block"}
 # Harness kinds rig can provision an auto/permission setting for. claude-code is the only
 # one IMPLEMENTED in v0.1; opencode is reserved (documented in docs/config-schema.md) so a
 # config naming it fails closed with a clear message rather than silently doing nothing.
@@ -206,6 +208,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_models(data.get("models", {}))
     _validate_agents_md(data.get("agents_md", {}))
     _validate_github(data.get("github", {}))
+    _validate_tmux(data.get("tmux", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -449,3 +452,125 @@ def _validate_github(gh: dict[str, Any]) -> None:
             raise ConfigError(
                 f"github.ruleset.required_status_checks must be a list of strings, got {checks!r}"
             )
+
+
+# The nested sub-blocks the tmux block accepts, each with its own allowed keys. Listed once so
+# the validator rejects a typo in any of them (fail-closed, consistent with every other block).
+_TMUX_TOP_KEYS = {
+    "enabled",
+    "apply",
+    "conf_path",
+    "generated_dir",
+    "resurrect",
+    "continuum",
+    "moshi",
+    "cc_restore",
+    "anti_sprawl",
+    "boot",
+}
+_TMUX_SUBKEYS = {
+    "resurrect": {"processes", "capture_pane_contents"},
+    "continuum": {"restore", "boot", "save_interval"},
+    "moshi": {"enabled"},
+    "cc_restore": {"enabled"},
+    "anti_sprawl": {"enabled", "session"},
+    "boot": {"enabled", "label"},
+}
+
+
+def _validate_tmux(t: dict[str, Any]) -> None:
+    """Validate the ``tmux`` block — rig-managed tmux configuration provisioning.
+
+    rig GENERATES a tmux config from this block (guaranteeing plugin-init ordering so the
+    Moshi status-right tweak can't wipe continuum's autosave hook) and MIGRATES an existing
+    hand-written ``~/.tmux.conf`` into an import (or a sentinel-fenced managed block). An
+    EMPTY/absent block means "leave tmux alone". Fail-closed, consistent with every other
+    block, on: a non-mapping block, an unknown top-level/nested key (typo guard), a non-bool
+    bool knob, a bad ``apply`` enum, a non-list-of-strings ``resurrect.processes``, and a
+    ``continuum.save_interval`` that is not an int >= 1.
+    """
+    if not isinstance(t, dict):
+        raise ConfigError("tmux must be a mapping")
+    if not t:
+        return
+    unknown = set(t) - _TMUX_TOP_KEYS
+    if unknown:
+        raise ConfigError(f"unknown tmux key(s): {', '.join(sorted(unknown))}")
+
+    enabled = t.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"tmux.enabled must be a bool, got {enabled!r}")
+    # `apply` PRESENT must be a valid enum string. A present null would `str(None)` into a bogus
+    # "None" apply_mode, and an unhashable value (list/dict) would raise a raw TypeError from the
+    # `in` check — so require a string in the enum. Only an ABSENT key falls back to the default.
+    if "apply" in t and (
+        not isinstance(t["apply"], str) or t["apply"] not in _VALID_TMUX_APPLY
+    ):
+        raise ConfigError(
+            f"tmux.apply must be one of {sorted(_VALID_TMUX_APPLY)}, got {t['apply']!r}"
+        )
+    for pathkey in ("conf_path", "generated_dir"):
+        # A key PRESENT with no value (YAML `conf_path:` → None) must fail closed: it can't fall
+        # back to the default the way a truly-absent key does (the plan would `str(None)` it into
+        # a literal "None" path). Only an absent key is allowed; a present non-string is rejected.
+        if pathkey in t and not isinstance(t[pathkey], str):
+            raise ConfigError(f"tmux.{pathkey} must be a string, got {t[pathkey]!r}")
+
+    for sub, allowed in _TMUX_SUBKEYS.items():
+        block = t.get(sub)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            raise ConfigError(f"tmux.{sub} must be a mapping, got {block!r}")
+        unknown_sub = set(block) - allowed
+        if unknown_sub:
+            raise ConfigError(
+                f"unknown tmux.{sub} key(s): {', '.join(sorted(unknown_sub))}"
+            )
+
+    res = t.get("resurrect", {})
+    if isinstance(res, dict):
+        procs = res.get("processes")
+        if procs is not None and (
+            not isinstance(procs, list) or not all(isinstance(p, str) for p in procs)
+        ):
+            raise ConfigError(
+                f"tmux.resurrect.processes must be a list of strings, got {procs!r}"
+            )
+        cap = res.get("capture_pane_contents")
+        if cap is not None and not isinstance(cap, bool):
+            raise ConfigError(
+                f"tmux.resurrect.capture_pane_contents must be a bool, got {cap!r}"
+            )
+
+    cont = t.get("continuum", {})
+    if isinstance(cont, dict):
+        for boolkey in ("restore", "boot"):
+            value = cont.get(boolkey)
+            if value is not None and not isinstance(value, bool):
+                raise ConfigError(f"tmux.continuum.{boolkey} must be a bool, got {value!r}")
+        interval = cont.get("save_interval")
+        # NB: bool is an int subclass — reject it explicitly so `true` can't pose as a count.
+        if interval is not None and (
+            isinstance(interval, bool) or not isinstance(interval, int) or interval < 1
+        ):
+            raise ConfigError(
+                f"tmux.continuum.save_interval must be an int >= 1, got {interval!r}"
+            )
+
+    for sub in ("moshi", "cc_restore", "anti_sprawl", "boot"):
+        block = t.get(sub, {})
+        if isinstance(block, dict):
+            value = block.get("enabled")
+            if value is not None and not isinstance(value, bool):
+                raise ConfigError(f"tmux.{sub}.enabled must be a bool, got {value!r}")
+    anti = t.get("anti_sprawl", {})
+    if isinstance(anti, dict):
+        session = anti.get("session")
+        if session is not None and not isinstance(session, str):
+            raise ConfigError(f"tmux.anti_sprawl.session must be a string, got {session!r}")
+    boot = t.get("boot", {})
+    if isinstance(boot, dict):
+        label = boot.get("label")
+        if label is not None and not isinstance(label, str):
+            raise ConfigError(f"tmux.boot.label must be a string, got {label!r}")

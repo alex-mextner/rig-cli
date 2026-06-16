@@ -81,3 +81,25 @@ harness:
   enabled: true
   kind: claude-code
   auto_mode: true
+
+# ── tmux — rig-managed tmux config (generate + migrate ~/.tmux.conf) ───────────────
+# OPT-IN and per-MACHINE (like auto-mode): tmux config is a developer-machine concern, so
+# DECLARE IT IN THE GLOBAL CONFIG (~/.config/rig/config.yaml), not in a per-repo rig.yaml.
+# Generating the config lets rig GUARANTEE ordering (continuum's status-right hook last, so
+# the opt-in Moshi tweak can't wipe continuum's autosave → the stale-session-on-reboot fix).
+# This block is left commented here because a CLI repo has nothing to do with tmux config;
+# uncomment it in your global config to provision it. See docs/config-schema.md#tmux.
+#
+# tmux:
+#   enabled: true
+#   apply: import                  # import (preferred) | block (managed-block fallback)
+#   resurrect:
+#     # do NOT list `claude` while cc_restore is on — cc-restore owns the exact resume; if
+#     # `claude` were here resurrect would restart it as a bare session before the hook runs.
+#     processes: [ssh, psql, mysql, sqlite3]
+#     capture_pane_contents: true
+#   continuum: { restore: true, save_interval: 15, boot: true }
+#   moshi: { enabled: true }        # opt-in; emitted BEFORE continuum init (root-cause fix)
+#   cc_restore: { enabled: true }   # per-window `claude --resume <id>` after a reboot
+#   anti_sprawl: { enabled: true, session: main }   # attach-or-create one canonical session
+#   boot: { enabled: true }         # launchd agent brings tmux up after a macOS reboot

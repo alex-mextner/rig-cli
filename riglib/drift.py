@@ -15,6 +15,7 @@ decide, per the "surface, don't auto-reconcile" rule).
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,10 +34,12 @@ from .actions.runner import (
     harness_settings_file,
     hook_bridge_entries,
     parse_mcp_command,
+    _is_rig_import_line,
     resolve_agents_md,
     resolve_ci_workflow,
     schedule_plan_from_action,
     skill_harness_link_target,
+    tmux_plan_from_action,
 )
 from .github_ruleset import DEFAULT_RULESET_NAME
 from .plan import Action, InstallPlan
@@ -117,6 +120,8 @@ def detect(
             _check_agents_symlink(action, report)
         elif action.kind == "provision_github_ruleset":
             _check_github_ruleset(action, report)
+        elif action.kind == "provision_tmux":
+            _check_tmux(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -599,6 +604,129 @@ def _check_schedule(action: Action, report: DriftReport) -> None:
         report.items.append(
             DriftItem("modified", "models", action.item, action.target, "crontab schedule differs from configured time/checker")
         )
+
+
+def _check_tmux(action: Action, report: DriftReport) -> None:
+    """Flag drift on the rig-MANAGED tmux region only (never the user's hand-written lines).
+
+    missing  — the generated ``rig.tmux.conf`` is absent, OR (import mode) ``~/.tmux.conf``
+               lost its ``source-file`` import line, OR (block mode) the managed block is gone.
+    modified — the generated ``rig.tmux.conf`` on disk differs from the desired one (a hand
+               edit of rig's own file), OR a cc script / the boot plist / the managed block differs.
+    Shares the desired-artifact computation with the install handler, so apply and status can
+    never disagree. User-specific lines in ``~/.tmux.conf`` are ignored entirely. Every region
+    ACCUMULATES into ``report.items`` (no early return), so simultaneously-drifted regions are
+    ALL surfaced, not just the first.
+    """
+    from .tmux import BLOCK_BEGIN, BLOCK_END
+
+    plan = tmux_plan_from_action(action)
+    desired_conf = plan.render_rig_conf()  # render once; reused by the block-mode check below.
+
+    # 1) the generated rig.tmux.conf — present + byte-identical to the desired render.
+    _file_drift(report, action, plan.rig_conf_path, desired_conf, "generated rig.tmux.conf")
+
+    # 2) the managed scripts (cc-save/cc-restore; attach-or-create when anti-sprawl is on) —
+    # the SAME list apply writes (managed_scripts), so drift can't disagree on which exist.
+    # Content AND the executable bit: a stripped +x means the resurrect hook can't run them.
+    for path, body in plan.managed_scripts():
+        _file_drift(report, action, path, body, path.name)
+        if path.is_file() and not os.access(path, os.X_OK):
+            report.items.append(
+                DriftItem("modified", "tmux", action.item, path,
+                          f"{path.name} is not executable (resurrect hook can't run it)")
+            )
+    # When anti-sprawl is DISABLED, apply stops writing tmux-attach.sh but never deletes a
+    # previously-installed one — and the user may still source it from their shell rc (so
+    # anti-sprawl stays active). Surface the leftover as a disk→config extra, like the boot plist.
+    if not plan.anti_sprawl_enabled and plan.attach_path.is_file():
+        report.items.append(
+            DriftItem("extra", "tmux", action.item, plan.attach_path,
+                      "tmux-attach.sh present but tmux.anti_sprawl is disabled "
+                      "(it may still be wired from your shell rc — remove it or re-enable anti_sprawl)")
+        )
+
+    # 3) the boot launchd plist (macOS). When boot is ENABLED, apply writes it → check content.
+    # When boot is DISABLED, apply does NOT delete a previously-written plist, so a leftover
+    # plist (it still starts tmux at login) is a disk→config EXTRA — surface it, don't go silent.
+    if _on_darwin():
+        if plan.boot_enabled:
+            _file_drift(report, action, plan.boot_plist_path, plan.render_boot_plist(),
+                        "boot launchd plist")
+        elif plan.boot_plist_path.is_file():
+            report.items.append(
+                DriftItem("extra", "tmux", action.item, plan.boot_plist_path,
+                          "boot launchd plist present but tmux.boot is disabled "
+                          "(it still starts tmux at login — remove it or re-enable boot)")
+            )
+
+    # 4) the wiring in ~/.tmux.conf (the managed REGION only — user lines are ignored).
+    conf_text = plan.conf_path.read_text(encoding="utf-8") if plan.conf_path.is_file() else ""
+    if plan.apply_mode == "block":
+        if BLOCK_BEGIN not in conf_text or BLOCK_END not in conf_text:
+            report.items.append(
+                DriftItem("missing", "tmux", action.item, plan.conf_path,
+                          "managed tmux block missing from ~/.tmux.conf")
+            )
+        elif _managed_block_body(conf_text, BLOCK_BEGIN, BLOCK_END) != desired_conf.strip("\n"):
+            report.items.append(
+                DriftItem("modified", "tmux", action.item, plan.conf_path,
+                          "managed tmux block in ~/.tmux.conf differs from the configured block")
+            )
+    else:  # import mode — the EXACT import line must be present (not a substring/comment).
+        import_line = plan.import_line()
+        rig_conf_name = plan.rig_conf_path.name
+        if not any(ln.strip() == import_line for ln in conf_text.splitlines()):
+            report.items.append(
+                DriftItem("missing", "tmux", action.item, plan.conf_path,
+                          "source-file import line missing from ~/.tmux.conf")
+            )
+        # A STALE rig import (a `source-file …/rig.tmux.conf` from an OLD generated_dir) is still
+        # active — tmux sources that old managed file — and `rig apply` WOULD remove it. Flag it,
+        # so status doesn't read in-sync while a stale managed config is live (codex P2).
+        elif any(
+            _is_rig_import_line(ln, import_line, rig_conf_name) and ln.strip() != import_line
+            for ln in conf_text.splitlines()
+        ):
+            report.items.append(
+                DriftItem("modified", "tmux", action.item, plan.conf_path,
+                          "a STALE rig source-file import (old generated_dir) is still in "
+                          "~/.tmux.conf — apply removes it")
+            )
+        else:
+            # ORDERING drift: rig appends its import LAST so its generated config (which fixes the
+            # Moshi-vs-continuum ordering) wins. If a user added an executable line AFTER the rig
+            # import, tmux runs it after rig.tmux.conf and can undo the fix (e.g. a trailing
+            # `status-right ''`). apply re-appends the import at the end → flag it (codex P2).
+            code = [ln for ln in conf_text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+            if code and code[-1].strip() != import_line:
+                report.items.append(
+                    DriftItem("modified", "tmux", action.item, plan.conf_path,
+                              "rig's source-file import is not the LAST line of ~/.tmux.conf "
+                              "(a later line can undo the generated ordering) — apply re-appends it")
+                )
+
+
+def _file_drift(report: DriftReport, action: Action, path: Path, desired: str, label: str) -> None:
+    """Append a ``missing`` (absent) or ``modified`` (content differs) DriftItem for a rig file."""
+    if not path.is_file():
+        report.items.append(DriftItem("missing", "tmux", action.item, path, f"{label} not installed"))
+    elif path.read_text(encoding="utf-8") != desired:
+        report.items.append(DriftItem("modified", "tmux", action.item, path, f"{label} differs from generated"))
+
+
+def _managed_block_body(conf_text: str, begin: str, end: str) -> str | None:
+    """The text BETWEEN the managed sentinels (exclusive), or None when absent/malformed."""
+    b = conf_text.find(begin)
+    e = conf_text.find(end)
+    if b == -1 or e == -1 or e <= b:
+        return None
+    return conf_text[b + len(begin):e].strip("\n")
+
+
+def _on_darwin() -> bool:
+    import sys
+    return sys.platform == "darwin"
 
 
 def _mcp_config_file(action: Action) -> Path:

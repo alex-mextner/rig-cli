@@ -12,6 +12,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1105,6 +1106,235 @@ def _gh_alias_set(name: str, path: str) -> int:
     return res.returncode
 
 
+# ── tmux configuration provisioning (generate + migrate) ───────────────────────────
+def tmux_plan_from_action(action: Action):
+    """Rebuild the pure :class:`~riglib.tmux.TmuxPlan` an action describes.
+
+    Shared by the install handler and the drift check so both agree on the exact desired
+    artifacts (the generated rig.tmux.conf, the cc scripts, the import line / managed block)
+    from the action's options. ``Path.home()`` is the resolved HOME at apply time (a test
+    monkeypatches it to a tmp HOME). Lazy import keeps the actions package import-light.
+    """
+    from ..tmux import build_tmux
+
+    opts = action.options
+    return build_tmux(
+        repo_home=Path.home(),
+        apply_mode=str(opts.get("apply_mode", "import")),
+        conf_path=str(opts.get("conf_path", "~/.tmux.conf")),
+        generated_dir=str(opts.get("generated_dir", "~/.config/rig/tmux")),
+        resurrect=dict(opts.get("resurrect", {}) or {}),
+        continuum=dict(opts.get("continuum", {}) or {}),
+        moshi=dict(opts.get("moshi", {}) or {}),
+        cc_restore=dict(opts.get("cc_restore", {}) or {}),
+        anti_sprawl=dict(opts.get("anti_sprawl", {}) or {}),
+        boot=dict(opts.get("boot", {}) or {}),
+    )
+
+
+def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
+    """Generate the rig-managed tmux artifacts and migrate ``~/.tmux.conf`` (idempotent).
+
+    What it writes:
+      - ``<generated_dir>/rig.tmux.conf`` — the rig-owned config (wholesale rewrite; the
+        ordering guarantee that fixes the continuum-hook-wipe bug lives in the generator).
+      - ``<generated_dir>/cc-save.sh`` + ``cc-restore.sh`` — the managed scripts, chmod +x.
+      - ``~/.tmux.conf`` — in IMPORT mode, a single ``source-file`` line (the rest of the
+        user's file untouched); in BLOCK mode, the managed body spliced between sentinels.
+      - the boot launchd plist (macOS) when ``boot.enabled`` — written but NEVER loaded into
+        launchd here (the user reloads on their own reboot; we don't disrupt a live server).
+
+    Migration + backup: when the existing ``~/.tmux.conf`` carries rig-owned settings inline
+    (resurrect/continuum/tpm/Moshi), the ORIGINAL is backed up to ``~/.tmux.conf.rig-bak``
+    BEFORE the rewrite — and an existing backup is never overwritten (the true original is
+    preserved). User-specific lines are left intact.
+
+    Idempotent: a re-apply that finds every artifact already current is a ``skipped`` no-op.
+    rig NEVER reloads the user's LIVE tmux server (no ``tmux source-file``) — the on-disk
+    result is prepared; the user reloads when ready.
+    """
+    from ..tmux import has_inline_rig_settings, neutralize_inline_rig_lines, splice_managed_block
+
+    plan = tmux_plan_from_action(action)
+    plan.generated_dir.mkdir(parents=True, exist_ok=True)
+
+    changed = False
+    backup: Path | None = None
+    # collect EVERY backup fsutil makes (a differing generated file moved to .rig-bak-* under
+    # on_conflict=backup) so a replacement is never silently lost — the repo's "backup-noted"
+    # contract. The migration backup (below) is the headline one returned in ActionResult.backup.
+    extra_backups: list[Path] = []
+    details: list[str] = []
+    # conflict-skipped managed scripts (left as the user's under on_conflict=skip) — surfaced in
+    # the result detail but NOT counted as a change (nothing was written): unresolved drift.
+    skipped_conflicts: list[str] = []
+
+    # 1) the generated rig.tmux.conf (wholesale, idempotent on identical bytes).
+    conf_out = fsutil.write_file(plan.rig_conf_path, plan.render_rig_conf(), on_conflict)
+    if conf_out.status == "error":
+        return ActionResult(action, "error", f"tmux: {conf_out.detail}")
+    if conf_out.backup:
+        extra_backups.append(conf_out.backup)
+    if conf_out.status != "skipped":
+        changed = True
+        details.append(f"generated {plan.rig_conf_path.name}")
+    elif not conf_out.detail.startswith("identical"):
+        # rig OWNS rig.tmux.conf — a DIFFERING one left untouched under on_conflict=skip is stale
+        # (e.g. an upgrade still carrying the old `@continuum-boot 'on'`) → unresolved drift the
+        # sourced tmux still uses. Surface it (NOT silently 'already current'), like the scripts.
+        skipped_conflicts.append(
+            f"{plan.rig_conf_path.name} differs and on_conflict=skip — NOT regenerated; tmux "
+            f"still sources the STALE rig config (re-run with backup/overwrite to update it)"
+        )
+
+    # 2) the managed scripts (chmod +x) — cc-save/cc-restore always, the anti-sprawl
+    # attach-or-create entry when enabled. `managed_scripts()` is the ONE source apply and
+    # drift share, so they can't diverge on which scripts exist.
+    for path, body in plan.managed_scripts():
+        out = fsutil.write_file(path, body, on_conflict)
+        if out.status == "error":
+            return ActionResult(action, "error", f"tmux: {out.detail}")
+        if out.backup:
+            extra_backups.append(out.backup)
+        wrote = out.status != "skipped"
+        identical_skip = out.status == "skipped" and out.detail.startswith("identical")
+        conflict_skip = out.status == "skipped" and not identical_skip
+        if wrote:
+            path.chmod(0o755)
+            changed = True
+            details.append(f"installed {path.name}")
+        elif identical_skip and not os.access(path, os.X_OK):
+            # drift-heal: contents identical (OUR file) but +x stripped → chmod IS a real change;
+            # report it (don't hide a hook-executable-bit repair behind 'already current'). We
+            # NEVER chmod a conflict-skip (a differing pre-existing file is the user's under skip).
+            path.chmod(0o755)
+            changed = True
+            details.append(f"restored +x on {path.name}")
+        if conflict_skip:
+            # a pre-existing DIFFERING file at rig's script path was left untouched under
+            # on_conflict=skip — but the generated config wires a resurrect hook at this path, so
+            # resurrect would run the user's/stale file. SURFACE it in the detail, but do NOT set
+            # `changed` — nothing was written, so a re-apply must NOT report `created` or inflate
+            # ApplyReport.changed every run; this is unresolved drift, reported, not a change.
+            skipped_conflicts.append(
+                f"{path.name} differs and on_conflict=skip — NOT applied; the resurrect hook "
+                f"points at an unmanaged file (re-run with backup/overwrite to wire rig's script)"
+            )
+
+    # 3) the boot launchd plist (macOS) — written, never loaded (the user reboots).
+    if plan.boot_enabled and sys.platform == "darwin":
+        plan.boot_plist_path.parent.mkdir(parents=True, exist_ok=True)
+        boot_out = fsutil.write_file(plan.boot_plist_path, plan.render_boot_plist(), on_conflict)
+        if boot_out.status == "error":
+            return ActionResult(action, "error", f"tmux: {boot_out.detail}")
+        if boot_out.backup:
+            extra_backups.append(boot_out.backup)
+        if boot_out.status != "skipped":
+            changed = True
+            details.append(f"wrote boot plist {plan.boot_plist_path.name} (load on next login/reboot)")
+        elif not boot_out.detail.startswith("identical"):
+            # rig OWNS the boot plist — a DIFFERING one left untouched under skip is stale.
+            skipped_conflicts.append(
+                f"{plan.boot_plist_path.name} differs and on_conflict=skip — NOT updated "
+                f"(re-run with backup/overwrite to refresh the boot plist)"
+            )
+
+    # 4) ~/.tmux.conf — migrate (back up an inline-settings original) then wire the managed region.
+    conf = plan.conf_path
+    existing = conf.read_text(encoding="utf-8") if conf.is_file() else ""
+    # one-time migration backup: only when the original carried rig-owned settings inline AND we
+    # haven't already kept a backup (never clobber the true original).
+    if existing and has_inline_rig_settings(existing) and not plan.backup_path.exists():
+        plan.backup_path.write_text(existing, encoding="utf-8")
+        backup = plan.backup_path
+        details.append(f"backed up original → {plan.backup_path.name}")
+        changed = True
+
+    desired_conf = _tmux_conf_with_managed(
+        plan, existing, splice_managed_block, neutralize_inline_rig_lines
+    )
+    if desired_conf != existing:
+        # Honor on_conflict=skip for the user's OWN file: if ~/.tmux.conf already exists and
+        # differs, `skip` means leave it untouched (consistent with the generated artifacts,
+        # which go through fsutil.write_file's skip path). A non-existent conf is always created
+        # (there's nothing to conflict with). backup/overwrite both proceed to write.
+        if on_conflict == "skip" and existing:
+            details.append(f"~/.tmux.conf differs but on_conflict=skip — left unwired ({conf.name})")
+        else:
+            conf.parent.mkdir(parents=True, exist_ok=True)
+            conf.write_text(desired_conf, encoding="utf-8")
+            changed = True
+            details.append(f"wired {plan.apply_mode} into {conf.name}")
+
+    if not changed:
+        # nothing was written. If a managed script was conflict-skipped, that is UNRESOLVED drift
+        # (the hook points at an unmanaged file) — report it as `skipped` with the warning, NOT a
+        # `created` change (a re-apply must stay idempotent and not inflate ApplyReport.changed).
+        if skipped_conflicts:
+            return ActionResult(
+                action, "skipped",
+                f"tmux/config: already current EXCEPT — {'; '.join(skipped_conflicts)}",
+            )
+        return ActionResult(action, "skipped", f"tmux/config: already current ({plan.apply_mode} mode)")
+    # surface EVERY backup (migration + any generated-file .rig-bak-* moves) so a replacement's
+    # restore path is never hidden — the repo's "backup-noted" contract. The headline backup is
+    # the migration one if present, else the first generated-file backup.
+    if extra_backups:
+        details.append("backups: " + ", ".join(b.name for b in extra_backups))
+    # a conflict-skipped script alongside other real changes is still surfaced (so the operator
+    # sees the unwired hook), appended to the detail of the (genuinely-changed) result.
+    details.extend(skipped_conflicts)
+    headline = backup or (extra_backups[0] if extra_backups else None)
+    status = "backed_up" if headline else "created"
+    return ActionResult(action, status, f"tmux/config: {'; '.join(details)}", headline)
+
+
+def _tmux_conf_with_managed(plan, existing: str, splice, neutralize) -> str:
+    """The desired ``~/.tmux.conf`` text for the plan's apply mode (pure).
+
+    - import mode: neutralize the inline rig-owned lines (so the sourced rig config is
+      authoritative), then ensure the single ``source-file`` import is present exactly once at
+      the end (drop a prior copy so a moved generated path doesn't leave a stale import).
+    - block mode: splice the generated body between the managed sentinels (conda-init style).
+    """
+    if plan.apply_mode == "block":
+        return splice(existing, plan.render_rig_conf())
+    # import mode — neutralize the redundant/harmful inline rig-owned lines FIRST (so the
+    # sourced rig.tmux.conf is authoritative; otherwise a leftover inline Moshi `status-right
+    # ''` after the user's own continuum init still wipes continuum's hook), then ensure the
+    # single source-file import is present exactly once at the END (after the user's lines).
+    neutralized = neutralize(existing) if existing else existing
+    import_line = plan.import_line()
+    rig_conf_name = plan.rig_conf_path.name  # "rig.tmux.conf" — rig owns this filename
+    kept = [
+        ln for ln in neutralized.splitlines()
+        if not _is_rig_import_line(ln, import_line, rig_conf_name)
+    ]
+    body = "\n".join(kept).rstrip("\n")
+    if body:
+        return body + "\n" + import_line + "\n"
+    return import_line + "\n"
+
+
+def _is_rig_import_line(line: str, import_line: str, rig_conf_name: str) -> bool:
+    """True if ``line`` is rig's OWN ``source-file …/rig.tmux.conf`` import (current or a stale
+    one pointing at an old generated_dir) — so it is dropped before re-appending the current
+    import exactly once. A comment or a keybinding that merely mentions the path is NOT matched
+    (we require the line to BE a `source-file` directive whose argument ends with the rig file).
+    """
+    s = line.strip()
+    if s == import_line:
+        return True
+    if s.startswith("#"):
+        return False
+    parts = s.split()
+    # `source-file [-q] <path>` — rig's own import names the rig.tmux.conf file as its argument.
+    if parts and parts[0] == "source-file":
+        arg = parts[-1].strip("'\"")
+        return Path(arg).name == rig_conf_name
+    return False
+
+
 # ── AGENTS.md / CLAUDE.md canonical + symlink ─────────────────────────────────────
 # One file is the real source of truth; the other is a relative symlink to it, so every
 # agent harness (Claude Code reads CLAUDE.md; Codex/others read AGENTS.md) sees identical
@@ -1471,4 +1701,5 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_schedule": _do_provision_schedule,
     "provision_agents_symlink": _do_provision_agents_symlink,
     "provision_github_ruleset": _do_provision_github_ruleset,
+    "provision_tmux": _do_provision_tmux,
 }
