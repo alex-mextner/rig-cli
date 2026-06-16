@@ -24,6 +24,7 @@ from .actions.runner import (
     _ci_companion_files,
     _find_marker_lines,
     _git_global,
+    _launchctl_gui_loaded,
     _launchctl_loaded,
     _read_crontab,
     _tmux_dry_run,
@@ -43,11 +44,13 @@ from .actions.runner import (
     resolve_global_excludes,
     schedule_plan_from_action,
     skill_harness_link_target,
+    tg_ctl_plan_from_action,
     tmux_plan_from_action,
 )
 from .config import GITIGNORE_BEGIN_MARKER
 from .github_ruleset import DEFAULT_RULESET_NAME
 from .plan import Action, InstallPlan
+from .tg_ctl import STALE_PREDECESSOR_LABEL
 
 
 @dataclass
@@ -129,6 +132,8 @@ def detect(
             _check_tmux(action, report)
         elif action.kind == "provision_global_excludes":
             _check_global_excludes(action, report)
+        elif action.kind == "provision_tg_ctl":
+            _check_tg_ctl(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -821,6 +826,62 @@ def _check_tmux(action: Action, report: DriftReport) -> None:
                           f"tmux plugin {name} not installed (the @plugin decl won't resolve) "
                           "— apply clones it")
             )
+
+
+def _check_tg_ctl(action: Action, report: DriftReport) -> None:
+    """Flag drift on the rig-managed tg-ctl LaunchAgent (macOS).
+
+    missing  — boot enabled but the plist is absent, OR present + byte-identical but the agent is
+               NOT loaded in the gui domain (launchd never picked it up → daemon not running).
+    modified — the plist on disk differs from the desired byte-exact render (a hand edit, or an
+               upgrade that changed the args/PATH). ``rig apply`` reconciles + (re)loads.
+    extra    — a leftover plist when boot is DISABLED (it still auto-starts the daemon), OR the
+               stale predecessor ``com.ultra.codex-tg-bot`` plist (apply boots it out + removes it).
+    Off darwin (no launchd) tg-ctl provisioning is a no-op, so there is nothing to check.
+    Shares the desired-plist computation with the install handler, so apply and status can never
+    disagree.
+    """
+    if not _on_darwin():
+        return
+    plan = tg_ctl_plan_from_action(action)
+
+    # the stale predecessor service is always drift while it exists (apply removes it).
+    if plan.stale_plist_path.is_file():
+        report.items.append(
+            DriftItem("extra", "tg_ctl", action.item, plan.stale_plist_path,
+                      f"stale predecessor '{STALE_PREDECESSOR_LABEL}' LaunchAgent present — "
+                      f"apply boots it out and removes it")
+        )
+
+    if not plan.boot_enabled:
+        # boot disabled: a leftover managed plist still auto-starts the daemon → surface it as a
+        # disk->config extra (apply never deletes the user's own file).
+        if plan.plist_path.is_file():
+            report.items.append(
+                DriftItem("extra", "tg_ctl", action.item, plan.plist_path,
+                          "tg-ctl boot plist present but tg_ctl.boot is disabled "
+                          "(it still starts the daemon at login — remove it or re-enable boot)")
+            )
+        return
+
+    desired = plan.render_plist()
+    if not plan.plist_path.is_file():
+        report.items.append(
+            DriftItem("missing", "tg_ctl", action.item, plan.plist_path,
+                      "tg-ctl boot LaunchAgent not installed")
+        )
+        return
+    if plan.plist_path.read_text(encoding="utf-8") != desired:
+        report.items.append(
+            DriftItem("modified", "tg_ctl", action.item, plan.plist_path,
+                      "tg-ctl boot LaunchAgent differs from the configured plist")
+        )
+        return
+    if not _launchctl_gui_loaded(plan.boot_label):
+        report.items.append(
+            DriftItem("missing", "tg_ctl", action.item, plan.plist_path,
+                      f"tg-ctl LaunchAgent '{plan.boot_label}' installed but not loaded")
+        )
 
 
 def _file_drift(report: DriftReport, action: Action, path: Path, desired: str, label: str) -> None:
