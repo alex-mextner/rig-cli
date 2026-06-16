@@ -86,8 +86,9 @@ CC_MAP_NAME = "cc-sessions.map"
 ATTACH_NAME = "tmux-attach.sh"
 RIG_CONF_NAME = "rig.tmux.conf"
 
-# The backup path for the migrated original ~/.tmux.conf. We never overwrite an existing one
-# (don't lose the user's true original on a second apply).
+# The base backup suffix for the migrated ~/.tmux.conf. The runner writes a UNIQUE timestamped
+# backup (`.rig-bak-<UTC>`) on every migrating apply (see runner._timestamped_backup_path), so a
+# later apply after a hand-edit keeps its OWN restore point instead of skipping — no state lost.
 BACKUP_SUFFIX = ".rig-bak"
 
 
@@ -613,7 +614,7 @@ def neutralize_inline_rig_lines(conf_text: str) -> str:
     harmless — tmux just re-applies them, and rig's correctly-ordered tail wins. So we comment
     out ONLY the wipe (the ``if-shell '[ -n "$MOSHI_CLIENT" ]' { … }`` block that sets
     status-left/right, or a bare ``set -g status-right ''``), prefixed with
-    :data:`NEUTRALIZE_PREFIX`; the full original is in ``~/.tmux.conf.rig-bak``. Everything else
+    :data:`NEUTRALIZE_PREFIX`; the full original is in a timestamped ``~/.tmux.conf.rig-bak-<UTC>``. Everything else
     — plugin decls, resurrect/continuum options (modeled or not), the inits — stays LIVE.
     Idempotent: an already-neutralized line is left as-is.
     """

@@ -787,10 +787,11 @@ def test_apply_migrates_and_backs_up_handwritten_conf(tmp_path, monkeypatch):
     )
     res = runner._do_provision_tmux(_tmux_action(home), "backup")
     assert res.status in ("created", "updated", "backed_up")
-    # original backed up to ~/.tmux.conf.rig-bak (never overwriting an existing backup).
-    bak = home / ".tmux.conf.rig-bak"
-    assert bak.is_file()
-    assert "set -g mouse on" in bak.read_text() and "status-right ''" in bak.read_text()
+    # original backed up to a UNIQUE timestamped ~/.tmux.conf.rig-bak-<UTC> (never clobbering).
+    baks = list(home.glob(".tmux.conf.rig-bak-*"))
+    assert len(baks) == 1, f"expected one timestamped backup, got {baks}"
+    bak_text = baks[0].read_text()
+    assert "set -g mouse on" in bak_text and "status-right ''" in bak_text
     # the new conf carries the import line.
     new_text = conf.read_text()
     assert "source-file" in new_text
@@ -805,18 +806,37 @@ def test_apply_migrates_and_backs_up_handwritten_conf(tmp_path, monkeypatch):
     assert live_cont, "the continuum option line must stay live (narrow neutralize)"
 
 
-def test_apply_does_not_overwrite_existing_backup(tmp_path, monkeypatch):
+def test_apply_creates_a_fresh_timestamped_backup_each_migration(tmp_path, monkeypatch):
+    """A second apply, after the user hand-edited ~/.tmux.conf back into a migrating state, must
+    snapshot the NEW content under its OWN timestamped backup — not skip because an earlier
+    backup exists (which would lose the in-between edits). Earlier backups stay intact. (CTO)
+    """
     from riglib.actions import runner
 
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    (home / ".tmux.conf").write_text("set -g @continuum-restore 'on'\nORIGINAL\n", encoding="utf-8")
-    bak = home / ".tmux.conf.rig-bak"
-    bak.write_text("A-PRECIOUS-EARLIER-BACKUP\n", encoding="utf-8")
+    conf = home / ".tmux.conf"
+    # a precious backup from an earlier apply must be preserved untouched.
+    precious = home / ".tmux.conf.rig-bak-20000101T000000_000000Z"
+    precious.write_text("A-PRECIOUS-EARLIER-BACKUP\n", encoding="utf-8")
+
+    moshi_wipe = "if-shell '[ -n \"$MOSHI_CLIENT\" ]' { set -g status-right '' }\n"
+    # first migrating apply
+    conf.write_text(moshi_wipe + "FIRST-EDIT\n", encoding="utf-8")
     runner._do_provision_tmux(_tmux_action(home), "backup")
-    # the pre-existing backup must NOT be clobbered.
-    assert bak.read_text() == "A-PRECIOUS-EARLIER-BACKUP\n"
+    # user hand-edits the conf back into a migrating state (re-adds the wipe + new content)
+    conf.write_text(moshi_wipe + "SECOND-EDIT\n", encoding="utf-8")
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+
+    baks = sorted(home.glob(".tmux.conf.rig-bak-*"))
+    contents = "".join(b.read_text() for b in baks)
+    # the precious earlier backup is intact, AND each migrating apply added its own snapshot —
+    # nothing lost.
+    assert precious.read_text() == "A-PRECIOUS-EARLIER-BACKUP\n"
+    assert "A-PRECIOUS-EARLIER-BACKUP" in contents
+    assert "FIRST-EDIT" in contents and "SECOND-EDIT" in contents
+    assert len(baks) >= 3
 
 
 def test_apply_honors_on_conflict_skip_for_user_conf(tmp_path, monkeypatch):
