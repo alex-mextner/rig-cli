@@ -38,6 +38,7 @@ harness: { ... }              # agent harness auto/permission provisioning (auto
 models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
 agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
 github: { ... }               # GitHub repo branch ruleset via gh api, default ON (no-op without a github remote)
+gitignore: { ... }            # rig-managed .gitignore block (ignores .claude/worktrees/), default ON
 ```
 
 If `agent_tools_source` is omitted, rig resolves it from `$RIG_AGENT_TOOLS_SOURCE`, then
@@ -451,6 +452,71 @@ Set `RIG_GH_DRY_RUN=1` to compute what *would* change (the create/update is repo
 
 ---
 
+## `gitignore`
+
+Maintains a **rig-managed block** in the repo's `.gitignore` (at the repo root) so harness
+artifacts are ignored **declaratively by the tool** — reconciled like every other category, not
+by a hand-edited global `~/.gitignore` ("fix tooling, not manual"). The motivating case: Claude
+Code creates throwaway worktrees under each repo's `.claude/worktrees/`; those must be gitignored,
+and rig owns that ignore. Default **ON** — on `rig init` AND `rig apply` rig converges the block;
+idempotent (a re-apply that finds it correct is a no-op).
+
+```yaml
+gitignore:
+  enabled: true                 # provision the managed block (default ON; false opts out)
+  entries:                      # the ignored paths inside the managed block
+    - .claude/worktrees/        # default: Claude Code's throwaway worktrees
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision the managed block (set `false` to leave `.gitignore` untouched) |
+| `entries` | list[str] | `[.claude/worktrees/]` | the paths ignored inside the managed block; an empty/absent list uses the default |
+
+**`.serena/` is intentionally NOT ignored.** Serena state is **committed** shared project memory
+(project memories travel with the repo), so it is never in the default entries — only throwaway
+harness artifacts are.
+
+**The managed block.** rig fences its lines with explicit markers and touches **only** what is
+between them:
+
+```
+# >>> rig-managed (do not edit) >>>
+.claude/worktrees/
+# <<< rig-managed (do not edit) <<<
+```
+
+**On-disk cases (idempotent, surgical, never destructive):**
+
+- **no `.gitignore`** → create it with the managed block.
+- **`.gitignore` without the block** → append the block after the existing content (one blank-line
+  separator); every existing line is preserved verbatim.
+- **block present and correct** → no-op (in sync).
+- **block present but its entries differ** → replace **just the block** in place; every line
+  **outside** the markers (above and below) is preserved verbatim, and the block stays where it sits.
+- **unbalanced / duplicated markers** (a begin with no end, an end before a begin, two blocks) →
+  **conflict**: rig won't guess the block's extent, so it leaves the file completely untouched and
+  surfaces it via `rig status`. Reconcile by hand, then re-apply.
+- **unreadable `.gitignore`** (no read permission, or a directory at the path) → **io_error**:
+  `rig apply` returns an `error` (it could not even inspect the file — never a silent exit 0), and
+  `rig status` surfaces a could-not-verify drift item rather than reporting in sync.
+
+Lines OUTSIDE the markers are preserved **byte-for-byte**: the block is located and spliced by raw
+offset (the file is read with newline translation off), so a CRLF file, a file with no trailing
+newline, and trailing blank lines all survive untouched. `entries` may not contain a marker line
+(validation rejects it — it would make the file a permanent conflict).
+
+`resolve_gitignore` is the single classification `rig apply` and `rig status` share (so they can
+never disagree): `create` (missing block → append/create), `update` (block differs → replace just
+the block), `ok` (matches → no-op), `conflict` (unbalanced markers → untouched, surfaced),
+`io_error` (unreadable → apply errors, status surfaces). There is no backup file — rig only ever
+edits its own fenced lines, so there is no user data to preserve (`on_conflict` does not apply
+here). Opting the category out (`enabled: false`) after a block was installed does NOT delete it
+(apply never deletes); `rig status` then reports the leftover block as a disk→config extra so you
+can remove it deliberately.
+
+---
+
 ## Validation
 
 `apply`/`status`/`init` validate before touching disk and **fail closed** on:
@@ -461,5 +527,7 @@ a malformed/out-of-range `models.schedule.time` or unknown `models` key, a non-b
 `agents_md.enabled`/`agents_md.symlink` or unknown `agents_md` key, an unknown
 `github`/`github.ruleset` key, a non-bool `github.ruleset` boolean knob, a
 `github.ruleset.required_reviews` that is not an int ≥ 0, a `github.ruleset.required_status_checks`
-that is not a list of strings, and an `agent_tools_source` that is not an agent-tools checkout.
+that is not a list of strings, a non-mapping `gitignore` block / non-bool `gitignore.enabled` /
+unknown `gitignore` key / a `gitignore.entries` that is not a list of strings or that contains a
+rig-managed marker line, and an `agent_tools_source` that is not an agent-tools checkout.
 `--dry-run` prints the resolved plan and exits 0 without writing.

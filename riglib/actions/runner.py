@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from ..config import GITIGNORE_BEGIN_MARKER, GITIGNORE_END_MARKER
 from ..github_ruleset import (
     build_ruleset_body,
     find_managed_ruleset,
@@ -1282,6 +1283,171 @@ def _do_provision_agents_symlink(action: Action, on_conflict: str) -> ActionResu
     return ActionResult(action, "error", f"agents-md: unhandled state {r.state!r}")
 
 
+# ── rig-managed .gitignore block ───────────────────────────────────────────────────
+# rig maintains a marker-delimited block in the repo's `.gitignore` so harness artifacts
+# (chiefly Claude Code's throwaway `.claude/worktrees/`) are ignored DECLARATIVELY by the tool,
+# reconciled like every other category — not by a hand-edited global ignore ("fix tooling, not
+# manual"). The markers fence ONLY rig's lines; every other line the user has in `.gitignore`
+# is preserved verbatim. apply and drift BOTH go through `resolve_gitignore` so they can never
+# disagree on what the desired block is or whether the file is in sync. The marker constants live
+# in `config.py` (the schema layer) so validation can reject a marker-colliding entry without an
+# import cycle; they are imported at module top and re-used here (drift/tests reach for them via
+# `runner.GITIGNORE_*`, which still resolves through this module's namespace).
+
+
+def gitignore_block_text(entries: list[str]) -> str:
+    """The exact marker-delimited block rig owns for ``entries`` (no trailing newline).
+
+    Single source of truth shared by the install handler and drift, so both agree byte-for-byte
+    on what the managed block SHOULD contain. The block is the begin marker, one line per entry
+    (in the order given), then the end marker.
+    """
+    return "\n".join([GITIGNORE_BEGIN_MARKER, *entries, GITIGNORE_END_MARKER])
+
+
+@dataclass(frozen=True)
+class GitignoreResolution:
+    """The desired ``.gitignore`` outcome for a repo — the one source apply + drift share.
+
+    ``state`` is the single discriminator both consumers switch on:
+      - ``ok``       — the managed block is already present and exactly correct: no-op.
+      - ``create``   — no ``.gitignore`` or no managed block: append the block (creating the file
+                       if absent), preserving any existing content.
+      - ``update``   — a managed block exists but its body differs: replace JUST the block,
+                       preserving every line outside the markers (verbatim — CRLF and trailing
+                       blanks included).
+      - ``conflict`` — the file has unbalanced/duplicated managed markers (a begin with no end, an
+                       end before a begin, two blocks): rig won't guess the block's extent, so it
+                       leaves the file untouched and surfaces it. ``detail`` says why.
+      - ``io_error`` — the path could not be read (unreadable, or a directory sits there). Unlike a
+                       marker ``conflict`` (the file is fine, the operator must reconcile) this is a
+                       failure to even inspect the file: apply reports it as an ERROR, never a silent
+                       skip. ``detail`` carries the OS error.
+
+    ``desired_block`` is the canonical block text; ``new_content`` is the full desired file
+    content for ``create``/``update`` (``None`` for ``ok``/``conflict``/``io_error``).
+    """
+
+    path: Path
+    state: str
+    desired_block: str
+    new_content: str | None = None
+    detail: str = ""
+
+
+def resolve_gitignore(path: Path, entries: list[str]) -> GitignoreResolution:
+    """Classify the on-disk ``.gitignore`` vs the desired managed block (pure, no writes).
+
+    Idempotent + non-destructive: rig only ever (a) appends the block to a file that lacks it
+    (creating the file if absent), (b) replaces JUST the existing block in place, or (c) no-ops a
+    correct block. An unbalanced marker pair is a ``conflict`` rig never rewrites. Every line
+    OUTSIDE the markers is preserved byte-for-byte: the block is located and spliced by raw
+    character offset (not splitlines/rejoin), so a CRLF file, a file with no trailing newline, and
+    trailing blank lines all survive untouched.
+    """
+    desired = gitignore_block_text(entries)
+    if not path.exists():
+        return GitignoreResolution(path, "create", desired, new_content=desired + "\n")
+    try:
+        # newline="" disables universal-newline translation so a CRLF file is read (and later
+        # re-written) byte-for-byte outside the managed block — the documented verbatim guarantee.
+        with path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError as exc:
+        # unreadable, or a directory at the path — a failure to inspect, not a marker conflict.
+        return GitignoreResolution(path, "io_error", desired, detail=f"cannot read {path}: {exc}")
+
+    # Find each marker line by its raw [start, end_of_line] offsets so the splice preserves every
+    # other byte verbatim (line ending included). A marker is a line whose stripped text equals the
+    # marker constant — tolerant of trailing whitespace on the marker line itself.
+    begins = _find_marker_lines(content, GITIGNORE_BEGIN_MARKER)
+    ends = _find_marker_lines(content, GITIGNORE_END_MARKER)
+    if len(begins) != len(ends) or len(begins) > 1:
+        return GitignoreResolution(
+            path, "conflict", desired,
+            detail=f"{path} has unbalanced/duplicated rig-managed markers — reconcile by hand, then re-run",
+        )
+    if not begins:
+        # no managed block: append it, keeping a single blank-line separator from prior content.
+        body = content.rstrip("\n")
+        sep = "\n\n" if body else ""
+        new_content = f"{body}{sep}{desired}\n"
+        return GitignoreResolution(path, "create", desired, new_content=new_content)
+
+    (b_start, _b_line_end), (e_start, e_line_end) = begins[0], ends[0]
+    if e_start < b_start:
+        return GitignoreResolution(
+            path, "conflict", desired,
+            detail=f"{path} has a rig-managed end marker before its begin marker — reconcile by hand, then re-run",
+        )
+    # the block spans from the begin marker's start to the end marker's end-of-line. Compare the
+    # raw on-disk block to the desired text; if identical it's in sync, else splice in the new block
+    # and keep everything before b_start and after e_line_end byte-for-byte.
+    current_block = content[b_start : e_line_end]
+    if current_block == desired:
+        return GitignoreResolution(path, "ok", desired)
+    new_content = content[:b_start] + desired + content[e_line_end:]
+    return GitignoreResolution(path, "update", desired, new_content=new_content)
+
+
+def _find_marker_lines(content: str, marker: str) -> list[tuple[int, int]]:
+    """Return ``(line_start_offset, line_end_offset)`` for each line equal to ``marker``.
+
+    ``line_end_offset`` is the offset of the newline that terminates the line (or ``len(content)``
+    for an un-terminated final line) — so a splice on ``[start, end)`` drops the marker line's text
+    but not its line ending, letting the caller re-emit a clean block. A line MATCHES when its text
+    with surrounding whitespace stripped equals ``marker`` (tolerant of a marker line that picked up
+    trailing spaces), so such a line is still recognized and normalized on the next apply.
+    """
+    out: list[tuple[int, int]] = []
+    pos = 0
+    n = len(content)
+    while pos <= n:
+        nl = content.find("\n", pos)
+        line_end = n if nl == -1 else nl
+        if content[pos:line_end].strip() == marker:
+            out.append((pos, line_end))
+        if nl == -1:
+            break
+        pos = nl + 1
+    return out
+
+
+def _do_provision_gitignore(action: Action, on_conflict: str) -> ActionResult:
+    """Provision/reconcile rig's managed block in the repo's ``.gitignore``.
+
+    Switches on the shared :func:`resolve_gitignore` ``state`` — apply and drift read the same
+    classification, so ``status`` never misreports the on-disk state. Idempotent: a correct block
+    is a no-op; a missing block is appended (creating ``.gitignore`` if absent); a drifted block is
+    replaced IN PLACE, preserving every other line verbatim. An unbalanced marker pair is a
+    ``conflict`` rig leaves untouched (``skipped``), and an unreadable path is an ``error`` (never a
+    silent skip — apply must not exit 0 having failed to even inspect the file). There is no backup:
+    rig only ever edits its OWN fenced lines, so there is no user data to preserve — ``on_conflict``
+    is irrelevant here (consistent with the surgical hook-bridge upsert, which likewise rewrites
+    only its own marked entries).
+    """
+    entries = [str(e) for e in action.options.get("entries", [])]
+    r = resolve_gitignore(action.target, entries)
+    if r.state == "ok":
+        return ActionResult(action, "skipped", f"gitignore: managed block already correct in {action.target.name}")
+    if r.state == "conflict":
+        return ActionResult(action, "skipped", f"gitignore: {r.detail}")
+    if r.state == "io_error":
+        return ActionResult(action, "error", f"gitignore: {r.detail}")
+    if r.new_content is None:  # defensive — create/update always carry content
+        return ActionResult(action, "error", f"gitignore: unhandled state {r.state!r}")
+    existed = action.target.exists()
+    action.target.parent.mkdir(parents=True, exist_ok=True)
+    # newline="" so the bytes we computed (which may carry the user's CRLF outside the block) are
+    # written verbatim, with no platform newline translation.
+    with action.target.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(r.new_content)
+    if r.state == "create":
+        verb = "added block to" if existed else "created"
+        return ActionResult(action, "created", f"gitignore: {verb} {action.target.name} ({len(entries)} entr{'y' if len(entries) == 1 else 'ies'})")
+    return ActionResult(action, "updated", f"gitignore: updated managed block in {action.target.name}")
+
+
 # ── GitHub repository ruleset (gh api) ─────────────────────────────────────────────
 # rig reconciles a branch ruleset on the repo's DEFAULT branch — the modern replacement for
 # branch protection — declaratively, the same way every other category is reconciled. The
@@ -1471,4 +1637,5 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_schedule": _do_provision_schedule,
     "provision_agents_symlink": _do_provision_agents_symlink,
     "provision_github_ruleset": _do_provision_github_ruleset,
+    "provision_gitignore": _do_provision_gitignore,
 }

@@ -410,6 +410,14 @@ def cmd_status(args: argparse.Namespace) -> int:
         from .drift import check_disabled_dispatcher
 
         check_disabled_dispatcher(loaded.repo_root, report)
+    # disabled-but-installed gitignore block: config opted the category out, but a prior apply may
+    # have left the rig-managed block in .gitignore. apply won't remove it, so surface it as
+    # disk→config drift (mirrors the disabled-dispatcher scan above; the block is repo-local).
+    gi_cfg = loaded.data.get("gitignore")
+    if isinstance(gi_cfg, dict) and gi_cfg.get("enabled") is False:
+        from .drift import check_disabled_gitignore
+
+        check_disabled_gitignore(loaded.repo_root, report)
     # surface the model-freshness schedule explicitly (installed / drifted / not configured),
     # so `rig status` answers "is the daily checker cron there?" at a glance.
     _print_schedule_status(plan, report)

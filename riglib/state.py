@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .config import GITIGNORE_DEFAULT_ENTRIES
 from .github_ruleset import GITHUB_RULESET_DEFAULTS
 
 
@@ -127,6 +128,11 @@ def default_state(
         # with ruleset.enabled: false. Add status checks with required_status_checks: [names].
         # The knobs come straight from the action's GITHUB_RULESET_DEFAULTS (one source).
         "github": {"ruleset": github_ruleset},
+        # rig-managed block in the repo's .gitignore: ignores the harness's throwaway
+        # `.claude/worktrees/` declaratively (default ON), reconciled like every other category.
+        # `.serena/` is intentionally NOT ignored — Serena state is committed shared memory.
+        # Opt out with gitignore.enabled: false; the default entries come from one source.
+        "gitignore": {"enabled": True, "entries": list(GITIGNORE_DEFAULT_ENTRIES)},
     }
 
 

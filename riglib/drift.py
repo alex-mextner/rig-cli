@@ -32,9 +32,11 @@ from .actions.runner import (
     github_ruleset_state,
     harness_settings_file,
     hook_bridge_entries,
+    GITIGNORE_BEGIN_MARKER,
     parse_mcp_command,
     resolve_agents_md,
     resolve_ci_workflow,
+    resolve_gitignore,
     schedule_plan_from_action,
     skill_harness_link_target,
 )
@@ -117,6 +119,8 @@ def detect(
             _check_agents_symlink(action, report)
         elif action.kind == "provision_github_ruleset":
             _check_github_ruleset(action, report)
+        elif action.kind == "provision_gitignore":
+            _check_gitignore(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -266,6 +270,66 @@ def _check_agents_symlink(action: Action, report: DriftReport) -> None:
     elif r.state == "conflict":
         report.items.append(
             DriftItem("modified", "agents_md", "symlink", r.link, r.detail)
+        )
+
+
+def _check_gitignore(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured rig-managed ``.gitignore`` block and the file on disk.
+
+    Switches on the SAME :func:`resolve_gitignore` ``state`` apply uses (one classification,
+    shared via the runner), so status and apply can never disagree on "in sync":
+
+    - ``create``   → ``missing``: no ``.gitignore`` or no managed block (apply appends it).
+    - ``update``   → ``modified``: a managed block exists but its entries differ (apply replaces
+                     just the block).
+    - ``ok``       → no drift item (in sync).
+    - ``conflict`` → ``modified``: unbalanced markers rig won't rewrite — surfaced so the
+                     operator reconciles by hand (apply leaves it untouched).
+    - ``io_error`` → ``modified``: the file couldn't be read (unreadable / a directory at the
+                     path). NOT silently in-sync — rig couldn't even inspect it, so a green status
+                     would mask a genuinely un-provisioned ignore (mirrors the github gh_error
+                     could-not-verify item).
+    """
+    entries = [str(e) for e in action.options.get("entries", [])]
+    r = resolve_gitignore(action.target, entries)
+    if r.state == "ok":
+        return
+    if r.state == "create":
+        report.items.append(
+            DriftItem("missing", "gitignore", "block", action.target,
+                      "rig-managed .gitignore block not present (apply adds it)")
+        )
+    elif r.state == "update":
+        report.items.append(
+            DriftItem("modified", "gitignore", "block", action.target,
+                      "rig-managed .gitignore block differs from config (apply replaces just the block)")
+        )
+    elif r.state in ("conflict", "io_error"):
+        report.items.append(
+            DriftItem("modified", "gitignore", "block", action.target, r.detail)
+        )
+
+
+def check_disabled_gitignore(repo_root: Path, report: DriftReport) -> None:
+    """Flag a still-installed rig-managed block when the config disables the ``gitignore`` category.
+
+    apply never deletes; so a repo that previously had the managed block keeps it in
+    ``.gitignore`` even after the config turns the category off. With the action gone from the
+    plan, ``_check_gitignore`` never runs — so without this scan the leftover block would report as
+    "in sync". Detect a present begin marker in the repo's ``.gitignore`` and report it as
+    disk→config drift (mirrors :func:`check_disabled_dispatcher` for the global dispatcher).
+    """
+    gi = repo_root / ".gitignore"
+    if not gi.is_file():
+        return
+    try:
+        content = gi.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if any(ln.strip() == GITIGNORE_BEGIN_MARKER for ln in content.splitlines()):
+        report.items.append(
+            DriftItem("extra", "gitignore", "block", gi,
+                      "gitignore disabled in config but the rig-managed block is still in .gitignore")
         )
 
 

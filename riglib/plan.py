@@ -66,7 +66,7 @@ _DEFAULT_HARNESS_KIND = "claude-code"
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_gitignore
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -500,6 +500,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── github (repository branch ruleset via gh api) ─────────────────────────────
     _build_github_ruleset(config, plan)
 
+    # ── gitignore (rig-managed block in the repo's .gitignore) ─────────────────────
+    _build_gitignore(config, plan)
+
     return plan
 
 
@@ -702,6 +705,47 @@ def _build_github_ruleset(config: LoadedConfig, plan: InstallPlan) -> None:
             source=config.repo_root,
             target=config.repo_root,
             options=options,
+        )
+    )
+
+
+def _build_gitignore(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the rig-managed ``.gitignore`` block provisioning for the repo.
+
+    Default **ON** (like ``agents_md``): rig maintains a marker-delimited block in the repo's
+    ``.gitignore`` (at ``config.repo_root``) so harness artifacts — chiefly Claude Code's
+    throwaway ``.claude/worktrees/`` — are ignored declaratively by the tool, reconciled like
+    every other category, not by a hand-edited global ignore. Opt out with
+    ``gitignore: { enabled: false }``.
+
+    The ignored ``entries`` are configurable with a sensible default
+    (``GITIGNORE_DEFAULT_ENTRIES``); an empty/absent block uses that default. The
+    upsert-just-the-block logic lives in ``actions/`` (it depends on what is already on disk),
+    so the plan emits ONE idempotent action carrying the resolved entries, anchored at the
+    repo root; no carrier in agent-tools.
+    """
+    from .config import GITIGNORE_DEFAULT_ENTRIES
+
+    gi = config.data.get("gitignore")
+    if gi is None:
+        gi = {}
+    if not isinstance(gi, dict):
+        return  # validate() already fail-closed on a non-mapping block
+    if gi.get("enabled") is False:
+        return
+    raw_entries = gi.get("entries")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        entries = list(GITIGNORE_DEFAULT_ENTRIES)
+    else:
+        entries = [str(e) for e in raw_entries]
+    plan.actions.append(
+        Action(
+            kind="provision_gitignore",
+            category="gitignore",
+            item="block",
+            source=config.repo_root,
+            target=config.repo_root / ".gitignore",
+            options={"entries": entries},
         )
     )
 

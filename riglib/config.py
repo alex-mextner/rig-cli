@@ -38,6 +38,7 @@ _VALID_TOP_KEYS = {
     "models",
     "agents_md",
     "github",
+    "gitignore",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
@@ -206,6 +207,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_models(data.get("models", {}))
     _validate_agents_md(data.get("agents_md", {}))
     _validate_github(data.get("github", {}))
+    _validate_gitignore(data.get("gitignore", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -379,6 +381,55 @@ def _validate_agents_md(am: dict[str, Any]) -> None:
         value = am.get(knob)
         if value is not None and not isinstance(value, bool):
             raise ConfigError(f"agents_md.{knob} must be a bool, got {value!r}")
+
+
+# The default entries rig's managed .gitignore block ignores. The harness (Claude Code)
+# creates throwaway worktrees under each repo's ``.claude/worktrees/``; those must be
+# gitignored declaratively by rig, not by a hand-edited global ignore. Listed once so the
+# validator (default-fill) and the plan builder reference the SAME default — NB: ``.serena/``
+# is deliberately NOT here (Serena state is COMMITTED shared project memory).
+GITIGNORE_DEFAULT_ENTRIES = (".claude/worktrees/",)
+
+# The markers that fence rig's managed block in a repo's .gitignore. Defined here (the schema
+# layer, stdlib-only) so config validation can reject an entry that collides with a marker
+# WITHOUT importing the actions runner (which would form a config→plan→config import cycle); the
+# runner imports these from config so the two never drift.
+GITIGNORE_BEGIN_MARKER = "# >>> rig-managed (do not edit) >>>"
+GITIGNORE_END_MARKER = "# <<< rig-managed (do not edit) <<<"
+
+
+def _validate_gitignore(gi: dict[str, Any]) -> None:
+    """Validate the ``gitignore`` block — rig's managed ``.gitignore`` block in the repo.
+
+    rig maintains a marker-delimited block in the repo's ``.gitignore`` so harness artifacts
+    (chiefly ``.claude/worktrees/``) are ignored declaratively by the tool, reconciled like
+    every other category — not by a hand-edited global ignore. Default **ON**: an absent/empty
+    block means "provision the default entries". Fail-closed, consistent with every other
+    block, on: a non-mapping block, a non-bool ``enabled``, an unknown key (typo guard), and a
+    non-string-list ``entries``.
+    """
+    if not isinstance(gi, dict):
+        raise ConfigError("gitignore must be a mapping")
+    if not gi:
+        return
+    unknown = set(gi) - {"enabled", "entries"}
+    if unknown:
+        raise ConfigError(f"unknown gitignore key(s): {', '.join(sorted(unknown))}")
+    enabled = gi.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"gitignore.enabled must be a bool, got {enabled!r}")
+    entries = gi.get("entries")
+    if entries is not None:
+        if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+            raise ConfigError(f"gitignore.entries must be a list of strings, got {entries!r}")
+        # Reject an entry that carries one of rig's block markers: writing it inside the managed
+        # block would make every later resolve see a duplicated marker and classify the file as a
+        # permanent conflict (apply could never re-converge). Fail closed on the footgun.
+        for e in entries:
+            if GITIGNORE_BEGIN_MARKER in e or GITIGNORE_END_MARKER in e:
+                raise ConfigError(
+                    f"gitignore.entries may not contain a rig-managed marker line, got {e!r}"
+                )
 
 
 # The ruleset knobs that are plain booleans (typo + type guard). Listed once so the

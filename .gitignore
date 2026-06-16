@@ -12,3 +12,7 @@ dist/
 # uv writes a lockfile when run via `uv run`; the dev/CI path is pip, so the lock is a
 # local artifact — never commit it.
 uv.lock
+
+# >>> rig-managed (do not edit) >>>
+.claude/worktrees/
+# <<< rig-managed (do not edit) <<<

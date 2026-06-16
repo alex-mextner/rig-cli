@@ -81,3 +81,13 @@ harness:
   enabled: true
   kind: claude-code
   auto_mode: true
+
+# ── Gitignore — rig owns a marker-delimited block in this repo's .gitignore ────────
+# Claude Code creates throwaway worktrees under .claude/worktrees/; rig ignores them
+# DECLARATIVELY (reconciled like every other category) rather than via a hand-edited global
+# ignore. NB: .serena/ is intentionally NOT ignored — Serena state is committed shared memory.
+# Default ON; this block makes the dogfooded config explicit. Opt out with enabled: false.
+gitignore:
+  enabled: true
+  entries:
+    - .claude/worktrees/
