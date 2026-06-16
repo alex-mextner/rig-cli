@@ -21,6 +21,7 @@ from pathlib import Path
 from .actions import fsutil
 from .actions.runner import (
     _ci_companion_files,
+    _find_marker_lines,
     _git_global,
     _launchctl_loaded,
     _read_crontab,
@@ -32,7 +33,6 @@ from .actions.runner import (
     github_ruleset_state,
     harness_settings_file,
     hook_bridge_entries,
-    GITIGNORE_BEGIN_MARKER,
     parse_mcp_command,
     resolve_agents_md,
     resolve_ci_workflow,
@@ -40,6 +40,7 @@ from .actions.runner import (
     schedule_plan_from_action,
     skill_harness_link_target,
 )
+from .config import GITIGNORE_BEGIN_MARKER
 from .github_ruleset import DEFAULT_RULESET_NAME
 from .plan import Action, InstallPlan
 
@@ -317,16 +318,19 @@ def check_disabled_gitignore(repo_root: Path, report: DriftReport) -> None:
     ``.gitignore`` even after the config turns the category off. With the action gone from the
     plan, ``_check_gitignore`` never runs — so without this scan the leftover block would report as
     "in sync". Detect a present begin marker in the repo's ``.gitignore`` and report it as
-    disk→config drift (mirrors :func:`check_disabled_dispatcher` for the global dispatcher).
+    disk→config drift (mirrors :func:`check_disabled_dispatcher` for the global dispatcher). Marker
+    detection reuses :func:`_find_marker_lines` (the same offset-based scanner ``resolve_gitignore``
+    uses) read with newline translation off, so detection never diverges from apply.
     """
     gi = repo_root / ".gitignore"
     if not gi.is_file():
         return
     try:
-        content = gi.read_text(encoding="utf-8")
+        with gi.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
     except OSError:
         return
-    if any(ln.strip() == GITIGNORE_BEGIN_MARKER for ln in content.splitlines()):
+    if _find_marker_lines(content, GITIGNORE_BEGIN_MARKER):
         report.items.append(
             DriftItem("extra", "gitignore", "block", gi,
                       "gitignore disabled in config but the rig-managed block is still in .gitignore")

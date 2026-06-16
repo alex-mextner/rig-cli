@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import Catalog, Item
-from .config import LoadedConfig
+from .config import GITIGNORE_DEFAULT_ENTRIES, LoadedConfig
 from .github_ruleset import GITHUB_RULESET_DEFAULTS
 
 
@@ -724,8 +724,6 @@ def _build_gitignore(config: LoadedConfig, plan: InstallPlan) -> None:
     so the plan emits ONE idempotent action carrying the resolved entries, anchored at the
     repo root; no carrier in agent-tools.
     """
-    from .config import GITIGNORE_DEFAULT_ENTRIES
-
     gi = config.data.get("gitignore")
     if gi is None:
         gi = {}

@@ -1291,8 +1291,7 @@ def _do_provision_agents_symlink(action: Action, on_conflict: str) -> ActionResu
 # is preserved verbatim. apply and drift BOTH go through `resolve_gitignore` so they can never
 # disagree on what the desired block is or whether the file is in sync. The marker constants live
 # in `config.py` (the schema layer) so validation can reject a marker-colliding entry without an
-# import cycle; they are imported at module top and re-used here (drift/tests reach for them via
-# `runner.GITIGNORE_*`, which still resolves through this module's namespace).
+# import cycle; this module imports them at top for its own block construction/detection.
 
 
 def gitignore_block_text(entries: list[str]) -> str:

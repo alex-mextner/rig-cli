@@ -19,14 +19,19 @@ from pathlib import Path
 import pytest
 
 from riglib.actions.runner import (
-    GITIGNORE_BEGIN_MARKER,
-    GITIGNORE_END_MARKER,
     _do_provision_gitignore,
     gitignore_block_text,
     resolve_gitignore,
     run_plan,
 )
-from riglib.config import GITIGNORE_DEFAULT_ENTRIES, ConfigError, LoadedConfig, validate
+from riglib.config import (
+    GITIGNORE_BEGIN_MARKER,
+    GITIGNORE_DEFAULT_ENTRIES,
+    GITIGNORE_END_MARKER,
+    ConfigError,
+    LoadedConfig,
+    validate,
+)
 from riglib.drift import DriftReport, check_disabled_gitignore, detect
 from riglib.plan import Action, InstallPlan, build
 
