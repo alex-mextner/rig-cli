@@ -18,41 +18,31 @@ It's a peer to the rest of the ecosystem — [`tg-cli`](https://github.com/alex-
 [`review-cli`](https://github.com/alex-mextner/review-cli),
 [`draw-cli`](https://github.com/alex-mextner/draw-cli),
 [`3d-cli`](https://github.com/alex-mextner/3d-cli),
-[`task-cli`](https://github.com/alex-mextner/task-cli) — a small standalone Python CLI
-(`bin/rig` shim + a `riglib/` package), uv-runnable, stdlib-only at import time with heavy deps lazy.
+[`task-cli`](https://github.com/alex-mextner/task-cli) — composable, agent-native CLIs that
+share one config-and-skills backbone. `agent-tools` is the **WHAT** (portable skills, guards,
+CI gates, MCP); `rig` is the **HOW** — it reads your `rig.yaml`, converges the repo and the
+machine to it (idempotently, with backups), and surfaces drift in both directions.
 
-![ecosystem](./docs/img/ecosystem.svg)
-
-## Why a separate tool
-
-`agent-tools` is a *library* of portable rules and guards. It does not install itself.
-`rig` is the installer/reconciler: it reads your `rig.yaml`, computes what should be on
-disk, and converges to it — idempotently, with backups, surfacing drift both ways. The
-config is the reproducible source of truth; `rig` is the engine that applies it.
-
-```
-agent-tools  =  WHAT (skills / hooks / CI gates / MCP — portable content)
-rig          =  HOW  (read rig.yaml, apply it, reconcile, detect drift, bootstrap deps)
-```
+![rig apply converges the repo to rig.yaml; rig status reports drift both ways](./docs/img/reconcile.svg)
 
 ## Install
 
-```bash
-git clone https://github.com/alex-mextner/rig-cli
-cd rig-cli && ./install.sh        # symlinks bin/rig into ~/.local/bin, registers the skill
-```
-
-Or run from a checkout without installing — `python3 bin/rig …` / `uv run bin/rig …`.
-
-The interactive wizard needs `textual`:
+**One-liner** (installs deps, links `rig` into PATH, registers the skill):
 
 ```bash
-pip install 'rig-cli[tui]'        # or: rig doctor --yes --optional (textual/rich are optional deps)
+curl -fsSL https://raw.githubusercontent.com/alex-mextner/rig-cli/main/install.sh | bash
 ```
+
+**Isolated env via pipx:**
+
+```bash
+pipx install git+https://github.com/alex-mextner/rig-cli              # adds the `rig` command
+pipx install 'rig-cli[tui] @ git+https://github.com/alex-mextner/rig-cli'   # + interactive wizard
+```
+
+Or run straight from a checkout — `uv run bin/rig …` / `python3 bin/rig …`.
 
 ## Commands
-
-![dispatch](./docs/img/dispatch.svg)
 
 | Command | One-line |
 | --- | --- |
@@ -140,8 +130,6 @@ against the equally-long window immediately before it.
 and `rig apply` reproduces the same install on any machine and in any agent session.
 
 The config **cascades by location** (no scope flag):
-
-![cascade](./docs/img/cascade.svg)
 
 1. **Global** — `~/.config/rig/config.yaml` (machine-wide defaults you carry across repos).
 2. **Per-repo** — `./rig.yaml` (overrides the global layer; committed).
@@ -316,7 +304,7 @@ Part of the [HyperIDE.ai](https://hyperide.ai) agent toolchain:
 
 - **[tg-cli](https://github.com/alex-mextner/tg-cli)** — simple Telegram CLI to send messages, photos & files, and a two-way agent bridge (reports, Q→buttons, voice/rich)
 - **[review-cli](https://github.com/alex-mextner/review-cli)** — multi-model read-only code review from one command: diff review, cited quorum, brainstorm, visual review, and interactive spec-review tooling. Read-only, CLI-first, harness-agnostic.
-- **[agent-tools](https://github.com/alex-mextner/agent-tools)** — the shared umbrella: portable agent skills, git/agent hooks, CI gates, and the `agenttools_log` lib that the other CLIs consume
+- **[agent-tools](https://github.com/alex-mextner/agent-tools)** — the shared catalog `rig` applies: portable agent skills, agent-hooks, the global git-hook dispatcher, CI gates, and MCP servers
 - **[draw-cli](https://github.com/alex-mextner/draw-cli)** — text-to-image via Hugging Face
 - **[3d-cli](https://github.com/alex-mextner/3d-cli)** — scriptable CLI for the full 3D FDM lifecycle: modeling, mesh repair, slicing, and print monitoring
 - **[task-cli](https://github.com/alex-mextner/task-cli)** — enforced ticket-system CLI for agents (GitHub Issues / Linear): acceptance criteria, motivation, and user-impact gates before work starts
