@@ -274,17 +274,21 @@ def test_cc_save_populates_map_from_a_real_claude_child(tmux_env, monkeypatch):
     gen = home / ".config" / "rig" / "tmux"
 
     # A fake `claude` whose process `comm` reports `claude` (the production case: cc shows up as a
-    # VERSION string in pane_current_command, the real `claude` is a CHILD). `exec -a claude sleep`
-    # gives a long-lived process whose `comm` is `claude` deterministically (a plain `cp sleep
-    # claude` does NOT — macOS `ps comm` doesn't follow the rename reliably). It is run by a
-    # LAUNCHER that keeps it a genuine child of the pane shell (background it, then the shell stays
-    # alive) — a bare send-keys `claude &` gets reparented by zsh job-control and detaches.
+    # VERSION string in pane_current_command, the real `claude` is a CHILD). The process must have a
+    # `comm` whose basename is `claude` on BOTH platforms — and the two single-trick approaches each
+    # fail on one OS: `exec -a claude sleep` rewrites only argv[0] (Linux `comm` still reads `sleep`
+    # → descendant invisible → CI failed); a COPY of the `sleep` binary won't run on macOS (SIP
+    # refuses to exec an unsigned copy of a system binary). A SYMLINK named `claude` → the real
+    # `sleep` works on both: the kernel sets `comm` from the invoked name, so `comm`'s basename is
+    # `claude` on Linux AND macOS. Run by a LAUNCHER that keeps it a genuine child of the pane shell
+    # (background it, the shell stays alive) — a bare send-keys `claude &` gets reparented by
+    # job-control and detaches.
     work = home / "proj"
     work.mkdir()
     fake_claude = home / "fakebin" / "claude"
     fake_claude.parent.mkdir()
-    fake_claude.write_text("#!/usr/bin/env bash\nexec -a claude sleep \"$@\"\n", encoding="utf-8")
-    fake_claude.chmod(0o755)
+    real_sleep = shutil.which("sleep") or "/bin/sleep"
+    fake_claude.symlink_to(real_sleep)  # symlink named `claude` → comm basename == claude on both OSes
     launcher = home / "launch.sh"
     launcher.write_text(
         f"#!/usr/bin/env bash\n{shlex.quote(str(fake_claude))} 300 &\nsleep 300\n", encoding="utf-8"
