@@ -78,8 +78,12 @@ def source_names() -> list[str]:
 
 # ── shared parse helpers (used by the concrete parsers) ─────────────────────────────────
 def parse_iso(ts: str | None) -> datetime | None:
-    """Parse an ISO-8601 timestamp (``...Z`` or offset) into aware UTC. None on failure."""
-    if not ts:
+    """Parse an ISO-8601 timestamp (``...Z`` or offset) into aware UTC. None on failure.
+
+    A non-string value (e.g. a malformed log line with ``{"timestamp": 123}``) returns None
+    rather than raising, so one bad line is skipped per the source contract, not fatal.
+    """
+    if not isinstance(ts, str) or not ts:
         return None
     s = ts.strip()
     if s.endswith("Z"):

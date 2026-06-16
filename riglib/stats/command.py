@@ -255,6 +255,14 @@ def run(args) -> int:
     except StatsError as exc:
         print(f"error: {exc}")
         return 2
+    # A transposed range (--since after --until) would otherwise exit 0 with an empty report
+    # that reads like real zero usage. Reject it on the same usage-error path as a bad date.
+    if since is not None and until is not None and since > until:
+        print(
+            f"error: --since ({since.date()}) is after --until ({until.date()}); "
+            "the date range is empty"
+        )
+        return 2
 
     home = Path(args.home) if getattr(args, "home", None) else None
     # --baseline narrows the report to the two buckets the adoption question is about

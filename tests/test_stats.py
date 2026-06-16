@@ -515,6 +515,9 @@ def test_parse_epoch_units_and_bad_input():
     assert parse_iso("2026-06-10T10:00:00Z") is not None
     assert parse_iso("garbage") is None
     assert parse_iso(None) is None
+    # a non-string timestamp (malformed log line `{"timestamp": 123}`) must skip, not raise
+    assert parse_iso(123) is None  # type: ignore[arg-type]
+    assert parse_iso({"weird": 1}) is None  # type: ignore[arg-type]
 
 
 # ── defensive parsing: one bad line/shape must not kill the harness (review finding #19) ──
@@ -700,6 +703,15 @@ def test_run_rejects_bad_since(capsys):
     from riglib.stats import run
 
     assert run(_ns(since="nope")) == 2
+
+
+def test_run_rejects_inverted_date_range(capsys):
+    """--since after --until is a transposed-date typo; it must error, not emit an empty
+    report that reads like real zero usage."""
+    from riglib.stats import run
+
+    assert run(_ns(since="2026-06-15", until="2026-06-01")) == 2
+    assert "is after --until" in capsys.readouterr().out
 
 
 def test_run_rejects_unknown_harness(capsys):
