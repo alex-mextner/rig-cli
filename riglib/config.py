@@ -40,6 +40,7 @@ _VALID_TOP_KEYS = {
     "github",
     "tmux",
     "gitignore",
+    "tg_ctl",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
@@ -263,6 +264,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_github(data.get("github", {}))
     _validate_tmux(data.get("tmux", {}))
     _validate_gitignore(data.get("gitignore", {}))
+    _validate_tg_ctl(data.get("tg_ctl", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -715,3 +717,43 @@ def _validate_tmux(t: dict[str, Any]) -> None:
                     "tmux.login_shell.shell must be an absolute path to the shell BINARY with no "
                     f"arguments (rig adds `-l`), or empty to use $SHELL — got {shell!r}"
                 )
+
+
+# The keys the tg_ctl block accepts. Listed once so the validator rejects a typo (fail-closed,
+# consistent with every other block).
+_TG_CTL_KEYS = {
+    "enabled",
+    "boot",
+    "label",
+    "bun_path",
+    "tg_ctl_path",
+    "config_dir",
+}
+
+
+def _validate_tg_ctl(t: dict[str, Any]) -> None:
+    """Validate the ``tg_ctl`` block — rig-managed tg-ctl inbound-daemon LaunchAgent.
+
+    This is a per-MACHINE concern (one inbound Telegram control daemon per machine), so it
+    belongs in the GLOBAL layer (``~/.config/rig/config.yaml``), like ``harness``/``tmux``/
+    ``git_hooks`` — NOT a committed repo ``rig.yaml``. Default **ON**: an EMPTY/absent block
+    still provisions the daemon (a present block with ``enabled`` not false opts in). Fail-closed,
+    consistent with every other block, on: a non-mapping block, an unknown key (typo guard), a
+    non-bool ``enabled``/``boot``, and a non-string ``label``/``bun_path``/``tg_ctl_path``/
+    ``config_dir``.
+    """
+    if not isinstance(t, dict):
+        raise ConfigError("tg_ctl must be a mapping")
+    if not t:
+        return
+    unknown = set(t) - _TG_CTL_KEYS
+    if unknown:
+        raise ConfigError(f"unknown tg_ctl key(s): {', '.join(sorted(unknown))}")
+    for boolkey in ("enabled", "boot"):
+        value = t.get(boolkey)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(f"tg_ctl.{boolkey} must be a bool, got {value!r}")
+    for strkey in ("label", "bun_path", "tg_ctl_path", "config_dir"):
+        value = t.get(strkey)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"tg_ctl.{strkey} must be a string, got {value!r}")
