@@ -39,6 +39,25 @@ def test_python_dep_no_syspkg_recommends_pip(monkeypatch):
     assert textual.install_cmd == [sys.executable, "-m", "pip", "install", "--user", "textual"]
 
 
+def test_rich_dep_is_diagnosed_for_stats_tui(monkeypatch):
+    """`rig stats show --format tui` needs `rich` (pyproject's [tui] extra ships it), so
+    doctor must diagnose/provision it — not just `textual`. (review finding)"""
+    monkeypatch.setattr(doctor, "_python_present", lambda name: False)
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    report = doctor.diagnose(OsInfo("darwin", "brew", "macOS"))
+    rich = next(s for s in report.statuses if s.dep.name == "rich")
+    assert not rich.present
+    assert not rich.dep.required  # optional, like textual (TUI degrades to plain text)
+    # brew has no `rich` formula → pip into THIS interpreter, like textual.
+    import sys
+
+    assert rich.install_cmd == [sys.executable, "-m", "pip", "install", "--user", "rich"]
+    # and on a manager that DOES package it, the system package is used.
+    apt_report = doctor.diagnose(OsInfo("linux", "apt", "Ubuntu"))
+    apt_rich = next(s for s in apt_report.statuses if s.dep.name == "rich")
+    assert apt_rich.install_cmd == ["sudo", "apt-get", "install", "-y", "python3-rich"]
+
+
 def test_bootstrap_not_run_without_yes(monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
     monkeypatch.setattr(doctor, "_python_present", lambda name: False)

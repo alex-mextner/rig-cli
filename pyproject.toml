@@ -15,9 +15,11 @@ authors = [{ name = "Alex Mextner" }]
 dependencies = ["pyyaml"]
 
 [project.optional-dependencies]
-# The interactive wizard. Headless `rig setup --config ... --yes`, `rig apply`,
-# `rig status`, and `rig doctor` work WITHOUT textual; only the TUI front-end needs it.
-tui = ["textual>=0.50"]
+# The interactive wizard + the `rig stats show --format tui` rich report. Headless
+# `rig init --config ... --yes`, `rig apply`, `rig status`, `rig doctor`, and the
+# json/web stats outputs all work WITHOUT these; the stats TUI degrades to plain text
+# when rich is absent (it is lazy-imported), so this stays purely optional.
+tui = ["textual>=0.50", "rich>=13"]
 test = ["pytest"]
 
 [project.scripts]

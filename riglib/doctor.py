@@ -2,7 +2,7 @@
 
 A "dependency" here is an external CLI binary that agent-tools content relies on
 (gitleaks for secret-scan, gh for ship/CI, git always, etc.) plus rig's own optional
-runtime bits (pyyaml, textual). For each, doctor reports present/absent and — when the
+runtime bits (pyyaml, textual, rich). For each, doctor reports present/absent and — when the
 OS package manager is known — the exact install command. In ``--yes`` mode it runs the
 install commands non-interactively; otherwise it only prints them (never a destructive
 install without confirmation).
@@ -17,7 +17,6 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .detect import OsInfo, detect_os, install_command
 
@@ -63,6 +62,12 @@ DEPENDENCIES: list[Dependency] = [
         "the interactive setup wizard (rig init TUI)",
         kind="python",
         pkg={"brew": "", "apt": "", "dnf": "", "pacman": "python-textual"},
+    ),
+    Dependency(
+        "rich",
+        "the `rig stats show --format tui` report (degrades to plain text when absent)",
+        kind="python",
+        pkg={"brew": "", "apt": "python3-rich", "dnf": "python3-rich", "pacman": "python-rich"},
     ),
     # The daily model-freshness schedule (models:) is provisioned via the platform-native
     # scheduler: launchd (launchctl) on macOS, crontab on Linux. Both ship with the OS; this
