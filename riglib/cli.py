@@ -521,6 +521,31 @@ def cmd_status(args: argparse.Namespace) -> int:
         from .drift import check_disabled_dispatcher
 
         check_disabled_dispatcher(loaded.repo_root, report)
+    # disabled-but-installed global-excludes block: config opted the gitignore category out, but a
+    # prior apply may have left the rig-managed block in the global excludes file. apply won't
+    # remove it, so surface it as disk→config drift (mirrors the disabled-dispatcher scan; this is
+    # a GLOBAL, machine-wide artifact, not repo-local).
+    gi_cfg = loaded.data.get("gitignore")
+    if isinstance(gi_cfg, dict) and gi_cfg.get("enabled") is False:
+        from .config import GITIGNORE_DEFAULT_EXCLUDESFILE
+        from .drift import check_disabled_global_excludes
+        from .plan import Action
+
+        gi_opts: dict[str, object] = {"xdg_default": GITIGNORE_DEFAULT_EXCLUDESFILE}
+        override = gi_cfg.get("excludesfile")
+        if isinstance(override, str) and override:
+            gi_opts["excludesfile"] = override
+        check_disabled_global_excludes(
+            Action(
+                kind="provision_global_excludes",
+                category="gitignore",
+                item="block",
+                source=loaded.repo_root,
+                target=loaded.repo_root,
+                options=gi_opts,
+            ),
+            report,
+        )
     # surface the model-freshness schedule explicitly (installed / drifted / not configured),
     # so `rig status` answers "is the daily checker cron there?" at a glance.
     _print_schedule_status(plan, report)

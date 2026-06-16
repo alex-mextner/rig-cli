@@ -39,6 +39,7 @@ _VALID_TOP_KEYS = {
     "agents_md",
     "github",
     "tmux",
+    "gitignore",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
@@ -261,6 +262,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_agents_md(data.get("agents_md", {}))
     _validate_github(data.get("github", {}))
     _validate_tmux(data.get("tmux", {}))
+    _validate_gitignore(data.get("gitignore", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -434,6 +436,76 @@ def _validate_agents_md(am: dict[str, Any]) -> None:
         value = am.get(knob)
         if value is not None and not isinstance(value, bool):
             raise ConfigError(f"agents_md.{knob} must be a bool, got {value!r}")
+
+
+# The default entries rig's managed block puts in the GLOBAL git excludes file. The harness
+# (Claude Code) creates throwaway worktrees under each repo's ``.claude/worktrees/``; those must
+# be gitignored MACHINE-WIDE (every repo, no per-repo commit) via git's global ``core.excludesfile``
+# — not by a per-repo committed ``.gitignore`` and not by a hand-edited global ignore. Listed once
+# so the validator (default-fill), the plan builder, and the runner reference the SAME default —
+# NB: ``.serena/`` is deliberately NOT here (Serena state is COMMITTED shared project memory).
+GITIGNORE_DEFAULT_ENTRIES = ("**/.claude/worktrees/",)
+
+# The XDG default rig points ``core.excludesfile`` at when the user has NOT already set it. Git's
+# documented global-ignore location is ``$XDG_CONFIG_HOME/git/ignore`` (``~/.config/git/ignore``).
+# Defined here so the plan builder and runner agree on the fallback path; the runner expands ``~``
+# and ``$XDG_CONFIG_HOME`` at apply time so a committed config stays portable.
+GITIGNORE_DEFAULT_EXCLUDESFILE = "~/.config/git/ignore"
+
+# The markers that fence rig's managed block in the global excludes file. Defined here (the schema
+# layer, stdlib-only) so config validation can reject an entry that collides with a marker WITHOUT
+# importing the actions runner (which would form a config→plan→config import cycle); the runner
+# imports these from config so the two never drift.
+GITIGNORE_BEGIN_MARKER = "# >>> rig-managed (do not edit) >>>"
+GITIGNORE_END_MARKER = "# <<< rig-managed (do not edit) <<<"
+
+# A fixed explanatory comment rig writes as the FIRST line INSIDE the managed block, right after the
+# begin marker, so a human reading the global excludes file knows what the block is and why it is
+# there. It is part of the canonical block text (rendered byte-for-byte), so it must match what is
+# ALREADY on a provisioned machine for a re-apply to be a true zero-churn no-op. Do not reword
+# casually — a change here makes the next apply rewrite every provisioned machine's block.
+GITIGNORE_BLOCK_COMMENT = (
+    "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/; "
+    "rig ignores them globally."
+)
+
+
+def _validate_gitignore(gi: dict[str, Any]) -> None:
+    """Validate the ``gitignore`` block — rig's managed block in the GLOBAL git excludes file.
+
+    This is GLOBAL (machine-wide) config: rig maintains a marker-delimited block in git's
+    ``core.excludesfile`` so harness artifacts (chiefly ``**/.claude/worktrees/``) are ignored in
+    EVERY repo on the machine, with zero per-repo commits — not by a per-repo committed
+    ``.gitignore`` and not by a hand-edited global ignore. Default **ON**: an absent/empty block
+    means "provision the default entries (and set core.excludesfile if it is unset)". Fail-closed,
+    consistent with every other block, on: a non-mapping block, a non-bool ``enabled``, an unknown
+    key (typo guard), a non-string ``excludesfile`` override, and a non-string-list ``entries``.
+    """
+    if not isinstance(gi, dict):
+        raise ConfigError("gitignore must be a mapping")
+    if not gi:
+        return
+    unknown = set(gi) - {"enabled", "entries", "excludesfile"}
+    if unknown:
+        raise ConfigError(f"unknown gitignore key(s): {', '.join(sorted(unknown))}")
+    enabled = gi.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"gitignore.enabled must be a bool, got {enabled!r}")
+    excludesfile = gi.get("excludesfile")
+    if excludesfile is not None and not isinstance(excludesfile, str):
+        raise ConfigError(f"gitignore.excludesfile must be a string, got {excludesfile!r}")
+    entries = gi.get("entries")
+    if entries is not None:
+        if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+            raise ConfigError(f"gitignore.entries must be a list of strings, got {entries!r}")
+        # Reject an entry that carries one of rig's block markers: writing it inside the managed
+        # block would make every later resolve see a duplicated marker and classify the file as a
+        # permanent conflict (apply could never re-converge). Fail closed on the footgun.
+        for e in entries:
+            if GITIGNORE_BEGIN_MARKER in e or GITIGNORE_END_MARKER in e:
+                raise ConfigError(
+                    f"gitignore.entries may not contain a rig-managed marker line, got {e!r}"
+                )
 
 
 # The ruleset knobs that are plain booleans (typo + type guard). Listed once so the

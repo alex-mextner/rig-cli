@@ -22,10 +22,12 @@ from pathlib import Path
 from .actions import fsutil
 from .actions.runner import (
     _ci_companion_files,
+    _find_marker_lines,
     _git_global,
     _launchctl_loaded,
     _read_crontab,
     _tmux_dry_run,
+    _resolve_excludes_target,
     build_hook_descriptor,
     crontab_with_managed,
     descriptor_text,
@@ -38,10 +40,12 @@ from .actions.runner import (
     _is_rig_import_line,
     resolve_agents_md,
     resolve_ci_workflow,
+    resolve_global_excludes,
     schedule_plan_from_action,
     skill_harness_link_target,
     tmux_plan_from_action,
 )
+from .config import GITIGNORE_BEGIN_MARKER
 from .github_ruleset import DEFAULT_RULESET_NAME
 from .plan import Action, InstallPlan
 
@@ -123,6 +127,8 @@ def detect(
             _check_github_ruleset(action, report)
         elif action.kind == "provision_tmux":
             _check_tmux(action, report)
+        elif action.kind == "provision_global_excludes":
+            _check_global_excludes(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -482,6 +488,80 @@ def _check_dispatcher(action: Action, report: DriftReport) -> None:
                     report.items.append(
                         DriftItem("modified", "git_hooks", frag.name, dst, "dispatcher fragment differs from source")
                     )
+
+
+def _check_global_excludes(action: Action, report: DriftReport) -> None:
+    """Flag drift in the GLOBAL git-excludes provisioning (a GLOBAL-section drift item).
+
+    Two coupled checks, mirroring apply's two steps:
+      1. ``core.excludesfile`` — if it is unset (and no override pins a file), rig WOULD set it;
+         surface that as ``missing`` so ``status`` says "apply will wire core.excludesfile". The
+         resolution goes through the SAME :func:`_resolve_excludes_target` apply uses, so status and
+         apply agree on the target file and whether git config needs writing.
+      2. The managed block — switch on the SAME :func:`resolve_global_excludes` ``state`` apply uses:
+
+         - ``create``   → ``missing``: no excludes file or no managed block (apply adds it).
+         - ``update``   → ``modified``: a managed block exists but differs, OR the file has
+                          duplicated rig-managed blocks (apply collapses to one correct block).
+         - ``ok``       → no block drift item (in sync).
+         - ``conflict`` → ``modified``: unbalanced markers rig won't rewrite — surfaced so the
+                          operator reconciles by hand (apply leaves it untouched).
+         - ``io_error`` → ``modified``: the file couldn't be read. NOT silently in-sync — rig
+                          couldn't even inspect it, so a green status would mask an un-provisioned
+                          ignore.
+    """
+    entries = [str(e) for e in action.options.get("entries", [])]
+    target, needs_set, set_value = _resolve_excludes_target(action)
+    if needs_set:
+        report.items.append(
+            DriftItem(
+                "missing", "gitignore", "core.excludesfile", target,
+                f"global core.excludesfile is unset (apply sets it → {set_value})",
+            )
+        )
+    r = resolve_global_excludes(target, entries)
+    if r.state == "ok":
+        return
+    if r.state == "create":
+        report.items.append(
+            DriftItem("missing", "gitignore", "block", target,
+                      "rig-managed global-excludes block not present (apply adds it)")
+        )
+    elif r.state == "update":
+        report.items.append(
+            DriftItem("modified", "gitignore", "block", target,
+                      "rig-managed global-excludes block differs from config (apply reconciles it)")
+        )
+    elif r.state in ("conflict", "io_error"):
+        report.items.append(
+            DriftItem("modified", "gitignore", "block", target, r.detail)
+        )
+
+
+def check_disabled_global_excludes(action: Action, report: DriftReport) -> None:
+    """Flag a still-installed managed block when the config disables the ``gitignore`` category.
+
+    apply never deletes; so a machine that previously provisioned the global-excludes block keeps
+    it in ``core.excludesfile`` even after the config turns the category off. With the action gone
+    from the plan, ``_check_global_excludes`` never runs — so without this scan the leftover block
+    would report as "in sync". Resolve the target the SAME way apply does and report a present begin
+    marker as disk→config drift (mirrors :func:`check_disabled_dispatcher`). Marker detection reuses
+    :func:`_find_marker_lines` (the same offset-based scanner :func:`resolve_global_excludes` uses)
+    read with newline translation off, so detection never diverges from apply.
+    """
+    target, _needs_set, _set_value = _resolve_excludes_target(action)
+    if not target.is_file():
+        return
+    try:
+        with target.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError:
+        return
+    if _find_marker_lines(content, GITIGNORE_BEGIN_MARKER):
+        report.items.append(
+            DriftItem("extra", "gitignore", "block", target,
+                      "gitignore disabled in config but the rig-managed block is still in the global excludes file")
+        )
 
 
 def _check_harness(action: Action, report: DriftReport) -> None:
