@@ -809,6 +809,19 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
     # target is plan-resolved.)
     conf_path = _expand(str(t.get("conf_path", "~/.tmux.conf")), config.repo_root)
     generated_dir = _expand(str(t.get("generated_dir", "~/.config/rig/tmux")), config.repo_root)
+
+    # RESOLVE the login shell to a CONCRETE path ONCE here (plan time), not per render. An empty
+    # `login_shell.shell` means "use the user's $SHELL"; resolving it at render would make
+    # rig.tmux.conf depend on $SHELL/FS at the moment of EACH render — so `rig apply` (one $SHELL)
+    # and `rig status` (launchd/cron/CI, different/empty $SHELL) would render DIFFERENT
+    # default-command lines → permanent flapping drift apply "fixes" every run (review Medium). By
+    # baking the path into the action options, render/drift are deterministic and idempotent.
+    login_shell = dict(t.get("login_shell", {}) or {})
+    if login_shell.get("enabled", True) is not False and not login_shell.get("shell"):
+        from .tmux import resolve_login_shell
+
+        login_shell["shell"] = resolve_login_shell()
+
     plan.actions.append(
         Action(
             kind="provision_tmux",
@@ -826,7 +839,7 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
                 "cc_restore": dict(t.get("cc_restore", {}) or {}),
                 "anti_sprawl": dict(t.get("anti_sprawl", {}) or {}),
                 "boot": dict(t.get("boot", {}) or {}),
-                "login_shell": dict(t.get("login_shell", {}) or {}),
+                "login_shell": login_shell,
             },
         )
     )

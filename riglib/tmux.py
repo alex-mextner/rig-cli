@@ -250,10 +250,13 @@ class TmuxPlan:
         # "${SHELL:-/bin/sh} -l"` makes tmux abort the WHOLE source-file with "invalid environment
         # variable" at that line, so continuum/tpm/everything after it never loads → an empty,
         # config-less server (caught only by the REAL e2e, never by a parse-check). So we bake the
-        # path. `_resolve_login_shell` reads the user's $SHELL (the login server inherits it) and
-        # falls back to /bin/sh. Single-quote it so a shell path with a space can't be split.
+        # path. DETERMINISM: the plan resolves the shell ONCE (plan._build_tmux) and bakes the
+        # concrete path into the action — so render does NOT read $SHELL/FS here and rig.tmux.conf
+        # is identical across applies/status regardless of the ambient $SHELL (review Medium: a
+        # per-render resolve made drift flap). The `or resolve_login_shell()` is only a fallback
+        # for a direct build_tmux() with an empty shell (tests); the real path is plan-baked.
         if self.login_shell_enabled:
-            shell = self.login_shell or _resolve_login_shell()
+            shell = self.login_shell or resolve_login_shell()
             # tmux's `default-command` takes ONE option value, which tmux then runs as a SHELL
             # command (`sh -c "<value>"`). So the value must be a SINGLE tmux argument whose INNER
             # text, when the shell parses it, is `<quoted-path> -l`. We therefore: shell-quote the
@@ -587,16 +590,31 @@ def _resurrect_token(name: str) -> str:
 _TMUX_FALLBACK_PATHS = ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux")
 
 
-def _resolve_login_shell() -> str:
-    """The user's login shell as a CONCRETE path, resolved at config-GENERATION time.
+def resolve_login_shell() -> str:
+    """The user's login shell as a CONCRETE path, resolved from a STABLE source.
 
-    Why baked (not a tmux ``${SHELL}`` reference): tmux's option-value env expansion does NOT
-    support ``${VAR:-default}``, and even a bare ``${SHELL}`` is fragile (a launchd-started
-    server may not inherit SHELL). A wrong reference makes tmux abort the WHOLE source-file at
-    that line ("invalid environment variable") → continuum/tpm never load. So we resolve here:
-    ``$SHELL`` if set and absolute, else ``/bin/zsh`` if it exists (the macOS default), else
-    ``/bin/sh`` (always present). The result is a real path tmux runs as ``<shell> -l``.
+    Baked into the action at PLAN time, NOT a tmux ``${SHELL}`` reference (tmux's option-value env
+    expansion rejects ``${VAR:-default}`` and a bare ``${SHELL}`` is fragile under launchd — a
+    wrong ref aborts the WHOLE source-file with "invalid environment variable", so continuum/tpm
+    never load).
+
+    CRITICAL — resolve from the PASSWD DATABASE, not ``$SHELL`` (review P1): ``apply`` and
+    ``status`` each rebuild a FRESH plan, so resolving from the volatile ``$SHELL`` env var would
+    bake a DIFFERENT shell when the two run under different environments (``SHELL=/bin/bash rig
+    apply`` then ``SHELL=/usr/bin/fish rig status``, or a launchd/cron status with no $SHELL) →
+    permanent flapping drift. ``pwd.getpwuid(getuid()).pw_shell`` is the user's REAL login shell
+    from the system account database — IDENTICAL across every invocation regardless of the ambient
+    env. We use it first; only if it is unavailable/empty do we fall back to ``$SHELL``, then
+    ``/bin/zsh`` (macOS default), then ``/bin/sh`` (always present).
     """
+    try:
+        import pwd
+
+        passwd_shell = pwd.getpwuid(os.getuid()).pw_shell
+        if passwd_shell.startswith("/"):
+            return passwd_shell
+    except (KeyError, OSError, ImportError, AttributeError):
+        pass  # no passwd entry / non-POSIX — fall through to the env/default chain.
     env_shell = os.environ.get("SHELL", "")
     if env_shell.startswith("/"):
         return env_shell

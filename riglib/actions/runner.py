@@ -1279,6 +1279,7 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
     # activation must then NOT `launchctl load -w` it (that would ENABLE a stale/unmanaged boot
     # path despite skip semantics — codex finding). Same for a conflict-skipped ~/.tmux.conf below.
     boot_plist_conflicted = False
+    boot_plist_changed = False  # plist (re)written this apply → an already-loaded agent is reloaded.
     if plan.boot_enabled and sys.platform == "darwin":
         plan.boot_plist_path.parent.mkdir(parents=True, exist_ok=True)
         boot_out = fsutil.write_file(plan.boot_plist_path, plan.render_boot_plist(), on_conflict)
@@ -1288,6 +1289,7 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
             extra_backups.append(boot_out.backup)
         if boot_out.status != "skipped":
             changed = True
+            boot_plist_changed = True
             details.append(f"wrote boot plist {plan.boot_plist_path.name} (load on next login/reboot)")
         elif not boot_out.detail.startswith("identical"):
             # rig OWNS the boot plist — a DIFFERING one left untouched under skip is stale.
@@ -1346,6 +1348,7 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
     act_changes, act_warnings = _tmux_activate(
         plan,
         boot_load_safe=not (boot_plist_conflicted or boot_script_conflicted or conf_conflicted),
+        boot_plist_changed=boot_plist_changed,
     )
     if act_changes:
         changed = True
@@ -1375,7 +1378,9 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
     return ActionResult(action, status, f"tmux/config: {'; '.join(details)}", headline)
 
 
-def _tmux_activate(plan, *, boot_load_safe: bool = True) -> tuple[list[str], list[str]]:
+def _tmux_activate(
+    plan, *, boot_load_safe: bool = True, boot_plist_changed: bool = False
+) -> tuple[list[str], list[str]]:
     """Bring the rig-managed tmux LIVE on this machine (DEFECTS 1/4/5/6).
 
     Returns ``(changes, warnings)``: ``changes`` are real mutations the run performed (the caller
@@ -1384,10 +1389,16 @@ def _tmux_activate(plan, *, boot_load_safe: bool = True) -> tuple[list[str], lis
     offline machine) — surfaced to the operator but NEVER counted as a change (else every re-apply
     would falsely report ``created`` — codex/opus idempotency finding).
 
-    ``boot_load_safe`` (caller-supplied): when False — the boot plist OR the ``~/.tmux.conf``
+    ``boot_load_safe`` (caller-supplied): when False — the boot plist / boot script / ``~/.tmux.conf``
     wiring was CONFLICT-skipped (left stale/unwired) — the launchctl-load is SUPPRESSED so we never
-    enable a stale/unmanaged boot path despite on_conflict=skip (codex finding). The non-boot steps
+    enable a stale/unmanaged boot path despite on_conflict=skip (review finding). The non-boot steps
     (plugins / resurrect dir / first save) still run; they don't risk activating a stale boot.
+
+    ``boot_plist_changed`` (caller-supplied): the boot plist was (re)written this apply. We load the
+    agent when it is NOT loaded; we only UNLOAD-then-reload an ALREADY-loaded agent when the plist
+    CHANGED. A steady-state re-apply (loaded + unchanged) does nothing — so we never restart the
+    agent every run (re-spawning a ``main`` session on the live server) and a transient load failure
+    can't disable a working unchanged agent (review findings).
 
     Steps, each idempotent and non-fatal (a clean machine must end up FULLY working with zero
     manual steps; a partial/offline machine degrades, never aborts the whole apply):
@@ -1442,33 +1453,60 @@ def _tmux_activate(plan, *, boot_load_safe: bool = True) -> tuple[list[str], lis
             shutil.rmtree(dest, ignore_errors=True)  # drop any partial dir the failed clone left.
             warnings.append(f"plugin {name} NOT installed (clone failed rc={rc} — offline?)")
 
-    # 1) launchctl-(re)load the boot agent (macOS) so it fires at login. `-w` enables it across
-    # reboots. We reload when it is NOT loaded OR its loaded definition may be stale (always
-    # unload-then-load-w for the managed agent so a plist content change is picked up — codex
-    # finding: skipping reload-when-loaded leaves launchd running the old job). Idempotent: an
-    # already-correct agent re-loads to the same definition (no user-visible change), so this is a
-    # WARNING-or-change only when we actually (re)issued the load and it failed/succeeded with a
-    # state change. To keep re-apply a no-op we only COUNT it as a change when it was not loaded.
-    # SUPPRESSED when boot_load_safe is False — the boot plist / ~/.tmux.conf was conflict-skipped
-    # and may be stale/unwired, so loading the agent would enable a stale boot path (codex finding).
+    # 1) launchctl-load the boot agent (macOS) so it fires at login. `-w` enables it across reboots.
+    # Load ONLY when there is real work:
+    #   - NOT loaded  → load it (no unload first — nothing to unload; a steady-state re-apply where
+    #     it's already loaded does NOTHING, so apply stays a no-op AND we never restart it every run
+    #     / re-spawn a `main` session on the live server: review Low).
+    #   - loaded BUT the plist was rewritten this apply (boot_plist_changed) → unload then load -w so
+    #     launchd picks up the new definition (codex: a stale loaded job must be refreshed).
+    # We unload ONLY in the changed-plist branch, so a transient load failure can leave the agent
+    # off only when we deliberately refreshed a CHANGED plist (surfaced as a warning) — never for an
+    # unchanged steady-state agent (review Medium: unconditional unload could disable a working one).
+    # SUPPRESSED entirely when boot_load_safe is False — the plist / boot script / ~/.tmux.conf was
+    # conflict-skipped (stale/unwired), so loading would enable a stale boot path (review finding).
+    #
+    # rig_boot_active tracks whether rig's REPLACEMENT boot agent is actually in place after this
+    # block — freshly loaded, or already-loaded-and-still-safe. The stale-boot cleanup (step 5) is
+    # gated on it: removing continuum's own autostart (Login Items / Tmux.Start) while rig has NOT
+    # got a working replacement loaded would leave the machine with NO tmux autostart at all on the
+    # next login (a conflict-skip / offline / launchctl-failure path). So we only clean once rig's
+    # boot is confirmed active (review finding).
+    rig_boot_active = False
     if plan.boot_enabled and sys.platform == "darwin" and plan.boot_plist_path.is_file():
         if not boot_load_safe:
             warnings.append(
-                "boot agent NOT loaded — the boot plist or ~/.tmux.conf was conflict-skipped "
-                "(stale/unwired); re-run with on_conflict=backup/overwrite to load it"
+                "boot agent NOT loaded — the boot plist, boot script, or ~/.tmux.conf was "
+                "conflict-skipped (stale/unwired); re-run with on_conflict=backup/overwrite to load it"
             )
-        else:
-            was_loaded = _launchctl_loaded(plan.boot_label)
-            _launchctl("unload", str(plan.boot_plist_path))
+        elif not _launchctl_loaded(plan.boot_label):
             rc = _launchctl_load_enable(plan.boot_plist_path)
             if rc != 0:
                 warnings.append(f"boot agent NOT loaded (launchctl rc={rc})")
-            elif not was_loaded:
+            else:
                 changes.append(f"launchctl load -w {plan.boot_plist_path.name}")
+                rig_boot_active = True
+        elif boot_plist_changed:
+            # refresh a CHANGED plist into the already-running agent: unload then load -w.
+            _launchctl("unload", str(plan.boot_plist_path))
+            rc = _launchctl_load_enable(plan.boot_plist_path)
+            if rc != 0:
+                warnings.append(
+                    f"boot agent reload FAILED (launchctl rc={rc}) — it may be left unloaded; "
+                    f"re-run `rig apply` or `launchctl load -w {plan.boot_plist_path}`"
+                )
+            else:
+                changes.append(f"reloaded boot agent {plan.boot_plist_path.name} (plist changed)")
+                rig_boot_active = True
+        else:
+            # already loaded + safe + unchanged → rig's boot is in place (steady-state re-apply).
+            rig_boot_active = True
 
-    # 5) clean continuum's stale macOS boot (Login Items + old Tmux.Start agent) — macOS only AND
-    # only when rig owns boot (don't remove the user's own autostart if they opted out of rig boot).
-    if plan.boot_enabled and sys.platform == "darwin":
+    # 5) clean continuum's stale macOS boot (Login Items + old Tmux.Start agent) — macOS only, only
+    # when rig owns boot (don't remove the user's own autostart if they opted out of rig boot), AND
+    # only when rig's REPLACEMENT boot is actually active (never strip the last autostart while our
+    # own replacement failed to load / was conflict-skipped — review finding).
+    if plan.boot_enabled and sys.platform == "darwin" and rig_boot_active:
         if _clean_stale_continuum_boot(plan):
             changes.append("cleaned stale continuum boot (Login Items / old Tmux.Start)")
 

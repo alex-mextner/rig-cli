@@ -379,6 +379,53 @@ def test_login_shell_honors_configured_shell():
     assert "/usr/bin/fish" in line and "-l" in line
 
 
+def test_plan_resolves_login_shell_to_a_concrete_path(fake_agent_tools, tmp_path, monkeypatch):
+    """DETERMINISM (review): the plan resolves an EMPTY login_shell.shell to a CONCRETE absolute
+    path at plan time and bakes it — so render does NOT depend on $SHELL/FS at render time."""
+    plan = _build({"tmux": {"enabled": True}}, tmp_path, fake_agent_tools)
+    a = next(act for act in plan.actions if act.kind == "provision_tmux")
+    baked = a.options["login_shell"]["shell"]
+    assert baked.startswith("/") and " " not in baked  # a concrete absolute binary path
+
+
+def test_login_shell_resolves_from_passwd_not_ambient_shell(monkeypatch):
+    """The resolver reads the PASSWD database (stable login shell), NOT the volatile $SHELL env —
+    so it is identical whatever $SHELL is set to (review P1: $SHELL-based resolve flapped)."""
+    import os
+    import pwd
+
+    from riglib import tmux as tmod
+
+    real = pwd.getpwuid(os.getuid()).pw_shell
+    if not real.startswith("/"):
+        pytest.skip("no absolute passwd shell on this host")
+    monkeypatch.setenv("SHELL", "/some/other/shell-XYZ")  # $SHELL differs from passwd
+    assert tmod.resolve_login_shell() == real  # passwd wins, $SHELL ignored
+
+
+def test_login_shell_deterministic_across_separate_plans_under_different_shell(
+    fake_agent_tools, tmp_path, monkeypatch
+):
+    """THE real apply→status path (review P1): `apply` and `status` each REBUILD a fresh plan. Two
+    independently-built plans under DIFFERENT $SHELL must bake the SAME shell, so a
+    `SHELL=/bin/bash rig apply` followed by `SHELL=/usr/bin/fish rig status` does NOT flap drift."""
+    from riglib.actions.runner import tmux_plan_from_action
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    plan_apply = _build({"tmux": {"enabled": True}}, tmp_path, fake_agent_tools)
+    a_apply = next(act for act in plan_apply.actions if act.kind == "provision_tmux")
+    render_apply = tmux_plan_from_action(a_apply).render_rig_conf()
+    # a SEPARATE plan rebuild (as `rig status` does) under a DIFFERENT $SHELL.
+    monkeypatch.setenv("SHELL", "/usr/bin/fish")
+    plan_status = _build({"tmux": {"enabled": True}}, tmp_path, fake_agent_tools)
+    a_status = next(act for act in plan_status.actions if act.kind == "provision_tmux")
+    render_status = tmux_plan_from_action(a_status).render_rig_conf()
+    line_apply = next(ln for ln in render_apply.splitlines() if "default-command" in ln)
+    line_status = next(ln for ln in render_status.splitlines() if "default-command" in ln)
+    assert line_apply == line_status  # identical despite the two different ambient $SHELLs
+
+
 def test_render_ordering_continuum_hook_is_last_plugin_init():
     """THE root-cause guarantee: continuum's run-shell init comes AFTER the Moshi status-right
     tweak (and after resurrect), so the Moshi tweak can never wipe continuum's autosave hook.
@@ -1768,6 +1815,74 @@ def test_activation_suppresses_boot_load_when_plist_conflict_skipped(tmp_path, m
     (la / "ai.hyperide.tmux-boot.plist").write_text("<plist>STALE</plist>\n", encoding="utf-8")
     runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "skip")
     assert rec["load_w"] == []  # the stale boot agent was NOT loaded
+    # AND the stale-continuum-boot cleanup must NOT run: rig has not loaded its replacement, so
+    # stripping continuum's own autostart now would leave NO tmux autostart at all (review finding).
+    assert rec["cleanups"] == 0
+
+
+def test_activation_does_not_reload_already_loaded_unchanged_agent(tmp_path, monkeypatch):
+    """A steady-state re-apply (agent already loaded, plist unchanged) must NOT unload/reload the
+    boot agent — so it never restarts it / re-spawns `main` every apply, and a transient load
+    failure can't disable a working agent (review Medium/Low). The launchctl load is NOT called."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch, launchctl_loaded=True)
+    # first apply writes the plist (changed) and would load; then everything is current + loaded.
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "backup")
+    rec["load_w"].clear()
+    rec["launchctl"].clear()
+    # second apply: plist unchanged + agent loaded → NO load, NO unload.
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "backup")
+    assert rec["load_w"] == []  # not (re)loaded
+    assert not any(v == "unload" for v, _a in rec["launchctl"])  # not unloaded
+
+
+def test_activation_reloads_when_plist_changed_and_agent_loaded(tmp_path, monkeypatch):
+    """When the plist is REWRITTEN (e.g. an upgrade changes the boot script path) AND the agent is
+    already loaded, activation unloads + load -w's it so launchd picks up the new definition."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch, launchctl_loaded=True)
+    # pre-seed a DIFFERING plist so this apply REWRITES it (boot_plist_changed) under backup.
+    la = home / "Library" / "LaunchAgents"
+    la.mkdir(parents=True)
+    (la / "ai.hyperide.tmux-boot.plist").write_text("<plist>OLD</plist>\n", encoding="utf-8")
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "backup")
+    plist = str(la / "ai.hyperide.tmux-boot.plist")
+    assert rec["load_w"] == [plist]  # reloaded the changed plist
+    assert ("unload", plist) in rec["launchctl"]  # unloaded first to refresh the definition
+
+
+def test_failed_clone_warning_surfaced_on_changed_apply(tmp_path, monkeypatch):
+    """A clone failure on a FIRST (config-writing → changed) apply must still surface the
+    'plugin NOT installed' warning in the result detail, not be swallowed (review Low-4)."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    _activation_seams(monkeypatch)
+    monkeypatch.setattr(runner, "_git_clone", lambda repo, dest: 1)  # offline: every clone fails
+    # a FIRST apply (no config yet) → config is written → status is created/changed.
+    res = runner._do_provision_tmux(_tmux_action(home), "backup")
+    assert res.status in ("created", "backed_up")
+    assert "NOT installed" in res.detail  # the offline-clone warning reached the user
 
 
 def test_activation_suppresses_boot_load_when_boot_script_conflict_skipped(tmp_path, monkeypatch):
