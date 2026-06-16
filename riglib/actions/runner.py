@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -1132,6 +1133,23 @@ def tmux_plan_from_action(action: Action):
     )
 
 
+def _timestamped_backup_path(base: Path) -> Path:
+    """Turn a fixed backup path (``<conf>.rig-bak``) into a UNIQUE timestamped one
+    (``<conf>.rig-bak-<UTC>``). A fixed name was written only on the FIRST migration
+    (guarded by ``not exists()``), so a later apply — after the user hand-edited the conf —
+    would neutralize those edits WITHOUT a backup. A timestamped name never collides, so every
+    migrating apply keeps its own restore point. Microsecond precision avoids a same-second
+    collision. (CTO 2026-06-16)
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    path = base.with_name(f"{base.name}-{stamp}")
+    n = 1
+    while path.exists():  # paranoia: two applies inside the same microsecond
+        path = base.with_name(f"{base.name}-{stamp}-{n}")
+        n += 1
+    return path
+
+
 def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
     """Generate the rig-managed tmux artifacts and migrate ``~/.tmux.conf`` (idempotent).
 
@@ -1242,12 +1260,16 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
     # 4) ~/.tmux.conf — migrate (back up an inline-settings original) then wire the managed region.
     conf = plan.conf_path
     existing = conf.read_text(encoding="utf-8") if conf.is_file() else ""
-    # one-time migration backup: only when the original carried rig-owned settings inline AND we
-    # haven't already kept a backup (never clobber the true original).
-    if existing and has_inline_rig_settings(existing) and not plan.backup_path.exists():
-        plan.backup_path.write_text(existing, encoding="utf-8")
-        backup = plan.backup_path
-        details.append(f"backed up original → {plan.backup_path.name}")
+    # Migration backup: whenever the conf still carries rig-owned settings inline (so migration
+    # will NEUTRALIZE live user lines), snapshot it FIRST under a UNIQUE timestamped name. A
+    # fixed `.rig-bak` was written only on the first migration (`not exists()`), so a second
+    # apply after the user hand-edited ~/.tmux.conf would neutralize those edits WITHOUT backing
+    # them up — losing the in-between state. A timestamped name keeps every restore point.
+    if existing and has_inline_rig_settings(existing):
+        backup_target = _timestamped_backup_path(plan.backup_path)
+        backup_target.write_text(existing, encoding="utf-8")
+        backup = backup_target
+        details.append(f"backed up original → {backup_target.name}")
         changed = True
 
     desired_conf = _tmux_conf_with_managed(

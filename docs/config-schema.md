@@ -516,9 +516,10 @@ tmux:
   between the markers (conda-init style). Lines before and after the block are preserved.
 
 **First apply / migration.** When the existing `~/.tmux.conf` carries rig-owned settings inline
-(resurrect/continuum/tpm/Moshi), rig backs the **original** up to `~/.tmux.conf.rig-bak` before
-wiring the managed region — and **never overwrites an existing backup** (the true original is
-preserved). The migration is deliberately **conservative**: it neutralizes (comments out, with a
+(resurrect/continuum/tpm/Moshi), rig backs the **original** up to a UNIQUE timestamped
+`~/.tmux.conf.rig-bak-<UTC>` before wiring the managed region — so every migrating apply keeps its
+OWN restore point and a later apply (after a hand-edit) never loses the in-between state by
+skipping a backup. The migration is deliberately **conservative**: it neutralizes (comments out, with a
 `# rig-migrated (now in rig.tmux.conf):` marker) **only the inline Moshi `status-left`/
 `status-right` wipe** — the one line that is *actively harmful* (if it runs after the user's own
 continuum init it wipes continuum's autosave hook). **Every other line stays live**, including
