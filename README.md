@@ -224,6 +224,20 @@ The catalog drives config validation (unknown item names fail closed), the wizar
 description panes, and the install actions. Update agent-tools, and `rig` picks up new
 items on the next scan — no code change in `rig`.
 
+### Universal skills vs. a project's `AGENTS.md`
+
+`rig` is the **universal skill layer**. Cross-project, always-apply MANDATORY skills (for
+example `visual-proof-cycle` or `task-completion-selfcheck`) are provisioned by `rig` from
+the agent-tools catalog and meant to reach **every project and every user** through the
+SessionStart blurb, the rig-installed skills, and each skill's own trigger `description`.
+That layer is their single source of truth.
+
+A project's `AGENTS.md` (or a repo-level `CLAUDE.md`) is for **project-specific guidance
+only** — how *this* repo builds, its layout, its local conventions. **Never duplicate a
+universal mandatory skill into an individual `AGENTS.md`:** it pins a stale copy to one repo,
+hides the real source, and goes stale the moment the skill changes. The universal layer is
+the one place that carries these mandates — let it, and keep `AGENTS.md` project-specific.
+
 ## Architecture
 
 ```
