@@ -117,6 +117,38 @@ def test_tmux_boot_label_must_be_string():
     validate({"version": 1, "tmux": {"boot": {"label": "com.me.tmux"}}})
 
 
+def test_tmux_login_shell_block_accepted():
+    validate({"version": 1, "tmux": {"login_shell": {"enabled": True, "shell": "/bin/zsh"}}})
+    validate({"version": 1, "tmux": {"login_shell": {"enabled": False}}})
+
+
+def test_tmux_login_shell_enabled_must_be_bool():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"login_shell": {"enabled": "yes"}}})
+
+
+def test_tmux_login_shell_shell_must_be_string():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"login_shell": {"shell": 123}}})
+
+
+def test_tmux_login_shell_shell_must_be_absolute_path():
+    """A non-empty shell override must be an ABSOLUTE path to the BINARY with NO args (rig adds
+    `-l`). A relative name, OR an absolute path WITH args (`/bin/zsh -l` — the review-caught case
+    that passed `startswith('/')` but rendered `'/bin/zsh -l' -l`), is rejected."""
+    for bad in ("zsh", "zsh -l", "bin/zsh", "/bin/zsh -l", "/bin/zsh --login", "/opt/My App/zsh"):
+        with pytest.raises(ConfigError):
+            validate({"version": 1, "tmux": {"login_shell": {"shell": bad}}})
+    # empty (use $SHELL) and a bare absolute binary path are both fine.
+    validate({"version": 1, "tmux": {"login_shell": {"shell": ""}}})
+    validate({"version": 1, "tmux": {"login_shell": {"shell": "/usr/bin/fish"}}})
+
+
+def test_tmux_login_shell_unknown_key_rejected():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"login_shell": {"bogus": True}}})
+
+
 def test_tmux_enabled_null_is_accepted_and_provisions():
     """`enabled: null` (explicit None) is valid and, per the docs ('not false' provisions),
     must NOT be treated as disabled."""
@@ -213,6 +245,138 @@ def test_cc_save_avoids_ls_head_pipe():
     assert not any("head -n1" in ln for ln in code_lines)
     # the first-line-of-listing parameter expansion replaces the pipe.
     assert any("listing" in ln and "newest=" in ln for ln in code_lines)
+
+
+# ── DEFECT 2: cc-save must detect claude by the pane's PROCESS TREE, not the command string ──
+def test_cc_save_walks_pane_process_tree_not_command_string():
+    """DEFECT 2 (the reboot bug): cc shows up in `pane_current_command` as its VERSION string
+    (e.g. `2.1.178`), and the real `claude` process is a CHILD of the pane's shell. Filtering on
+    `pane_current_command == claude` therefore matched NOTHING → the map was always empty → cc
+    never resumed. cc-save must walk the pane's process TREE (pane_pid + descendants) for a
+    process whose command is `claude` / `*/claude`."""
+    body = _plan().render_cc_save()
+    # it must enumerate the pane PID + its descendants (a tree walk), not just read the command.
+    assert "pane_pid" in body or "#{pane_pid}" in body
+    # the OLD broken filter on the command string must be GONE from the EXECUTABLE code (a
+    # comment may still reference it to explain WHY the tree walk replaced it).
+    code_lines = [ln for ln in body.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("pane_current_command" in ln for ln in code_lines)
+    # a process-tree walk: descend children via ppid (ps -o pid,ppid or pgrep -P).
+    assert "ppid" in body or "pgrep -P" in body
+
+
+def test_cc_save_matches_claude_basename_in_the_tree():
+    """The matched descendant's command is `claude` or `*/claude` (an absolute path to the
+    binary), never a substring like `claudette` — match the basename."""
+    body = _plan().render_cc_save()
+    assert "claude" in body
+    # it must record the pane→cwd→session-id map (the whole point) once a claude descendant is found.
+    assert "MAP_FILE" in body and ".jsonl" in body
+
+
+def test_cc_save_still_records_cwd_and_session_id():
+    """Detection changed (tree walk), but the RECORDED data is unchanged: pane addr, cwd, id."""
+    body = _plan().render_cc_save()
+    assert "pane_current_path" in body or "#{pane_current_path}" in body
+    assert "encode_cwd" in body
+    assert "newest_session_id" in body
+
+
+def _run_pane_has_claude(snapshot: str, root: str) -> int:
+    """Extract the REAL `pane_has_claude` BFS from the generated cc-save script and run it against
+    a SYNTHETIC ps snapshot — HERMETIC (no tmux/network/real processes), so the tree-walk logic is
+    covered even when the e2e is opted out (opus finding: the BFS was only exercised in the e2e).
+    Returns the function's exit code (0 = a `claude` descendant of `root` was found)."""
+    import shlex
+    import subprocess
+    import textwrap
+
+    body = _plan().render_cc_save()
+    # pull out the pane_has_claude() function definition (from its `pane_has_claude() {` to the
+    # matching closing brace at column 0 — the script formats it that way).
+    start = body.index("pane_has_claude() {")
+    end = body.index("\n}\n", start) + len("\n}\n")
+    fn = body[start:end]
+    script = textwrap.dedent(f"""\
+        set -euo pipefail
+        PS_SNAPSHOT={shlex.quote(snapshot)}
+        {fn}
+        if pane_has_claude {shlex.quote(root)}; then exit 0; else exit 1; fi
+    """)
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True).returncode
+
+
+def test_pane_has_claude_finds_a_direct_child():
+    """The pane's direct child is `claude` → detected (the common case: cc is a child of the shell)."""
+    snap = "100 1 bash\n200 100 claude\n300 100 sleep\n"
+    assert _run_pane_has_claude(snap, "100") == 0
+
+
+def test_pane_has_claude_finds_a_deep_descendant():
+    """A `claude` two levels down (shell → node → claude) is still found by the BFS."""
+    snap = "100 1 bash\n200 100 node\n300 200 claude\n"
+    assert _run_pane_has_claude(snap, "100") == 0
+
+
+def test_pane_has_claude_matches_absolute_path_basename():
+    """A descendant reported by its absolute path (`/opt/homebrew/bin/claude`) matches `*/claude`."""
+    snap = "100 1 zsh\n200 100 /opt/homebrew/bin/claude\n"
+    assert _run_pane_has_claude(snap, "100") == 0
+
+
+def test_pane_has_claude_no_match_when_absent():
+    """No `claude` anywhere in the tree → not found (exit non-zero)."""
+    snap = "100 1 bash\n200 100 vim\n300 100 less\n"
+    assert _run_pane_has_claude(snap, "100") != 0
+
+
+def test_pane_has_claude_does_not_match_substring():
+    """A `claudette` process is NOT a `claude` match (basename equality, not substring)."""
+    snap = "100 1 bash\n200 100 claudette\n"
+    assert _run_pane_has_claude(snap, "100") != 0
+
+
+def test_pane_has_claude_ignores_claude_outside_the_subtree():
+    """A `claude` that is NOT a descendant of the queried pane is ignored (no false positive)."""
+    snap = "100 1 bash\n200 100 sleep\n900 1 claude\n"  # 900 is a sibling, not under 100
+    assert _run_pane_has_claude(snap, "100") != 0
+
+
+# ── DEFECT 3: restored panes must be LOGIN shells (so ~/.zprofile / PATH is sourced) ─────────
+def test_render_default_command_is_a_login_shell():
+    """DEFECT 3 (the reboot bug): resurrect restores panes with a NON-login shell (resurrect's
+    `default-command ''`), so `~/.zprofile` (PATH etc.) is NOT sourced → restored panes have a
+    broken env. The generated config must set a login-shell default-command."""
+    conf = _plan().render_rig_conf()
+    assert "set -g default-command" in conf
+    # a login shell: the user's $SHELL with -l (so ~/.zprofile / ~/.bash_profile is sourced).
+    assert "-l" in conf
+    line = next(ln for ln in conf.splitlines() if "default-command" in ln)
+    assert "SHELL" in line or "/bin/" in line
+
+
+def test_login_shell_default_command_is_default_on():
+    """The login-shell default-command defaults ON (the safe value); a plan with no login_shell
+    block still emits it."""
+    assert "set -g default-command" in tmux.build_tmux(repo_home=Path("/home/u")).render_rig_conf()
+
+
+def test_login_shell_can_be_disabled():
+    """Configurable: `login_shell.enabled: false` omits the default-command (the user keeps
+    resurrect's default non-login behavior)."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), login_shell={"enabled": False}
+    ).render_rig_conf()
+    assert "set -g default-command" not in conf
+
+
+def test_login_shell_honors_configured_shell():
+    """An explicit `login_shell.shell` is used verbatim (e.g. a non-default shell binary)."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), login_shell={"enabled": True, "shell": "/usr/bin/fish"}
+    ).render_rig_conf()
+    line = next(ln for ln in conf.splitlines() if "default-command" in ln)
+    assert "/usr/bin/fish" in line and "-l" in line
 
 
 def test_render_ordering_continuum_hook_is_last_plugin_init():
@@ -348,7 +512,22 @@ def test_boot_plist_is_well_formed_and_labelled():
     assert parsed["Label"] == p.boot_label
     assert parsed["RunAtLoad"] is True
     assert parsed["KeepAlive"] is False
-    assert parsed["ProgramArguments"][-1] == "start-server"
+    # DEFECT 1: the plist must run the BOOT SCRIPT (which `new-session -d` loads the conf →
+    # continuum restores), NOT a bare `tmux start-server` (an EMPTY server that loads nothing).
+    assert parsed["ProgramArguments"][-1] == str(p.boot_script_path)
+    assert parsed["ProgramArguments"][-1].endswith(tmux.BOOT_NAME)
+
+
+def test_boot_plist_does_not_run_bare_start_server():
+    """DEFECT 1 (the reboot bug): `tmux start-server` starts a server WITHOUT loading the conf
+    or plugins (tmux loads the conf only on the FIRST session), so continuum-restore never
+    fires → empty server. The plist must invoke the boot SCRIPT instead."""
+    import plistlib
+
+    args = plistlib.loads(
+        tmux.build_tmux(repo_home=Path("/home/u")).render_boot_plist().encode("utf-8")
+    )["ProgramArguments"]
+    assert "start-server" not in args
 
 
 def test_boot_label_is_configurable():
@@ -358,40 +537,59 @@ def test_boot_label_is_configurable():
     assert p.boot_plist_path.name == "com.me.tmux.plist"
 
 
-def test_boot_plist_tmux_bin_falls_back_to_existing_path(monkeypatch):
-    """When tmux isn't on PATH, the boot plist must point at an EXISTING common location, not a
-    blind Apple-silicon hard-code (codex P2)."""
+def test_boot_plist_points_at_the_boot_script():
+    """The plist's single program argument is the generated boot script — the one indirection
+    that lets the boot bring up a REAL session (loading the conf) instead of an empty server."""
     import plistlib
 
-    monkeypatch.setattr(tmux.shutil, "which", lambda name: None)  # not on PATH
-    # only the Intel path "exists"
-    monkeypatch.setattr(tmux.Path, "exists", lambda self: str(self) == "/usr/local/bin/tmux")
     p = tmux.build_tmux(repo_home=Path("/home/u"))
-    parsed = plistlib.loads(p.render_boot_plist().encode("utf-8"))
-    assert parsed["ProgramArguments"][0] == "/usr/local/bin/tmux"
-
-
-def test_boot_plist_passes_f_for_custom_conf_path():
-    """A non-default conf_path must reach the login server via `-f`, else it starts WITHOUT
-    the managed config (continuum/resurrect never set → no restore) (codex P2)."""
-    import plistlib
-
-    p = tmux.build_tmux(repo_home=Path("/home/u"), conf_path="~/.config/tmux/custom.conf")
     args = plistlib.loads(p.render_boot_plist().encode("utf-8"))["ProgramArguments"]
-    assert "-f" in args
-    assert any(a.endswith("custom.conf") for a in args)
-    assert args[-1] == "start-server"
+    assert args == [str(p.boot_script_path)]
 
 
-def test_boot_plist_omits_f_for_default_conf_path():
-    """The default ~/.tmux.conf is auto-loaded by tmux, so no `-f` is emitted (keeps the
-    common-case plist minimal)."""
-    import plistlib
+# ── boot script (DEFECT 1: new-session -d loads the conf → continuum restores) ──────────────
+def test_boot_script_creates_a_session_to_load_the_conf():
+    """The boot script must `tmux new-session -d` (which loads ~/.tmux.conf → the sourced
+    rig.tmux.conf → continuum), NOT `tmux start-server` (an empty server that loads nothing)."""
+    body = tmux.build_tmux(repo_home=Path("/home/u")).render_boot_script()
+    assert body.startswith("#!/")
+    assert "new-session -d" in body
+    assert "start-server" not in body
 
-    p = tmux.build_tmux(repo_home=Path("/home/u"))  # default conf_path
-    args = plistlib.loads(p.render_boot_plist().encode("utf-8"))["ProgramArguments"]
-    assert "-f" not in args
-    assert args[-1] == "start-server"
+
+def test_boot_script_is_idempotent_attach_or_create():
+    """A second login/boot must NOT spawn a duplicate session — the boot script creates the
+    canonical session only if it does not already exist (anti-sprawl at boot)."""
+    body = tmux.build_tmux(
+        repo_home=Path("/home/u"), anti_sprawl={"enabled": True, "session": "main"}
+    ).render_boot_script()
+    assert "has-session" in body
+    assert "main" in body
+
+
+def test_boot_script_passes_f_for_custom_conf_path():
+    """A non-default conf_path must reach the boot session via `-f`, else the session starts
+    WITHOUT the managed config (continuum/resurrect never set → no restore)."""
+    body = tmux.build_tmux(
+        repo_home=Path("/home/u"), conf_path="~/.config/tmux/custom.conf"
+    ).render_boot_script()
+    assert "-f" in body
+    assert "custom.conf" in body
+
+
+def test_boot_script_omits_f_for_default_conf_path():
+    """The default ~/.tmux.conf is auto-loaded by tmux, so no `-f` is emitted."""
+    body = tmux.build_tmux(repo_home=Path("/home/u")).render_boot_script()
+    assert " -f " not in body
+
+
+def test_boot_script_tmux_bin_falls_back_to_existing_path(monkeypatch):
+    """When tmux isn't on PATH, the boot script must reference an EXISTING common location, not a
+    blind Apple-silicon hard-code (codex P2)."""
+    monkeypatch.setattr(tmux.shutil, "which", lambda name: None)  # not on PATH
+    monkeypatch.setattr(tmux.Path, "exists", lambda self: str(self) == "/usr/local/bin/tmux")
+    body = tmux.build_tmux(repo_home=Path("/home/u")).render_boot_script()
+    assert "/usr/local/bin/tmux" in body
 
 
 # ── anti-sprawl attach-or-create ─────────────────────────────────────────────────────────
@@ -665,13 +863,38 @@ def test_plan_resolves_relative_paths_against_repo_root(fake_agent_tools, tmp_pa
 def test_plan_carries_resolved_knobs(fake_agent_tools, tmp_path):
     plan = _build(
         {"tmux": {"enabled": True, "apply": "block", "moshi": {"enabled": True},
-                  "continuum": {"save_interval": 9}}},
+                  "continuum": {"save_interval": 9},
+                  "login_shell": {"enabled": False, "shell": "/bin/zsh"}}},
         tmp_path, fake_agent_tools,
     )
     a = next(a for a in plan.actions if a.kind == "provision_tmux")
     assert a.options["apply_mode"] == "block"
     assert a.options["moshi"]["enabled"] is True
     assert a.options["continuum"]["save_interval"] == 9
+    assert a.options["login_shell"] == {"enabled": False, "shell": "/bin/zsh"}
+
+
+def test_apply_login_shell_default_command_lands_in_generated_conf(tmp_path, monkeypatch):
+    """The login-shell default-command (DEFECT 3) reaches the generated rig.tmux.conf on apply."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    conf = (home / ".config" / "rig" / "tmux" / "rig.tmux.conf").read_text()
+    assert "set -g default-command" in conf and "-l" in conf
+
+
+def test_apply_login_shell_disabled_omits_default_command(tmp_path, monkeypatch):
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    runner._do_provision_tmux(_tmux_action(home, login_shell={"enabled": False}), "backup")
+    conf = (home / ".config" / "rig" / "tmux" / "rig.tmux.conf").read_text()
+    assert "set -g default-command" not in conf
 
 
 # ── install (runner) — import mode, idempotent, migration + backup ───────────────────────
@@ -699,6 +922,19 @@ def _tmux_action(home, **over):
         target=home / ".tmux.conf",
         options=options,
     )
+
+
+def _stage_live_tmux_state(home):
+    """Create the LIVE activation state (the resurrect dir + complete plugin checkouts) a real
+    apply would. Drift now checks these (codex finding), but the unit suite applies under
+    RIG_TMUX_DRY_RUN (no live activation), so an in-sync drift test must stage them itself —
+    otherwise drift correctly reports 'no plugins / no resurrect dir'. Uses the REAL plugin
+    entrypoints from tmux.PLUGINS (NOT `<dir>.tmux` — resurrect ships `resurrect.tmux`)."""
+    (home / ".tmux" / "resurrect").mkdir(parents=True, exist_ok=True)
+    plugins = home / ".tmux" / "plugins"
+    for name, (_repo, entry) in tmux.PLUGINS.items():
+        (plugins / name).mkdir(parents=True, exist_ok=True)
+        (plugins / name / entry).write_text("#!/usr/bin/env bash\n", encoding="utf-8")
 
 
 def test_apply_import_writes_generated_file_and_import_line(tmp_path, monkeypatch):
@@ -1114,8 +1350,51 @@ def test_drift_tmux_in_sync_after_apply(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     a = _tmux_action(home)
     runner._do_provision_tmux(a, "backup")
+    _stage_live_tmux_state(home)  # a real apply would have created plugins + resurrect dir
     report = detect(InstallPlan(actions=[a]))
     assert not [d for d in report.items if d.category == "tmux"]
+
+
+def test_drift_tmux_live_state_missing(tmp_path, monkeypatch):
+    """DEFECTS 4/6 drift: a missing resurrect dir / plugin checkout is surfaced by `rig status`
+    so a clean machine doesn't read as in-sync while apply still has live work to do (codex
+    finding). Here the live state is NOT staged → drift reports both."""
+    from riglib.actions import runner
+    from riglib.drift import detect
+    from riglib.plan import InstallPlan
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    a = _tmux_action(home)
+    runner._do_provision_tmux(a, "backup")  # writes the config artifacts (dry-run: no live activation)
+    # status checks the LIVE state only on a real machine (under RIG_TMUX_DRY_RUN apply skips the
+    # live activation, so status correctly suppresses the matching live drift to stay consistent).
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    drift = [d for d in detect(InstallPlan(actions=[a])).items if d.category == "tmux"]
+    assert any("resurrect" in d.detail and d.direction == "missing" for d in drift)
+    assert any("plugin" in d.detail and "tpm" in str(d.target) for d in drift)
+
+
+def test_drift_tmux_live_state_suppressed_under_dry_run(tmp_path, monkeypatch):
+    """Under RIG_TMUX_DRY_RUN apply skips the LIVE activation (no plugin clone, no resurrect
+    dir), so status MUST suppress the matching live-state drift — else status would report drift
+    apply deliberately won't converge (apply/status disagree, and status could never read in-sync
+    under the flag, e.g. CI/smoke). The file-artifact drift stays checked; only the live half is
+    gated. (The autouse _isolate_tmux_activation fixture already sets the flag for this test.)"""
+    from riglib.actions import runner
+    from riglib.drift import detect
+    from riglib.plan import InstallPlan
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    a = _tmux_action(home)
+    runner._do_provision_tmux(a, "backup")  # writes config artifacts; dry-run skips live activation
+    # the resurrect dir + plugin checkouts are absent (dry-run never created them), but with the
+    # flag set status must NOT flag them — only the live half is gated, file artifacts stay in-sync.
+    drift = [d for d in detect(InstallPlan(actions=[a])).items if d.category == "tmux"]
+    assert not any("resurrect" in d.detail or "plugin" in d.detail for d in drift), drift
 
 
 def test_drift_tmux_modified_generated_file(tmp_path, monkeypatch):
@@ -1201,6 +1480,7 @@ def test_drift_tmux_block_mode_missing_and_modified(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     a = _tmux_action(home, apply_mode="block")
     runner._do_provision_tmux(a, "backup")
+    _stage_live_tmux_state(home)  # a real apply would have created plugins + resurrect dir
     # in sync right after apply
     assert not [d for d in detect(InstallPlan(actions=[a])).items if d.category == "tmux"]
     # tamper INSIDE the managed block → 'modified' (content compared, not just sentinels)
@@ -1228,6 +1508,7 @@ def test_drift_tmux_boot_plist(tmp_path, monkeypatch):
     monkeypatch.setattr(_sys, "platform", "darwin")
     a = _tmux_action(home, boot={"enabled": True})
     runner._do_provision_tmux(a, "backup")
+    _stage_live_tmux_state(home)  # a real apply would have created plugins + resurrect dir
     assert not [d for d in detect(InstallPlan(actions=[a])).items if d.category == "tmux"]
     # delete the boot plist → drift surfaces it (it was previously unchecked).
     (home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-boot.plist").unlink()
@@ -1309,6 +1590,367 @@ def test_apply_surfaces_generated_file_backups(tmp_path, monkeypatch):
     assert res.status == "backed_up"
     assert res.backup is not None and ".rig-bak" in res.backup.name
     assert "backups:" in res.detail
+
+
+# ── DEFECTS 1/4/5/6: live activation (plugins, resurrect dir, first save, launchctl, cleanup) ──
+def _activation_seams(monkeypatch, *, plugins_present=False, launchctl_loaded=False):
+    """Stub the live seams an activation touches and return a record of the calls made.
+
+    Records git clones, launchctl verbs, tmux `resurrect save` runs, and continuum boot-cleanup
+    runs — so a test can assert WHICH side effects an activation performed without any real
+    network / daemon / tmux-server access.
+    """
+    from riglib.actions import runner
+
+    rec = {"clones": [], "launchctl": [], "load_w": [], "saves": 0, "cleanups": 0}
+
+    def _clone(repo, dest):
+        rec["clones"].append((repo, str(dest)))
+        Path(dest).mkdir(parents=True, exist_ok=True)
+        return 0
+
+    def _load_w(plist):
+        rec["load_w"].append(str(plist))
+        return 0
+
+    def _cleanup(plan):
+        rec["cleanups"] += 1
+        return True
+
+    monkeypatch.setattr(runner, "_git_clone", _clone)
+    monkeypatch.setattr(runner, "_launchctl", lambda verb, arg: rec["launchctl"].append((verb, arg)) or 0)
+    monkeypatch.setattr(runner, "_launchctl_load_enable", _load_w)
+    monkeypatch.setattr(runner, "_launchctl_loaded", lambda label: launchctl_loaded)
+    monkeypatch.setattr(runner, "_tmux_resurrect_save", lambda plan: rec.update(saves=rec["saves"] + 1) or 0)
+    monkeypatch.setattr(runner, "_clean_stale_continuum_boot", _cleanup)
+    return rec
+
+
+def test_activation_creates_resurrect_dir(tmp_path, monkeypatch):
+    """DEFECT 4: ~/.tmux/resurrect must EXIST after apply, else resurrect never writes a
+    snapshot (tmux_resurrect_*.txt) → nothing to restore on reboot."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)  # run the real activation
+    _activation_seams(monkeypatch)
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    assert (home / ".tmux" / "resurrect").is_dir()
+
+
+def test_activation_clones_missing_plugins(tmp_path, monkeypatch):
+    """DEFECT 6: on a CLEAN machine ~/.tmux/plugins is empty, so the @plugin declarations don't
+    resolve. Activation must clone tpm + resurrect + continuum."""
+    from riglib.actions import runner
+    from riglib import tmux as tmod
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch)
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    cloned = {repo for repo, _dest in rec["clones"]}
+    assert cloned == {url for url, _entry in tmod.PLUGINS.values()}
+
+
+def test_activation_skips_already_present_plugins(tmp_path, monkeypatch):
+    """Idempotent: a COMPLETE plugin checkout that already exists is NOT re-cloned."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    # pre-create a COMPLETE tpm checkout (its `tpm` entrypoint present) so it's "already installed".
+    tpm = home / ".tmux" / "plugins" / "tpm"
+    tpm.mkdir(parents=True)
+    (tpm / "tpm").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    rec = _activation_seams(monkeypatch)
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    cloned_dests = {dest for _repo, dest in rec["clones"]}
+    assert not any(d.endswith("/tpm") for d in cloned_dests)  # tpm not re-cloned
+    assert any(d.endswith("/tmux-resurrect") for d in cloned_dests)  # the missing ones still cloned
+
+
+def test_activation_recloned_partial_plugin_dir(tmp_path, monkeypatch):
+    """A partial/broken plugin dir (from a failed clone) is NOT treated as installed — it is
+    cleared and re-cloned, so the 'offline retries next apply' contract holds (codex finding)."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    # a tpm dir that EXISTS but is missing its `tpm` entrypoint → partial → must be re-cloned.
+    partial = home / ".tmux" / "plugins" / "tpm"
+    partial.mkdir(parents=True)
+    (partial / "stray.txt").write_text("leftover from a failed clone\n", encoding="utf-8")
+    rec = _activation_seams(monkeypatch)
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    assert any(d.endswith("/tpm") for _r, d in rec["clones"]), "partial tpm was not re-cloned"
+
+
+def test_activation_launchctl_loads_the_boot_agent_with_w(tmp_path, monkeypatch):
+    """DEFECT 1: `rig apply` must `launchctl load -w` the boot agent (it previously wrote the
+    plist but NEVER loaded it → the agent didn't fire). `-w` enables it across reboots."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch)
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "backup")
+    # a `launchctl load -w <plist>` must have been issued for the boot plist (via the dedicated
+    # _launchctl_load_enable helper, which builds `launchctl load -w <plist>` with -w as its own
+    # token — see the helper's docstring for why it is separate from the 2-arg _launchctl).
+    plist = str(home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-boot.plist")
+    assert rec["load_w"] == [plist], rec["load_w"]
+
+
+def test_activation_takes_a_first_resurrect_save(tmp_path, monkeypatch):
+    """DEFECT 6: after apply, take a first `resurrect save` so there is a snapshot to restore."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch)
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    assert rec["saves"] >= 1
+
+
+def test_activation_cleans_stale_continuum_boot(tmp_path, monkeypatch):
+    """DEFECT 5: continuum's own osx_iterm/terminal_start_tmux.sh register as macOS Login Items
+    and compete with rig's launchd agent. Activation must clean them (osx_disable.sh / bootout)."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch)
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "backup")
+    assert rec["cleanups"] >= 1
+
+
+def test_activation_suppresses_boot_load_when_plist_conflict_skipped(tmp_path, monkeypatch):
+    """on_conflict=skip + a DIFFERING boot plist on disk: activation must NOT launchctl-load it
+    (loading a stale/unmanaged boot path despite skip semantics — codex finding)."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch)
+    # pre-seed a DIFFERING boot plist so on_conflict=skip leaves it stale (conflict-skipped).
+    la = home / "Library" / "LaunchAgents"
+    la.mkdir(parents=True)
+    (la / "ai.hyperide.tmux-boot.plist").write_text("<plist>STALE</plist>\n", encoding="utf-8")
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "skip")
+    assert rec["load_w"] == []  # the stale boot agent was NOT loaded
+
+
+def test_activation_suppresses_boot_load_when_boot_script_conflict_skipped(tmp_path, monkeypatch):
+    """on_conflict=skip + a DIFFERING tmux-boot.sh on disk: activation must NOT launchctl-load the
+    agent (the plist runs THAT script, so loading would run a stale boot script — review P1)."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch)
+    # pre-seed a DIFFERING boot script so on_conflict=skip leaves it stale (conflict-skipped).
+    gen = home / ".config" / "rig" / "tmux"
+    gen.mkdir(parents=True)
+    (gen / "tmux-boot.sh").write_text("#!/usr/bin/env bash\necho STALE BOOT\n", encoding="utf-8")
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "skip")
+    assert rec["load_w"] == []  # the agent that runs the stale boot script was NOT loaded
+
+
+def test_activation_does_not_clean_continuum_boot_when_rig_boot_disabled(tmp_path, monkeypatch):
+    """The stale-boot cleanup is gated on rig owning boot: if the user opted OUT of rig boot
+    (boot.enabled false) but relies on continuum's own autostart, activation must NOT nuke it
+    (opus finding)."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch)
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": False}), "backup")
+    assert rec["cleanups"] == 0  # boot disabled → the user's own autostart is left alone
+
+
+def test_activation_re_apply_is_a_noop(tmp_path, monkeypatch):
+    """Idempotency (opus/codex finding): a second real activation with everything already present
+    (plugins complete, boot agent loaded, a snapshot on disk) makes NO changes → the apply is a
+    `skipped` no-op, never a spurious `created` on every run."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    _activation_seams(monkeypatch, launchctl_loaded=True)  # agent already loaded → no re-load change
+    # nothing stale to clean on a settled machine → cleanup is a no-op (not a change).
+    monkeypatch.setattr(runner, "_clean_stale_continuum_boot", lambda plan: False)
+    # pre-stage a fully-activated machine: complete plugin checkouts + a resurrect snapshot.
+    _stage_live_tmux_state(home)
+    (home / ".tmux" / "resurrect" / "tmux_resurrect_20260101T000000.txt").write_text(
+        "snap\n", encoding="utf-8")
+    # first apply writes the config artifacts; second must be a pure no-op.
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "backup")
+    res2 = runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "backup")
+    assert res2.status == "skipped", res2.detail
+
+
+def test_activation_skips_first_save_when_snapshot_exists(tmp_path, monkeypatch):
+    """The FIRST save fires ONLY when no snapshot exists — a re-apply must not re-save and risk
+    clobbering a good snapshot with an empty/partial one (opus finding). Exercises the REAL
+    _tmux_resurrect_save guard (not the seam stub)."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch)
+    # a snapshot already exists on disk.
+    resurrect = home / ".tmux" / "resurrect"
+    resurrect.mkdir(parents=True)
+    (resurrect / "tmux_resurrect_20260101T000000.txt").write_text("snap\n", encoding="utf-8")
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    assert rec["saves"] == 0  # snapshot present → no re-save
+
+
+def test_failed_clone_is_a_warning_not_a_change(tmp_path, monkeypatch):
+    """A failed plugin clone (offline) is surfaced as a WARNING but must NOT mark the apply
+    `changed` — else every re-apply falsely reports `created` (codex/opus idempotency finding).
+    With nothing else to do (snapshot present, plugins the only gap), a clone-failure-only run is
+    `skipped`, and the warning is in the detail."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    _activation_seams(monkeypatch)  # stub launchctl/cleanup/save; the clone is overridden below
+    # make every clone fail (offline) …
+    monkeypatch.setattr(runner, "_git_clone", lambda repo, dest: 1)
+    # nothing stale to clean (so a clone-failure is the ONLY activation outcome).
+    monkeypatch.setattr(runner, "_clean_stale_continuum_boot", lambda plan: False)
+    # … and pre-stage the resurrect dir + a snapshot so NOTHING else is a change.
+    resurrect = home / ".tmux" / "resurrect"
+    resurrect.mkdir(parents=True)
+    (resurrect / "tmux_resurrect_20260101T000000.txt").write_text("snap\n", encoding="utf-8")
+    # second apply (config already current from a first) so only activation could change anything.
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    res2 = runner._do_provision_tmux(_tmux_action(home), "backup")
+    assert res2.status == "skipped", res2.detail  # a failed clone did NOT inflate `changed`
+    assert "NOT installed" in res2.detail  # the warning is still surfaced
+
+
+def test_resurrect_save_does_not_start_a_server(tmp_path, monkeypatch):
+    """_tmux_resurrect_save must NOT start a server just to snapshot it (it would save an empty
+    pre-restore state). With no live server it returns non-zero and runs no save (opus finding)."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # install a real save.sh so the function gets past its existence check.
+    save = home / ".tmux" / "plugins" / "tmux-resurrect" / "scripts" / "save.sh"
+    save.parent.mkdir(parents=True)
+    save.write_text("#!/usr/bin/env bash\ntouch ${SAVED_MARKER:-/dev/null}\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        import subprocess as sp
+        # `tmux list-sessions` → non-zero (no server). Anything else shouldn't be reached.
+        return sp.CompletedProcess(cmd, 1, stdout="", stderr="no server running")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner.shutil, "which", lambda n: "/usr/bin/tmux" if n == "tmux" else None)
+    plan = tmux.build_tmux(repo_home=home)
+    rc = runner._tmux_resurrect_save(plan)
+    assert rc != 0  # no live server → no save
+    # it probed for a live server (list-sessions) but NEVER ran save.sh and NEVER started a server.
+    assert any("list-sessions" in " ".join(c) for c in calls)
+    assert not any("save.sh" in " ".join(c) for c in calls)
+    assert not any("new-session" in " ".join(c) for c in calls)
+
+
+def test_dry_run_skips_all_live_activation(tmp_path, monkeypatch):
+    """RIG_TMUX_DRY_RUN=1 writes the on-disk artifacts but performs NO live effect (clone /
+    launchctl / save / cleanup) — the seam the unit suite + CI rely on."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setenv("RIG_TMUX_DRY_RUN", "1")
+    rec = _activation_seams(monkeypatch)
+    runner._do_provision_tmux(_tmux_action(home, boot={"enabled": True}), "backup")
+    # the files still land …
+    assert (home / ".config" / "rig" / "tmux" / "rig.tmux.conf").is_file()
+    # … but NOTHING live ran.
+    assert rec["clones"] == [] and rec["launchctl"] == []
+    assert rec["saves"] == 0 and rec["cleanups"] == 0
+
+
+def test_clean_continuum_boot_is_idempotent_noop_when_absent(tmp_path, monkeypatch):
+    """The cleanup is idempotent: with no stale continuum boot present it does nothing and
+    never errors (a clean machine has nothing to clean)."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.setattr(runner, "_launchctl", lambda verb, arg: 0)
+    plan = tmux.build_tmux(repo_home=home)
+    # must not raise even though no Tmux.Start.plist / osx_disable.sh exists.
+    runner._clean_stale_continuum_boot(plan)
 
 
 def test_drift_tmux_reports_all_drifted_regions(tmp_path, monkeypatch):

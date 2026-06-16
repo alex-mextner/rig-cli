@@ -467,6 +467,7 @@ _TMUX_TOP_KEYS = {
     "cc_restore",
     "anti_sprawl",
     "boot",
+    "login_shell",
 }
 _TMUX_SUBKEYS = {
     "resurrect": {"processes", "capture_pane_contents"},
@@ -475,6 +476,7 @@ _TMUX_SUBKEYS = {
     "cc_restore": {"enabled"},
     "anti_sprawl": {"enabled", "session"},
     "boot": {"enabled", "label"},
+    "login_shell": {"enabled", "shell"},
 }
 
 
@@ -558,7 +560,7 @@ def _validate_tmux(t: dict[str, Any]) -> None:
                 f"tmux.continuum.save_interval must be an int >= 1, got {interval!r}"
             )
 
-    for sub in ("moshi", "cc_restore", "anti_sprawl", "boot"):
+    for sub in ("moshi", "cc_restore", "anti_sprawl", "boot", "login_shell"):
         block = t.get(sub, {})
         if isinstance(block, dict):
             value = block.get("enabled")
@@ -574,3 +576,18 @@ def _validate_tmux(t: dict[str, Any]) -> None:
         label = boot.get("label")
         if label is not None and not isinstance(label, str):
             raise ConfigError(f"tmux.boot.label must be a string, got {label!r}")
+    login = t.get("login_shell", {})
+    if isinstance(login, dict):
+        shell = login.get("shell")
+        if shell is not None:
+            if not isinstance(shell, str):
+                raise ConfigError(f"tmux.login_shell.shell must be a string, got {shell!r}")
+            # Empty string → "resolve $SHELL at apply". A NON-empty override must be an ABSOLUTE
+            # path to the shell BINARY ONLY — no relative name, and NO arguments (whitespace). rig
+            # appends ` -l` itself; a value like `/bin/zsh -l` would render `'/bin/zsh -l' -l`,
+            # making tmux try to exec a binary literally named "/bin/zsh -l" (review P2).
+            if shell and (not shell.startswith("/") or any(c.isspace() for c in shell)):
+                raise ConfigError(
+                    "tmux.login_shell.shell must be an absolute path to the shell BINARY with no "
+                    f"arguments (rig adds `-l`), or empty to use $SHELL — got {shell!r}"
+                )

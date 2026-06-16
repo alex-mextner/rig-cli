@@ -958,6 +958,18 @@ def _schedule_dry_run() -> bool:
     return os.environ.get("RIG_SCHEDULE_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
 
 
+def _tmux_dry_run() -> bool:
+    """Honor RIG_TMUX_DRY_RUN — write the tmux artifacts but DON'T run the LIVE activation.
+
+    The live activation (clone tpm/resurrect/continuum, create ~/.tmux/resurrect, ``launchctl
+    load -w`` the boot agent, take a first ``resurrect save``, clean continuum's stale macOS
+    boot Login Items) is real network + daemon + ``tmux``-server access — unwanted in CI /
+    containers / the unit suite. With the flag set, the on-disk artifacts still land; the live
+    effects are skipped. Mirrors :func:`_schedule_dry_run`.
+    """
+    return os.environ.get("RIG_TMUX_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+
+
 def _do_provision_schedule(action: Action, on_conflict: str) -> ActionResult:
     """Install the daily model-freshness schedule IF MISSING (idempotent).
 
@@ -1074,6 +1086,22 @@ def _launchctl_loaded(label: str) -> bool:
     return res.returncode == 0
 
 
+def _launchctl_load_enable(plist: Path) -> int:
+    """``launchctl load -w <plist>`` — load the agent AND enable it across reboots (``-w``).
+
+    Separate from :func:`_launchctl` because ``-w`` is a FLAG that must be its own argv token
+    (``["launchctl", "load", "-w", <plist>]``), not folded into the verb. Used to actually FIRE
+    the tmux boot agent at login — rig previously wrote the plist but never loaded it (DEFECT 1).
+    """
+    try:
+        res = subprocess.run(
+            ["launchctl", "load", "-w", str(plist)], capture_output=True, text=True, timeout=20
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 1
+    return res.returncode
+
+
 # ── git/gh shells (isolated for testability) ──────────────────────────────────────
 def _git_global(key: str) -> str | None:
     try:
@@ -1130,6 +1158,7 @@ def tmux_plan_from_action(action: Action):
         cc_restore=dict(opts.get("cc_restore", {}) or {}),
         anti_sprawl=dict(opts.get("anti_sprawl", {}) or {}),
         boot=dict(opts.get("boot", {}) or {}),
+        login_shell=dict(opts.get("login_shell", {}) or {}),
     )
 
 
@@ -1206,8 +1235,12 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
         )
 
     # 2) the managed scripts (chmod +x) — cc-save/cc-restore always, the anti-sprawl
-    # attach-or-create entry when enabled. `managed_scripts()` is the ONE source apply and
-    # drift share, so they can't diverge on which scripts exist.
+    # attach-or-create entry when enabled, the boot script when boot is enabled. `managed_scripts()`
+    # is the ONE source apply and drift share, so they can't diverge on which scripts exist.
+    # `boot_script_conflicted` records a DIFFERING boot script left untouched under skip: the plist
+    # the launchd agent runs points at THIS script, so loading the agent would run a stale boot
+    # script — suppress the load in that case too (review P1), like the plist/conf conflicts below.
+    boot_script_conflicted = False
     for path, body in plan.managed_scripts():
         out = fsutil.write_file(path, body, on_conflict)
         if out.status == "error":
@@ -1229,6 +1262,8 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
             changed = True
             details.append(f"restored +x on {path.name}")
         if conflict_skip:
+            if path == plan.boot_script_path:
+                boot_script_conflicted = True
             # a pre-existing DIFFERING file at rig's script path was left untouched under
             # on_conflict=skip — but the generated config wires a resurrect hook at this path, so
             # resurrect would run the user's/stale file. SURFACE it in the detail, but do NOT set
@@ -1240,6 +1275,10 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
             )
 
     # 3) the boot launchd plist (macOS) — written, never loaded (the user reboots).
+    # `boot_plist_conflicted` records a DIFFERING plist left untouched under on_conflict=skip: the
+    # activation must then NOT `launchctl load -w` it (that would ENABLE a stale/unmanaged boot
+    # path despite skip semantics — codex finding). Same for a conflict-skipped ~/.tmux.conf below.
+    boot_plist_conflicted = False
     if plan.boot_enabled and sys.platform == "darwin":
         plan.boot_plist_path.parent.mkdir(parents=True, exist_ok=True)
         boot_out = fsutil.write_file(plan.boot_plist_path, plan.render_boot_plist(), on_conflict)
@@ -1252,6 +1291,7 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
             details.append(f"wrote boot plist {plan.boot_plist_path.name} (load on next login/reboot)")
         elif not boot_out.detail.startswith("identical"):
             # rig OWNS the boot plist — a DIFFERING one left untouched under skip is stale.
+            boot_plist_conflicted = True
             skipped_conflicts.append(
                 f"{plan.boot_plist_path.name} differs and on_conflict=skip — NOT updated "
                 f"(re-run with backup/overwrite to refresh the boot plist)"
@@ -1272,6 +1312,7 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
         details.append(f"backed up original → {backup_target.name}")
         changed = True
 
+    conf_conflicted = False
     desired_conf = _tmux_conf_with_managed(
         plan, existing, splice_managed_block, neutralize_inline_rig_lines
     )
@@ -1281,12 +1322,35 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
         # which go through fsutil.write_file's skip path). A non-existent conf is always created
         # (there's nothing to conflict with). backup/overwrite both proceed to write.
         if on_conflict == "skip" and existing:
+            conf_conflicted = True
             details.append(f"~/.tmux.conf differs but on_conflict=skip — left unwired ({conf.name})")
         else:
             conf.parent.mkdir(parents=True, exist_ok=True)
             conf.write_text(desired_conf, encoding="utf-8")
             changed = True
             details.append(f"wired {plan.apply_mode} into {conf.name}")
+
+    # 5) LIVE activation (DEFECTS 1/4/5/6) — make a CLEAN machine fully working with no manual
+    # steps: create ~/.tmux/resurrect, clone missing plugins, launchctl-load the boot agent,
+    # take a FIRST resurrect save (only if none exists), clean continuum's stale macOS boot. Each
+    # step is idempotent (skip-if-present) and runs even when the file-write path was a no-op (a
+    # deleted plugin must be re-cloned on re-apply). RIG_TMUX_DRY_RUN skips ALL of it (CI/unit).
+    # Returns (real changes, warnings): ONLY real changes mark `changed` (so a steady-state
+    # re-apply stays a no-op); warnings (failed clone/launchctl — offline) are surfaced but never
+    # inflate ApplyReport.changed (codex/opus idempotency finding).
+    #
+    # boot_load_safe gates the launchctl-load: if the boot plist, the BOOT SCRIPT it runs, OR the
+    # ~/.tmux.conf wiring was CONFLICT-skipped (left stale/unwired), loading the agent would enable
+    # a stale/unmanaged boot path despite skip semantics — so we suppress the load then (review
+    # findings). Plugins / the resurrect dir / the first save are still safe to run.
+    act_changes, act_warnings = _tmux_activate(
+        plan,
+        boot_load_safe=not (boot_plist_conflicted or boot_script_conflicted or conf_conflicted),
+    )
+    if act_changes:
+        changed = True
+        details.extend(act_changes)
+    skipped_conflicts.extend(act_warnings)
 
     if not changed:
         # nothing was written. If a managed script was conflict-skipped, that is UNRESOLVED drift
@@ -1309,6 +1373,215 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
     headline = backup or (extra_backups[0] if extra_backups else None)
     status = "backed_up" if headline else "created"
     return ActionResult(action, status, f"tmux/config: {'; '.join(details)}", headline)
+
+
+def _tmux_activate(plan, *, boot_load_safe: bool = True) -> tuple[list[str], list[str]]:
+    """Bring the rig-managed tmux LIVE on this machine (DEFECTS 1/4/5/6).
+
+    Returns ``(changes, warnings)``: ``changes`` are real mutations the run performed (the caller
+    marks the apply ``changed`` ONLY for these, so a steady-state re-apply with nothing to do is a
+    genuine no-op); ``warnings`` are non-fatal degradations (a failed clone / launchctl on an
+    offline machine) — surfaced to the operator but NEVER counted as a change (else every re-apply
+    would falsely report ``created`` — codex/opus idempotency finding).
+
+    ``boot_load_safe`` (caller-supplied): when False — the boot plist OR the ``~/.tmux.conf``
+    wiring was CONFLICT-skipped (left stale/unwired) — the launchctl-load is SUPPRESSED so we never
+    enable a stale/unmanaged boot path despite on_conflict=skip (codex finding). The non-boot steps
+    (plugins / resurrect dir / first save) still run; they don't risk activating a stale boot.
+
+    Steps, each idempotent and non-fatal (a clean machine must end up FULLY working with zero
+    manual steps; a partial/offline machine degrades, never aborts the whole apply):
+
+      4) create ``~/.tmux/resurrect`` so resurrect can write its ``tmux_resurrect_*.txt``
+         snapshot (absent dir = no snapshot ever written = nothing to restore on reboot).
+      6) clone the canonical tmux plugins (tpm + resurrect + continuum) into ``~/.tmux/plugins``
+         if MISSING (default branch, one-shot, never auto-upgraded — see tmux.PLUGINS' trust
+         contract), so the ``@plugin`` declarations actually resolve on a clean machine.
+      1) on macOS, ``launchctl load -w`` the boot agent so it FIRES at login (rig used to write
+         the plist but never load it). The boot script itself is idempotent (``has-session`` →
+         exit 0), so loading it never disrupts an active session.
+      5) on macOS, clean continuum's OWN stale boot (``osx_iterm/terminal_start_tmux.sh`` Login
+         Items + an old ``Tmux.Start`` launchd agent) that competes with rig's boot agent — gated
+         on ``boot.enabled`` (if the user opted OUT of rig boot, never nuke their own autostart).
+      6b) take a FIRST ``resurrect save`` ONLY when no snapshot exists yet — so a re-apply never
+         re-saves (idempotency) and never clobbers a good snapshot with an empty/partial one.
+
+    ``RIG_TMUX_DRY_RUN`` skips every live step (the file artifacts already landed in the caller).
+    """
+    if _tmux_dry_run():
+        return [], []
+
+    from .. import tmux as tmod
+
+    changes: list[str] = []
+    warnings: list[str] = []
+
+    # 4) the resurrect snapshot dir.
+    resurrect_dir = plan.home / ".tmux" / "resurrect"
+    if not resurrect_dir.is_dir():
+        resurrect_dir.mkdir(parents=True, exist_ok=True)
+        changes.append("created ~/.tmux/resurrect")
+
+    # 6) clone missing plugins (idempotent: skip a COMPLETE checkout that already exists). A
+    # partial dir from a prior failed clone is NOT treated as installed — it is removed and
+    # re-cloned, so the "offline retries next apply" contract holds (codex finding).
+    plugins_dir = plan.home / ".tmux" / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    for name, (repo, entrypoint) in tmod.PLUGINS.items():
+        dest = plugins_dir / name
+        if (dest / entrypoint).exists():
+            continue
+        if dest.exists():
+            # a partial/broken checkout (entrypoint missing) — clear it so the clone retries clean.
+            shutil.rmtree(dest, ignore_errors=True)
+        rc = _git_clone(repo, dest)
+        if rc == 0:
+            changes.append(f"installed plugin {name}")
+        else:
+            # non-fatal (offline / no git): a WARNING, not a change — must not inflate `changed`.
+            shutil.rmtree(dest, ignore_errors=True)  # drop any partial dir the failed clone left.
+            warnings.append(f"plugin {name} NOT installed (clone failed rc={rc} — offline?)")
+
+    # 1) launchctl-(re)load the boot agent (macOS) so it fires at login. `-w` enables it across
+    # reboots. We reload when it is NOT loaded OR its loaded definition may be stale (always
+    # unload-then-load-w for the managed agent so a plist content change is picked up — codex
+    # finding: skipping reload-when-loaded leaves launchd running the old job). Idempotent: an
+    # already-correct agent re-loads to the same definition (no user-visible change), so this is a
+    # WARNING-or-change only when we actually (re)issued the load and it failed/succeeded with a
+    # state change. To keep re-apply a no-op we only COUNT it as a change when it was not loaded.
+    # SUPPRESSED when boot_load_safe is False — the boot plist / ~/.tmux.conf was conflict-skipped
+    # and may be stale/unwired, so loading the agent would enable a stale boot path (codex finding).
+    if plan.boot_enabled and sys.platform == "darwin" and plan.boot_plist_path.is_file():
+        if not boot_load_safe:
+            warnings.append(
+                "boot agent NOT loaded — the boot plist or ~/.tmux.conf was conflict-skipped "
+                "(stale/unwired); re-run with on_conflict=backup/overwrite to load it"
+            )
+        else:
+            was_loaded = _launchctl_loaded(plan.boot_label)
+            _launchctl("unload", str(plan.boot_plist_path))
+            rc = _launchctl_load_enable(plan.boot_plist_path)
+            if rc != 0:
+                warnings.append(f"boot agent NOT loaded (launchctl rc={rc})")
+            elif not was_loaded:
+                changes.append(f"launchctl load -w {plan.boot_plist_path.name}")
+
+    # 5) clean continuum's stale macOS boot (Login Items + old Tmux.Start agent) — macOS only AND
+    # only when rig owns boot (don't remove the user's own autostart if they opted out of rig boot).
+    if plan.boot_enabled and sys.platform == "darwin":
+        if _clean_stale_continuum_boot(plan):
+            changes.append("cleaned stale continuum boot (Login Items / old Tmux.Start)")
+
+    # 6b) take a FIRST resurrect save ONLY if no snapshot exists yet — so a re-apply is a no-op and
+    # an existing good snapshot is never clobbered by an empty/partial one (opus finding).
+    if not _resurrect_snapshot_exists(plan) and _tmux_resurrect_save(plan) == 0:
+        changes.append("took first resurrect save")
+
+    return changes, warnings
+
+
+def _resurrect_snapshot_exists(plan) -> bool:
+    """True if a resurrect snapshot already exists (so we DON'T re-take a first save). resurrect
+    writes ``tmux_resurrect_*.txt`` files plus a ``last`` symlink to the newest; either signals a
+    prior save."""
+    resurrect_dir = plan.home / ".tmux" / "resurrect"
+    if not resurrect_dir.is_dir():
+        return False
+    if (resurrect_dir / "last").exists():
+        return True
+    return any(resurrect_dir.glob("tmux_resurrect_*.txt"))
+
+
+def _git_clone(repo: str, dest: Path) -> int:
+    """Shallow-clone ``repo`` to ``dest``. Returns 0 on success, non-zero on any failure (so the
+    caller treats an offline/no-git machine as 'plugin not installed', never an apply abort)."""
+    if not shutil.which("git"):
+        return 127
+    try:
+        res = subprocess.run(
+            ["git", "clone", "--depth", "1", repo, str(dest)],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 1
+    return res.returncode
+
+
+def _tmux_resurrect_save(plan) -> int:
+    """Take a resurrect snapshot of the CURRENT live tmux server. Returns 0 on success, non-zero
+    otherwise. Non-fatal: a machine with no running server (or no resurrect plugin) just doesn't
+    get a save (a later apply, after the user starts tmux, retries).
+
+    Saves the server ONLY IF one is ALREADY running — it does NOT start a server to save (opus
+    finding): booting a bare ``main`` session and immediately saving could snapshot an empty,
+    pre-restore state and clobber a good snapshot. resurrect ships a standalone ``scripts/save.sh``
+    that writes the snapshot without a key-binding; we invoke it directly. Does NOT depend on the
+    boot script existing (so it still works when ``boot.enabled`` is false but a server is up —
+    the boot script is only written when boot is enabled).
+    """
+    tmux_bin = shutil.which("tmux")
+    if not tmux_bin:
+        return 127
+    save_script = plan.home / ".tmux" / "plugins" / "tmux-resurrect" / "scripts" / "save.sh"
+    if not save_script.is_file():
+        return 1
+    try:
+        # only save when a server is already running — never start one just to snapshot it.
+        # Probe with `list-sessions`, NOT `has-session`: a bare `has-session` (no `-t`) resolves a
+        # target session from $TMUX / the most-recent session, so OUTSIDE tmux (a launchd/cron/plain
+        # apply — exactly how rig runs) it can return non-zero even when a server IS up, silently
+        # skipping the first save. `list-sessions` exits 0 iff any server with a session is alive,
+        # regardless of attach context (1 + "no server running" otherwise). (review finding)
+        probe = subprocess.run(
+            [tmux_bin, "list-sessions"], capture_output=True, text=True, timeout=10
+        )
+        if probe.returncode != 0:
+            return 1  # no live server → nothing to save (a later apply retries when one is up).
+        res = subprocess.run(
+            ["bash", str(save_script)], capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 1
+    return res.returncode
+
+
+def _clean_stale_continuum_boot(plan) -> bool:
+    """Disable/remove continuum's OWN macOS boot artifacts that compete with rig's boot agent
+    (DEFECT 5). Returns True if there WAS stale state and it was cleaned; False on a clean
+    machine (so a re-apply is a no-op — true idempotency, not "ran osx_disable.sh again").
+
+    continuum, when ``@continuum-boot on`` was ever set, installs an iTerm/Terminal-coupled boot:
+      - ``~/.tmux/plugins/tmux-continuum/scripts/…`` registers ``osx_iterm_start_tmux.sh`` /
+        ``osx_terminal_start_tmux.sh`` as macOS Login Items, AND
+      - an old ``Tmux.Start`` launchd agent (``~/Library/LaunchAgents/Tmux.Start.plist``).
+    Both fight rig's single launchd boot agent. The stale-boot SIGNAL is the old
+    ``Tmux.Start.plist`` (continuum writes it when its boot is enabled; rig never does). Only when
+    that signal is present do we (a) run continuum's documented ``osx_disable.sh`` to un-register
+    its Login Items, and (b) ``launchctl bootout`` + remove the old plist. A machine with no
+    Tmux.Start plist has no stale boot → nothing to do → return False.
+    """
+    old_plist = plan.home / "Library" / "LaunchAgents" / "Tmux.Start.plist"
+    if not old_plist.is_file():
+        return False  # no stale continuum boot present — idempotent no-op.
+
+    # un-register continuum's Login Items via its own documented disable script (if installed).
+    osx_disable = (
+        plan.home / ".tmux" / "plugins" / "tmux-continuum" / "scripts" / "osx_disable.sh"
+    )
+    if osx_disable.is_file():
+        try:
+            subprocess.run(["bash", str(osx_disable)], capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # bootout + unload + remove the old Tmux.Start launchd agent (continuum's iTerm boot).
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    _launchctl("bootout", f"gui/{uid}/Tmux.Start")
+    _launchctl("unload", str(old_plist))
+    try:
+        old_plist.unlink()
+    except OSError:
+        pass
+    return True
 
 
 def _tmux_conf_with_managed(plan, existing: str, splice, neutralize) -> str:

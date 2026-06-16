@@ -826,6 +826,7 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
                 "cc_restore": dict(t.get("cc_restore", {}) or {}),
                 "anti_sprawl": dict(t.get("anti_sprawl", {}) or {}),
                 "boot": dict(t.get("boot", {}) or {}),
+                "login_shell": dict(t.get("login_shell", {}) or {}),
             },
         )
     )

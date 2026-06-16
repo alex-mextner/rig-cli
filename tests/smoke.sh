@@ -34,6 +34,10 @@ else
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
   export HOME="$TMP/home"; mkdir -p "$HOME"
+  # exercise the tmux catalog area through the real CLI but NEVER touch the live machine: the
+  # dry-run guard writes the on-disk artifacts (config + boot script + plist) into the throwaway
+  # HOME while skipping every live step (no plugin clone, no `launchctl load`, no resurrect save).
+  export RIG_TMUX_DRY_RUN=1
   git config --global user.email smoke@rig.test
   git config --global user.name  rig-smoke
   ( cd "$TMP" && git init -q )
@@ -51,9 +55,15 @@ ci:
   items:
     secret-scan: { enabled: true, tier: block }
     ship:        { enabled: true, install_to: ~/bin, gh_alias: false }
-mcp:
-  items:
-    review: { enabled: true, command: "review --mcp" }
+tmux:
+  enabled: true
+  apply: import
+  resurrect: { processes: [ssh, psql], capture_pane_contents: true }
+  continuum: { restore: true, save_interval: 15, boot: true }
+  cc_restore: { enabled: true }
+  anti_sprawl: { enabled: true, session: main }
+  boot: { enabled: true }
+  login_shell: { enabled: true }
 YAML
 
   # dry-run first (must write nothing)
@@ -73,6 +83,17 @@ YAML
   [[ -L "$HOME/.claude/skills/$sk_name" ]] || fail "skill '$sk_name' not symlinked into harness dir"
   [[ -f "$HOME/.claude/skills/$sk_name/SKILL.md" ]] || fail "harness skill link does not resolve"
   pass "rig init --yes installed skills + CI + dispatcher + harness skill links"
+
+  # tmux v2: the managed config + boot script (DEFECT 1) land on disk (dry-run skips only the
+  # LIVE steps — plugin clone / launchctl load — not the artifact writes).
+  [[ -f "$HOME/.config/rig/tmux/rig.tmux.conf" ]] || fail "tmux: rig.tmux.conf not generated"
+  [[ -f "$HOME/.config/rig/tmux/tmux-boot.sh" ]]  || fail "tmux: boot script (DEFECT 1) not generated"
+  grep -Eq '^[[:space:]]*[^#].*new-session -d' "$HOME/.config/rig/tmux/tmux-boot.sh" \
+    || fail "tmux: boot script must use 'new-session -d', not a bare start-server (DEFECT 1)"
+  # require the real directive, not a comment that merely mentions it (codex finding)
+  grep -Eq '^[[:space:]]*set -g default-command' "$HOME/.config/rig/tmux/rig.tmux.conf" \
+    || fail "tmux: login-shell 'set -g default-command' (DEFECT 3) not in generated config"
+  pass "rig init --yes generated tmux v2 config + boot script (login-shell, new-session -d)"
 
   # idempotency: a second apply changes nothing (no created/updated/backed_up in summary)
   out="$($RIG apply -C "$TMP" --config "$TMP/rig.yaml" 2>&1)"

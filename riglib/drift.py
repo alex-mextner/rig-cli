@@ -25,6 +25,7 @@ from .actions.runner import (
     _git_global,
     _launchctl_loaded,
     _read_crontab,
+    _tmux_dry_run,
     build_hook_descriptor,
     crontab_with_managed,
     descriptor_text,
@@ -705,6 +706,41 @@ def _check_tmux(action: Action, report: DriftReport) -> None:
                               "rig's source-file import is not the LAST line of ~/.tmux.conf "
                               "(a later line can undo the generated ordering) — apply re-appends it")
                 )
+
+    # 5) live activation state (DEFECTS 4/6): the resurrect snapshot dir + the plugin checkouts.
+    # apply now MANAGES these; status must surface them so a clean machine's "no snapshot / no
+    # plugins" doesn't read as in-sync (codex finding). A missing/partial plugin or absent
+    # resurrect dir is `missing` drift apply reconciles. (launchd loaded-state is intentionally
+    # NOT checked here — `rig status` must stay read-only + offline, and a `launchctl list` probe
+    # is a live-daemon query; the plist content drift above already covers the agent definition.)
+    #
+    # RIG_TMUX_DRY_RUN suppresses the LIVE half of apply (no plugin clone, no resurrect dir), so
+    # status MUST suppress the matching live-state drift too — else status would report drift apply
+    # is deliberately not converging (apply/status would disagree, and `rig status` could never read
+    # in-sync under the flag, e.g. CI/smoke). The file artifacts (sections 1-4) are written even
+    # under dry-run, so their drift stays checked above; only this live section is gated. Reuse the
+    # runner's flag helper so the dry-run truthiness has ONE definition across apply + status.
+    if _tmux_dry_run():
+        return
+
+    from .tmux import PLUGINS
+
+    resurrect_dir = plan.home / ".tmux" / "resurrect"
+    if not resurrect_dir.is_dir():
+        report.items.append(
+            DriftItem("missing", "tmux", action.item, resurrect_dir,
+                      "~/.tmux/resurrect missing (resurrect writes no snapshot → nothing to "
+                      "restore on reboot) — apply creates it")
+        )
+    plugins_dir = plan.home / ".tmux" / "plugins"
+    for name, (_repo, entry) in PLUGINS.items():
+        dest = plugins_dir / name
+        if not (dest / entry).exists():
+            report.items.append(
+                DriftItem("missing", "tmux", action.item, dest,
+                          f"tmux plugin {name} not installed (the @plugin decl won't resolve) "
+                          "— apply clones it")
+            )
 
 
 def _file_drift(report: DriftReport, action: Action, path: Path, desired: str, label: str) -> None:

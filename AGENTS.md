@@ -46,12 +46,19 @@ decided by TTY + config + flags. `init` is the canonical onboarding command (the
 - **Agent-hook `cmd` is always written absolute.** The `agents-hooks/v1` runner rejects
   relative paths; the install action rewrites the `/ABSOLUTE/PATH/TO/...` placeholder to
   the real script path in the agent-tools checkout.
-- **Never mutate a LIVE running service.** rig prepares on-disk artifacts; the user reloads.
-  The `tmux` block writes `rig.tmux.conf` + the managed scripts + a boot launchd plist and
-  wires `~/.tmux.conf`, but NEVER runs `tmux source-file` against the user's live server and
-  NEVER `launchctl load`s the boot plist (that would disrupt an active session). The `models`
-  schedule is the one exception (a non-interactive cron is safe to (re)load). Migration backs
-  up the original (`~/.tmux.conf.rig-bak`) and never overwrites an existing backup.
+- **Never mutate a LIVE running service in a way that disrupts an active session.** rig prepares
+  on-disk artifacts; the user reloads their config. The `tmux` block writes `rig.tmux.conf` + the
+  managed scripts + the boot script + a boot launchd plist and wires `~/.tmux.conf`, but NEVER
+  runs `tmux source-file` against the user's live server (that would re-apply config under their
+  feet). **The tmux LIVE ACTIVATION is the deliberate exception** (a clean machine must end up
+  FULLY working with zero manual steps, CTO 2026-06-16): on `rig apply` rig also clones the
+  plugins, creates `~/.tmux/resurrect`, `launchctl load -w`s the BOOT agent, takes a first
+  `resurrect save`, and cleans continuum's stale boot. These are SAFE for an active session — the
+  boot agent's script is idempotent (`has-session` → exit 0, never spawns a duplicate or touches
+  existing panes), and a first `resurrect save` is read-only w.r.t. the live session. It mirrors
+  the `models` schedule exception (a non-interactive launchd agent is safe to (re)load). Gate the
+  whole activation behind `RIG_TMUX_DRY_RUN` (the unit suite + CI set it). Migration backs up the
+  original (`~/.tmux.conf.rig-bak-<UTC>`, timestamped) and never overwrites an existing backup.
 
 ## The integration seam (agent-tools)
 
@@ -64,11 +71,18 @@ should hard-code agent-tools paths.
 
 - `python -m pytest -q` — the unit suite. Fast, hermetic; uses a fake agent-tools checkout
   (`tests/conftest.py::fake_agent_tools`) and `tmp_path` — tests never touch the real HOME
-  or a real agent-tools checkout.
+  or a real agent-tools checkout. The autouse guards `RIG_TMUX_DRY_RUN=1` /
+  `_isolate_scheduler` keep the tmux live-activation + the scheduler out of the suite.
+- `RIG_TMUX_E2E=1 python -m pytest -q tests/test_tmux_e2e.py` — the **opt-in** real-tmux e2e
+  (the acceptance gate for the tmux reboot cycle: it drives a REAL tmux server on a private
+  `-L` socket and clones the real plugins, so it needs tmux + git + network). It is OFF in the
+  default `pytest` run to keep that hermetic; the tmux BFS / artifact logic it proves is ALSO
+  covered hermetically by the unit suite (`test_pane_has_claude_*` etc.). Auto-skips offline.
 - `bash tests/smoke.sh` — end-to-end: `--help`, `doctor`, a headless `init` against a
   sample config in a throwaway repo with an isolated `HOME`, idempotency, status, pytest.
   Needs a real agent-tools checkout (`RIG_AGENT_TOOLS_SOURCE`); self-skips the apply leg
-  without one.
+  without one. The init leg sets `RIG_TMUX_DRY_RUN=1` so the tmux artifacts land without the
+  live activation.
 - Add a test with every behavior change. TDD red-first is the house style.
 
 ## Style
