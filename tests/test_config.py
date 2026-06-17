@@ -75,6 +75,31 @@ def test_load_drops_legacy_scope(tmp_path, monkeypatch):
     assert "scope" not in loaded.data
 
 
+def test_key_sources_track_layer_provenance(tmp_path, monkeypatch):
+    # a key set only in the GLOBAL config maps to the global path; a key the repo sets maps to
+    # the repo path. This is what source_for_key() uses to name the right file in an error.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    _w(config.global_config_path(), "version: 1\nmcp: {enabled: true}\nskills: {enabled: true}\n")
+    repo = tmp_path / "repo"
+    _w(repo / "rig.yaml", "version: 1\nci: {enabled: false}\nskills: {enabled: false}\n")
+    loaded = config.load(repo)
+    assert loaded.key_sources["mcp"] == config.global_config_path()  # global-only key
+    assert loaded.key_sources["ci"] == repo / "rig.yaml"  # repo-only key
+    assert loaded.key_sources["skills"] == repo / "rig.yaml"  # repo OVERRIDES global
+    assert loaded.source_for_key("mcp.items.x") == config.global_config_path()
+
+
+def test_load_strips_scope_from_key_sources(tmp_path, monkeypatch):
+    # the removed legacy `scope` key is dropped from provenance too (not just from data), so a
+    # stray `scope:` never lingers as a tracked source. source_for_key falls back when untracked.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(repo / "rig.yaml", "version: 1\nscope: both\nskills: {enabled: false}\n")
+    loaded = config.load(repo)
+    assert "scope" not in loaded.key_sources
+    assert loaded.source_for_key("scope") == loaded.primary_config_path  # fallback, not KeyError
+
+
 def test_validate_rejects_bad_on_conflict():
     with pytest.raises(config.ConfigError, match="on_conflict"):
         config.validate({"version": 1, "defaults": {"on_conflict": "nuke"}})

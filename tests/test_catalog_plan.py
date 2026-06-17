@@ -8,7 +8,8 @@ import pytest
 
 from riglib.catalog import Catalog, CatalogError
 from riglib.config import LoadedConfig
-from riglib.plan import PlanError, build
+from riglib.errors import UnknownItemError
+from riglib.plan import build
 
 
 def test_catalog_scan_finds_all_categories(fake_agent_tools):
@@ -94,8 +95,10 @@ def test_plan_codeql_variant_selected(fake_agent_tools, tmp_path):
 def test_plan_unknown_universal_skill_fails_closed(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
     cfg = _cfg({"skills": {"universal": {"disable": ["shell-timeout"]}}}, tmp_path)  # typo
-    with pytest.raises(PlanError, match="universal skill"):
+    with pytest.raises(UnknownItemError) as exc:
         build(cfg, cat, project_type="unknown")
+    # error-system v2: did-you-mean suggests the nearest valid skill
+    assert "shell-timeouts" in exc.value.fix
 
 
 def test_plan_unknown_agent_hook_fails_closed(fake_agent_tools, tmp_path):
@@ -104,15 +107,18 @@ def test_plan_unknown_agent_hook_fails_closed(fake_agent_tools, tmp_path):
         {"skills": {"enabled": False}, "agent_hooks": {"items": {"block-no-verifyy": {"enabled": True}}}},
         tmp_path,
     )
-    with pytest.raises(PlanError, match="agent_hooks"):
+    with pytest.raises(UnknownItemError) as exc:
         build(cfg, cat, project_type="unknown")
+    assert "agent_hooks" in exc.value.what
+    assert "block-no-verify" in exc.value.fix  # nearest valid
 
 
 def test_plan_unknown_by_type_bundle_fails_closed(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
     cfg = _cfg({"skills": {"by_type": {"enable": ["backendd"]}}}, tmp_path)  # typo
-    with pytest.raises(PlanError, match="by-type bundle"):
+    with pytest.raises(UnknownItemError) as exc:
         build(cfg, cat, project_type="unknown")
+    assert "backend" in exc.value.fix  # nearest valid bundle
 
 
 def test_plan_unknown_ci_item_fails_closed(fake_agent_tools, tmp_path):
@@ -121,8 +127,9 @@ def test_plan_unknown_ci_item_fails_closed(fake_agent_tools, tmp_path):
         {"skills": {"enabled": False}, "ci": {"items": {"secret_scan": {"enabled": True}}}},
         tmp_path,
     )
-    with pytest.raises(PlanError, match="unknown ci item"):
+    with pytest.raises(UnknownItemError) as exc:
         build(cfg, cat, project_type="unknown")
+    assert "secret-scan" in exc.value.fix  # nearest valid
 
 
 def test_plan_ci_all_true_enables_catalog(fake_agent_tools, tmp_path):
@@ -141,7 +148,7 @@ def test_plan_unknown_ci_enable_name_fails_closed(fake_agent_tools, tmp_path):
         {"skills": {"enabled": False}, "ci": {"all": False, "enable": ["secret_scan"]}},
         tmp_path,
     )
-    with pytest.raises(PlanError, match="unknown ci item"):
+    with pytest.raises(UnknownItemError, match="unknown ci item"):
         build(cfg, cat, project_type="unknown")
 
 
@@ -161,8 +168,10 @@ def test_plan_unknown_git_hooks_key_fails_closed(fake_agent_tools, tmp_path):
          "git_hooks": {"dispatcherr": {"enabled": True}}},  # typo
         tmp_path,
     )
-    with pytest.raises(PlanError, match="git_hooks"):
+    with pytest.raises(UnknownItemError) as exc:
         build(cfg, cat, project_type="unknown")
+    assert "git_hooks" in exc.value.what
+    assert "dispatcher" in exc.value.fix
 
 
 def test_plan_ship_absent_from_catalog_fails_closed(fake_agent_tools, tmp_path):
@@ -173,7 +182,7 @@ def test_plan_ship_absent_from_catalog_fails_closed(fake_agent_tools, tmp_path):
         {"skills": {"enabled": False}, "ci": {"items": {"ship": {"enabled": True}}}},
         tmp_path,
     )
-    with pytest.raises(PlanError, match="unknown ci item"):
+    with pytest.raises(UnknownItemError, match="unknown ci item"):
         build(cfg, cat, project_type="unknown")
 
 

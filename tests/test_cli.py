@@ -22,11 +22,37 @@ def test_no_command_prints_help(capsys):
     assert "rig — the dev-environment" in out
 
 
-def test_doctor_runs(capsys):
+def test_doctor_runs(tmp_path, capsys, monkeypatch):
+    from riglib import errors
+
+    # isolate HOME so `_scan_missing_targets()` can't read the dev machine's real
+    # ~/.claude/settings.json (a dead hook there would flip the exit code to MISSING_TARGET).
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     rc = main(["doctor"])
     out = capsys.readouterr().out
     assert "rig doctor" in out
-    assert rc in (0, 1)  # 1 if optional deps missing on the CI box
+    # 0 = all present; 1 = optional deps missing on the CI box; 127 = a REQUIRED dep absent
+    # (the documented missing-dependency class — honored by the exit-code contract).
+    assert rc in (0, 1, errors.EXIT_MISSING_DEP)
+
+
+def test_doctor_missing_required_dep_uses_127_contract(tmp_path, capsys, monkeypatch):
+    """A missing REQUIRED dep exits with the documented missing-dependency class (127).
+
+    The --help epilog promises `127  missing dependency`; doctor must honor that (the public
+    exit-code contract scripts branch on) instead of the generic non-zero. A pure --yes-less run
+    so nothing is installed; only required deps are forced absent.
+    """
+    from riglib import doctor, errors
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # force every dependency probe to "absent" so missing_required is non-empty.
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor, "_python_present", lambda name: False)
+    rc = main(["doctor"])  # no --yes → reports + advises, installs nothing
+    out = capsys.readouterr().out
+    assert "missing dependencies above" in out
+    assert rc == errors.EXIT_MISSING_DEP
 
 
 def test_setup_dryrun_default(tmp_path, capsys, fake_agent_tools, monkeypatch):
@@ -102,7 +128,11 @@ def test_setup_failclosed_leaves_no_config(tmp_path, capsys, fake_agent_tools, m
         encoding="utf-8",
     )
     rc = main(["init", "-C", str(repo), "--config", str(template), "--yes"])
-    assert rc == 2
+    # error-system v2: an unknown catalog item exits with the unknown-item class (4), not the
+    # generic config class (2). The fail-closed guarantee is unchanged: no rig.yaml is written.
+    from riglib import errors
+
+    assert rc == errors.EXIT_UNKNOWN_ITEM
     assert not (repo / "rig.yaml").exists()  # fail-closed: no invalid config written
 
 
@@ -147,8 +177,14 @@ def test_setup_with_external_config_persists_repo_yaml(tmp_path, capsys, fake_ag
 
 
 def test_status_scans_empty_ci_target_for_extras(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    import subprocess
+
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     repo = tmp_path / "repo"
+    repo.mkdir()
+    # CI is the REPO layer — its extras are only scanned inside a real git repo (error-system
+    # v2: a non-git dir has no repo layer), so this must be an actual repository.
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
     (repo / ".github" / "workflows").mkdir(parents=True)
     (repo / ".github" / "workflows" / "rogue.yml").write_text("name: rogue\n", encoding="utf-8")
     cfg = repo / "rig.yaml"
