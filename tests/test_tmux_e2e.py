@@ -385,20 +385,6 @@ def test_cc_save_detects_the_versioned_binary_install(tmux_env, monkeypatch):
         f"#!/usr/bin/env bash\n{shlex.quote(str(versioned))} 300 &\nsleep 300\n", encoding="utf-8"
     )
     launcher.chmod(0o755)
-    run(["tmux", "new-session", "-d", "-s", "main", "-c", str(work), str(launcher)])
-    # wait for the versioned descendant to appear. Probe `args` (the full command line), NOT `comm`
-    # — exactly the portability point: on Linux `comm` is the truncated BASENAME (`2.1.179`, no
-    # path), so only `args` carries the `claude/versions/` path on both macOS and Linux.
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        snap = subprocess.run(
-            ["ps", "-eo", "args="], capture_output=True, text=True
-        ).stdout
-        if f"claude/versions/{version}" in snap:
-            break
-        time.sleep(0.2)
-    else:
-        pytest.fail("the versioned claude descendant never appeared in the process table")
 
     # seed a Claude Code session file for that cwd so cc-save has an id to record.
     enc = str(work).replace("/", "-").replace(".", "-")
@@ -407,13 +393,37 @@ def test_cc_save_detects_the_versioned_binary_install(tmux_env, monkeypatch):
     sid = "99999999-8888-7777-6666-555555555555"
     (proj / f"{sid}.jsonl").write_text("{}\n", encoding="utf-8")
 
-    r = run(["bash", str(gen / "cc-save.sh")])
-    assert r.returncode == 0, f"cc-save failed: {r.stderr}"
+    run(["tmux", "new-session", "-d", "-s", "main", "-c", str(work), str(launcher)])
+    # POLL the REAL generated cc-save until it records the pane (or time out). We assert on cc-save's
+    # OWN output — the production acceptance criterion — instead of a separate `ps` probe, so the
+    # test validates the exact production matcher on the exact platform (a flat `ps args` probe
+    # diverged from how the shimmed-socket tree walk sees the pane and flaked on CI). This loop also
+    # absorbs the launch→ps-visibility race. If cc-save can detect the versioned descendant, the map
+    # is non-empty; if it can't (the regression / a real platform gap), the loop times out and fails.
     map_file = gen / "cc-sessions.map"
-    assert map_file.is_file(), "cc-save wrote no map file"
-    lines = [ln for ln in map_file.read_text().splitlines() if ln.strip()]
-    assert lines, "INCIDENT: cc-save missed the VERSIONED-binary cc process — map is EMPTY"
-    assert any(str(work) in ln and sid in ln for ln in lines), lines
+    deadline = time.time() + 15
+    lines: list[str] = []
+    found = False
+    while time.time() < deadline:
+        r = run(["bash", str(gen / "cc-save.sh")])
+        assert r.returncode == 0, f"cc-save failed: {r.stderr}"
+        # cc-save has finished writing (sequential — `run` returns before we read), so the read is
+        # not racing a concurrent writer. Break ONLY when OUR versioned pane (this cwd + sid) is in
+        # the map — not merely on any non-empty map: cc-save scans ALL panes, so an unrelated claude
+        # process on the host (a parallel test, the dev's own session) could populate it without our
+        # descendant yet being visible, and an early break would then flake the final assertion.
+        if map_file.is_file():
+            lines = [ln for ln in map_file.read_text().splitlines() if ln.strip()]
+            if any(str(work) in ln and sid in ln for ln in lines):
+                found = True
+                break
+        time.sleep(0.3)
+    # the production matcher (the `.../claude/versions/` arm) found OUR versioned pane and recorded
+    # its exact cwd→session-id. A timeout here is the INCIDENT regression (or a real platform gap).
+    assert found, (
+        "INCIDENT: cc-save did NOT record the VERSIONED-binary cc pane "
+        f"(cwd={work}, sid={sid}); map lines={lines!r}"
+    )
 
 
 def test_cc_restore_relaunches_claude_resume_into_fresh_shell(tmux_env, monkeypatch):
