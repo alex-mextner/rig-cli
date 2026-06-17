@@ -16,7 +16,16 @@ agent-tools read-only.
 They are distinct, NOT synonyms. Interactivity (full TUI / semi / non-interactive `--yes`) is
 **orthogonal** to the command — both `init` and `apply` run in any of the three modes,
 decided by TTY + config + flags. `init` is the canonical onboarding command (the front door).
-(The old `setup` back-compat alias has been removed — `init` is the one onboarding command.)
+
+**`rig setup` is the INTERACTIVE config wizard** (NOT an alias for `init`/`apply`). In a TTY it
+shows what is enabled across every reconciled area (the same areas as `rig status`), lets you
+change options in the local `rig.yaml` AND the global `~/.config/rig/config.yaml` — each option
+carrying an inline hint — then applies (`rig apply`) on the spot. With no TTY (piped/redirected)
+it prints USAGE for `init`/`apply`/`config get|set` instead of running a half-wizard. The option
+list + hints come from the in-code registry `riglib/schema.py` (the single source of truth, which
+also emits a JSON schema). `rig config get|set <key>` is its headless counterpart — `set` routes
+the value to the key's owning layer (REPO keys → `./rig.yaml`, GLOBAL-only keys like
+`gitignore`/`tg_ctl`/`tmux` → the global config; `--global` forces the global layer).
 
 ## Hard rules
 
