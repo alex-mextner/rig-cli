@@ -1,10 +1,13 @@
-"""Tests for `rig setup` (the interactive config wizard) + `rig config get|set`.
+"""Tests for `rig setup` — the interactive config wizard + its schema/option registry.
 
-Exercises production code, not mocks: the real option registry (riglib.schema), the real
+Exercises production code, not mocks: the real option registry (riglib.schema) and the real
 wizard loop (riglib.setup_wizard.run_setup driven by scripted input + an injected apply fn that
-calls the real engine), and the real `rig config` CLI handlers writing real YAML to disk. The
-autouse `_isolate_home`/`_isolate_scheduler` fixtures keep HOME/XDG and the scheduler off the
-real machine.
+calls the real engine, writing real YAML to disk). The autouse `_isolate_home`/`_isolate_scheduler`
+fixtures keep HOME/XDG and the scheduler off the real machine.
+
+The user-facing `rig config get|set <dot.path>` CLI is the dot-path editor (read/edit one key by
+dotted path, then reconcile) and is covered separately in tests/test_config_getset.py — it is a
+DIFFERENT surface from the wizard's schema-key engine tested here.
 """
 
 from __future__ import annotations
@@ -271,140 +274,6 @@ def test_wizard_rejects_invalid_value_and_leaves_config_untouched(tmp_path):
     assert any("rejected" in ln for ln in out_lines)
 
 
-# ── `rig config get|set` (the headless counterpart) ──────────────────────────────────────
-def test_config_get_reads_cascaded_value(tmp_path, capsys):
-    repo = _make_repo(tmp_path)
-    rc = main(["config", "get", "harness.auto_mode", "-C", str(repo)])
-    out = capsys.readouterr().out.strip()
-    assert rc == 0
-    assert out == "true"
-
-
-def test_config_get_absent_key_falls_back_to_default(tmp_path, capsys):
-    repo = _make_repo(tmp_path)
-    rc = main(["config", "get", "skills.enabled", "-C", str(repo)])
-    out = capsys.readouterr().out.strip()
-    assert rc == 0
-    assert out == "true"  # default when absent from config
-
-
-def test_config_get_int_option_renders_bare_number(tmp_path, capsys):
-    repo = _make_repo(tmp_path)
-    rc = main(["config", "get", "github.ruleset.required_reviews", "-C", str(repo)])
-    out = capsys.readouterr().out.strip()
-    assert rc == 0
-    assert out == "0"  # int default, machine-readable bare number
-
-
-def test_config_get_returns_global_override_of_repo_key(tmp_path, capsys, monkeypatch):
-    # the cascade's core behavior: a repo key set in the GLOBAL config (and absent from the repo
-    # rig.yaml) is what `config get` returns.
-    gdir = tmp_path / "xdg-ovr"
-    (gdir / "rig").mkdir(parents=True)
-    (gdir / "rig" / "config.yaml").write_text(
-        "harness: {auto_mode: false}\n", encoding="utf-8"
-    )
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
-    import subprocess
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
-    (repo / "rig.yaml").write_text("version: 1\n", encoding="utf-8")  # no harness key in repo
-    rc = main(["config", "get", "harness.auto_mode", "-C", str(repo)])
-    out = capsys.readouterr().out.strip()
-    assert rc == 0
-    assert out == "false"  # the global override wins over the registry default
-
-
-def test_config_set_repo_key_writes_repo_yaml(tmp_path, capsys):
-    repo = _make_repo(tmp_path)
-    rc = main(["config", "set", "harness.auto_mode", "no", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "REPO" in out
-    import yaml
-
-    data = yaml.safe_load((repo / "rig.yaml").read_text())
-    assert data["harness"]["auto_mode"] is False
-
-
-def test_config_set_global_only_key_writes_global_config(tmp_path, capsys, monkeypatch):
-    repo = _make_repo(tmp_path)
-    gdir = tmp_path / "xdg2"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
-    rc = main(["config", "set", "gitignore.enabled", "no", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "GLOBAL" in out
-    import yaml
-
-    gcfg = yaml.safe_load((gdir / "rig" / "config.yaml").read_text())
-    assert gcfg["gitignore"]["enabled"] is False
-    assert "gitignore" not in yaml.safe_load((repo / "rig.yaml").read_text())
-
-
-def test_config_set_global_flag_forces_global_for_repo_key(tmp_path, capsys, monkeypatch):
-    repo = _make_repo(tmp_path)
-    gdir = tmp_path / "xdg3"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
-    rc = main(["config", "set", "harness.auto_mode", "no", "--global", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "GLOBAL" in out
-    import yaml
-
-    gcfg = yaml.safe_load((gdir / "rig" / "config.yaml").read_text())
-    assert gcfg["harness"]["auto_mode"] is False
-
-
-def test_config_get_unknown_key_exits_config_class(tmp_path, capsys):
-    from riglib import errors
-
-    repo = _make_repo(tmp_path)
-    rc = main(["config", "get", "bogus.key", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == errors.EXIT_CONFIG
-    assert "unknown config key" in out
-
-
-def test_config_set_valid_string_value(tmp_path, capsys):
-    import yaml
-
-    repo = _make_repo(tmp_path)
-    rc = main(["config", "set", "models.schedule.time", "09:30", "-C", str(repo)])
-    assert rc == 0
-    data = yaml.safe_load((repo / "rig.yaml").read_text())
-    assert data["models"]["schedule"]["time"] == "09:30"
-
-
-def test_config_set_unknown_key_exits_config_class(tmp_path, capsys):
-    from riglib import errors
-
-    repo = _make_repo(tmp_path)
-    rc = main(["config", "set", "bogus.key", "x", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == errors.EXIT_CONFIG
-    assert "unknown config key" in out
-
-
-def test_config_set_invalid_value_fails_closed(tmp_path, capsys):
-    repo = _make_repo(tmp_path)
-    before = (repo / "rig.yaml").read_text()
-    rc = main(["config", "set", "models.schedule.time", "25:00", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == 2
-    assert "error" in out.lower()
-    assert (repo / "rig.yaml").read_text() == before  # nothing written
-
-
-def test_config_no_action_prints_help(capsys):
-    rc = main(["config"])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "get" in out and "set" in out
-
-
 # ── regression guards the review flagged ────────────────────────────────────────────────
 def test_writable_layer_agrees_with_the_scaffold():
     """A category writable to REPO must be one the default scaffold commits into rig.yaml.
@@ -436,41 +305,6 @@ def test_writable_layer_agrees_with_the_scaffold():
             and layer_for_category(area.category) == schema.GLOBAL
         ):
             assert schema.writable_layer_for_category(area.category) == schema.GLOBAL, area.category
-
-
-def test_config_set_global_only_leaves_repo_file_untouched(tmp_path, capsys, monkeypatch):
-    repo = _make_repo(tmp_path)
-    before = (repo / "rig.yaml").read_text()
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg4"))
-    main(["config", "set", "tg_ctl.boot", "no", "-C", str(repo)])
-    assert (repo / "rig.yaml").read_text() == before  # repo file never touched for a global key
-
-
-def test_config_set_against_absent_global_file_succeeds(tmp_path, capsys, monkeypatch):
-    # a new global config must validate + write, and get the canonical version: 1 seeded in.
-    repo = _make_repo(tmp_path)
-    gdir = tmp_path / "fresh-xdg"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
-    assert not (gdir / "rig" / "config.yaml").exists()
-    rc = main(["config", "set", "gitignore.enabled", "no", "-C", str(repo)])
-    assert rc == 0
-    import yaml
-
-    written = yaml.safe_load((gdir / "rig" / "config.yaml").read_text())
-    assert written["gitignore"]["enabled"] is False
-    assert written["version"] == 1  # a brand-new file is canonical
-
-
-def test_config_set_global_flag_on_already_global_key_is_noop_passthrough(tmp_path, capsys, monkeypatch):
-    # --global on an already-global-only key is accepted (a no-op) and still writes the global file.
-    repo = _make_repo(tmp_path)
-    gdir = tmp_path / "xdg-gg"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
-    rc = main(["config", "set", "tg_ctl.enabled", "no", "--global", "-C", str(repo)])
-    assert rc == 0
-    import yaml
-
-    assert yaml.safe_load((gdir / "rig" / "config.yaml").read_text())["tg_ctl"]["enabled"] is False
 
 
 def test_effective_value_with_non_dict_intermediate_returns_default():
@@ -635,39 +469,6 @@ def test_set_path_refuses_to_clobber_a_non_mapping_intermediate():
     assert fresh == {"harness": {"auto_mode": False}}
 
 
-def test_config_set_rejects_non_mapping_intermediate_in_file(tmp_path, capsys):
-    import subprocess
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
-    (repo / "rig.yaml").write_text("version: 1\nharness: oops\n", encoding="utf-8")
-    before = (repo / "rig.yaml").read_text()
-    rc = main(["config", "set", "harness.auto_mode", "no", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == 2
-    assert "error" in out.lower()
-    assert (repo / "rig.yaml").read_text() == before  # nothing clobbered
-
-
-def test_config_set_against_malformed_yaml_fails_closed(tmp_path, capsys):
-    from riglib import errors
-
-    import subprocess
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
-    # a syntactically broken YAML file — set must report cleanly, not dump a traceback or overwrite.
-    bad = "version: 1\nharness: {enabled: true\n"  # unbalanced brace
-    (repo / "rig.yaml").write_text(bad, encoding="utf-8")
-    rc = main(["config", "set", "harness.auto_mode", "no", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == errors.EXIT_CONFIG
-    assert "error" in out.lower()
-    assert (repo / "rig.yaml").read_text() == bad  # the unparseable file is never overwritten
-
-
 def test_wizard_against_malformed_yaml_exits_gracefully(tmp_path):
     import subprocess
 
@@ -690,39 +491,6 @@ def test_wizard_against_malformed_yaml_exits_gracefully(tmp_path):
     assert (repo / "rig.yaml").read_text() == bad  # untouched
 
 
-def test_config_set_against_non_dict_yaml_fails_closed(tmp_path, capsys):
-    # valid YAML but the WRONG SHAPE (a bare list) must not be silently overwritten.
-    from riglib import errors
-
-    import subprocess
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
-    wrong = "- a\n- b\n"
-    (repo / "rig.yaml").write_text(wrong, encoding="utf-8")
-    rc = main(["config", "set", "harness.auto_mode", "no", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == errors.EXIT_CONFIG
-    assert "mapping" in out.lower()
-    assert (repo / "rig.yaml").read_text() == wrong  # not destroyed
-
-
-def test_config_get_against_malformed_yaml_fails_closed(tmp_path, capsys):
-    from riglib import errors
-
-    import subprocess
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
-    (repo / "rig.yaml").write_text("version: 1\nharness: {enabled: true\n", encoding="utf-8")
-    rc = main(["config", "get", "harness.auto_mode", "-C", str(repo)])
-    out = capsys.readouterr().out
-    assert rc == errors.EXIT_CONFIG
-    assert "error" in out.lower()
-
-
 def test_load_layer_config_empty_file_is_empty_layer(tmp_path):
     p = tmp_path / "empty.yaml"
     p.write_text("", encoding="utf-8")
@@ -730,28 +498,3 @@ def test_load_layer_config_empty_file_is_empty_layer(tmp_path):
     assert setup_wizard.load_layer_config(tmp_path / "absent.yaml") == {}  # absent → {}
 
 
-def test_config_set_repo_key_with_no_existing_rig_yaml(tmp_path, capsys):
-    import subprocess
-
-    import yaml
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
-    assert not (repo / "rig.yaml").exists()
-    rc = main(["config", "set", "harness.auto_mode", "no", "-C", str(repo)])
-    assert rc == 0
-    data = yaml.safe_load((repo / "rig.yaml").read_text())
-    assert data["harness"]["auto_mode"] is False  # the new file was created + written
-    assert data["version"] == 1  # canonical version seeded into the fresh file
-
-
-def test_config_get_global_only_key_from_non_repo_cwd(tmp_path, capsys, monkeypatch):
-    # a global-only key is readable from a plain (non-git) dir — repo_root just falls back to cwd.
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-nr"))
-    rc = main(["config", "get", "gitignore.enabled", "-C", str(plain)])
-    out = capsys.readouterr().out.strip()
-    assert rc == 0
-    assert out == "true"  # the documented default, read without a repo

@@ -52,7 +52,7 @@ Or run straight from a checkout — `uv run bin/rig …` / `python3 bin/rig …`
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
 | `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
 | `rig setup` | **The interactive configuration wizard.** In a terminal it shows what is enabled across every reconciled area, lets you change any option (with an inline hint per option) in the local `rig.yaml` AND the global `~/.config/rig/config.yaml`, then applies. Non-interactive (piped / no TTY) it prints usage for `init`/`apply`/`config get\|set`. |
-| `rig config get\|set` | **The headless counterpart to the wizard** — read/change one setting by its registry key. `get <key>` reads the cascaded (global+repo) value (e.g. `harness.auto_mode`); `set <key> <value>` writes it (type-coerced, fail-closed validation) to the key's **owning layer** — REPO keys → `./rig.yaml`, GLOBAL-only keys (`gitignore`, `tg_ctl`, `tmux`) → `~/.config/rig/config.yaml`. `--global` forces the global layer. Run `rig apply` afterwards to converge. |
+| `rig config get\|set` | **The headless counterpart to the wizard** — read/edit ONE nested key by **dot path**, then reconcile. `get <dot.path>` reads one key from the single target file (`./rig.yaml`, or `--global`); `--json` emits the raw value, a subtree prints as YAML. `set <dot.path> <value>` coerces the value conservatively (`true`/`false`/int/float/null; `09`/`1e3`/underscored/Unicode-digit values stay strings), writes it, then runs the **same apply engine** as `rig apply` (full rollback if the write or the catalog-backed plan build fails). `--global` targets `~/.config/rig/config.yaml`; `--no-apply` writes the key and prints the plan only. |
 | `rig install-skill` | Register the `rig` agent skill so harnesses auto-discover it. |
 | `rig stats show` | **Tool-adoption analytics.** Parse the session logs of every agent harness on the machine and report how often each tool is invoked, bucketed into baseline / ours / external-advertised / other — so you can see whether the rig + agent-tools ecosystem is actually being used vs the built-in baseline. `` `--format json|tui|web` ``, breakdowns by repo/harness, a daily trend (the `json` output additionally exposes the weekly series). |
 
@@ -85,8 +85,9 @@ every reconciled area (the `rig status` rows), lets you toggle/change any option
 `rig.yaml` AND the global `~/.config/rig/config.yaml` — each option with an inline hint of how
 and why — then applies the change on the spot. Run from a non-TTY (a pipe/redirect) it prints
 usage for the core commands instead of a half-wizard. For scripted single-value edits use its
-headless counterpart `rig config get <key>` / `rig config set <key> <value>` (a `set` lands in
-the key's owning layer; `--global` forces the global config).
+headless counterpart `rig config get <dot.path>` / `rig config set <dot.path> <value>` — a
+dot-path editor that reads/edits one nested key then reconciles (`--global` targets the global
+config, `--no-apply` writes without converging).
 
 Headless / agent path (no TUI):
 

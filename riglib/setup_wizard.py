@@ -46,10 +46,10 @@ rig setup — interactive configuration wizard
   This is a non-interactive run (input is piped / not a terminal), so there is nothing to
   prompt. Use the core commands directly instead:
 
-    rig init                 first-run onboarding: scaffold rig.yaml + wire the catalog in
-    rig apply                reconcile the repo to rig.yaml (idempotent)
-    rig config get <key>     read one config value      (e.g. rig config get harness.auto_mode)
-    rig config set <key> <v> set one config value        (--global writes ~/.config/rig/config.yaml)
+    rig init                       first-run onboarding: scaffold rig.yaml + wire the catalog in
+    rig apply                      reconcile the repo to rig.yaml (idempotent)
+    rig config get <dot.path>      read one nested key   (e.g. rig config get harness.auto_mode)
+    rig config set <dot.path> <v>  write one key, then reconcile  (--global / --no-apply)
 
   See `rig <command> --help` for each command's flags, and docs/config-schema.md for the
   full schema.
