@@ -22,6 +22,8 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .layers import GLOBAL as _GLOBAL
+from .layers import REPO as _REPO
 
 # ── tiny output helpers (no color dep; honor NO_COLOR) ───────────────────────────
 import os as _os
@@ -51,6 +53,14 @@ def _dim(s: str) -> str:
 
 def _bold(s: str) -> str:
     return _c("1", s)
+
+
+# The GLOBAL/REPO layer headings, shared by the area summary and the per-item drift dump so the
+# two renderers can never disagree on the wording.
+_LAYER_HEADERS = {
+    _GLOBAL: "GLOBAL — machine-wide (from ~/.config/rig/config.yaml)",
+    _REPO: "REPO — this repository (from ./rig.yaml)",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -546,11 +556,19 @@ def cmd_status(args: argparse.Namespace) -> int:
             ),
             report,
         )
-    # surface the model-freshness schedule explicitly (installed / drifted / not configured),
-    # so `rig status` answers "is the daily checker cron there?" at a glance.
+    # AREA SUMMARY — the headline: every reconciled area (grouped by layer) with its in-sync vs
+    # drift counts, so the user sees the FULL picture of what rig manages, not a skill-dominated
+    # wall of drift lines. Printed in BOTH the in-sync and drift cases (the per-item drift dump
+    # below is the detail; this is the at-a-glance overview). The report is complete here — the
+    # disabled-dispatcher/disabled-global-excludes augmentations have run; schedule/tg-ctl drift
+    # is already in the report from detect(). Printed FIRST so it is the headline, with the richer
+    # per-area detail lines (schedule cron time, tg-ctl launchd label) following it.
+    _render_area_summary(plan, report, env)
+
+    # richer detail for two GLOBAL areas the summary counts but can't fully describe: the
+    # model-freshness schedule (the daily cron time) and the tg-ctl inbound daemon (its launchd
+    # boot label / unsupported-off-darwin state). Printed under the summary as its detail.
     _print_schedule_status(plan, report)
-    # surface the tg-ctl inbound-daemon boot agent in the GLOBAL section (installed / drifted /
-    # disabled), so status answers "is the Telegram control daemon auto-starting?" at a glance.
     _print_tg_ctl_status(plan, report)
 
     # missing-target: a hook command in the harness settings.json that points at a file gone
@@ -613,6 +631,89 @@ def _declaring_config(category: str, loaded) -> str:
     return str(path) if path is not None else "not declared in any layer"
 
 
+def _area_state_line(area, plan, report) -> str:
+    """The rendered state for ONE area: "not configured" / "in sync" / "drift (…)".
+
+    The reliable, unit-stable numbers are the DRIFT counts (config→disk + disk→config), so those
+    are what the line reports. We deliberately do NOT print an "in-sync item count": a plan action
+    and a drift item are not 1:1 across areas (the gitignore area is ONE action but TWO drift
+    checks — the excludesfile setting AND the managed block — and a skill is one copy action + one
+    harness-link action, two of each), so ``declared − missing`` mixes units and would either lie
+    or need clamping. "in sync" / "drift (N …)" answers the real question — is this area out of
+    sync, and by how much — without that fragile arithmetic. The detailed per-item dump below
+    enumerates exactly which items drift.
+
+    ``tg_ctl`` is the one CONFIGURED area whose installed-ness is platform-gated: off macOS the
+    provisioner is a no-op, so detect() reports no drift even though nothing is actually installed
+    — a naive "no drift → in sync" would mislead. A configured tg_ctl off Darwin is rendered
+    "unsupported" (matching the dedicated tg-ctl detail line), never a false "in sync". A DISABLED
+    tg_ctl (no action in the plan) still falls through to "not configured" like any other off
+    area — the platform note only applies once the area is actually turned on.
+    """
+    from .areas import area_matches_action, area_matches_drift
+
+    configured = any(area_matches_action(area, a.category, a.options) for a in plan.actions)
+    missing = sum(
+        1 for d in (report.by_direction("missing") + report.by_direction("modified"))
+        if area_matches_drift(area, d.category, d.item, d.direction)
+    )
+    extra = sum(
+        1 for d in report.by_direction("extra")
+        if area_matches_drift(area, d.category, d.item, d.direction)
+    )
+
+    # tg_ctl off Darwin: the provisioner is a no-op so detect() finds no drift even though nothing
+    # installed → render "unsupported" instead of a false "in sync". But ONLY when there really is
+    # no drift: if some path ever DID surface drift off Darwin (a stale launchd plist from a prior
+    # macOS run), "unsupported" must not mask it — fall through to the drift branch below.
+    if area.key == "tg_ctl" and configured and missing == 0 and extra == 0:
+        from .drift import _on_darwin
+
+        if not _on_darwin():
+            return _dim("unsupported (macOS-only; no-op off darwin)")
+
+    if not configured and missing == 0 and extra == 0:
+        return _dim("not configured")
+    if missing == 0 and extra == 0:
+        return _ok("in sync")
+    parts = []
+    if missing:
+        # "missing/modified" because the count folds both directions of config→disk drift: a
+        # declared item absent from disk AND one present-but-changed. Naming only "missing" would
+        # mislabel a modified-on-disk file as deleted (matches _render_drift_by_layer's wording).
+        parts.append(f"{missing} declared-but-missing/modified")
+    if extra:
+        parts.append(f"{extra} on-disk-not-declared")
+    return _warn(f"drift ({', '.join(parts)})")
+
+
+def _render_area_summary(plan, report, env) -> None:
+    """Print the AREA SUMMARY: every reconciled area, grouped by layer, with in-sync vs drift.
+
+    The pre-summary status rendered ONLY drifting items as a flat dump dominated by skill rows
+    (one per skill + a harness-link row each), so it read as "mostly skills" and every other
+    area was buried or — when in sync — invisible. This summary enumerates the full area
+    registry (:mod:`riglib.areas`) so the user sees, at a glance, the WHOLE set of things rig
+    manages and where each stands: configured-and-in-sync, drifted (with a count), or not
+    configured. The detailed per-item drift dump still follows below for the actual problems.
+
+    REPO-layer areas are gated to git repos (a non-git dir has no repo layer); in a non-git dir
+    only the GLOBAL areas show.
+    """
+    from .areas import areas_for_layer
+    from .layers import GLOBAL, REPO
+
+    print()
+    print(_bold("  areas rig manages:"))
+    # only render (and only count) the layers that will actually show — a non-git dir has no
+    # REPO layer, so its REPO areas are neither computed nor printed.
+    layers = (GLOBAL,) if not env.is_git_repo else (GLOBAL, REPO)
+    for layer in layers:
+        print(_dim(f"    {_LAYER_HEADERS[layer]}"))
+        for area in areas_for_layer(layer):
+            print(f"      {area.label}: {_area_state_line(area, plan, report)}")
+
+
 def _render_drift_by_layer(report, loaded, env) -> None:
     """Render drift GROUPED by GLOBAL vs REPO, each item naming its declaring config file.
 
@@ -635,10 +736,6 @@ def _render_drift_by_layer(report, loaded, env) -> None:
     for d in extra:
         buckets[layer_for_category(d.category)]["extra"].append(d)
 
-    headers = {
-        GLOBAL: "GLOBAL — machine-wide (from ~/.config/rig/config.yaml)",
-        REPO: "REPO — this repository (from ./rig.yaml)",
-    }
     for layer in (GLOBAL, REPO):
         miss = buckets[layer]["missing"]
         ext = buckets[layer]["extra"]
@@ -648,7 +745,7 @@ def _render_drift_by_layer(report, loaded, env) -> None:
         if layer == REPO and not env.is_git_repo:
             continue
         print()
-        print(_bold(f"  {headers[layer]}"))
+        print(_bold(f"  {_LAYER_HEADERS[layer]}"))
         if miss:
             print(_warn(f"    config→disk drift ({len(miss)}) — declared but missing/modified:"))
             for d in miss:

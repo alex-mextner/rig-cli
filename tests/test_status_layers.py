@@ -53,7 +53,10 @@ def _git_repo(path: Path) -> Path:
 # ── category → layer classification ───────────────────────────────────────────────
 def test_category_layer_classification():
     # GLOBAL: machine-wide artifacts declared in ~/.config/rig/config.yaml
-    for cat in ("skills", "agent_hooks", "mcp", "harness", "models", "git_hooks", "tmux"):
+    for cat in (
+        "skills", "agent_hooks", "mcp", "harness", "models", "git_hooks", "gitignore",
+        "tmux", "tg_ctl",
+    ):
         assert layer_for_category(cat) == GLOBAL, cat
     # REPO: this repo's artifacts declared in ./rig.yaml
     for cat in ("ci", "agents_md", "github"):
