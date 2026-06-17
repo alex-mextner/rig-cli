@@ -832,6 +832,9 @@ A malformed dot path, a non-mapping intermediate, a schema-rejected value, a wri
 a plan-**build** failure aborts; the write is kept only if both stages pass — otherwise the file
 is rolled back to its prior contents (a freshly-created file, and the immediate dir `set` created
 for it, are removed). The second stage builds the same plan as `rig apply`, so a config that
-cannot even be *planned* never persists. Errors that surface only while *executing* the plan
+cannot even be *planned* never persists. For a `--global` edit, the global file is **also**
+validated **in isolation** (its own layer, no repo overlay) when it pins its own
+`agent_tools_source`, so a catalog-backed break in the global config can't be masked by the
+current repo overriding that key — it would otherwise persist and fail in every other repo. Errors that surface only while *executing* the plan
 (a permission denied on a copy, say) are reported with a non-zero exit but leave the
 already-valid config in place — identical to re-running `rig apply`.

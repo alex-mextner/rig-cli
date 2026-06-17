@@ -419,6 +419,36 @@ def test_cli_set_global_targets_xdg_config(tmp_path, capsys, fake_agent_tools, m
     assert gdata["defaults"]["on_conflict"] == "overwrite"
 
 
+def test_cli_set_global_bad_value_not_masked_by_repo_override(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply
+):
+    # A --global set of a catalog-backed key (agent_tools_source) to a BAD value must be rejected
+    # even when THIS repo's rig.yaml overrides the same key with a valid one. The merged cascade
+    # would mask the breakage (repo wins), persisting a global config that fails in every other
+    # repo. The global layer is validated in isolation, so the write rolls back. (codex P2)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    gpath = config.global_config_path()
+    original_global = f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+    _w(gpath, original_global)
+    repo = tmp_path / "repo"
+    # the repo overrides agent_tools_source with a VALID checkout → the cascade alone would pass
+    _w(
+        repo / "rig.yaml",
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n",
+    )
+    bad = tmp_path / "not-a-checkout"
+    bad.mkdir()
+    rc = main(["config", "set", "agent_tools_source", str(bad), "-C", str(repo), "--global"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "is not an agent-tools checkout" in out
+    # fail-closed: the global file is rolled back to its prior, valid contents
+    assert gpath.read_text(encoding="utf-8") == original_global
+    assert len(_mock_apply) == 0  # rejected before any reconcile
+
+
 def test_cli_get_outside_repo_fails_soft(tmp_path, capsys, monkeypatch):
     # a non-global `get` from a plain dir (no .git, no rig.yaml) must fail closed with a clean
     # message — never a traceback (symmetric with set's broad guard).

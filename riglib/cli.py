@@ -263,6 +263,35 @@ def _load_plan(cwd: str, config: str | None, project_type_override: str | None =
     return plan, loaded, env
 
 
+def _validate_layer_in_isolation(layer_path: Path) -> None:
+    """Build a plan over ONE config file alone (no cascade), so a catalog-backed value the file
+    DECLARES can't be masked by a layer that merges over it.
+
+    A `rig config set … --global` edit is otherwise only validated by the merged cascade
+    (`_load_plan`), where a repo's `rig.yaml` overriding the just-broken global key (e.g. a bad
+    `agent_tools_source`, or a global catalog item ref) hides the breakage — the write persists a
+    config that fails in every OTHER repo. Loading the file as the sole explicit layer with
+    `include_global=False` (its own directory has no `rig.yaml` to overlay) surfaces those errors
+    against the file itself. Raises ConfigError / CatalogError / PlanError on rejection.
+
+    Scope: only what the file ITSELF declares. A global file legitimately omits
+    `agent_tools_source` (the checkout is supplied per-repo or via env), so we only run the
+    catalog-backed plan build when this file pins its own `agent_tools_source` — there is nothing
+    global-specific to catalog-validate otherwise, and demanding an independently-resolvable
+    checkout would reject a valid deferring global config. Schema (`config.load`) still runs either
+    way.
+    """
+    from .catalog import Catalog
+    from .config import load
+    from .plan import build
+
+    loaded = load(layer_path.parent, explicit_config=layer_path, include_global=False)
+    if loaded.agent_tools_source is None:
+        return  # no own catalog coordinate to mask — schema validation already ran in load()
+    catalog = Catalog.scan(loaded.agent_tools_source)
+    build(loaded, catalog)
+
+
 def _print_plan(plan) -> None:
     print(_bold(f"\nPlan: {len(plan)} action(s)  [on_conflict={plan.on_conflict}]"))
     for a in plan.actions:
@@ -1097,6 +1126,11 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         state = SetupState.from_dict(data)
         if args.is_global:
             target.write_text(state.to_yaml(), encoding="utf-8")
+            # Validate the global file ALONE first: the cascade plan below merges the repo
+            # overlay over it, which can mask a catalog-backed error in the global layer (a repo
+            # `rig.yaml` overriding the just-broken key). Check the written file in isolation so a
+            # globally-broken config never persists just because THIS repo happens to override it.
+            _validate_layer_in_isolation(target)
         else:
             state.write(target)
         plan, _loaded, _env = _load_plan(args.cwd, config=None)
