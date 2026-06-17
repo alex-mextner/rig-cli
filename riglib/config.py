@@ -67,8 +67,116 @@ def repo_config_path(repo_root: Path) -> Path:
     return repo_root / CONFIG_FILENAME
 
 
-def _load_yaml(path: Path) -> dict[str, Any]:
-    """Parse a YAML file to a dict. Lazy yaml import; empty file → {}."""
+# ── dot-path get/set + scalar coercion (the `rig config get|set` engine) ────────────
+# A dot path indexes the YAML mapping tree: ``harness.mode`` → ``data["harness"]["mode"]``.
+# Used ONLY for the targeted config edit/read commands — not for the cascade loader, which
+# always merges whole layers. Kept here (next to the loader/validator) so the path syntax
+# and the schema it indexes never drift into a separate module.
+
+
+def split_path(dotted: str) -> list[str]:
+    """Split a dot path into segments, rejecting empties (``a..b``, leading/trailing dot).
+
+    Fail-closed: a malformed path is a :class:`ConfigError`, not a silent no-op — a typo in
+    ``rig config set`` must abort before it writes a key the schema can't reach.
+    """
+    if not dotted or not dotted.strip():
+        raise ConfigError("empty config path")
+    parts = [p.strip() for p in dotted.split(".")]
+    if any(p == "" for p in parts):
+        # empty segment ("a..b", a leading/trailing dot, or a whitespace-only segment "a. .b")
+        raise ConfigError(f"invalid config path {dotted!r}: empty segment")
+    return parts
+
+
+def get_path(data: dict[str, Any], dotted: str) -> Any:
+    """Read a nested value by dot path. Raises :class:`ConfigError` if the path is absent.
+
+    Traversal fails closed when an intermediate segment is missing OR is a non-mapping
+    (``a.b`` where ``a`` is a scalar/list) — both are "the path does not exist", reported
+    with the exact segment that broke so the caller can fix the typo.
+    """
+    node: Any = data
+    walked: list[str] = []
+    for seg in split_path(dotted):
+        if not isinstance(node, dict) or seg not in node:
+            where = ".".join(walked) or "<root>"
+            raise ConfigError(f"config path {dotted!r} not found (no {seg!r} under {where})")
+        node = node[seg]
+        walked.append(seg)
+    return node
+
+
+def set_path(data: dict[str, Any], dotted: str, value: Any) -> None:
+    """Set a nested value by dot path, creating intermediate mappings in place.
+
+    Fail-closed if an existing intermediate segment is a non-mapping: overwriting
+    ``ci.items`` (a dict) by setting ``ci.items.x`` is fine, but setting ``a.b`` when ``a``
+    is already a scalar would silently clobber it — refuse instead, naming the segment.
+    """
+    parts = split_path(dotted)
+    node = data
+    for seg in parts[:-1]:
+        if seg not in node:
+            node[seg] = {}
+        elif not isinstance(node[seg], dict):
+            raise ConfigError(
+                f"cannot set {dotted!r}: {seg!r} is a {type(node[seg]).__name__}, not a mapping"
+            )
+        node = node[seg]
+    node[parts[-1]] = value
+
+
+def coerce_scalar(raw: str) -> Any:
+    """Coerce a CLI string to the obvious scalar type: bool, int, float, null, else string.
+
+    The shell hands every value to us as text; ``tier=block`` must stay a string while
+    ``auto_mode=true`` must become a real bool (the schema validators reject a string there).
+    Quote-wrap (``'"true"'`` → the string ``true``) forces a literal string for the rare case
+    a stringly-typed value collides with a keyword.
+
+    Coercion is deliberately CONSERVATIVE — only the unambiguous forms convert, everything
+    else stays a string. So ``int``/``float`` accept a plain optionally-signed number but
+    NOT Python's surprising extras (``1_000``, ``nan``, ``inf``, whitespace), which a config
+    author would never mean to type and which would otherwise smuggle a NaN/underscore-int
+    into the tree.
+    """
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        return raw[1:-1]  # explicit string escape: "true" / '12' stay strings
+    low = raw.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if low in ("null", "none", "~"):
+        return None
+    # require ASCII so str.isdigit()'s Unicode digits (superscripts like '²') — which int()/
+    # float() then choke on — can't sneak past as a number; they stay strings. The try/except
+    # is a belt-and-suspenders guard so coercion NEVER raises (fail-closed → fall back to str).
+    if raw.isascii():
+        body = raw[1:] if raw[:1] in ("+", "-") else raw  # allow a single leading sign
+        # plain integer, but a leading zero ("0644", "007") stays a string — it's almost
+        # always a file mode / zero-padded id / version the author means literally, and int()
+        # would silently drop the zero.
+        if body.isdigit() and not (len(body) > 1 and body[0] == "0"):
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+        # plain decimal float: digits, exactly one dot, optional sign — rejects nan/inf/1e3/_.
+        elif body.count(".") == 1 and body.replace(".", "", 1).isdigit():
+            try:
+                return float(raw)
+            except ValueError:
+                pass
+    return raw
+
+
+def read_yaml_file(path: Path) -> dict[str, Any]:
+    """Parse a single YAML config file to a dict (fail-closed). Lazy yaml import; empty → {}.
+
+    Public so the targeted `config get|set` commands can read ONE file (not the cascade) and
+    inherit the same error handling: YAML syntax errors and a non-mapping top level both raise
+    :class:`ConfigError` rather than leaking a PyYAML traceback or a list/scalar.
+    """
     import yaml  # lazy: keeps `rig --help` dependency-free
 
     try:
@@ -188,7 +296,7 @@ def load(
         ``_deep_merge`` returns a fresh dict rather than mutating in place.
         """
         nonlocal merged
-        data = _load_yaml(path)
+        data = read_yaml_file(path)
         merged = _deep_merge(merged, data)
         for k in data:
             key_sources[k] = path
@@ -236,7 +344,9 @@ def validate(data: dict[str, Any]) -> None:
         raise ConfigError(f"unknown top-level key(s): {', '.join(sorted(unknown))}")
 
     version = data.get("version", 1)
-    if not isinstance(version, int):
+    # bool is an int subclass and True == 1, so guard it explicitly — `version: true` is a typo,
+    # not v1 (this also blocks `rig config set version true` from coercing past the check).
+    if isinstance(version, bool) or not isinstance(version, int):
         raise ConfigError(f"version must be an int, got {version!r}")
     if version != 1:
         raise ConfigError(f"unsupported config version {version} (this rig supports v1)")

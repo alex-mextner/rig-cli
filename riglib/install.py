@@ -22,9 +22,10 @@ description: >-
   Set up a repository (and a dev machine) from a committed rig.yaml by applying
   agent-tools content — skills, agent-hooks, git-hooks/dispatcher, CI gates, MCP. Use
   when the user wants to bootstrap a repo's guardrails, reconcile it to its config,
-  check for config/disk drift, or install the toolchain dependencies. Commands:
-  `rig init` (wizard or --config/--yes), `rig apply` (idempotent reconcile),
-  `rig status` (two-way drift), `rig doctor` (dependency bootstrap).
+  check for config/disk drift, change a single setting, or install the toolchain
+  dependencies. Commands: `rig init` (wizard or --config/--yes), `rig apply` (idempotent
+  reconcile), `rig status` (two-way drift), `rig config get|set` (read/change one key, then
+  reconcile), `rig doctor` (dependency bootstrap).
 metadata:
   author: alex-mextner
   repo: https://github.com/alex-mextner/rig-cli
@@ -42,6 +43,8 @@ rig init --config rig.yaml --yes    # headless, non-interactive
 rig apply                       # reconcile the repo to rig.yaml (idempotent)
 rig apply --dry-run             # print the resolved plan, write nothing
 rig status                      # report drift BOTH ways (config↔disk)
+rig config get harness.auto_mode  # read one nested key (--global for ~/.config/rig/config.yaml)
+rig config set harness.auto_mode false   # write one key, then reconcile (the apply engine)
 rig doctor                      # detect deps; --yes to install across brew/apt/dnf/pacman/zypper
 rig export -o rig.yaml          # write a starter rig.yaml from detected defaults
 ```
