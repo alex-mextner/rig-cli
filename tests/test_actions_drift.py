@@ -841,6 +841,9 @@ def test_harness_auto_writes_user_settings_not_repo(fake_agent_tools, tmp_path):
             "skills": {"enabled": False}, "agent_hooks": {"enabled": False},
             "ci": {"enabled": False}, "mcp": {"enabled": False},
             "git_hooks": {"dispatcher": {"enabled": False}},
+            # ship_delegator is default-ON and writes <repo>/.claude/scripts/pr-ship.sh, which would
+            # create repo/.claude — off here so the assertion below isolates the HARNESS behavior.
+            "ship_delegator": {"enabled": False},
             "harness": {"kind": "claude-code", "auto_mode": True},  # no settings_path → user scope
         },
         repo_root=repo,

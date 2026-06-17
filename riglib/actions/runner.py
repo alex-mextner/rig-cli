@@ -7,12 +7,14 @@ decides how to surface them.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -23,6 +25,10 @@ from ..config import (
     GITIGNORE_BEGIN_MARKER,
     GITIGNORE_BLOCK_COMMENT,
     GITIGNORE_END_MARKER,
+    SHIP_DELEGATOR_EXCLUDE_BEGIN_MARKER,
+    SHIP_DELEGATOR_EXCLUDE_COMMENT,
+    SHIP_DELEGATOR_EXCLUDE_END_MARKER,
+    SHIP_DELEGATOR_REL_PATH,
 )
 from ..github_ruleset import (
     build_ruleset_body,
@@ -2301,6 +2307,398 @@ def _do_provision_agents_symlink(action: Action, on_conflict: str) -> ActionResu
     return ActionResult(action, "error", f"agents-md: unhandled state {r.state!r}")
 
 
+# ── per-repo `gh ship` delegator (.claude/scripts/pr-ship.sh) ──────────────────────
+# `gh ship` is a gh alias → `<repo>/.claude/scripts/pr-ship.sh`. Historically that delegator
+# existed ONLY in agent-tools, so `gh ship` FAILED in every other managed repo (papered over by a
+# runtime alias fallback). rig provisions the delegator into EVERY managed repo so `gh ship` works
+# on a clean machine, and ignores it via the repo's `.git/info/exclude` (a per-repo, never-committed
+# git exclude) so the provisioned file does not dirty the worktree — ship refuses a dirty tree, so
+# an un-ignored provisioned file would break the very command it enables. apply + drift both go
+# through `resolve_ship_delegator`, so they can never disagree on whether the repo is in sync.
+
+
+def ship_delegator_content(canonical_ship: Path) -> str:
+    """The exact bytes of the provisioned ``.claude/scripts/pr-ship.sh`` for a canonical ship.sh.
+
+    A thin delegator: the global ``gh ship`` alias runs ``<repo>/.claude/scripts/pr-ship.sh``; this
+    script execs the canonical generalized ship implementation. It prefers a REPO-LOCAL
+    ``ci/ship/ship.sh`` (so agent-tools — which carries the real ship.sh — self-hosts and always
+    runs its own checked-out version) and otherwise execs the rig-baked ``canonical_ship`` (the
+    ``ci/ship/ship.sh`` in the agent-tools checkout rig applied from), so ``gh ship`` works in every
+    other repo on a clean machine. Deterministic for a given ``canonical_ship`` so a re-apply / drift
+    compare is a byte-for-byte no-op; ``canonical_ship`` is the un-resolved configured/expanded path
+    rig stored at plan time.
+
+    SECURITY: ``canonical_ship`` derives from the user-controlled ``agent_tools_source`` config, so
+    it is shell-quoted with :func:`shlex.quote` before being baked in. Without that, a path
+    containing ``"``, ``$()``, backticks, or a space would either break the generated script or
+    EXECUTE arbitrary commands every time ``gh ship`` runs (e.g. ``agent_tools_source:
+    /tmp/$(curl evil)/agent-tools``). Single-quoting renders every metacharacter inert.
+    """
+    canon = shlex.quote(str(canonical_ship))
+    return (
+        "#!/usr/bin/env bash\n"
+        "# Provisioned by rig (ship_delegator). The global `gh ship` alias runs\n"
+        "# <repo>/.claude/scripts/pr-ship.sh. agent-tools' canonical, generalized ship\n"
+        "# implementation lives at ci/ship/ship.sh — delegate to it so `gh ship` works in this\n"
+        "# repo with the same green-CI-gated merge + cleanup as everywhere else. Repo-local\n"
+        "# ci/ship/ship.sh wins (agent-tools self-hosts); otherwise the rig-baked canonical path.\n"
+        "set -euo pipefail\n"
+        # `git rev-parse` EXITS NON-ZERO outside a git repo; under `set -e` a failing command
+        # substitution in this assignment would abort the whole script (exit 128) before we ever
+        # reach the canonical fallback. Guard it: run git separately with `|| true` so a non-git cwd
+        # (or no git at all) just leaves toplevel empty and falls through to the baked path.
+        'toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"\n'
+        'repo_local="${toplevel:+$toplevel/ci/ship/ship.sh}"\n'
+        'if [[ -n "$repo_local" && -f "$repo_local" ]]; then\n'
+        '  exec "$repo_local" "$@"\n'
+        "fi\n"
+        # canonical is shlex.quote'd above — the value is user-derived (agent_tools_source).
+        f"canonical={canon}\n"
+        'if [[ -f "$canonical" ]]; then\n'
+        '  exec "$canonical" "$@"\n'
+        "fi\n"
+        'echo "pr-ship.sh: canonical ship.sh not found (repo-local $repo_local nor $canonical)." >&2\n'
+        'echo "Re-run \'rig apply\' against a current agent-tools checkout to refresh it." >&2\n'
+        "exit 127\n"
+    )
+
+
+def ship_delegator_exclude_block_text() -> str:
+    """The exact marker-delimited block rig owns in a repo's ``.git/info/exclude``.
+
+    Single source of truth shared by the install handler and drift, so both agree byte-for-byte on
+    what the managed entry SHOULD be: the begin marker, a fixed explanatory comment, the one ignored
+    path (the provisioned delegator), then the end marker. Rendered byte-for-byte so a re-apply is a
+    true zero-churn no-op.
+    """
+    return "\n".join(
+        [
+            SHIP_DELEGATOR_EXCLUDE_BEGIN_MARKER,
+            SHIP_DELEGATOR_EXCLUDE_COMMENT,
+            f"/{SHIP_DELEGATOR_REL_PATH}",
+            SHIP_DELEGATOR_EXCLUDE_END_MARKER,
+        ]
+    )
+
+
+def repo_info_exclude_path(repo_root: Path) -> Path | None:
+    """Resolve the repo's git exclude file (``info/exclude``), worktree-aware.
+
+    In a plain repo this is ``<repo>/.git/info/exclude``. In a git WORKTREE, ``<repo>/.git`` is a
+    FILE pointing at that worktree's private gitdir (``<common>/.git/worktrees/<name>``), and
+    ``info/exclude`` is PER-WORKTREE — it lives in that private gitdir, NOT in the common dir (only
+    things like ``HEAD``/objects are shared). A naive ``<repo>/.git/info/exclude`` would therefore
+    fail in a worktree (``.git`` is a file, not a dir). We ask git for the canonical path
+    (``git -C <repo> rev-parse --git-path info/exclude``), which returns the correct per-layout file
+    — so ignoring the delegator in a worktree affects ONLY that worktree, exactly right. Returns
+    ``None`` when the path is not a git repo (git errors) so the caller treats "no git" as
+    nothing-to-ignore, never a crash.
+    """
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    raw = res.stdout.strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    # `--git-path` yields a path relative to the repo root (e.g. `.git/info/exclude`); anchor it.
+    return p if p.is_absolute() else (repo_root / p)
+
+
+@dataclass(frozen=True)
+class ShipDelegatorResolution:
+    """The desired ship-delegator outcome for a repo — the one source apply + drift share.
+
+    ``state`` is the single discriminator both consumers switch on:
+      - ``ok``       — the delegator file is present and exactly correct AND the ``.git/info/exclude``
+                       entry is present: no-op.
+      - ``create``   — the delegator file is absent: write it (and add the exclude entry).
+      - ``update``   — the delegator file exists but its bytes differ, OR the file is correct but the
+                       exclude entry is missing: rewrite the file and/or add the entry.
+      - ``io_error`` — the delegator path could not be inspected (a directory sits there, unreadable):
+                       apply reports an ERROR, never a silent skip. ``detail`` carries why.
+
+    ``content`` is the canonical delegator bytes; ``exclude_path`` is the resolved per-repo exclude
+    file (``None`` when the repo is not a git repo — then there is nothing to ignore and the file
+    write alone reconciles); ``exclude_ok`` records whether the exclude entry is already present;
+    ``file_correct`` records whether the delegator FILE already matches ``content`` (so apply can
+    skip a needless rewrite-with-backup when only the exclude is missing, and drift can tell the
+    file-edited case from the missing-ignore case without re-reading the file).
+    """
+
+    delegator_path: Path
+    content: str
+    state: str
+    exclude_path: Path | None
+    exclude_ok: bool
+    file_correct: bool = False
+    detail: str = ""
+
+
+def _exclude_has_entry(exclude_path: Path | None) -> bool:
+    """True when the repo's ``.git/info/exclude`` carries EXACTLY ONE correct rig ship-delegator block.
+
+    A repo with no git (no exclude path) → True (nothing to ignore, so "not missing"). An absent or
+    unreadable exclude file → False. Otherwise this returns True ONLY when the file holds exactly one
+    well-formed managed block whose body equals :func:`ship_delegator_exclude_block_text` — so all of
+    these report as NOT-ok (drift, which ``_reconcile_ship_exclude`` then repairs): no block, an
+    UNBALANCED pair (a begin with no end — reconcile refuses it, so it must not read "ok"), and
+    DUPLICATED blocks (a prior non-idempotent edit — reconcile collapses them). Mirrors the global-
+    excludes "ok" semantics so the two managed-block reconcilers agree on what "in sync" means.
+    """
+    if exclude_path is None:
+        return True
+    if not exclude_path.is_file():
+        return False
+    try:
+        # newline="" — read RAW (no CRLF→LF translation), so this byte-compare matches
+        # _reconcile_ship_exclude's raw read EXACTLY. Reading with translation here (read_text's
+        # default) would normalize a CRLF file's \r away and report "ok" while the reconcile, seeing
+        # the raw \r, rewrites the block — the two would disagree on "in sync" on a CRLF exclude file.
+        with exclude_path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError:
+        return False
+    begins = _find_marker_lines(content, SHIP_DELEGATOR_EXCLUDE_BEGIN_MARKER)
+    ends = _find_marker_lines(content, SHIP_DELEGATOR_EXCLUDE_END_MARKER)
+    if len(begins) != 1 or len(ends) != 1:
+        return False  # absent, unbalanced, or duplicated → not in sync (reconcile fixes it)
+    # exactly one balanced pair: it is "ok" only when its body matches the canonical block byte-for-
+    # byte. CONTRACT: `_find_marker_lines` returns (line_start_offset, end_of_line_offset) where the
+    # end offset is the newline terminating the marker line (or len(content)) — so content[b_start:
+    # e_end] is exactly the block text WITHOUT a trailing newline, matching ship_delegator_exclude_
+    # block_text(). `_reconcile_ship_exclude` slices identically, so the two stay in lockstep; if that
+    # offset semantics ever changes, BOTH must update together (a SYNC pair).
+    b_start, _b_end = begins[0]
+    e_start, e_end = ends[0]
+    if e_start < b_start:  # end before begin → misordered, reconcile by hand
+        return False
+    return content[b_start:e_end] == ship_delegator_exclude_block_text()
+
+
+def resolve_ship_delegator(repo_root: Path, canonical_ship: Path) -> ShipDelegatorResolution:
+    """Classify the on-disk ship-delegator state vs desired (pure, no writes).
+
+    Reads the delegator file + the repo's ``.git/info/exclude`` and returns the one ``state`` apply
+    and drift both switch on, so ``status`` never misreports the on-disk state. Idempotent: a correct
+    file + a present exclude entry is ``ok``; an absent file is ``create``; a drifted file OR a
+    correct file with a missing exclude entry is ``update``; a directory/unreadable path is
+    ``io_error``.
+    """
+    content = ship_delegator_content(canonical_ship)
+    deleg = repo_root / SHIP_DELEGATOR_REL_PATH
+    exclude_path = repo_info_exclude_path(repo_root)
+    exclude_ok = _exclude_has_entry(exclude_path)
+
+    if not deleg.exists():
+        return ShipDelegatorResolution(deleg, content, "create", exclude_path, exclude_ok)
+    if not deleg.is_file():
+        return ShipDelegatorResolution(
+            deleg, content, "io_error", exclude_path, exclude_ok,
+            detail=f"{deleg} is not a regular file",
+        )
+    try:
+        on_disk = deleg.read_text(encoding="utf-8")
+    except OSError as exc:
+        return ShipDelegatorResolution(
+            deleg, content, "io_error", exclude_path, exclude_ok, detail=f"cannot read {deleg}: {exc}"
+        )
+    file_correct = on_disk == content
+    if file_correct and exclude_ok:
+        return ShipDelegatorResolution(deleg, content, "ok", exclude_path, exclude_ok, file_correct=True)
+    return ShipDelegatorResolution(deleg, content, "update", exclude_path, exclude_ok, file_correct=file_correct)
+
+
+def _reconcile_ship_exclude(exclude_path: Path | None) -> tuple[bool, str]:
+    """Reconcile rig's managed ship-delegator block in ``.git/info/exclude``. Returns ``(ok, note)``.
+
+    Reuses the same marker-block reconcile as the global excludes (``resolve_global_excludes``) so
+    the per-repo entry collapses duplicates and preserves every other line verbatim. A repo with no
+    git (no exclude path) is a no-op (nothing to ignore → ``ok``).
+
+    ``ok`` is FALSE — and the caller surfaces it as an ERROR, not a misleading "created" — for any
+    state where the ignore could NOT be established: an unreadable/unwritable exclude file (OSError),
+    or an unbalanced/misordered marker pair rig refuses to rewrite. This matters because the whole
+    point of the ignore is to keep the worktree clean (ship refuses a dirty tree); a delegator
+    written-but-not-ignored is the exact failure mode this feature prevents, so it must never be
+    reported as success.
+    """
+    if exclude_path is None:
+        return True, "no git repo — delegator not ignored (nothing to reconcile)"
+    # resolve_global_excludes fences entries with the GLOBAL markers; the ship delegator wants its
+    # OWN marker text, so we render the desired block ourselves and splice it via the SAME offset
+    # machinery (_find_marker_lines) to keep one collapse/preserve code path.
+    desired = ship_delegator_exclude_block_text()
+    if not exclude_path.is_file():
+        # is_file (not exists): a directory at info/exclude must NOT take the fresh-write branch (it
+        # would IsADirectoryError on the read below with a misleading message) — let the open() below
+        # raise and surface as a clear "could not read".
+        if not exclude_path.exists():
+            try:
+                exclude_path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_exclude(exclude_path, desired + "\n")
+            except OSError as exc:
+                return False, f"could not write {exclude_path}: {exc}"
+            return True, f"ignored in {exclude_path}"
+    try:
+        with exclude_path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError as exc:
+        return False, f"could not read {exclude_path}: {exc}"
+    begins = _find_marker_lines(content, SHIP_DELEGATOR_EXCLUDE_BEGIN_MARKER)
+    ends = _find_marker_lines(content, SHIP_DELEGATOR_EXCLUDE_END_MARKER)
+    if len(begins) != len(ends):
+        return False, f"{exclude_path} has unbalanced rig ship-delegator markers — reconcile by hand"
+    if not begins:
+        # Preserve the existing file VERBATIM (including a whitespace-only file's blank lines) and
+        # append the block. Ensure exactly one trailing newline before the block so we neither glue
+        # the block onto a non-newline-terminated last line nor accrete extra blanks; an empty file
+        # gets just the block. Mirrors the global reconcile but never discards pre-existing content.
+        if not content:
+            new_content = f"{desired}\n"
+        else:
+            lead = content if content.endswith("\n") else content + "\n"
+            new_content = f"{lead}{desired}\n"
+    else:
+        # collapse every managed region to ONE correct block in place (mirrors the global reconcile).
+        markers = sorted(
+            [(b[0], b[1], "begin") for b in begins] + [(e[0], e[1], "end") for e in ends]
+        )
+        pairs: list[tuple[int, int]] = []
+        expect = "begin"
+        pending = -1
+        for start, line_end, kind in markers:
+            if kind != expect:
+                return False, f"{exclude_path} has misordered rig ship-delegator markers — reconcile by hand"
+            if kind == "begin":
+                pending = start
+                expect = "end"
+            else:
+                pairs.append((pending, line_end))
+                expect = "begin"
+        if len(pairs) == 1 and content[pairs[0][0] : pairs[0][1]] == desired:
+            return True, f"already ignored in {exclude_path}"
+        out: list[str] = []
+        cursor = 0
+        for idx, (r_start, r_end) in enumerate(pairs):
+            out.append(content[cursor:r_start])
+            if idx == 0:
+                out.append(desired)
+            elif content[r_end : r_end + 1] == "\n":
+                r_end += 1
+            cursor = r_end
+        out.append(content[cursor:])
+        new_content = "".join(out)
+    try:
+        _atomic_write_exclude(exclude_path, new_content)
+    except OSError as exc:
+        return False, f"could not write {exclude_path}: {exc}"
+    return True, f"ignored in {exclude_path}"
+
+
+def _atomic_write_exclude(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` ATOMICALLY (tmp file in the same dir + ``os.replace``).
+
+    ``.git/info/exclude`` may hold the USER's own hand-added ignore lines. A plain truncate-rewrite
+    that is interrupted (SIGINT, disk-full, OSError mid-write) would leave that content destroyed
+    with no backup. Writing a sibling temp file and renaming it over the target makes the swap atomic
+    on POSIX (and best-effort on Windows): either the old file or the fully-written new one is present
+    — never a truncated half. ``newline=""`` writes LF verbatim (no CRLF translation), matching the
+    raw read in ``_exclude_has_entry`` so a re-apply is a byte-identical no-op.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".rig-tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _do_provision_ship_delegator(action: Action, on_conflict: str) -> ActionResult:
+    """Provision/reconcile the per-repo ``.claude/scripts/pr-ship.sh`` delegator + its git-exclude.
+
+    Two coupled steps, both idempotent:
+      1. Write ``<repo>/.claude/scripts/pr-ship.sh`` ONLY when its bytes differ from the desired
+         delegator (so a correct file is a true no-op and we never create a spurious ``.rig-bak``
+         backup just because the EXCLUDE entry was missing). Honors ``on_conflict`` via
+         :func:`fsutil.write_file` (a hand-edited delegator is backed up before overwrite) and sets
+         the exec bit.
+      2. ALWAYS reconcile rig's managed block in the repo's ``.git/info/exclude`` so the provisioned
+         file does not dirty the worktree (ship refuses a dirty tree). The exclude is rig-OWNED (its
+         own marker block), not user content, so it is reconciled regardless of ``on_conflict`` — a
+         ``skip`` that leaves a hand-edited delegator file still gets the file ignored, so status
+         won't re-flag a non-ignored delegator with no path forward. A repo with no git skips step 2
+         (nothing to ignore).
+
+    apply and drift switch on the SAME :func:`resolve_ship_delegator` ``state`` so status never
+    misreports. ``io_error`` (a directory/unreadable at the delegator path) is an error, never a
+    silent skip.
+    """
+    # Guard a missing/empty canonical_ship: a plan-builder regression that dropped the option would
+    # otherwise render `canonical=` and write a silently-broken delegator (every `gh ship` → exit
+    # 127 with no rig-side signal). Fail loudly instead. (The plan builder also fail-closes on a
+    # checkout without ci/ship/ship.sh, so this is defense-in-depth.)
+    raw_canonical = str(action.options.get("canonical_ship", "")).strip()
+    if not raw_canonical:
+        return ActionResult(action, "error", "ship-delegator: no canonical_ship in action options")
+    canonical = Path(raw_canonical)
+    r = resolve_ship_delegator(action.target, canonical)
+
+    if r.state == "io_error":
+        return ActionResult(action, "error", f"ship-delegator: {r.detail}")
+    if r.state == "ok":
+        return ActionResult(action, "skipped", f"ship-delegator: {r.delegator_path.name} already correct + ignored")
+
+    # Step 1 — write the file only when its bytes are wrong/absent (no needless backup when only the
+    # exclude was missing). `out` is initialized so the status read below never hits an unbound name
+    # if this branch logic is later edited (the ternary already guards it, this is belt-and-braces).
+    out: fsutil.WriteOutcome | None = None
+    if r.file_correct:
+        file_note = f"{r.delegator_path.name} already correct"
+        backup = None
+        skipped_user_file = False
+    else:
+        out = fsutil.write_file(r.delegator_path, r.content, on_conflict)
+        _chmod_x_if_changed(r.delegator_path, out)
+        file_note = out.detail
+        backup = out.backup
+        # on_conflict=skip on a DIFFERENT existing file: write_file skips without writing. We still
+        # reconcile the exclude (below) so a left-as-is delegator is at least ignored.
+        skipped_user_file = out.status == "skipped" and "on_conflict=skip" in out.detail
+
+    # Step 2 — always reconcile the git-exclude (rig-owned block). A FAILURE here (unreadable/
+    # unwritable exclude, or a marker pair rig won't rewrite) means the just-written delegator is NOT
+    # ignored → the worktree is now dirty, the exact thing this feature prevents. Surface it as an
+    # error, not a misleading "created" (the delegator is on disk, but the job is not done).
+    exclude_ok, exclude_note = _reconcile_ship_exclude(r.exclude_path)
+    if not exclude_ok:
+        return ActionResult(
+            action, "error",
+            f"ship-delegator: {file_note}; {exclude_note} — delegator written but NOT git-ignored "
+            "(worktree will be dirty; ship refuses a dirty tree)",
+            backup,
+        )
+
+    if skipped_user_file:
+        return ActionResult(action, "skipped", f"ship-delegator: {file_note}; {exclude_note}", backup)
+    # status: a changed file OR a freshly-added exclude entry is a change. file_correct→exclude-only
+    # change reports "updated" (the exclude was added); a written file reports its own write status.
+    status = out.status if out is not None else "updated"
+    return ActionResult(action, status, f"ship-delegator: {file_note}; {exclude_note}", backup)
+
+
 # ── GitHub repository ruleset (gh api) ─────────────────────────────────────────────
 # rig reconciles a branch ruleset on the repo's DEFAULT branch — the modern replacement for
 # branch protection — declaratively, the same way every other category is reconciled. The
@@ -2777,6 +3175,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "register_hook_bridge": _do_register_hook_bridge,
     "provision_schedule": _do_provision_schedule,
     "provision_agents_symlink": _do_provision_agents_symlink,
+    "provision_ship_delegator": _do_provision_ship_delegator,
     "provision_github_ruleset": _do_provision_github_ruleset,
     "provision_tmux": _do_provision_tmux,
     "provision_global_excludes": _do_provision_global_excludes,
