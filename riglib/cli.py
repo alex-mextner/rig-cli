@@ -27,6 +27,7 @@ from pathlib import Path
 from . import __version__
 from .layers import GLOBAL as _GLOBAL
 from .layers import REPO as _REPO
+from .layers import layer_for_category as _layer_for_category
 
 # ── tiny output helpers (no color dep; honor NO_COLOR) ───────────────────────────
 import os as _os
@@ -132,7 +133,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dry-run", action="store_true", help="print the resolved plan, write nothing")
     ap.add_argument("--only", help="comma-separated categories to scope (e.g. skills,ci)")
 
-    st = sub.add_parser("status", help="report drift between rig.yaml and disk (both ways)")
+    st = sub.add_parser(
+        "status",
+        help="report drift between config and disk, grouped by layer and managed area",
+        description="Report drift between config and disk. In a git repo, status shows GLOBAL "
+        "machine-wide areas and the REPO layer from ./rig.yaml; outside a git repo, it ignores "
+        "auto-discovered ./rig.yaml, reports only GLOBAL areas, and marks the repo layer / "
+        "rig.yaml as N/A.",
+    )
     st.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
     st.add_argument("--config", help="config file (default: ./rig.yaml + global)")
 
@@ -269,7 +277,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 # ── shared helpers ────────────────────────────────────────────────────────────────
-def _load_plan(cwd: str, config: str | None, project_type_override: str | None = None):
+def _load_plan(
+    cwd: str,
+    config: str | None,
+    project_type_override: str | None = None,
+    *,
+    allow_repo_autodiscovery_in_non_git: bool = True,
+):
     """Load config + catalog + build a plan. Returns (plan, loaded, env)."""
     from .catalog import Catalog
     from .config import load
@@ -277,17 +291,39 @@ def _load_plan(cwd: str, config: str | None, project_type_override: str | None =
     from .plan import build
 
     env = detect_environment(Path(cwd).resolve())
-    explicit = None
-    if config:
-        # a relative --config is relative to the detected git root (where rig.yaml lives),
-        # so the command works the same from the root or any subdirectory.
-        cp = Path(config)
-        explicit = (cp if cp.is_absolute() else env.repo_root / cp).resolve()
-    loaded = load(env.repo_root, explicit_config=explicit)
+    explicit = _resolve_explicit_config(env, config)
+    include_repo = _include_repo_config(env, explicit, allow_repo_autodiscovery_in_non_git)
+    loaded = load(env.repo_root, explicit_config=explicit, include_repo=include_repo)
     catalog = Catalog.scan(loaded.agent_tools_source)
     ptype = project_type_override or env.project_type
     plan = build(loaded, catalog, project_type=ptype)
     return plan, loaded, env
+
+
+def _resolve_explicit_config(env, config: str | None) -> Path | None:
+    """Resolve ``--config`` the same way for every command path.
+
+    A relative ``--config`` is relative to the detected git root, so the command works the
+    same from the root or any subdirectory.
+    """
+    if not config:
+        return None
+    cp = Path(config)
+    return (cp if cp.is_absolute() else env.repo_root / cp).resolve()
+
+
+def _include_repo_config(env, explicit: Path | None, allow_repo_autodiscovery_in_non_git: bool) -> bool:
+    """Whether this command context should load the repo/config layer."""
+    if env.is_git_repo:
+        return True
+    if explicit is not None:
+        return True
+    return allow_repo_autodiscovery_in_non_git
+
+
+def _is_global_action(action) -> bool:
+    """Whether an install action belongs to the GLOBAL status layer."""
+    return _layer_for_category(action.category) == _GLOBAL
 
 
 def _validate_layer_in_isolation(layer_path: Path) -> None:
@@ -532,11 +568,17 @@ def _print_non_git_status(env, config: str | None = None) -> int:
     print(f"  stack: {env.stack}  type: {env.project_type}")
     layers = "(none — built-in defaults)"
     try:
-        explicit = None
-        if config:
-            cp = Path(config)
-            explicit = (cp if cp.is_absolute() else env.repo_root / cp).resolve()
-        layers = ", ".join(load(env.repo_root, explicit_config=explicit).layers) or layers
+        explicit = _resolve_explicit_config(env, config)
+        loaded = load(
+            env.repo_root,
+            explicit_config=explicit,
+            include_repo=_include_repo_config(
+                env,
+                explicit,
+                allow_repo_autodiscovery_in_non_git=False,
+            ),
+        )
+        layers = ", ".join(loaded.layers) or layers
     except ConfigError:
         pass  # a malformed config still shouldn't stop us reporting "not a git repository"
     print(f"  config layers: {layers}")
@@ -552,7 +594,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     from .plan import PlanError, resolve_category_target
 
     try:
-        plan, loaded, env = _load_plan(args.cwd, args.config)
+        plan, loaded, env = _load_plan(
+            args.cwd,
+            args.config,
+            allow_repo_autodiscovery_in_non_git=False,
+        )
     except CatalogError as exc:
         # The catalog only matters for the REPO layer (what this repo would install). A non-git
         # dir (e.g. ~) has no repo layer at all, so an unresolved agent-tools checkout must NOT
@@ -581,6 +627,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     # real repo). Show that the repo layer is N/A and report the GLOBAL layer only.
     if not env.is_git_repo:
         _print_non_git_note()
+        # plan.build still emits default-on repo actions from built-in defaults even when no
+        # repo config file was loaded. Outside git those actions have no layer to report under,
+        # so status must drop them before drift detection as well as from the summary.
+        global_actions = []
+        repo_actions = []
+        for action in plan.actions:
+            (global_actions if _is_global_action(action) else repo_actions).append(action)
+        plan.actions = global_actions
+        if repo_actions:
+            print(_dim(
+                "  (repo-scoped areas are N/A outside a git repository: "
+                f"{len(repo_actions)} action(s) not evaluated)"
+            ))
     elif loaded.repo_path is None:
         # A REAL repo with no committed rig.yaml: make the fix PROMINENT, not a one-liner
         # buried above a long drift dump.

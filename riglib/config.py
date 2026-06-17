@@ -273,11 +273,13 @@ def load(
     *,
     explicit_config: Path | None = None,
     include_global: bool = True,
+    include_repo: bool = True,
 ) -> LoadedConfig:
     """Cascade-load config for ``repo_root``.
 
     - ``explicit_config`` (from ``--config P``) replaces the per-repo layer with ``P``.
     - The global layer is always the base unless ``include_global=False``.
+    - ``include_repo=False`` skips the repo/config layer entirely, including ``explicit_config``.
     - The result is validated (fail-closed) before return.
     """
     repo_root = repo_root.resolve()
@@ -309,15 +311,16 @@ def load(
         if gpath.is_file():
             _merge_layer(gpath, "global")
 
-    if explicit_config is not None:
-        rpath = explicit_config.resolve()
-        if not rpath.is_file():
-            raise ConfigError(f"--config file not found: {rpath}")
-        _merge_layer(rpath, "config")
-    else:
-        rpath = repo_config_path(repo_root)
-        if rpath.is_file():
-            _merge_layer(rpath, "repo")
+    if include_repo:
+        if explicit_config is not None:
+            rpath = explicit_config.resolve()
+            if not rpath.is_file():
+                raise ConfigError(f"--config file not found: {rpath}")
+            _merge_layer(rpath, "config")
+        else:
+            rpath = repo_config_path(repo_root)
+            if rpath.is_file():
+                _merge_layer(rpath, "repo")
 
     validate(merged)
     merged.pop("scope", None)  # `scope` is a removed legacy key — drop it so it never

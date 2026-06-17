@@ -48,7 +48,7 @@ Or run straight from a checkout — `uv run bin/rig …` / `python3 bin/rig …`
 | --- | --- |
 | `rig init` | **First-run onboarding.** Scaffold `rig.yaml` and wire in the agent-tools catalog — walking you through what's available (with opt-out). The front door for a repo/machine that has no config yet. |
 | `rig apply` | **Declarative reconcile** (kubectl-style): read `rig.yaml`, compute the diff vs the repo's state, converge, idempotently. The steady-state command you re-run on every machine; hand-edits that drift from the config are surfaced by `rig status`. `--dry-run` previews; `--only skills,ci` scopes. |
-| `rig status` | Detect + report **drift in both directions** (config says X but disk has Y; disk has Z not in config). |
+| `rig status` | Detect + report **drift in both directions**, grouped by GLOBAL/REPO layer and by every area rig reconciles (skills, hooks, CI, MCP, symlinks, repo settings, auto-mode, tmux, model cron). |
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
 | `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
 | `rig setup` | **The interactive configuration wizard.** In a terminal it shows what is enabled across every reconciled area, lets you change any option (with an inline hint per option) in the local `rig.yaml` AND the global `~/.config/rig/config.yaml`, then applies. Non-interactive (piped / no TTY) it prints usage for `init`/`apply`/`config get\|set`. |
@@ -215,6 +215,13 @@ binary. See [`docs/config-schema.md`](docs/config-schema.md#models) for the full
 - **disk→config** — installed on disk but not declared (orphan / hand-added). These are
   **reported, not deleted** — you decide whether to adopt them into the config or remove
   them.
+
+The status headline is grouped by reconciled area under the GLOBAL machine-wide layer and, when
+you are inside a git repository, the REPO layer from `./rig.yaml`. Outside a git repository,
+`rig status` ignores any auto-discovered local `rig.yaml`, shows only GLOBAL areas, and prints
+that the repo layer / `rig.yaml` is N/A; it does not tell you to commit a repo config where no
+repo exists. An explicit `--config` can still declare GLOBAL areas in that mode, but repo-scoped
+areas remain N/A until you run status inside a git repository.
 
 ## How rig consumes agent-tools (the integration seam)
 
