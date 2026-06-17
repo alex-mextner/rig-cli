@@ -351,6 +351,71 @@ def test_cc_save_populates_map_from_a_real_claude_child(tmux_env, monkeypatch):
     assert any(str(work) in ln and sid in ln for ln in lines), lines
 
 
+def test_cc_save_detects_the_versioned_binary_install(tmux_env, monkeypatch):
+    """THE 2026-06-17 INCIDENT (versioned-binary half of DEFECT 2): cc installs as a symlink
+    ``~/.local/bin/claude`` → ``…/claude/versions/<version>``. Launched by the RESOLVED path (not
+    the ``claude`` symlink), the process's name is the VERSION string (``2.1.179``), NOT ``claude``
+    — so a basename-only ``claude``/``*/claude`` match missed it and the map stayed empty (cc never
+    resumed after a reboot, the live incident). cc-save must still detect it via the
+    ``…/claude/versions/`` path arm of the tree-walk match (which reads ``ps -o args`` so the path
+    is visible on both macOS and Linux — Linux ``comm`` is the truncated basename with no path).
+
+    We reproduce the EXACT install shape: a ``claude/versions/<version>`` symlink → ``sleep`` run by
+    its resolved PATH, as a real child of a pane shell, so its ``args`` (argv[0]) is
+    ``…/claude/versions/<version>``. A SYMLINK (not a copy) is used so the launcher works on macOS
+    too: macOS SIP refuses to exec an unsigned COPY of a protected system binary, but exec'ing a
+    symlink to it is allowed, and ``args`` reflects the invoked path either way.
+    """
+    home, socket, run = tmux_env
+    _apply_with_real_plugins(home, monkeypatch)
+    gen = home / ".config" / "rig" / "tmux"
+
+    work = home / "verproj"
+    work.mkdir()
+    version = "2.1.179"
+    versions_dir = home / ".local" / "share" / "claude" / "versions"
+    versions_dir.mkdir(parents=True)
+    versioned = versions_dir / version
+    real_sleep = shutil.which("sleep") or "/bin/sleep"
+    versioned.symlink_to(real_sleep)  # argv[0] == the versioned path under claude/versions/
+    launcher = home / "launch-ver.sh"
+    # run the versioned binary BY ITS RESOLVED PATH (the failing production case), backgrounded so
+    # it stays a genuine descendant of the launcher (which keeps the pane shell alive).
+    launcher.write_text(
+        f"#!/usr/bin/env bash\n{shlex.quote(str(versioned))} 300 &\nsleep 300\n", encoding="utf-8"
+    )
+    launcher.chmod(0o755)
+    run(["tmux", "new-session", "-d", "-s", "main", "-c", str(work), str(launcher)])
+    # wait for the versioned descendant to appear. Probe `args` (the full command line), NOT `comm`
+    # — exactly the portability point: on Linux `comm` is the truncated BASENAME (`2.1.179`, no
+    # path), so only `args` carries the `claude/versions/` path on both macOS and Linux.
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        snap = subprocess.run(
+            ["ps", "-eo", "args="], capture_output=True, text=True
+        ).stdout
+        if f"claude/versions/{version}" in snap:
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("the versioned claude descendant never appeared in the process table")
+
+    # seed a Claude Code session file for that cwd so cc-save has an id to record.
+    enc = str(work).replace("/", "-").replace(".", "-")
+    proj = home / ".claude" / "projects" / enc
+    proj.mkdir(parents=True)
+    sid = "99999999-8888-7777-6666-555555555555"
+    (proj / f"{sid}.jsonl").write_text("{}\n", encoding="utf-8")
+
+    r = run(["bash", str(gen / "cc-save.sh")])
+    assert r.returncode == 0, f"cc-save failed: {r.stderr}"
+    map_file = gen / "cc-sessions.map"
+    assert map_file.is_file(), "cc-save wrote no map file"
+    lines = [ln for ln in map_file.read_text().splitlines() if ln.strip()]
+    assert lines, "INCIDENT: cc-save missed the VERSIONED-binary cc process — map is EMPTY"
+    assert any(str(work) in ln and sid in ln for ln in lines), lines
+
+
 def test_cc_restore_relaunches_claude_resume_into_fresh_shell(tmux_env, monkeypatch):
     """DEFECT 2 (restore half): with a seeded map, cc-restore sends `cd <cwd> && claude --resume
     <id>` into a FRESH shell pane (never on top of a running claude / an editor)."""
