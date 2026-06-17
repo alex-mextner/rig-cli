@@ -105,6 +105,11 @@ class LoadedConfig:
     global_path: Path | None = None
     repo_path: Path | None = None
     layers: list[str] = field(default_factory=list)
+    # Provenance: which config FILE last declared each top-level key. Built during the cascade
+    # (global first, then repo/explicit overwrites), so a key present only in the global config
+    # maps to the global path even when a repo rig.yaml is also loaded. Used to name the CORRECT
+    # source file in an unknown-item error instead of always blaming the repo file.
+    key_sources: dict[str, Path] = field(default_factory=dict)
 
     @property
     def agent_tools_source(self) -> str | None:
@@ -134,6 +139,22 @@ class LoadedConfig:
             return self.global_path
         return repo_config_path(self.repo_root)
 
+    def source_for_key(self, dotted_key: str) -> Path:
+        """The config FILE that declared ``dotted_key`` (e.g. ``mcp.items.review``).
+
+        Resolves provenance by the TOP-LEVEL key (``mcp``): a key that came solely from the
+        global ``~/.config/rig/config.yaml`` names the global file, while a key the repo
+        ``rig.yaml`` set (or overrode) names the repo file. This is what lets an unknown-item
+        error point at the file actually carrying the stale entry — e.g. a removed MCP slot
+        left in the global config is reported against the global file, not the repo's.
+
+        Falls back to :attr:`primary_config_path` when the key has no tracked provenance (a
+        config built directly in tests, or a key that is not top-level).
+        """
+        top = dotted_key.split(".", 1)[0]
+        src = self.key_sources.get(top)
+        return src if src is not None else self.primary_config_path
+
 
 def load(
     repo_root: Path,
@@ -152,34 +173,51 @@ def load(
     layers: list[str] = []
     gpath: Path | None = None
     rpath: Path | None = None
+    # Track which file last declared each top-level key, in cascade order (global, then
+    # repo/explicit). A key the repo layer sets overwrites the global provenance — so the final
+    # mapping names the file the user must edit to remove the offending key.
+    key_sources: dict[str, Path] = {}
+
+    def _merge_layer(path: Path, label: str) -> None:
+        """Merge one config file into the accumulator and record its key provenance + layer.
+
+        Single seam so a new layer can't forget to update ``key_sources`` (the bug the
+        provenance feature exists to avoid). ``merged`` is rebound via ``nonlocal`` because
+        ``_deep_merge`` returns a fresh dict rather than mutating in place.
+        """
+        nonlocal merged
+        data = _load_yaml(path)
+        merged = _deep_merge(merged, data)
+        for k in data:
+            key_sources[k] = path
+        layers.append(f"{label}:{path}")
 
     if include_global:
         gpath = global_config_path()
         if gpath.is_file():
-            merged = _deep_merge(merged, _load_yaml(gpath))
-            layers.append(f"global:{gpath}")
+            _merge_layer(gpath, "global")
 
     if explicit_config is not None:
         rpath = explicit_config.resolve()
         if not rpath.is_file():
             raise ConfigError(f"--config file not found: {rpath}")
-        merged = _deep_merge(merged, _load_yaml(rpath))
-        layers.append(f"config:{rpath}")
+        _merge_layer(rpath, "config")
     else:
         rpath = repo_config_path(repo_root)
         if rpath.is_file():
-            merged = _deep_merge(merged, _load_yaml(rpath))
-            layers.append(f"repo:{rpath}")
+            _merge_layer(rpath, "repo")
 
     validate(merged)
     merged.pop("scope", None)  # `scope` is a removed legacy key — drop it so it never
     # lingers in loaded.data, gets re-serialized, or is mistaken for a live setting.
+    key_sources.pop("scope", None)
     return LoadedConfig(
         data=merged,
         repo_root=repo_root,
         global_path=gpath if gpath and gpath.is_file() else None,
         repo_path=rpath if rpath and rpath.is_file() else None,
         layers=layers,
+        key_sources=key_sources,
     )
 
 

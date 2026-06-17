@@ -251,24 +251,25 @@ def _validate_item_names(config: LoadedConfig, catalog: Catalog) -> None:
     """
     from . import errors
 
-    config_path = str(config.primary_config_path)
-
     def _check(category: str, names: set[str], known: set[str], key_prefix: str) -> None:
         """Raise a structured :class:`errors.UnknownItemError` for the first unknown name.
 
         ``category`` is the catalog category used for the removed-slot lookup + did-you-mean;
         ``key_prefix`` is the dotted config-key path (e.g. ``mcp.items``) the bad name hangs
-        off, so the error names the EXACT offending key (``mcp.items.review``) + its file.
+        off, so the error names the EXACT offending key (``mcp.items.review``) + its file. The
+        file is resolved by the key's PROVENANCE (``source_for_key``): a stale entry that came
+        solely from the global config is reported against the global file, not the repo's.
         """
         unknown = sorted(names - known)
         if unknown:
             bad = unknown[0]
+            key = f"{key_prefix}.{bad}"
             raise errors.unknown_item_error(
                 category=category,
-                key=f"{key_prefix}.{bad}",
+                key=key,
                 bad=bad,
                 known=known,
-                config_path=config_path,
+                config_path=str(config.source_for_key(key)),
             )
 
     # skills — universal group
@@ -418,12 +419,13 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
             from . import errors
 
             bad = unknown[0]
+            key = f"ci.items.{bad}"
             raise errors.unknown_item_error(
                 category="ci",
-                key=f"ci.items.{bad}",
+                key=key,
                 bad=bad,
                 known=known,
-                config_path=str(config.primary_config_path),
+                config_path=str(config.source_for_key(key)),
             )
 
         # resolve which slots are enabled: per-item override > enable/disable > all > off.

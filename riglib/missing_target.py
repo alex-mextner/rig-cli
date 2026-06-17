@@ -47,8 +47,9 @@ def _missing_paths_in_command(command: str) -> list[str]:
     interpreter — and that interpreter may itself be an ABSOLUTE path on macOS
     (``/usr/bin/env python3 /abs/hook.py``, ``/opt/homebrew/bin/python3 /abs/hook.py``). We must
     check the SCRIPT, not the interpreter: skip a leading interpreter token (bare or absolute)
-    plus its ``env VAR=…`` / module / ``-c`` style args, then take the first remaining
-    script-looking token as the target. We check only THAT token — a later absolute path is
+    plus its ``env VAR=…`` / ``-c`` inline-code / ``-m <module>`` style args (both ``-c`` and
+    ``-m`` mean there is no script FILE to verify), then take the first remaining script-looking
+    token as the target. We check only THAT token — a later absolute path is
     almost always a runtime OUTPUT arg (``--out /var/run/x.json``) that legitimately doesn't
     exist yet; flagging it would make ``rig status``/``doctor`` cry wolf on a healthy hook.
     """
@@ -69,10 +70,13 @@ def _missing_paths_in_command(command: str) -> list[str]:
         rest = tokens[1:]
 
     for tok in rest:
-        # `-c '<inline code>'` as an INTERPRETER flag (i.e. before any script token) means there
-        # is no script FILE to verify. Only honor it before the first path — a `-c` AFTER the
-        # script is the script's OWN argument, not Python's, and must not suppress the check.
-        if via_interpreter and tok == "-c":
+        # `-c '<inline code>'` and `-m <module>` as INTERPRETER flags (i.e. before any script
+        # token) both mean there is NO script FILE to verify: `-c` runs inline code, `-m` runs an
+        # installed module by import name (`python3 -m my_hook --out x` has no path to check, and
+        # a later absolute arg like `--out /tmp/x.json` is a runtime output, not a hook script).
+        # Only honor them before the first path — a `-c`/`-m` AFTER the script is the script's OWN
+        # argument, not the interpreter's, and must not suppress the check.
+        if via_interpreter and tok in ("-c", "-m"):
             return []
         if _looks_like_script_path(tok):
             p = Path(tok).expanduser()

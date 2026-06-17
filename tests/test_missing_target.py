@@ -147,6 +147,50 @@ def test_scan_flags_dead_script_when_dash_c_is_script_arg(tmp_path):
     assert str(gone) in findings[0].what
 
 
+def test_scan_ignores_module_invocation(tmp_path):
+    # `python3 -m my_hook --out /tmp/result.json` runs a MODULE, not a script FILE — there is no
+    # script path to verify. The later absolute `--out` arg is a runtime output path, not a hook
+    # script, so a module-based hook must NOT be flagged (it would cry wolf on a healthy hook).
+    home = tmp_path / "home"
+    out_file = tmp_path / "run" / "result.json"  # never created — a runtime output path
+    settings = _settings(
+        home,
+        {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": f"python3 -m my_hook --out {out_file}"}
+        ]}]},
+    )
+    assert scan_settings_hooks(settings) == []
+
+
+def test_scan_ignores_module_invocation_under_absolute_interpreter(tmp_path):
+    # same, but the interpreter is an absolute path (the macOS form) — still no script to verify.
+    home = tmp_path / "home"
+    gone = tmp_path / "gone" / "x.py"  # an absolute path that doesn't exist, AFTER -m <module>
+    settings = _settings(
+        home,
+        {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": f"/opt/homebrew/bin/python3 -m pkg.hook {gone}"}
+        ]}]},
+    )
+    assert scan_settings_hooks(settings) == []
+
+
+def test_scan_flags_dead_script_when_dash_m_is_script_arg(tmp_path):
+    # `-m` AFTER the script is the SCRIPT's own argument, not Python's module flag — a dead
+    # script must still be flagged (mirror of the `-c`-as-script-arg guard).
+    home = tmp_path / "home"
+    gone = tmp_path / "gone" / "hook.py"  # the script itself is missing
+    settings = _settings(
+        home,
+        {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": f"python3 {gone} -m somearg"}
+        ]}]},
+    )
+    findings = scan_settings_hooks(settings)
+    assert len(findings) == 1
+    assert str(gone) in findings[0].what
+
+
 def test_scan_missing_settings_file_is_empty(tmp_path):
     # no settings.json at all → nothing to scan, no error
     assert scan_settings_hooks(tmp_path / "home" / ".claude" / "settings.json") == []

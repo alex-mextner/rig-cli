@@ -16,6 +16,7 @@ All offline (no agent-tools apply leg needed — drift detection runs against th
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -143,8 +144,6 @@ def test_status_groups_drift_by_layer_with_provenance(tmp_path, capsys, fake_age
 def test_status_global_layer_drift_names_global_config(tmp_path, capsys, fake_agent_tools, monkeypatch):
     # an isolated HOME with an undeclared MCP server on disk → a GLOBAL-layer extra, and a
     # global config file so its provenance can be named.
-    import json
-
     home = tmp_path / "home"
     (home / ".claude" / "mcp").mkdir(parents=True)
     (home / ".claude" / "mcp" / "mcp.json").write_text(
@@ -211,6 +210,48 @@ def test_help_documents_exit_codes(capsys):
     assert "exit codes:" in out
     assert "4" in out and "unknown item" in out
     assert "6" in out and "not a git repository" in out
+
+
+# ── exit-code precedence: a dead target outranks drift ────────────────────────────
+def test_status_missing_target_outranks_drift(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """When `rig status` finds BOTH a dead hook target AND config↔disk drift, it must exit with
+    EXIT_MISSING_TARGET (5), not EXIT_DRIFT (3) — the missing target must not be MASKED by drift.
+
+    A dead hook script fails at runtime (a generic "PreToolUse error"), so it's the more urgent,
+    more actionable class. Both findings are still PRINTED; only the single-valued exit code
+    reflects the higher-severity class so a CI script keying on the stable contract sees it.
+    """
+    home = tmp_path / "home"
+    gone = tmp_path / "gone-hook.py"  # referenced by a hook but never created
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": f"python3 {gone}"}]}
+        ]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = _git_repo(tmp_path / "repo")
+    # REPO-layer drift: an undeclared CI workflow on disk while ci is enabled-but-empty.
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "rogue.yml").write_text("name: rogue\n", encoding="utf-8")
+    (repo / "rig.yaml").write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: true, all: false}\n"
+        "agents_md: {enabled: false}\n",
+        encoding="utf-8",
+    )
+    rc = main(["status", "-C", str(repo)])
+    out = capsys.readouterr().out
+    # the missing-target class wins the exit code even though drift is ALSO present
+    assert rc == errors.EXIT_MISSING_TARGET
+    # both problems are surfaced to the user
+    assert str(gone) in out  # the dead hook target is printed
+    assert "rogue" in out  # the drift is printed too
+    assert "precedence" in out.lower()  # the exit-code precedence is explained
 
 
 # ── a clean in-sync repo still exits 0 ────────────────────────────────────────────

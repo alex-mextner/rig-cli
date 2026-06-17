@@ -71,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  5    missing target (config references a path/binary that's gone on disk)\n"
             "  6    not a git repository (a repo-scoped command run outside a repo)\n"
             "  127  missing dependency (a required external tool isn't installed)\n"
+            "\n"
+            "  precedence: when `rig status` finds BOTH a missing target and config↔disk drift,\n"
+            "  it prints both but exits 5 (missing-target outranks drift — the dead reference\n"
+            "  fails at runtime, so it's the more urgent class).\n"
         ),
     )
     p.add_argument("--version", action="version", version=f"rig {__version__}")
@@ -537,19 +541,33 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(_ok("\n  in sync — config and disk agree"))
         return 0
 
-    if dead_targets and report.in_sync:
-        # no config↔disk drift, but a dead hook reference IS a problem worth a non-zero exit.
-        print(_dim("\n  (no config↔disk drift, but a missing target above needs attention)"))
-        return errors.EXIT_MISSING_TARGET
+    if not report.in_sync:
+        # render the full drift report whenever there IS drift — the user must SEE every problem,
+        # regardless of which exit code we ultimately surface below.
+        _render_drift_by_layer(report, loaded, env)
+        # LOUD reassurance: apply NEVER deletes on-disk-not-declared items. A user must not fear
+        # `rig apply` will nuke a hand-added skill (it won't — extras are surfaced, never removed).
+        print()
+        print(_ok("  ✔ safe: `rig apply` NEVER deletes on-disk extras — items present on disk but"))
+        print(_ok("    not declared in any layer are left for you to decide. apply only ADDS/UPDATES."))
+        print(_dim("\n  run `rig apply` to converge config→disk (extras above are left as-is)"))
 
-    _render_drift_by_layer(report, loaded, env)
-    # LOUD reassurance: apply NEVER deletes on-disk-not-declared items. A user must not fear
-    # `rig apply` will nuke a hand-added skill (it won't — extras are surfaced, never removed).
-    print()
-    print(_ok("  ✔ safe: `rig apply` NEVER deletes on-disk extras — items present on disk but"))
-    print(_ok("    not declared in any layer are left for you to decide. apply only ADDS/UPDATES."))
-    print(_dim("\n  run `rig apply` to converge config→disk (extras above are left as-is)"))
-    return 3
+    # EXIT-CODE PRECEDENCE — a dead target OUTRANKS ordinary drift. A missing hook script will
+    # FAIL at runtime (a generic "PreToolUse error"); drift is merely "config and disk disagree".
+    # The more-actionable, higher-severity class wins so a script following the stable exit-code
+    # contract sees EXIT_MISSING_TARGET (5) even when drift is also present — the drift exit (3)
+    # must never MASK it. Both are printed above; only the exit code is single-valued.
+    if dead_targets:
+        if not report.in_sync:
+            print(_dim(
+                f"\n  exit: missing-target ({errors.EXIT_MISSING_TARGET}) takes precedence over "
+                f"config↔disk drift ({errors.EXIT_DRIFT}) — the dead reference fails at runtime; "
+                "fix it first, then re-run."
+            ))
+        else:
+            print(_dim("\n  (no config↔disk drift, but a missing target above needs attention)"))
+        return errors.EXIT_MISSING_TARGET
+    return errors.EXIT_DRIFT
 
 
 def _declaring_config(category: str, loaded) -> str:

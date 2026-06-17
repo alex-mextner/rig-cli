@@ -182,8 +182,15 @@ YAML
 fi
 
 # ── 4. unit suite ─────────────────────────────────────────────────────────────
+# Run pytest the way the repo actually runs it: prefer `uv run --with pytest` (the documented
+# command — README/AGENTS.md), so a machine whose bare `python3` is a clean interpreter without
+# pytest installed still runs the suite. Fall back to `python3 -m pytest` when uv is absent.
 echo "running pytest…"
-python3 -m pytest -q "$ROOT/tests" || fail "pytest"
+if command -v uv >/dev/null 2>&1; then
+  uv run --with pytest python -m pytest -q "$ROOT/tests" || fail "pytest"
+else
+  python3 -m pytest -q "$ROOT/tests" || fail "pytest"
+fi
 pass "pytest"
 
 echo "smoke OK"
