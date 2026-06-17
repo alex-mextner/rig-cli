@@ -95,7 +95,8 @@ def test_status_non_git_dir_ignores_local_rigyaml_repo_layer(
         f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
-        "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n",
+        "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
+        "permissions: {enabled: false}\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
@@ -134,6 +135,7 @@ def test_status_non_git_explicit_config_still_reports_global_areas_only(
         "skills: {all: true}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
         "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
+        "permissions: {enabled: false}\n"
         "ci: {enabled: true, all: false, items: {codeql: {enabled: true}}}\n",
         encoding="utf-8",
     )
@@ -162,6 +164,7 @@ def test_status_non_git_explicit_repo_only_config_says_repo_declarations_are_na(
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
         "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
+        "permissions: {enabled: false}\n"
         "ci: {enabled: true, all: false, items: {codeql: {enabled: true}}}\n",
         encoding="utf-8",
     )
