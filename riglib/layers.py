@@ -34,7 +34,9 @@ _CATEGORY_LAYER = {
     "harness": GLOBAL,
     "models": GLOBAL,
     "git_hooks": GLOBAL,
+    "gitignore": GLOBAL,
     "tmux": GLOBAL,
+    "tg_ctl": GLOBAL,
     # REPO — this repo, from ./rig.yaml
     "ci": REPO,
     "agents_md": REPO,
