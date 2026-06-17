@@ -19,6 +19,7 @@ enum values abort before anything touches disk.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ _VALID_TOP_KEYS = {
     "ci",
     "mcp",
     "harness",
+    "permissions",
     "models",
     "agents_md",
     "github",
@@ -369,6 +371,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_agent_hooks(data.get("agent_hooks", {}))
     _validate_skills(data.get("skills", {}))
     _validate_harness(data.get("harness", {}))
+    _validate_permissions(data.get("permissions", {}))
     _validate_models(data.get("models", {}))
     _validate_agents_md(data.get("agents_md", {}))
     _validate_github(data.get("github", {}))
@@ -472,6 +475,88 @@ def _validate_harness(h: dict[str, Any]) -> None:
         py = bridge.get("python")
         if py is not None and not isinstance(py, str):
             raise ConfigError(f"harness.hook_bridge.python must be a string, got {py!r}")
+
+
+# The keys the permissions block accepts. Listed once so the validator rejects a typo (fail-closed,
+# consistent with every other block).
+_PERMISSIONS_KEYS = {"enabled", "kind", "tools", "extra", "disable", "settings_path"}
+# Harness kinds the ALLOWLIST provisioning supports — broader than the auto-mode write
+# (_VALID_HARNESS_KINDS), since opencode HAS an additively-mergeable allowlist even though its
+# auto-mode write is not yet implemented. codex/gemini/pi have no such mechanism → recorded N/A
+# (rejected here with a clear message rather than silently writing nothing / breaking the harness).
+_VALID_PERMISSIONS_KINDS = {"claude-code", "opencode"}
+_NA_PERMISSIONS_KINDS = {"codex", "gemini", "pi"}
+# A pre-allowed tool is a single command token: it must START with an alphanumeric or ``/`` (an
+# absolute path) — never a dash (a leading-dash entry like ``-rf`` / ``--flag`` would render a
+# nonsensical/surprising allowlist entry) — and otherwise contain only letters, digits, and the
+# chars that legitimately appear in a command name or path (``.``/``_``/``-``/``/``). No spaces, no
+# shell metachars; ``..`` is rejected separately (path traversal).
+_PERMISSION_TOOL_RE = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9._/-]*$")
+
+
+def _validate_permissions(p: dict[str, Any]) -> None:
+    """Validate the ``permissions`` block — the per-harness command allowlist rig provisions.
+
+    rig pre-allows our ecosystem CLIs (tg/review/draw/3d/rig/task) + the safe-to-allow external
+    dev tools (gh/git/rg/uv/bun/jq/gitleaks) in the harness's permission allowlist so the agent
+    never stops to ask for a known-safe command. Default **ON**: an EMPTY/absent block still
+    provisions the DEFAULT tool set (a present block with ``enabled`` not false opts in). The list
+    is config-driven — ``tools`` (a list of command names) REPLACES the default set, ``extra``
+    adds, ``disable`` removes. Fail-closed, consistent with every other block, on: a non-mapping
+    block, an unknown key (typo guard), a non-bool ``enabled``, a non-string-list
+    ``tools``/``extra``/``disable``, and a non-string ``settings_path``.
+    """
+    if not isinstance(p, dict):
+        raise ConfigError("permissions must be a mapping")
+    if not p:
+        return
+    unknown = set(p) - _PERMISSIONS_KEYS
+    if unknown:
+        raise ConfigError(f"unknown permissions key(s): {', '.join(sorted(unknown))}")
+    enabled = p.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"permissions.enabled must be a bool, got {enabled!r}")
+    kind = p.get("kind")
+    if kind is not None:
+        if not isinstance(kind, str):
+            raise ConfigError(f"permissions.kind must be a string, got {kind!r}")
+        if kind in _NA_PERMISSIONS_KINDS:
+            raise ConfigError(
+                f"permissions.kind '{kind}' has no additively-mergeable command allowlist "
+                f"(supported: {sorted(_VALID_PERMISSIONS_KINDS)}). Remove permissions.kind or use a "
+                f"supported harness."
+            )
+        if kind not in _VALID_PERMISSIONS_KINDS:
+            raise ConfigError(
+                f"permissions.kind must be one of {sorted(_VALID_PERMISSIONS_KINDS)}, got {kind!r}"
+            )
+    for listkey in ("tools", "extra", "disable"):
+        value = p.get(listkey)
+        if value is not None:
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ConfigError(f"permissions.{listkey} must be a list of strings, got {value!r}")
+            # A tool name becomes a Bash(<name>:*) / "<name> *" allowlist ENTRY — a space or shell
+            # metachar would render a broken/surprising entry (Bash(git status:*), Bash(:*)). Restrict
+            # to a plain command token so the rendered entry always means what the author intends.
+            for v in value:
+                if not _PERMISSION_TOOL_RE.match(v) or ".." in v:
+                    raise ConfigError(
+                        f"permissions.{listkey} entry {v!r} is not a plain command name or "
+                        "absolute path (allowed: letters, digits, '.', '_', '-', '/'; no spaces, "
+                        "metachars, or '..')"
+                    )
+    settings_path = p.get("settings_path")
+    if settings_path is not None:
+        if not isinstance(settings_path, str):
+            raise ConfigError(f"permissions.settings_path must be a string, got {settings_path!r}")
+        # both supported harnesses store the allowlist in a JSON file; a non-.json override would be
+        # silently nested as <path>/settings.json by the runner. Require .json so the write lands
+        # exactly where the user pointed.
+        if not settings_path.endswith(".json"):
+            raise ConfigError(
+                f"permissions.settings_path must end in .json (the harness allowlist is a JSON file), "
+                f"got {settings_path!r}"
+            )
 
 
 # The model-freshness schedule defaults to NOON (run once a day, at noon). A `time:` override

@@ -28,7 +28,7 @@ def test_registry_covers_every_status_area():
     # the wizard must show what is enabled across ALL reconciled areas (the `rig status` rows).
     cats = {a.category for a in schema.AREAS}
     expected = {
-        "skills", "agent_hooks", "git_hooks", "ci", "mcp", "harness",
+        "skills", "agent_hooks", "git_hooks", "ci", "mcp", "harness", "permissions",
         "models", "agents_md", "github", "tmux", "gitignore", "tg_ctl",
     }
     assert cats == expected
@@ -36,8 +36,8 @@ def test_registry_covers_every_status_area():
 
 def test_global_only_categories_route_to_global_not_repo():
     # the footgun guard: a machine-wide, never-scaffolded block must NOT be writable into a
-    # committed repo rig.yaml. These three are documented global-only.
-    for cat in ("gitignore", "tg_ctl", "tmux"):
+    # committed repo rig.yaml. These are documented global-only.
+    for cat in ("gitignore", "tg_ctl", "tmux", "permissions"):
         assert schema.writable_layer_for_category(cat) == schema.GLOBAL
     # harness/models/git_hooks are status-grouped GLOBAL but the scaffold writes them into the
     # committed repo rig.yaml, so an EDIT of their value belongs in the repo file.

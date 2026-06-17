@@ -124,6 +124,22 @@ YAML
   [[ -f "$HOME/.claude/skills/$sk_name/SKILL.md" ]] || fail "harness skill link does not resolve"
   pass "rig init --yes installed skills + CI + dispatcher + harness skill links"
 
+  # permissions (default-ON): the command allowlist lands in the harness settings.json with our
+  # ecosystem CLIs + safe dev tools pre-allowed (Bash(<tool>:*)). This is the security-sensitive
+  # default-on path — assert it actually wrote, not just that status is green.
+  CCSET="$HOME/.claude/settings.json"
+  [[ -f "$CCSET" ]] || fail "permissions: harness settings.json not written"
+  # structural check (robust to JSON formatting), not a brittle grep of the pretty-printed text
+  python3 - "$CCSET" <<'PY' || fail "permissions: ecosystem CLIs + dev tools not in permissions.allow"
+import json, sys
+allow = set(json.load(open(sys.argv[1])).get("permissions", {}).get("allow", []))
+# the full default set — our ecosystem CLIs + the safe external dev tools
+tools = ("tg", "review", "draw", "3d", "rig", "task", "gh", "git", "rg", "uv", "bun", "jq", "gitleaks")
+missing = {f"Bash({t}:*)" for t in tools} - allow
+sys.exit(0 if not missing else (print("missing:", sorted(missing)) or 1))
+PY
+  pass "rig init --yes pre-allowed our CLIs + dev tools in permissions.allow"
+
   # tmux v2: the managed config + boot script (DEFECT 1) land on disk (dry-run skips only the
   # LIVE steps — plugin clone / launchctl load — not the artifact writes).
   [[ -f "$HOME/.config/rig/tmux/rig.tmux.conf" ]] || fail "tmux: rig.tmux.conf not generated"
@@ -204,6 +220,7 @@ mcp: { enabled: false }
 agents_md: { enabled: false }
 gitignore: { enabled: false }
 tg_ctl: { enabled: false }
+permissions: { enabled: false }
 YAML
   CLEANREPO="$TMP/clean-repo"; mkdir -p "$CLEANREPO"; ( cd "$CLEANREPO" && git init -q )
   cp "$CLEAN" "$CLEANREPO/rig.yaml"

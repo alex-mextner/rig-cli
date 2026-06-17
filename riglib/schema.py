@@ -51,7 +51,7 @@ _KINDS = {KIND_BOOL, KIND_ENUM, KIND_STR, KIND_INT}
 # ``tg_ctl`` (documented global-only in config.py/state.py) and ``tmux`` (machine tmux config).
 # Routing a GLOBAL-only value into a committed repo rig.yaml is the footgun this map prevents.
 # A category absent here defaults to REPO (the conservative "it lives in the committed file").
-_GLOBAL_ONLY_CATEGORIES = {"gitignore", "tg_ctl", "tmux"}
+_GLOBAL_ONLY_CATEGORIES = {"gitignore", "tg_ctl", "tmux", "permissions"}
 
 
 def writable_layer_for_category(category: str) -> str:
@@ -188,6 +188,22 @@ AREAS: tuple[Area, ...] = (
             _opt("harness.hook_bridge.enabled", KIND_BOOL, True,
                  "Wire the cc_hook_bridge into settings.json so installed agent-hooks actually FIRE in "
                  "Claude Code. Without it every agent-hook is inert and auto-mode is NOT safe."),
+        ),
+    ),
+    Area(
+        "permissions", "harness command allowlist",
+        "Pre-allow our ecosystem CLIs + safe external dev tools in the harness allowlist (no per-call prompts).",
+        (
+            _opt("permissions.enabled", KIND_BOOL, True,
+                 "Provision the per-harness command allowlist so tg/review/draw/3d/rig/task + "
+                 "gh/git/rg/uv/bun/jq/gitleaks are pre-allowed (no permission prompt per call). "
+                 "Additive — merges into the existing allowlist, never clobbers. Off = leave it alone. "
+                 "GLOBAL-only (the allowlist file is per-machine) — never written to a repo rig.yaml."),
+            _opt("permissions.kind", KIND_ENUM, "claude-code",
+                 "Which harness's allowlist to provision. opencode is supported here independently "
+                 "of harness.kind; codex/gemini have no additively-mergeable allowlist (N/A). "
+                 "The tool LIST (tools/extra/disable) is a list — edit it directly in the config file.",
+                 choices=("claude-code", "opencode")),
         ),
     ),
     Area(

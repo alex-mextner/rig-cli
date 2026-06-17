@@ -33,11 +33,13 @@ from .actions.runner import (
     crontab_with_managed,
     descriptor_text,
     desired_harness_value,
+    desired_permission_entries,
     find_managed_bridge_hook,
     github_ruleset_state,
     harness_settings_file,
     hook_bridge_entries,
     parse_mcp_command,
+    permissions_settings_file,
     _is_rig_import_line,
     resolve_agents_md,
     resolve_ci_workflow,
@@ -120,6 +122,8 @@ def detect(
             declared_mcp.setdefault(cf, set()).add(server_key)
         elif action.kind == "apply_harness":
             _check_harness(action, report)
+        elif action.kind == "provision_permissions":
+            _check_permissions(action, report)
         elif action.kind == "register_hook_bridge":
             _check_hook_bridge(action, report)
         elif action.kind == "provision_schedule":
@@ -604,6 +608,94 @@ def _check_harness(action: Action, report: DriftReport) -> None:
                 f"{section}.{key} is '{current}', config declares '{value}'",
             )
         )
+
+
+def _check_permissions(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured command allowlist and the harness settings file.
+
+    missing  — the settings file is absent, the allowlist container is absent, OR a desired entry
+               (one of the ecosystem/external tools) is not present in it. ``rig apply`` ADDS the
+               missing entries (additive merge — never removing the user's own).
+    modified — the settings file is malformed JSON, OR (object form) a desired entry's KEY is
+               present but its value is not ``"allow"`` (the user set it to ``ask``/``deny`` — that
+               is the user's call, surfaced so status isn't a silent green, but apply does NOT
+               downgrade it).
+    Only the DESIRED entries are checked; every other entry in the user's allowlist is irrelevant
+    here (an undeclared extra entry is the user's, not rig-managed drift). Shares
+    :func:`desired_permission_entries` with the install handler so apply and status never diverge.
+    """
+    key_path, container, entries, value = desired_permission_entries(action)
+    config_file = permissions_settings_file(action)
+    dotted = ".".join(key_path)
+    if not config_file.is_file():
+        report.items.append(
+            DriftItem("missing", "permissions", action.item, config_file, "harness settings file not written")
+        )
+        return
+    try:
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+    except ValueError:
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, config_file, "harness settings file is malformed JSON")
+        )
+        return
+    # A non-object root is a SHAPE problem apply ERRORS on — report `modified` (not a stream of
+    # `missing` entries), so status and apply agree on what the operator must fix.
+    if not isinstance(data, dict):
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, config_file, "harness settings file is not a JSON object")
+        )
+        return
+    # walk to the container (read-only — never mutate during a status scan). An INTERMEDIATE
+    # segment that exists as a NON-object is the same shape problem apply errors on (it can't create
+    # the container under a scalar) → report `modified`, not a stream of `missing` entries.
+    node: object = data
+    for seg in key_path[:-1]:
+        nxt = node.get(seg) if isinstance(node, dict) else None
+        if nxt is not None and not isinstance(nxt, dict):
+            report.items.append(
+                DriftItem("modified", "permissions", action.item, config_file,
+                          f"'{seg}' in {dotted} is not an object")
+            )
+            return
+        node = nxt
+        if node is None:
+            break
+    if node is not None:
+        node = node.get(key_path[-1]) if isinstance(node, dict) else None
+    if container == "array":
+        # the container exists but is the wrong type → SHAPE drift (apply errors); not per-entry missing.
+        if node is not None and not isinstance(node, list):
+            report.items.append(
+                DriftItem("modified", "permissions", action.item, config_file, f"{dotted} is not an array")
+            )
+            return
+        present = set(node) if isinstance(node, list) else set()
+        for entry in entries:
+            if entry not in present:
+                report.items.append(
+                    DriftItem("missing", "permissions", action.item, config_file,
+                              f"'{entry}' not in {dotted} (apply adds it)")
+                )
+    else:  # object form — key present AND set to the desired value
+        if node is not None and not isinstance(node, dict):
+            report.items.append(
+                DriftItem("modified", "permissions", action.item, config_file, f"{dotted} is not an object")
+            )
+            return
+        existing = node if isinstance(node, dict) else {}
+        for entry in entries:
+            if entry not in existing:
+                report.items.append(
+                    DriftItem("missing", "permissions", action.item, config_file,
+                              f"'{entry}' not in {dotted} (apply adds it)")
+                )
+            elif existing.get(entry) != value:
+                report.items.append(
+                    DriftItem("modified", "permissions", action.item, config_file,
+                              f"'{entry}' in {dotted} is {existing.get(entry)!r}, not {value!r} "
+                              "(user override — apply leaves it)")
+                )
 
 
 def _check_hook_bridge(action: Action, report: DriftReport) -> None:

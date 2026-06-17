@@ -69,6 +69,26 @@ mcp:
       enabled: true
       command: "review --mcp"
 
+# ── Permissions — pre-allow our CLIs + safe dev tools in the harness allowlist ─────
+# Default **ON**: an ABSENT `permissions:` block still provisions the allowlist with the default
+# tool set, so rig pre-allows tg/review/draw/3d/rig/task + gh/git/rg/uv/bun/jq/gitleaks in the
+# harness's permission allowlist (claude-code: permissions.allow in ~/.claude/settings.json;
+# opencode: permission.bash). The merge is ADDITIVE — every existing entry is preserved, the
+# desired ones are merged in, deduped; a re-apply is a no-op. The grant is at the command-PREFIX
+# level (Bash(<tool>:*) covers a tool's subcommands/flags), so the restraint is in WHICH tools are
+# listed — dev/VCS tooling, never standalone destructive commands (rm/sudo/dd). GLOBAL-only (the
+# allowlist file is per-machine), like
+# tg_ctl/gitignore — so it is NOT scaffolded into this committed repo rig.yaml; declare it in the
+# global config (~/.config/rig/config.yaml) to override the tool list. The list is config-driven:
+#   permissions:
+#     enabled: true
+#     kind: opencode        # target opencode's allowlist (default: follow harness.kind / claude-code)
+#     tools: [tg, review, draw, 3d, rig, task, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES default
+#     extra: [kubectl]      # ADDS to the (default or explicit) set
+#     disable: [gitleaks]   # drops from rig's desired set (won't ADD it; never removes a live entry)
+# Keyed off permissions.kind, else harness.kind (codex/gemini have no additively-mergeable
+# allowlist → recorded N/A).
+
 # ── Harness — recommend auto-mode ON by default ───────────────────────────────────
 # The agent runs autonomously (the harness auto-accepts tool calls) with minimum
 # babysitting. SAFE because the agent-hooks above are installed (all: true) — they block
