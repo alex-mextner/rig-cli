@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from riglib.actions.runner import _do_provision_agents_symlink, resolve_agents_md, run_plan
+from riglib.actions.runner import (
+    _do_provision_agents_symlink,
+    _is_broken_symlink,
+    resolve_agents_md,
+    run_plan,
+)
 from riglib.config import ConfigError, LoadedConfig, validate
 from riglib.drift import detect
 from riglib.plan import Action, InstallPlan, build
@@ -193,6 +198,197 @@ def test_broken_canonical_symlink_without_pair_is_a_conflict(tmp_path):
     assert res.status == "skipped"
     assert (tmp_path / "AGENTS.md").is_symlink()  # untouched
     assert not (tmp_path / "CLAUDE.md").exists()
+
+
+# ── _is_broken_symlink predicate (guards the dangling-link detection directly) ────
+def test_is_broken_symlink_only_true_for_a_dangling_link(tmp_path):
+    real = tmp_path / "real.md"
+    real.write_text("x\n", encoding="utf-8")
+    good = tmp_path / "good"
+    good.symlink_to("real.md")  # resolves
+    bad = tmp_path / "bad"
+    bad.symlink_to("missing.md")  # dangling
+    a_dir = tmp_path / "adir"
+    a_dir.mkdir()
+    assert _is_broken_symlink(bad) is True
+    assert _is_broken_symlink(good) is False  # a healthy symlink is not "broken"
+    assert _is_broken_symlink(real) is False  # a regular file
+    assert _is_broken_symlink(a_dir) is False  # a directory
+    assert _is_broken_symlink(tmp_path / "nope") is False  # a path that does not exist at all
+
+
+# ── dangling rig-shaped link (the canonical was deleted out from under a provisioned pair) ──
+# The spec's "rig status flags a missing or BROKEN link". A dangling link stays a non-mutating
+# CONFLICT — rig must NOT silently recreate an empty canonical (that would mask the deletion of
+# real curated content, turning a visible recoverable failure into a silent unrecoverable one) —
+# but its detail must NAME it a broken symlink so a human restores the canonical (or removes the
+# link), instead of the generic "neither is a real file".
+def test_dangling_claude_link_to_missing_agents_is_named_broken(tmp_path):
+    # CLAUDE.md -> AGENTS.md but AGENTS.md was deleted: a dangling RIG-SHAPED link (target is the
+    # paired name, the other slot empty) — the spec's headline "canonical deleted out from under
+    # the pair". Named with restore-the-canonical guidance; rig NEVER recreates the canonical.
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict"
+    assert "broken symlink" in r.detail
+    assert "its canonical target AGENTS.md does not exist" in r.detail  # rig-shaped deletion case
+    res = _apply(tmp_path)
+    assert res.status == "skipped"
+    assert (tmp_path / "CLAUDE.md").is_symlink()  # link left exactly as the user has it
+    assert not (tmp_path / "AGENTS.md").exists()  # rig NEVER recreates the deleted canonical
+
+
+def test_dangling_agents_link_to_missing_claude_is_named_broken(tmp_path):
+    # the mirror: AGENTS.md -> CLAUDE.md with CLAUDE.md missing. Still a rig-shaped broken link,
+    # still a non-mutating conflict (recreating CLAUDE.md would silently flip canonical AND mask
+    # a possible deletion).
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict"
+    assert "its canonical target CLAUDE.md does not exist" in r.detail  # rig-shaped deletion case
+    res = _apply(tmp_path)
+    assert res.status == "skipped"
+    assert (tmp_path / "AGENTS.md").is_symlink()  # untouched
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+
+def test_dangling_link_to_foreign_missing_target_is_named_broken_generically(tmp_path):
+    # a broken symlink whose target is NOT the paired managed name (a foreign dangling target):
+    # surfaced as a broken/dangling link, but WITHOUT the "canonical was deleted" narrative — the
+    # canonical name was never involved, so that advice would be wrong. Still never mutated.
+    (tmp_path / "CLAUDE.md").symlink_to("does-not-exist.md")
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict"
+    assert "broken/dangling symlink" in r.detail and "does not resolve" in r.detail
+    assert "canonical target" not in r.detail  # not the rig-shaped canonical-missing narrative
+    assert _apply(tmp_path).status == "skipped"
+    assert (tmp_path / "CLAUDE.md").is_symlink()  # untouched
+
+
+def test_peer_symlink_loop_is_named_dangling_not_canonical_deleted(tmp_path):
+    # AGENTS.md -> CLAUDE.md AND CLAUDE.md -> AGENTS.md: a circular loop. Both resolve to nothing
+    # (ELOOP), so both are "broken", but NOTHING was deleted — the rig-shaped single-dangling
+    # branch must NOT fire (it requires the OTHER slot empty), so no "canonical deleted" claim.
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict"
+    assert "broken/dangling symlink" in r.detail and "do not resolve" in r.detail
+    assert "canonical target" not in r.detail  # not the rig-shaped canonical-missing narrative
+    assert _apply(tmp_path).status == "skipped"
+    assert (tmp_path / "AGENTS.md").is_symlink() and (tmp_path / "CLAUDE.md").is_symlink()
+
+
+def test_directory_beside_dangling_link_is_not_the_canonical_deleted_case(tmp_path):
+    # AGENTS.md is a DIRECTORY (a competing occupant), CLAUDE.md is a dangling symlink: the
+    # rig-shaped branch requires the OTHER slot to be EMPTY, so it must NOT fire (the directory,
+    # not a deletion, is the real problem). The generic broken-link message applies — no "canonical
+    # deleted" narrative — and rig never mutates either slot.
+    (tmp_path / "AGENTS.md").mkdir()
+    (tmp_path / "CLAUDE.md").symlink_to("gone.md")  # dangling (foreign, so no dir resolution)
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict"
+    assert "canonical target" not in r.detail  # not the rig-shaped canonical-missing narrative
+    assert _apply(tmp_path).status == "skipped"
+    assert (tmp_path / "AGENTS.md").is_dir()  # untouched
+    assert (tmp_path / "CLAUDE.md").is_symlink()
+
+
+def test_both_slots_dangling_foreign_links_read_as_plural(tmp_path):
+    # both slots dangling to foreign targets: plural generic broken-link copy, no deletion claim.
+    (tmp_path / "AGENTS.md").symlink_to("gone-a.md")
+    (tmp_path / "CLAUDE.md").symlink_to("gone-c.md")
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict"
+    assert "are broken/dangling symlinks" in r.detail and "their targets do not resolve" in r.detail
+    assert "canonical target" not in r.detail  # not the rig-shaped canonical-missing narrative
+    assert _apply(tmp_path).status == "skipped"
+    assert (tmp_path / "AGENTS.md").is_symlink() and (tmp_path / "CLAUDE.md").is_symlink()
+
+
+def test_self_referential_symlink_is_a_conflict_not_a_crash(tmp_path):
+    # AGENTS.md → AGENTS.md (a self-loop), CLAUDE.md absent. pathlib raises RuntimeError when it
+    # tries to resolve the loop; resolve_agents_md must NOT propagate it (it would crash rig
+    # status/apply). It is a generic broken-link conflict — NOT the "canonical deleted" narrative
+    # (nothing was deleted; the link eats itself) — and rig never mutates it.
+    (tmp_path / "AGENTS.md").symlink_to("AGENTS.md")
+    r = resolve_agents_md(tmp_path)  # must not raise
+    assert r.state == "conflict"
+    assert "canonical target" not in r.detail  # not the rig-shaped canonical-missing narrative
+    assert "broken/dangling symlink" in r.detail
+    assert _apply(tmp_path).status == "skipped"
+    assert (tmp_path / "AGENTS.md").is_symlink()  # untouched
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+
+def test_mixed_rig_shaped_and_foreign_dangling_pair_is_generic_conflict(tmp_path):
+    # one rig-shaped dangling link (AGENTS.md → CLAUDE.md) beside a foreign dangling link
+    # (CLAUDE.md → gone.md). The rig-shaped branch must SKIP (the other slot is a symlink, not
+    # empty), so the generic plural branch fires — no "canonical deleted" claim — and rig never
+    # mutates either slot.
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+    (tmp_path / "CLAUDE.md").symlink_to("gone.md")
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict"
+    assert "canonical target" not in r.detail  # not the rig-shaped canonical-missing narrative
+    assert "broken/dangling symlink" in r.detail
+    assert _apply(tmp_path).status == "skipped"
+    assert (tmp_path / "AGENTS.md").is_symlink() and (tmp_path / "CLAUDE.md").is_symlink()
+
+
+def test_mixed_rig_shaped_and_foreign_dangling_pair_mirror_guards_first_iteration(tmp_path):
+    # the mirror of the case above: CLAUDE.md → AGENTS.md (rig-shaped) beside AGENTS.md → gone.md
+    # (foreign). Here the rig-shaped match is in the loop's FIRST iteration, whose "other slot
+    # empty" guard must also hold (AGENTS.md is a symlink, not empty) → skip → generic branch.
+    # Locks that BOTH iterations honor the guard, not just the second.
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+    (tmp_path / "AGENTS.md").symlink_to("gone.md")
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict"
+    assert "canonical target" not in r.detail  # generic, not the rig-shaped narrative
+    assert "broken/dangling symlink" in r.detail
+    assert _apply(tmp_path).status == "skipped"
+    assert (tmp_path / "AGENTS.md").is_symlink() and (tmp_path / "CLAUDE.md").is_symlink()
+
+
+def test_dangling_rig_shaped_link_with_absolute_target_is_named_broken(tmp_path):
+    # an ABSOLUTE dangling target to the paired name still counts as the rig-shaped case
+    # (symlink_points_to accepts an absolute path resolving to the same dir) — lock the message.
+    (tmp_path / "CLAUDE.md").symlink_to(tmp_path / "AGENTS.md")  # absolute, still dangling
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict" and "broken symlink" in r.detail
+    assert "its canonical target AGENTS.md does not exist" in r.detail  # rig-shaped deletion case
+    assert _apply(tmp_path).status == "skipped"
+
+
+def test_real_file_with_dangling_peer_link_does_not_reach_broken_branch(tmp_path):
+    # guard: a REAL AGENTS.md beside a CLAUDE.md symlink to a missing foreign target is handled by
+    # the earlier "one real file + foreign link" branch (a conflict about the foreign symlink),
+    # NOT the neither-real broken-symlink branch — so the "restore from git" advice (which assumes
+    # the canonical was lost) never fires when a real canonical is sitting right there.
+    (tmp_path / "AGENTS.md").write_text("# real canonical\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").symlink_to("gone.md")  # dangling, foreign target
+    r = resolve_agents_md(tmp_path)
+    assert r.state == "conflict"
+    assert "symlink to something other than AGENTS.md" in r.detail  # the foreign-link branch
+    assert "broken symlink" not in r.detail  # not the canonical-was-deleted message
+    assert _apply(tmp_path).status == "skipped"
+    assert (tmp_path / "AGENTS.md").read_text() == "# real canonical\n"  # untouched
+
+
+def test_drift_flags_dangling_link_as_broken_and_apply_leaves_it(tmp_path):
+    # status must FLAG a broken link (the spec) — drift surfaces the broken-symlink detail — and
+    # apply must NOT silently fix it (no canonical resurrection), so the breakage stays visible.
+    # Assert the category + the broken-link copy, not the drift direction taxonomy (which detect
+    # owns and may retune), so this locks behavior, not an incidental classification label.
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+    plan = _plan_with_action(tmp_path)
+    items = [i for i in detect(plan).items if i.category == "agents_md"]
+    assert items and any("broken symlink" in i.detail for i in items)
+    run_plan(plan)
+    assert (tmp_path / "CLAUDE.md").is_symlink() and not (tmp_path / "AGENTS.md").exists()
+    # still flagged after apply (apply did not mutate the dangling link)
+    assert any("broken symlink" in i.detail for i in detect(plan).items if i.category == "agents_md")
 
 
 # ── plan gating: default ON, explicit opt-out ─────────────────────────────────────
