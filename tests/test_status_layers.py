@@ -79,6 +79,106 @@ def test_status_non_git_dir_no_should_be_committed(tmp_path, capsys, fake_agent_
     assert rc in (0, errors.EXIT_DRIFT)
 
 
+def test_status_non_git_dir_ignores_local_rigyaml_repo_layer(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    """A rig.yaml in a plain directory is not a repo layer.
+
+    The ROADMAP wording is "show ONLY the global layer" outside a git repo. A local rig.yaml in
+    a non-git directory must therefore not drive the summary, otherwise `rig status -C ~/scratch`
+    would still behave like that directory had a committed repo config.
+    """
+    xdg = tmp_path / "xdg"
+    (xdg / "rig").mkdir(parents=True)
+    global_cfg = xdg / "rig" / "config.yaml"
+    global_cfg.write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
+        "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
+        "permissions: {enabled: false}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    local_cfg = plain / "rig.yaml"
+    local_cfg.write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\nskills: {{all: true}}\n",
+        encoding="utf-8",
+    )
+
+    rc = main(["status", "-C", str(plain)])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "not a git repository" in out.lower()
+    assert str(global_cfg) in out
+    assert str(local_cfg) not in out
+    layer_line = next(line for line in out.splitlines() if line.strip().startswith("config layers:"))
+    assert f"global:{global_cfg}" in layer_line
+    assert f"repo:{local_cfg}" not in layer_line
+    assert "repo-scoped areas are N/A outside a git repository" in out
+    assert "in sync — config and disk agree" in out
+
+
+def test_status_non_git_explicit_config_still_reports_global_areas_only(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    """An explicit config can drive GLOBAL areas outside git, but REPO areas stay N/A."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    cfg = tmp_path / "explicit.yaml"
+    cfg.write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {all: true}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
+        "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
+        "permissions: {enabled: false}\n"
+        "ci: {enabled: true, all: false, items: {codeql: {enabled: true}}}\n",
+        encoding="utf-8",
+    )
+
+    rc = main(["status", "-C", str(plain), "--config", str(cfg)])
+    out = capsys.readouterr().out
+
+    assert rc == errors.EXIT_DRIFT
+    assert "not a git repository" in out.lower()
+    assert f"config:{cfg}" in out
+    assert "skills: drift" in out.lower()
+    assert "repo-scoped areas are N/A outside a git repository" in out
+    assert "CI gates" not in out
+    assert "REPO — this repository" not in out
+
+
+def test_status_non_git_explicit_repo_only_config_says_repo_declarations_are_na(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    cfg = tmp_path / "repo-only.yaml"
+    cfg.write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
+        "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
+        "permissions: {enabled: false}\n"
+        "ci: {enabled: true, all: false, items: {codeql: {enabled: true}}}\n",
+        encoding="utf-8",
+    )
+
+    rc = main(["status", "-C", str(plain), "--config", str(cfg)])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "not a git repository" in out.lower()
+    assert "repo-scoped areas are N/A outside a git repository" in out
+    assert "CI gates" not in out
+    assert "REPO — this repository" not in out
+
+
 # ── non-git dir, catalog UNRESOLVABLE: still reports "not a git repository" ────────
 def test_status_non_git_dir_without_resolvable_catalog(tmp_path, capsys, monkeypatch):
     """The smoke-only regression: in a non-git dir where the agent-tools checkout cannot be
