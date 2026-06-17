@@ -19,6 +19,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from ..config import (
+    GITIGNORE_BEGIN_MARKER,
+    GITIGNORE_BLOCK_COMMENT,
+    GITIGNORE_END_MARKER,
+)
 from ..github_ruleset import (
     build_ruleset_body,
     find_managed_ruleset,
@@ -2022,6 +2027,293 @@ def _do_provision_github_ruleset(action: Action, on_conflict: str) -> ActionResu
     return ActionResult(action, "updated", f"github-ruleset: updated '{name}' (id={rs_id}) on {owner}/{repo}")
 
 
+# ── rig-managed GLOBAL git-excludes block ──────────────────────────────────────────
+# rig maintains a marker-delimited block in git's GLOBAL ``core.excludesfile`` so harness
+# artifacts (chiefly Claude Code's throwaway ``**/.claude/worktrees/``) are ignored in EVERY repo
+# on the machine, with zero per-repo commits — not by a per-repo committed ``.gitignore`` and not
+# by a hand-edited global ignore. This is the global counterpart of the git-hooks dispatcher: a
+# ``git config --global`` setting plus a managed file. The markers fence ONLY rig's lines; every
+# other line the user (or another tool) has in the excludes file is preserved verbatim. apply and
+# drift BOTH go through ``resolve_global_excludes`` so they can never disagree on the desired block
+# or whether the file is in sync. The marker constants live in ``config.py`` (the schema layer) so
+# validation can reject a marker-colliding entry without an import cycle; this module imports them
+# at top for its own block construction/detection.
+
+
+def global_excludes_block_text(entries: list[str]) -> str:
+    """The exact marker-delimited block rig owns for ``entries`` (no trailing newline).
+
+    Single source of truth shared by the install handler and drift, so both agree byte-for-byte
+    on what the managed block SHOULD contain. The block is the begin marker, a fixed explanatory
+    comment line (so a human reading the global excludes file knows what it is), one line per entry
+    (in the order given), then the end marker. The comment is rendered byte-for-byte and matches the
+    block already present on a provisioned machine, so a re-apply is a true zero-churn no-op.
+    """
+    return "\n".join([GITIGNORE_BEGIN_MARKER, GITIGNORE_BLOCK_COMMENT, *entries, GITIGNORE_END_MARKER])
+
+
+@dataclass(frozen=True)
+class GlobalExcludesResolution:
+    """The desired global-excludes outcome — the one source apply + drift share.
+
+    ``state`` is the single discriminator both consumers switch on:
+      - ``ok``       — the managed block is already present and exactly correct: no-op.
+      - ``create``   — no excludes file or no managed block: append the block (creating the file
+                       if absent), preserving any existing content.
+      - ``update``   — a managed block exists but its body differs, OR the file has MULTIPLE
+                       rig-managed blocks (a prior non-idempotent appender): collapse the managed
+                       region to ONE correct block in place, preserving every line outside the
+                       markers (verbatim — CRLF and trailing blanks included).
+      - ``conflict`` — the file has unbalanced markers (a begin with no end, an end before a
+                       begin): rig won't guess the block's extent, so it leaves the file untouched
+                       and surfaces it. ``detail`` says why.
+      - ``io_error`` — the path could not be read (unreadable, or a directory sits there). Unlike a
+                       marker ``conflict`` (the file is fine, the operator must reconcile) this is a
+                       failure to even inspect the file: apply reports it as an ERROR, never a silent
+                       skip. ``detail`` carries the OS error.
+
+    ``desired_block`` is the canonical block text; ``new_content`` is the full desired file content
+    for ``create``/``update`` (``None`` for ``ok``/``conflict``/``io_error``).
+    """
+
+    path: Path
+    state: str
+    desired_block: str
+    new_content: str | None = None
+    detail: str = ""
+
+
+def resolve_global_excludes(path: Path, entries: list[str]) -> GlobalExcludesResolution:
+    """Classify the on-disk global excludes file vs the desired managed block (pure, no writes).
+
+    Idempotent + non-destructive: rig only ever (a) appends the block to a file that lacks it
+    (creating the file if absent), (b) collapses the existing managed region to ONE correct block
+    in place, or (c) no-ops a correct single block. Crucially this is STRICTLY idempotent even when
+    a prior tool appended the block MORE THAN ONCE: a file with several rig-managed blocks resolves
+    to ``update`` and collapses to exactly one. An unbalanced marker pair is a ``conflict`` rig
+    never rewrites. Every line OUTSIDE the managed region is preserved byte-for-byte: the region is
+    located and spliced by raw character offset (not splitlines/rejoin), so a CRLF file, a file with
+    no trailing newline, and trailing blank lines all survive untouched.
+    """
+    desired = global_excludes_block_text(entries)
+    if not path.exists():
+        return GlobalExcludesResolution(path, "create", desired, new_content=desired + "\n")
+    try:
+        # newline="" disables universal-newline translation so a CRLF file is read (and later
+        # re-written) byte-for-byte outside the managed region — the documented verbatim guarantee.
+        with path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError as exc:
+        # unreadable, or a directory at the path — a failure to inspect, not a marker conflict.
+        return GlobalExcludesResolution(path, "io_error", desired, detail=f"cannot read {path}: {exc}")
+
+    # Find each marker line by its raw [start, end_of_line] offsets so the splice preserves every
+    # other byte verbatim (line ending included). A marker is a line whose stripped text equals the
+    # marker constant — tolerant of trailing whitespace on the marker line itself.
+    begins = _find_marker_lines(content, GITIGNORE_BEGIN_MARKER)
+    ends = _find_marker_lines(content, GITIGNORE_END_MARKER)
+    # An unbalanced pair (different counts, or an end with no begin) is ambiguous — rig won't guess
+    # the region's extent. NOTE a balanced N-pairs (N>1) is NOT a conflict: it is a non-idempotent
+    # duplicate we collapse below.
+    if len(begins) != len(ends) or (ends and not begins):
+        return GlobalExcludesResolution(
+            path, "conflict", desired,
+            detail=f"{path} has unbalanced rig-managed markers — reconcile by hand, then re-run",
+        )
+    if not begins:
+        # no managed block: append it, keeping a single blank-line separator from prior content.
+        body = content.rstrip("\n")
+        sep = "\n\n" if body else ""
+        new_content = f"{body}{sep}{desired}\n"
+        return GlobalExcludesResolution(path, "create", desired, new_content=new_content)
+
+    # Pair the markers by interleaving them in document order: they must strictly alternate
+    # begin, end, begin, end, … Anything else (an end before a begin, a begin immediately followed
+    # by another begin → a nested/overlapping block) is ambiguous and rig won't guess — conflict.
+    # Each valid pair fences ONE managed block region ``[begin_start, end_line_end]``; the spans
+    # between consecutive pairs are USER content (e.g. a hand-added ignore that landed between two
+    # duplicated rig blocks) and MUST be preserved.
+    markers = sorted(
+        [(b[0], b[1], "begin") for b in begins] + [(e[0], e[1], "end") for e in ends]
+    )
+    pairs: list[tuple[int, int]] = []  # (region_start, region_end) per managed block
+    expect = "begin"
+    pending_start = -1
+    for start, line_end, kind in markers:
+        if kind != expect:
+            return GlobalExcludesResolution(
+                path, "conflict", desired,
+                detail=f"{path} has misordered/nested rig-managed markers — reconcile by hand, then re-run",
+            )
+        if kind == "begin":
+            pending_start = start
+            expect = "end"
+        else:
+            pairs.append((pending_start, line_end))
+            expect = "begin"
+
+    # Already exactly one correct block? (the common steady state — a true no-op).
+    if len(pairs) == 1 and content[pairs[0][0] : pairs[0][1]] == desired:
+        return GlobalExcludesResolution(path, "ok", desired)
+
+    # Splice OUT every managed-block region (preserving all USER content outside the markers,
+    # including any text BETWEEN duplicated blocks), then re-insert ONE correct block where the
+    # FIRST block sat. Build the result left-to-right so each non-managed span is copied verbatim.
+    out_parts: list[str] = []
+    cursor = 0
+    for idx, (r_start, r_end) in enumerate(pairs):
+        out_parts.append(content[cursor:r_start])  # user content before this block, verbatim
+        if idx == 0:
+            out_parts.append(desired)  # the single canonical block replaces the first one
+        else:
+            # A removed duplicate block leaves a seam: if both the text before and after it end/
+            # start with a newline we'd otherwise create a doubled blank line. Drop one leading
+            # newline of the following span so collapsing N blocks doesn't accrete blank lines.
+            if content[r_end : r_end + 1] == "\n":
+                r_end += 1
+        cursor = r_end
+    out_parts.append(content[cursor:])  # trailing user content, verbatim
+    new_content = "".join(out_parts)
+    return GlobalExcludesResolution(path, "update", desired, new_content=new_content)
+
+
+def _find_marker_lines(content: str, marker: str) -> list[tuple[int, int]]:
+    """Return ``(line_start_offset, line_end_offset)`` for each line equal to ``marker``.
+
+    ``line_end_offset`` is the offset of the newline that terminates the line (or ``len(content)``
+    for an un-terminated final line) — so a splice on ``[start, end)`` drops the marker line's text
+    but not its line ending, letting the caller re-emit a clean block. A line MATCHES when its text
+    with surrounding whitespace stripped equals ``marker`` (tolerant of a marker line that picked up
+    trailing spaces), so such a line is still recognized and normalized on the next apply.
+    """
+    out: list[tuple[int, int]] = []
+    pos = 0
+    n = len(content)
+    while pos <= n:
+        nl = content.find("\n", pos)
+        line_end = n if nl == -1 else nl
+        if content[pos:line_end].strip() == marker:
+            out.append((pos, line_end))
+        if nl == -1:
+            break
+        pos = nl + 1
+    return out
+
+
+def _resolve_excludes_target(action: Action) -> tuple[Path, bool, str | None]:
+    """Resolve WHICH file holds the managed block, and whether ``core.excludesfile`` must be set.
+
+    Honors the user's existing choice: if ``core.excludesfile`` is ALREADY set (the common case —
+    e.g. ``~/.gitignore``), the block goes in THAT file and git config is left alone. If it is NOT
+    set, rig points ``core.excludesfile`` at the XDG default (``~/.config/git/ignore``) and writes
+    the block there — so on a clean machine ``rig init`` does everything itself. An explicit
+    ``gitignore.excludesfile`` override in config forces a specific file (and rig sets
+    ``core.excludesfile`` to it when git's value doesn't already match).
+
+    Returns ``(target_path, needs_set, set_value)``:
+      - ``target_path`` — the resolved, ``~``/``$XDG``-expanded file to reconcile the block in.
+      - ``needs_set``   — True when ``core.excludesfile`` must be written (unset, or override
+                          differs from the current value).
+      - ``set_value``   — the value to write into ``core.excludesfile`` (the un-expanded, portable
+                          form so git stores ``~/.config/git/ignore``, not a machine path); None
+                          when ``needs_set`` is False.
+
+    The git-config READ goes through ``_git_global`` (the same seam the dispatcher uses), so tests
+    monkeypatch one function and never run real ``git config --global``.
+    """
+    current = _git_global("core.excludesfile")
+    override = action.options.get("excludesfile")
+    xdg_default = action.options.get("xdg_default") or "~/.config/git/ignore"
+    if isinstance(override, str) and override:
+        # explicit override: reconcile in this file; set core.excludesfile when git doesn't match.
+        target = _expand_user_path(override)
+        needs_set = current != override
+        return target, needs_set, (override if needs_set else None)
+    if current:
+        # respect the user's existing choice — manage the block in their file, touch no git config.
+        return _expand_user_path(current), False, None
+    # unset: point git at the XDG default AND write the block there (clean-machine path).
+    return _expand_user_path(xdg_default), True, xdg_default
+
+
+def _expand_user_path(path_str: str) -> Path:
+    """Expand ``~`` and ``$XDG_CONFIG_HOME`` (for the ``~/.config`` prefix) to a concrete path.
+
+    SYNC: this is the ``~/.config`` → ``$XDG_CONFIG_HOME`` mapping from ``plan._expand`` (keep the
+    two in step). It is duplicated rather than imported because ``plan._expand`` ALSO anchors a
+    relative remainder at the repo root — meaningless for a GLOBAL excludes path (which is always
+    absolute after ``~`` expansion) and would couple this global action to a repo root it does not
+    have. Matching git's XDG-aware read location matters when a test/machine points
+    ``$XDG_CONFIG_HOME`` somewhere non-default.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg and (path_str == "~/.config" or path_str.startswith("~/.config/")):
+        path_str = xdg + path_str[len("~/.config"):]
+    return Path(os.path.expanduser(os.path.expandvars(path_str)))
+
+
+def _do_provision_global_excludes(action: Action, on_conflict: str) -> ActionResult:
+    """Provision/reconcile rig's managed block in the GLOBAL git ``core.excludesfile``.
+
+    Two coupled steps, in order:
+      1. Resolve the target file from ``core.excludesfile`` (honor an existing value; set it to the
+         XDG default when unset — so a clean machine is fully provisioned by ``rig init`` alone).
+      2. Reconcile the marker block via the shared :func:`resolve_global_excludes` ``state`` — apply
+         and drift read the same classification, so ``status`` never misreports the on-disk state.
+
+    Idempotent: a correct single block with ``core.excludesfile`` already set is a true no-op; a
+    missing block is appended (creating the file if absent); a drifted OR DUPLICATED managed region
+    is collapsed IN PLACE to one correct block, preserving every other line verbatim. An unbalanced
+    marker pair is a ``conflict`` rig leaves untouched (``skipped``), and an unreadable path is an
+    ``error`` (never a silent skip). There is no backup: rig only ever edits its OWN fenced lines
+    plus a git-config setting, so ``on_conflict`` is irrelevant here (consistent with the dispatcher
+    and the surgical hook-bridge upsert).
+    """
+    entries = [str(e) for e in action.options.get("entries", [])]
+    target, needs_set, set_value = _resolve_excludes_target(action)
+
+    notes: list[str] = []
+    cfg_status = "skipped"
+    # Step 1: wire core.excludesfile when it is unset / doesn't match the override.
+    if needs_set and set_value is not None:
+        rc = _set_git_global("core.excludesfile", set_value)
+        if rc == 0:
+            notes.append(f"core.excludesfile → {set_value}")
+            cfg_status = "created"
+        else:
+            return ActionResult(action, "error", "gitignore: failed to set global core.excludesfile")
+
+    # Step 2: reconcile the managed block in the resolved file.
+    r = resolve_global_excludes(target, entries)
+    if r.state == "ok":
+        if cfg_status == "created":
+            # rare: git config was unset but the file already had the exact block — config write is
+            # itself a change, so report it (not a silent no-op).
+            return ActionResult(action, "created", f"gitignore: {'; '.join(notes)} (block already correct in {target})")
+        return ActionResult(action, "skipped", f"gitignore: managed block already correct in {target}")
+    if r.state == "conflict":
+        return ActionResult(action, "skipped", f"gitignore: {r.detail}")
+    if r.state == "io_error":
+        return ActionResult(action, "error", f"gitignore: {r.detail}")
+    if r.new_content is None:  # defensive — create/update always carry content
+        return ActionResult(action, "error", f"gitignore: unhandled state {r.state!r}")
+    existed = target.exists()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # newline="" so the bytes we computed (which may carry the user's CRLF outside the block) are
+    # written verbatim, with no platform newline translation.
+    with target.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(r.new_content)
+    n = len(entries)
+    plural = "entry" if n == 1 else "entries"
+    if r.state == "create":
+        verb = "added block to" if existed else "created"
+        block_note = f"{verb} {target} ({n} {plural})"
+    else:
+        block_note = f"updated managed block in {target}"
+    notes.append(block_note)
+    return ActionResult(action, "created" if r.state == "create" else "updated", f"gitignore: {'; '.join(notes)}")
+
+
 _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "copy_skill": _do_copy_skill,
     "link_skill_harness": _do_link_skill_harness,
@@ -2035,4 +2327,5 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_agents_symlink": _do_provision_agents_symlink,
     "provision_github_ruleset": _do_provision_github_ruleset,
     "provision_tmux": _do_provision_tmux,
+    "provision_global_excludes": _do_provision_global_excludes,
 }

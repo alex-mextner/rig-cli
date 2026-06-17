@@ -21,7 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import Catalog, Item
-from .config import LoadedConfig
+from .config import (
+    GITIGNORE_DEFAULT_ENTRIES,
+    GITIGNORE_DEFAULT_EXCLUDESFILE,
+    LoadedConfig,
+)
 from .github_ruleset import GITHUB_RULESET_DEFAULTS
 
 
@@ -66,7 +70,7 @@ _DEFAULT_HARNESS_KIND = "claude-code"
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_tmux
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_tmux | provision_global_excludes
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -520,6 +524,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── tmux (rig-managed tmux configuration) ──────────────────────────────────────
     _build_tmux(config, plan)
 
+    # ── gitignore (rig-managed block in the GLOBAL git excludes file) ──────────────
+    _build_global_excludes(config, plan)
+
     return plan
 
 
@@ -676,6 +683,61 @@ def _build_agents_symlink(config: LoadedConfig, plan: InstallPlan) -> None:
             source=config.repo_root,
             target=config.repo_root,
             options={},
+        )
+    )
+
+
+def _build_global_excludes(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the rig-managed block in the GLOBAL git excludes file (``core.excludesfile``).
+
+    This is GLOBAL (machine-wide) config, wired like the git-hooks ``dispatcher``: rig owns ONE
+    marker-delimited block in git's global ``core.excludesfile`` so harness artifacts — chiefly
+    Claude Code's throwaway ``**/.claude/worktrees/`` — are ignored in EVERY repo on the machine,
+    with zero per-repo commits and no per-repo ``rig apply``. Opt out with
+    ``gitignore: { enabled: false }``. Default **ON** (like the dispatcher), so on a clean machine
+    ``rig init``/``rig apply`` provisions it without any per-repo config.
+
+    Target resolution is deferred to apply time (it depends on whether ``core.excludesfile`` is
+    already set on this machine — a thing the plan cannot read purely), so the plan emits ONE
+    idempotent action carrying the resolved ``entries`` and the XDG fallback path; the runner
+    reads ``core.excludesfile`` and EITHER reconciles the block in the user's existing excludes
+    file OR sets ``core.excludesfile`` to the XDG default and writes the block there. The
+    placeholder ``target`` is the XDG default for display; the runner re-resolves it. No carrier
+    in agent-tools.
+
+    The ignored ``entries`` are configurable with a sensible default (``GITIGNORE_DEFAULT_ENTRIES``);
+    an empty/absent list uses that default. The ``excludesfile`` override (rare) forces a specific
+    file rather than honoring ``core.excludesfile``.
+    """
+    gi = config.data.get("gitignore")
+    if gi is None:
+        gi = {}
+    if not isinstance(gi, dict):
+        return  # validate() already fail-closed on a non-mapping block
+    if gi.get("enabled") is False:
+        return
+    raw_entries = gi.get("entries")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        entries = list(GITIGNORE_DEFAULT_ENTRIES)
+    else:
+        entries = [str(e) for e in raw_entries]
+    override = gi.get("excludesfile")
+    options: dict[str, Any] = {
+        "entries": entries,
+        "xdg_default": GITIGNORE_DEFAULT_EXCLUDESFILE,
+    }
+    if isinstance(override, str) and override:
+        options["excludesfile"] = override
+    plan.actions.append(
+        Action(
+            kind="provision_global_excludes",
+            category="gitignore",
+            item="block",
+            source=config.repo_root,
+            # Placeholder for display only — the runner re-resolves the real target from
+            # core.excludesfile (or the XDG default) at apply time. Expanded for portability.
+            target=_expand(GITIGNORE_DEFAULT_EXCLUDESFILE, config.repo_root),
+            options=options,
         )
     )
 

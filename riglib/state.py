@@ -127,6 +127,12 @@ def default_state(
         # with ruleset.enabled: false. Add status checks with required_status_checks: [names].
         # The knobs come straight from the action's GITHUB_RULESET_DEFAULTS (one source).
         "github": {"ruleset": github_ruleset},
+        # NB: `gitignore` (the GLOBAL git-excludes block) is deliberately NOT scaffolded into this
+        # generated, COMMITTED repo `rig.yaml`. It is GLOBAL (machine-wide) config — it belongs in
+        # the global rig layer (~/.config/rig/config.yaml), with zero per-repo commits — and it is
+        # default-ON at PLAN level (an ABSENT `gitignore` key still provisions the block), so `rig
+        # init` on a clean machine provisions it WITHOUT baking a global-config block into every
+        # repo's committed file. Opt out with `gitignore: { enabled: false }` (in either layer).
     }
 
 

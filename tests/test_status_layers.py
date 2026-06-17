@@ -259,12 +259,13 @@ def test_status_clean_repo_exits_zero(tmp_path, capsys, fake_agent_tools, monkey
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     repo = _git_repo(tmp_path / "repo")
     cfg = repo / "rig.yaml"
-    # everything OFF, including agents_md (on by default → would otherwise drift the symlink)
+    # everything OFF, including the default-on categories that would otherwise drift: agents_md
+    # (the symlink) and gitignore (the GLOBAL core.excludesfile block — on by default).
     cfg.write_text(
         f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
-        "agents_md: {enabled: false}\n",
+        "agents_md: {enabled: false}\ngitignore: {enabled: false}\n",
         encoding="utf-8",
     )
     rc = main(["status", "-C", str(repo)])
