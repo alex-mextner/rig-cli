@@ -1126,10 +1126,8 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         state = SetupState.from_dict(data)
         if args.is_global:
             target.write_text(state.to_yaml(), encoding="utf-8")
-            # Validate the global file ALONE first: the cascade plan below merges the repo
-            # overlay over it, which can mask a catalog-backed error in the global layer (a repo
-            # `rig.yaml` overriding the just-broken key). Check the written file in isolation so a
-            # globally-broken config never persists just because THIS repo happens to override it.
+            # Validate the global layer alone before the cascade plan below — see
+            # _validate_layer_in_isolation for why the merged cascade can mask a global break.
             _validate_layer_in_isolation(target)
         else:
             state.write(target)
