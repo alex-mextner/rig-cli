@@ -1,0 +1,703 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/alex-mextner/rig-cli/blob/main/schema/rig.schema.json",
+  "title": "rig.yaml — rig-cli declarative config",
+  "description": "The committed source of truth for a repo's setup (and ~/.config/rig/config.yaml). See docs/config-schema.md for the human-readable reference.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "schema version (only 1 supported)",
+      "default": 1,
+      "minimum": 1
+    },
+    "agent_tools_source": {
+      "type": "string",
+      "description": "the agent-tools checkout to apply FROM (default: auto-detect)"
+    },
+    "defaults": {
+      "type": "object",
+      "description": "cross-category fallback targets + the on-conflict policy.",
+      "properties": {
+        "skills_target": {
+          "type": "string",
+          "description": "default skills install dir",
+          "default": "~/.agents/skills"
+        },
+        "hooks_target": {
+          "type": "string",
+          "description": "default agent-hooks dir",
+          "default": "~/.claude/hooks"
+        },
+        "ci_target": {
+          "type": "string",
+          "description": "default CI workflows dir",
+          "default": ".github/workflows"
+        },
+        "mcp_target": {
+          "type": "string",
+          "description": "default MCP config dir",
+          "default": "~/.claude/mcp"
+        },
+        "on_conflict": {
+          "type": "string",
+          "description": "what apply does when a target already exists",
+          "enum": [
+            "skip",
+            "overwrite",
+            "backup"
+          ],
+          "default": "backup"
+        }
+      },
+      "additionalProperties": false
+    },
+    "skills": {
+      "type": "object",
+      "description": "advisory markdown rules copied into the agent skills dir (opt-out model).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "install skills at all",
+          "default": true
+        },
+        "target": {
+          "type": "string",
+          "description": "where SKILL.md dirs are copied",
+          "default": "~/.agents/skills"
+        },
+        "all": {
+          "type": "boolean",
+          "description": "enable all skills (opt-out)",
+          "default": true
+        },
+        "harness_link": {
+          "type": "boolean",
+          "description": "also symlink each installed skill into the harness discovery dir",
+          "default": true
+        },
+        "harness_skill_dir": {
+          "type": "string",
+          "description": "override the harness skill-discovery dir"
+        },
+        "universal": {
+          "type": "object",
+          "description": "the universal skill set (opt-out via disable / opt-in via enable).",
+          "properties": {
+            "all": {
+              "type": "boolean",
+              "description": "enable all universal skills",
+              "default": true
+            },
+            "disable": {
+              "type": "array",
+              "description": "universal skills to drop",
+              "items": {
+                "type": "string"
+              }
+            },
+            "enable": {
+              "type": "array",
+              "description": "universal skills to add (with all:false)",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "by_type": {
+          "type": "object",
+          "description": "by-type skill bundles for the detected project type.",
+          "properties": {
+            "enable": {
+              "type": "array",
+              "description": "which by-type bundles to install whole",
+              "items": {
+                "type": "string"
+              }
+            },
+            "disable": {
+              "type": "array",
+              "description": "by-type bundles to drop",
+              "items": {
+                "type": "string"
+              }
+            },
+            "items": {
+              "type": "object",
+              "description": "per-skill overrides keyed by `by-type/<kind>/<name>`",
+              "additionalProperties": {
+                "type": "object"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "agent_hooks": {
+      "type": "object",
+      "description": "programmatic guards that block before a side effect (no-verify, secrets, raw merge).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "install the agent-hook guards",
+          "default": true
+        },
+        "target": {
+          "type": "string",
+          "description": "where hook descriptors are written",
+          "default": "~/.claude/hooks"
+        },
+        "target_kind": {
+          "type": "string",
+          "description": "logical-point → harness-event mapping",
+          "enum": [
+            "claude-code",
+            "generic"
+          ]
+        },
+        "all": {
+          "type": "boolean",
+          "description": "install all guard hooks",
+          "default": true
+        },
+        "items": {
+          "type": "object",
+          "description": "per-hook overrides (enabled / on_error) keyed by hook name",
+          "additionalProperties": {
+            "type": "object"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "git_hooks": {
+      "type": "object",
+      "description": "the global-hook dispatcher: your hooks run in every repo, even ones that hijack core.hooksPath.",
+      "properties": {
+        "dispatcher": {
+          "type": "object",
+          "description": "the machine-wide global-hook dispatcher.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "install the global-hook dispatcher",
+              "default": false
+            },
+            "dir": {
+              "type": "string",
+              "description": "drop-in fragments dir",
+              "default": "~/.config/git/global-hooks.d"
+            },
+            "runner": {
+              "type": "string",
+              "description": "the dispatcher script",
+              "default": "~/.config/git/run-global-hooks"
+            },
+            "set_global_hooks_path": {
+              "type": "boolean",
+              "description": "wire it as git's global core.hooksPath",
+              "default": true
+            },
+            "install_local_retrofit_script": {
+              "type": "boolean",
+              "description": "put install-local-hooks.sh on PATH",
+              "default": true
+            },
+            "fragments": {
+              "type": "object",
+              "description": "per-fragment overrides keyed by fragment name (secret-scan, …)",
+              "additionalProperties": {
+                "type": "object"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ci": {
+      "type": "object",
+      "description": "vendor-neutral CI gates (secret-scan, codeql, dependency-review, ship, …).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "install CI gate workflows",
+          "default": true
+        },
+        "target": {
+          "type": "string",
+          "description": "workflows dir, or `export-only`",
+          "default": ".github/workflows"
+        },
+        "all": {
+          "type": "boolean",
+          "description": "install every gate (vs per-item)",
+          "default": false
+        },
+        "items": {
+          "type": "object",
+          "description": "per-gate overrides (enabled / tier / variant / …) keyed by gate name",
+          "additionalProperties": {
+            "type": "object"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "mcp": {
+      "type": "object",
+      "description": "MCP registrations (review, code-search) — callable from any agent.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "register MCP servers",
+          "default": true
+        },
+        "target": {
+          "type": "string",
+          "description": "MCP config dir, file, or `export-only`",
+          "default": "~/.claude/mcp"
+        },
+        "items": {
+          "type": "object",
+          "description": "per-server overrides (command / server / enabled) keyed by server name",
+          "additionalProperties": {
+            "type": "object"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "harness": {
+      "type": "object",
+      "description": "the agent harness's auto/permission mode — provisioned, not hand-toggled.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the harness setting",
+          "default": true
+        },
+        "kind": {
+          "type": "string",
+          "description": "which harness to write (claude-code; opencode reserved)",
+          "enum": [
+            "claude-code",
+            "opencode"
+          ],
+          "default": "claude-code"
+        },
+        "auto_mode": {
+          "type": "boolean",
+          "description": "true → auto-accept tool calls; false → interactive",
+          "default": true
+        },
+        "mode": {
+          "type": "string",
+          "description": "pin the exact permission value (overrides auto_mode map)"
+        },
+        "settings_path": {
+          "type": "string",
+          "description": "the settings file to merge into",
+          "default": ".claude/settings.json"
+        },
+        "hook_bridge": {
+          "type": "object",
+          "description": "wire the agents-hooks/v1 → CC dispatcher into settings.json.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "wire the cc_hook_bridge dispatcher",
+              "default": true
+            },
+            "python": {
+              "type": "string",
+              "description": "the interpreter the dispatcher runs under",
+              "default": "python3"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "permissions": {
+      "type": "object",
+      "description": "pre-allow our ecosystem CLIs + safe external dev tools in the harness allowlist.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the command allowlist",
+          "default": true
+        },
+        "kind": {
+          "type": "string",
+          "description": "which harness's allowlist to provision",
+          "enum": [
+            "claude-code",
+            "opencode"
+          ]
+        },
+        "tools": {
+          "type": "array",
+          "description": "command names to pre-allow (replaces the default set)",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extra": {
+          "type": "array",
+          "description": "command names to ADD on top of the set",
+          "items": {
+            "type": "string"
+          }
+        },
+        "disable": {
+          "type": "array",
+          "description": "command names to drop from rig's desired set",
+          "items": {
+            "type": "string"
+          }
+        },
+        "settings_path": {
+          "type": "string",
+          "description": "override the settings file (.json)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "models": {
+      "type": "object",
+      "description": "a daily cron that runs the model-freshness checker and proposes version bumps.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the daily checker schedule",
+          "default": true
+        },
+        "checker_path": {
+          "type": "string",
+          "description": "the model_freshness.py the schedule runs"
+        },
+        "schedule": {
+          "type": "object",
+          "description": "when the daily checker runs.",
+          "properties": {
+            "time": {
+              "type": "string",
+              "description": "daily run time, HH:MM 24-hour",
+              "default": "12:00"
+            },
+            "label": {
+              "type": "string",
+              "description": "the launchd Label / crontab sentinel identity"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "agents_md": {
+      "type": "object",
+      "description": "one canonical AGENTS.md + a CLAUDE.md symlink, so every harness reads the same instructions.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the canonical + symlink pair",
+          "default": true
+        },
+        "symlink": {
+          "type": "boolean",
+          "description": "alias opt-out — false equals enabled:false",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "github": {
+      "type": "object",
+      "description": "GitHub repository settings rig reconciles via gh api.",
+      "properties": {
+        "ruleset": {
+          "type": "object",
+          "description": "a branch ruleset on the default branch (the modern branch-protection replacement).",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "provision the ruleset",
+              "default": true
+            },
+            "name": {
+              "type": "string",
+              "description": "the ruleset rig owns/reconciles",
+              "default": "rig-managed"
+            },
+            "require_pull_request": {
+              "type": "boolean",
+              "description": "require a PR to merge",
+              "default": true
+            },
+            "required_reviews": {
+              "type": "integer",
+              "description": "required_approving_review_count",
+              "default": 0,
+              "minimum": 0
+            },
+            "block_force_push": {
+              "type": "boolean",
+              "description": "emit the non_fast_forward rule",
+              "default": true
+            },
+            "restrict_deletion": {
+              "type": "boolean",
+              "description": "emit the deletion rule",
+              "default": true
+            },
+            "require_linear_history": {
+              "type": "boolean",
+              "description": "emit the required_linear_history rule",
+              "default": false
+            },
+            "require_signatures": {
+              "type": "boolean",
+              "description": "emit the required_signatures rule",
+              "default": false
+            },
+            "required_status_checks": {
+              "type": "array",
+              "description": "contexts to require; empty emits no rule",
+              "items": {
+                "type": "string"
+              }
+            },
+            "admin_bypass": {
+              "type": "boolean",
+              "description": "add the repo Admin role to bypass_actors",
+              "default": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "tmux": {
+      "type": "object",
+      "description": "rig-managed tmux configuration (persistence across reboots, plugin-init ordering).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the rig-managed tmux config (opt-in)",
+          "default": false
+        },
+        "apply": {
+          "type": "string",
+          "description": "apply mechanism",
+          "enum": [
+            "import",
+            "block"
+          ],
+          "default": "import"
+        },
+        "conf_path": {
+          "type": "string",
+          "description": "the user's tmux config rig migrates",
+          "default": "~/.tmux.conf"
+        },
+        "generated_dir": {
+          "type": "string",
+          "description": "where rig writes its files",
+          "default": "~/.config/rig/tmux"
+        },
+        "resurrect": {
+          "type": "object",
+          "description": "tmux-resurrect knobs.",
+          "properties": {
+            "processes": {
+              "type": "array",
+              "description": "@resurrect-processes",
+              "items": {
+                "type": "string"
+              }
+            },
+            "capture_pane_contents": {
+              "type": "boolean",
+              "description": "@resurrect-capture-pane-contents",
+              "default": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "continuum": {
+          "type": "object",
+          "description": "tmux-continuum knobs.",
+          "properties": {
+            "restore": {
+              "type": "boolean",
+              "description": "@continuum-restore on",
+              "default": true
+            },
+            "boot": {
+              "type": "boolean",
+              "description": "no-op (rig owns boot via launchd)",
+              "default": true
+            },
+            "save_interval": {
+              "type": "integer",
+              "description": "@continuum-save-interval (minutes)",
+              "default": 15,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "moshi": {
+          "type": "object",
+          "description": "opt-in Moshi status-line tweaks.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "enable Moshi tweaks",
+              "default": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "cc_restore": {
+          "type": "object",
+          "description": "per-window Claude Code resume by session id.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "wire cc-save/cc-restore",
+              "default": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "anti_sprawl": {
+          "type": "object",
+          "description": "one canonical session (attach-or-create).",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "install the attach-or-create entry",
+              "default": true
+            },
+            "session": {
+              "type": "string",
+              "description": "the canonical session name",
+              "default": "main"
+            }
+          },
+          "additionalProperties": false
+        },
+        "boot": {
+          "type": "object",
+          "description": "a launchd agent that brings tmux up after a reboot.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "write + load the boot agent",
+              "default": true
+            },
+            "label": {
+              "type": "string",
+              "description": "the launchd agent label",
+              "default": "ai.hyperide.tmux-boot"
+            }
+          },
+          "additionalProperties": false
+        },
+        "login_shell": {
+          "type": "object",
+          "description": "restored panes are login shells (source ~/.zprofile/PATH).",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "set a login-shell default-command",
+              "default": true
+            },
+            "shell": {
+              "type": "string",
+              "description": "login shell path ('' → resolve $SHELL)",
+              "default": ""
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "gitignore": {
+      "type": "object",
+      "description": "a rig-managed block in git's global core.excludesfile (ignores harness worktrees machine-wide).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the managed block",
+          "default": true
+        },
+        "entries": {
+          "type": "array",
+          "description": "the ignored paths inside the managed block",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excludesfile": {
+          "type": "string",
+          "description": "force a specific file instead of honoring core.excludesfile"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tg_ctl": {
+      "type": "object",
+      "description": "the tg-ctl inbound daemon auto-started as a per-machine boot LaunchAgent (macOS).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the tg-ctl LaunchAgent",
+          "default": true
+        },
+        "boot": {
+          "type": "boolean",
+          "description": "write + load the boot agent",
+          "default": true
+        },
+        "label": {
+          "type": "string",
+          "description": "launchd Label / plist filename stem",
+          "default": "ai.hyperide.tg-ctl"
+        },
+        "bun_path": {
+          "type": "string",
+          "description": "the bun binary"
+        },
+        "tg_ctl_path": {
+          "type": "string",
+          "description": "the tg-ctl Bun script",
+          "default": "~/.files/bin/tg-ctl"
+        },
+        "config_dir": {
+          "type": "string",
+          "description": "tg-cli config + launchd logs dir",
+          "default": "~/.config/tg-cli"
+        }
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "string",
+      "description": "removed legacy key (tolerated, ignored)",
+      "deprecated": true
+    }
+  }
+}

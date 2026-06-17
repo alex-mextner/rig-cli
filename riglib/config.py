@@ -57,7 +57,133 @@ _RESERVED_HARNESS_KINDS = {"opencode"}
 
 
 class ConfigError(ValueError):
-    """Raised on a malformed/invalid config (fail-closed before any write)."""
+    """Raised on a malformed/invalid config (fail-closed before any write).
+
+    A 3-part, renderable error (WHAT / WHY / FIX) that also names the SCHEMA PATH of the
+    offending key. The roadmap (§5 "ENFORCED JSON schema") asks every rejection to say what is
+    wrong, where (the dotted schema path, e.g. ``harness.auto_mode``), and how to fix it — so a
+    malformed config fails LOUDLY, not silently.
+
+    Subclass of :class:`ValueError` for backward-compat: every existing ``except ConfigError``
+    (and ``except (ConfigError, …)``) keeps catching it. ``str(err)`` stays the one-line WHAT, so
+    legacy ``error: {exc}`` renderers are unchanged; the richer renderer (:func:`render_config_error`)
+    shows the why/fix/schema path when present.
+
+    ``schema_path`` is the dotted path into the config tree the JSON schema indexes
+    (``defaults.on_conflict``, ``github.ruleset.required_reviews``) — the SAME path an editor would
+    show from ``schema/rig.schema.json``. ``why``/``fix`` carry the root cause and a concrete remedy.
+    A plain ``ConfigError("msg")`` (no kwargs) still works — why/fix/schema_path default empty.
+    """
+
+    def __init__(
+        self,
+        what: str,
+        *,
+        why: str = "",
+        fix: str = "",
+        schema_path: str = "",
+    ) -> None:
+        super().__init__(what)
+        self.what = what
+        self.why = why
+        self.fix = fix
+        self.schema_path = schema_path
+
+    def __str__(self) -> str:
+        return self.what
+
+
+def render_config_error(err: ConfigError, *, color: bool = True) -> str:
+    """Render a :class:`ConfigError` as the consistent 3-part block (what / why / fix + path).
+
+    Always shows the WHAT (prefixed ``error:``). Shows the SCHEMA PATH on the ``why`` line and the
+    FIX line only when populated, so a terse error doesn't print empty labels. Mirrors
+    :func:`riglib.errors.render` (the structured-error renderer) so config errors and catalog/plan
+    errors read identically. The path is shown as ``schema/rig.schema.json#/<json-pointer>`` so the
+    user can jump straight to the offending node in the published schema.
+    """
+
+    def _col(code: str, s: str) -> str:
+        return f"\033[{code}m{s}\033[0m" if color else s
+
+    lines = [_col("31", f"error: {err.what}")]
+    why = err.why
+    if err.schema_path:
+        from . import config_schema
+
+        # The pointer is resolved through the registry so it stops at an open `items`/`fragments`
+        # map (item names aren't schema nodes) and never dangles. A path that can't resolve at all
+        # shows the dotted key alone — better than a pointer to a node that doesn't exist.
+        pointer = config_schema.schema_pointer_for(err.schema_path)
+        if pointer is not None:
+            loc = f"schema path: {err.schema_path}  ({config_schema.SCHEMA_REL_PATH}#{pointer})"
+        else:
+            loc = f"schema path: {err.schema_path}"
+        why = f"{why}; {loc}" if why else loc
+    if why:
+        lines.append(_col("2", "  why: ") + why)
+    if err.fix:
+        lines.append(_col("32", "  fix: ") + err.fix)
+    return "\n".join(lines)
+
+
+def _reject_unknown_keys(block: dict[str, Any], block_path: str) -> None:
+    """Reject any key in ``block`` that the schema does not declare for ``block_path``.
+
+    The single unknown-key gate, sourced from :mod:`riglib.config_schema` (the SAME registry the
+    published JSON schema is emitted from), so the validator and ``schema/rig.schema.json`` can
+    never disagree on what is a typo. Raises a 3-part :class:`ConfigError` whose schema path points
+    at the FIRST offending key and whose fix lists the keys that block DOES accept. ``block_path``
+    is the dotted path of the parent block (``""`` for the document root, ``github.ruleset`` for a
+    nested block).
+
+    A block carrying an OPEN ``items``/``fragments`` map (ci, mcp, agent_hooks, skills.by_type,
+    git_hooks.dispatcher) keeps that map key as valid — only OTHER unknown keys are rejected.
+    """
+    from . import config_schema
+
+    if block_path:
+        valid = config_schema.block_child_keys(block_path)
+    else:
+        valid = set(config_schema.TOP_LEVEL_KEYS) | {"scope"}  # tolerate the legacy top key
+    if valid is None:
+        return  # not a registry-known block (defensive — caller passes a known path)
+    unknown = sorted(set(block) - valid)
+    if not unknown:
+        return
+    bad = unknown[0]
+    # "top-level" at the document root, else the dotted block path ("github.ruleset").
+    where = block_path or "top-level"
+    key_path = f"{block_path}.{bad}" if block_path else bad
+    plural = "key" if len(unknown) == 1 else "keys"
+    accepted = ", ".join(sorted(valid - {"scope"}))
+    raise ConfigError(
+        f"unknown {where} {plural}: {', '.join(unknown)}",
+        why=f"{', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not a known "
+        f"{where} key — likely a typo (validated against {config_schema.SCHEMA_REL_PATH})",
+        fix=f"remove it, or use one of: {accepted}",
+        schema_path=key_path,
+    )
+
+
+def _check_bool(block: dict[str, Any], key: str, path: str) -> None:
+    """Fail-closed if ``block[key]`` is present and not a bool, naming the schema ``path``.
+
+    A tiny shared guard so every block's bool knob (``enabled``/``all``/…) rejects a typo'd value
+    with the schema path attached — the runtime and the JSON schema then agree on the type. NB:
+    ``bool`` is an int subclass, so this also rejects an int posing as a bool only implicitly; use
+    a dedicated check where an int and a bool must be told apart (e.g. ``required_reviews``).
+    """
+    value = block.get(key)
+    if value is not None and not isinstance(value, bool):
+        raise ConfigError(f"{path} must be a bool, got {value!r}", schema_path=path)
+
+
+def _check_str(block: dict[str, Any], key: str, path: str) -> None:
+    """Fail-closed if ``block[key]`` is present and not a string, naming the schema ``path``."""
+    value = block.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ConfigError(f"{path} must be a string, got {value!r}", schema_path=path)
 
 
 def global_config_path() -> Path:
@@ -337,41 +463,59 @@ def load(
 
 
 def validate(data: dict[str, Any]) -> None:
-    """Fail-closed schema validation. Raises :class:`ConfigError` on any violation."""
+    """Fail-closed schema validation. Raises :class:`ConfigError` on any violation.
+
+    The accepted key set + the schema PATH on each error come from :mod:`riglib.config_schema`
+    (the SAME registry ``schema/rig.schema.json`` is generated from), so a hand-edit, a
+    ``rig config set``, and the editor all agree on what is valid. The roadmap's "reject an
+    unknown key or bad value with a clear error + the schema path" is implemented here.
+    """
     if not isinstance(data, dict):
-        raise ConfigError("config root must be a mapping")
+        raise ConfigError("config root must be a mapping", schema_path="")
 
     # `scope` was removed (the two layers cascade by LOCATION — a repo rig.yaml is repo-scoped,
-    # the global config is global; see the module docstring). Tolerate a legacy `scope` key so
-    # existing committed rig.yaml files don't break before they're cleaned up — it is ignored.
-    unknown = set(data) - _VALID_TOP_KEYS - {"scope"}
-    if unknown:
-        raise ConfigError(f"unknown top-level key(s): {', '.join(sorted(unknown))}")
+    # the global config is global; see the module docstring). It is tolerated (whitelisted in the
+    # gate) so existing committed rig.yaml files don't break before they're cleaned up.
+    _reject_unknown_keys(data, "")
 
     version = data.get("version", 1)
     # bool is an int subclass and True == 1, so guard it explicitly — `version: true` is a typo,
     # not v1 (this also blocks `rig config set version true` from coercing past the check).
     if isinstance(version, bool) or not isinstance(version, int):
-        raise ConfigError(f"version must be an int, got {version!r}")
+        raise ConfigError(
+            f"version must be an int, got {version!r}",
+            why="version is the config schema version (only 1 is supported)",
+            fix="set `version: 1`",
+            schema_path="version",
+        )
     if version != 1:
-        raise ConfigError(f"unsupported config version {version} (this rig supports v1)")
+        raise ConfigError(
+            f"unsupported config version {version} (this rig supports v1)",
+            fix="set `version: 1`",
+            schema_path="version",
+        )
 
     defaults = data.get("defaults", {})
     if not isinstance(defaults, dict):
-        raise ConfigError("defaults must be a mapping")
+        raise ConfigError("defaults must be a mapping", schema_path="defaults")
+    _reject_unknown_keys(defaults, "defaults")
     on_conflict = defaults.get("on_conflict", "backup")
     if on_conflict not in _VALID_ON_CONFLICT:
         raise ConfigError(
             f"defaults.on_conflict must be one of {sorted(_VALID_ON_CONFLICT)}, "
-            f"got {on_conflict!r}"
+            f"got {on_conflict!r}",
+            fix=f"use one of: {', '.join(sorted(_VALID_ON_CONFLICT))}",
+            schema_path="defaults.on_conflict",
         )
 
     for cat in _VALID_CATEGORIES:
         if cat in data and not isinstance(data[cat], dict):
-            raise ConfigError(f"category '{cat}' must be a mapping")
+            raise ConfigError(f"category '{cat}' must be a mapping", schema_path=cat)
 
     _validate_ci(data.get("ci", {}))
     _validate_agent_hooks(data.get("agent_hooks", {}))
+    _validate_mcp(data.get("mcp", {}))
+    _validate_git_hooks(data.get("git_hooks", {}))
     _validate_skills(data.get("skills", {}))
     _validate_harness(data.get("harness", {}))
     _validate_permissions(data.get("permissions", {}))
@@ -384,23 +528,48 @@ def validate(data: dict[str, Any]) -> None:
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
+    # Reject an unknown FIXED knob (enabled/target/all); the open `items` map keeps arbitrary
+    # gate names valid (a bad gate NAME is a catalog error caught later, not a schema typo).
+    _reject_unknown_keys(ci, "ci")
+    _check_bool(ci, "enabled", "ci.enabled")
+    _check_str(ci, "target", "ci.target")
+    _check_bool(ci, "all", "ci.all")
     items = ci.get("items", {})
     if not isinstance(items, dict):
-        raise ConfigError("ci.items must be a mapping")
+        raise ConfigError("ci.items must be a mapping", schema_path="ci.items")
     for name, spec in items.items():
         if not isinstance(spec, dict):
             continue
         tier = spec.get("tier")
         if tier is not None and tier not in _VALID_TIERS:
             raise ConfigError(
-                f"ci.items.{name}.tier must be one of {sorted(_VALID_TIERS)}, got {tier!r}"
+                f"ci.items.{name}.tier must be one of {sorted(_VALID_TIERS)}, got {tier!r}",
+                fix=f"use one of: {', '.join(sorted(_VALID_TIERS))}",
+                schema_path=f"ci.items.{name}.tier",
             )
 
 
+# The logical-point → harness-event mappings agent_hooks supports (the schema declares the same
+# enum). A typo here is rejected so the runtime and an editor agree.
+_VALID_AGENT_HOOK_TARGET_KINDS = {"claude-code", "generic"}
+
+
 def _validate_agent_hooks(ah: dict[str, Any]) -> None:
+    _reject_unknown_keys(ah, "agent_hooks")
+    _check_bool(ah, "enabled", "agent_hooks.enabled")
+    _check_str(ah, "target", "agent_hooks.target")
+    _check_bool(ah, "all", "agent_hooks.all")
+    target_kind = ah.get("target_kind")
+    if target_kind is not None and target_kind not in _VALID_AGENT_HOOK_TARGET_KINDS:
+        raise ConfigError(
+            f"agent_hooks.target_kind must be one of {sorted(_VALID_AGENT_HOOK_TARGET_KINDS)}, "
+            f"got {target_kind!r}",
+            fix=f"use one of: {', '.join(sorted(_VALID_AGENT_HOOK_TARGET_KINDS))}",
+            schema_path="agent_hooks.target_kind",
+        )
     items = ah.get("items", {})
     if not isinstance(items, dict):
-        raise ConfigError("agent_hooks.items must be a mapping")
+        raise ConfigError("agent_hooks.items must be a mapping", schema_path="agent_hooks.items")
     for name, spec in items.items():
         if not isinstance(spec, dict):
             continue
@@ -408,7 +577,69 @@ def _validate_agent_hooks(ah: dict[str, Any]) -> None:
         if on_error is not None and on_error not in _VALID_ON_ERROR:
             raise ConfigError(
                 f"agent_hooks.items.{name}.on_error must be one of "
-                f"{sorted(_VALID_ON_ERROR)}, got {on_error!r}"
+                f"{sorted(_VALID_ON_ERROR)}, got {on_error!r}",
+                fix=f"use one of: {', '.join(sorted(_VALID_ON_ERROR))}",
+                schema_path=f"agent_hooks.items.{name}.on_error",
+            )
+
+
+def _validate_mcp(mcp: dict[str, Any]) -> None:
+    """Validate the ``mcp`` block — MCP server registrations.
+
+    Until now ``mcp`` had no dedicated validator (only the generic "must be a mapping" check), so
+    a typo'd FIXED knob (``enabled``/``target``) was silently ignored. Now fail-closed on an
+    unknown fixed key — the open ``items`` map (arbitrary server names) stays valid; a bad SERVER
+    name is a catalog error caught later, not a schema typo.
+    """
+    if not isinstance(mcp, dict):
+        raise ConfigError("mcp must be a mapping", schema_path="mcp")
+    _reject_unknown_keys(mcp, "mcp")
+    enabled = mcp.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"mcp.enabled must be a bool, got {enabled!r}", schema_path="mcp.enabled")
+    target = mcp.get("target")
+    if target is not None and not isinstance(target, str):
+        raise ConfigError(f"mcp.target must be a string, got {target!r}", schema_path="mcp.target")
+    items = mcp.get("items", {})
+    if not isinstance(items, dict):
+        raise ConfigError("mcp.items must be a mapping", schema_path="mcp.items")
+
+
+def _validate_git_hooks(gh: dict[str, Any]) -> None:
+    """Validate the ``git_hooks`` block — the global-hook dispatcher.
+
+    Until now ``git_hooks`` had no dedicated validator (only the generic "must be a mapping"
+    check), so a typo'd dispatcher knob was silently ignored. Fail-closed, consistent with every
+    other block, on an unknown ``git_hooks`` / ``git_hooks.dispatcher`` key (the dispatcher keeps
+    its open ``fragments`` map) and a non-bool dispatcher bool knob. An EMPTY/absent block is fine.
+    """
+    if not isinstance(gh, dict):
+        raise ConfigError("git_hooks must be a mapping", schema_path="git_hooks")
+    if not gh:
+        return
+    _reject_unknown_keys(gh, "git_hooks")
+    disp = gh.get("dispatcher")
+    if disp is None:
+        return
+    if not isinstance(disp, dict):
+        raise ConfigError(
+            f"git_hooks.dispatcher must be a mapping, got {disp!r}",
+            schema_path="git_hooks.dispatcher",
+        )
+    _reject_unknown_keys(disp, "git_hooks.dispatcher")
+    for boolkey in ("enabled", "set_global_hooks_path", "install_local_retrofit_script"):
+        value = disp.get(boolkey)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(
+                f"git_hooks.dispatcher.{boolkey} must be a bool, got {value!r}",
+                schema_path=f"git_hooks.dispatcher.{boolkey}",
+            )
+    for strkey in ("dir", "runner"):
+        value = disp.get(strkey)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(
+                f"git_hooks.dispatcher.{strkey} must be a string, got {value!r}",
+                schema_path=f"git_hooks.dispatcher.{strkey}",
             )
 
 
@@ -427,14 +658,31 @@ def _validate_skills(sk: dict[str, Any]) -> None:
     # validate the knobs.
     if not isinstance(sk, dict):
         return
+    _reject_unknown_keys(sk, "skills")
+    _check_bool(sk, "enabled", "skills.enabled")
+    _check_str(sk, "target", "skills.target")
+    _check_bool(sk, "all", "skills.all")
     harness_link = sk.get("harness_link")
     if harness_link is not None and not isinstance(harness_link, bool):
-        raise ConfigError(f"skills.harness_link must be a bool, got {harness_link!r}")
+        raise ConfigError(
+            f"skills.harness_link must be a bool, got {harness_link!r}",
+            schema_path="skills.harness_link",
+        )
     harness_skill_dir = sk.get("harness_skill_dir")
     if harness_skill_dir is not None and not isinstance(harness_skill_dir, str):
         raise ConfigError(
-            f"skills.harness_skill_dir must be a string, got {harness_skill_dir!r}"
+            f"skills.harness_skill_dir must be a string, got {harness_skill_dir!r}",
+            schema_path="skills.harness_skill_dir",
         )
+    # Reject a typo'd FIXED key in the universal / by_type sub-blocks too (the schema closes them).
+    # The catalog-keyed `by_type.items` map stays open; only OTHER unknown keys are rejected.
+    for sub in ("universal", "by_type"):
+        block = sk.get(sub)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            raise ConfigError(f"skills.{sub} must be a mapping, got {block!r}", schema_path=f"skills.{sub}")
+        _reject_unknown_keys(block, f"skills.{sub}")
 
 
 def _validate_harness(h: dict[str, Any]) -> None:
@@ -445,39 +693,57 @@ def _validate_harness(h: dict[str, Any]) -> None:
     so the config author isn't left thinking rig wrote a setting it didn't.
     """
     if not isinstance(h, dict):
-        raise ConfigError("harness must be a mapping")
+        raise ConfigError("harness must be a mapping", schema_path="harness")
     if not h:
         return
+    _reject_unknown_keys(h, "harness")
     kind = h.get("kind", "claude-code")
     if kind in _RESERVED_HARNESS_KINDS:
         raise ConfigError(
             f"harness.kind '{kind}' is documented but not implemented in this rig "
             f"(supported: {sorted(_VALID_HARNESS_KINDS)}). Remove the harness block or "
-            f"use a supported kind."
+            f"use a supported kind.",
+            fix=f"use one of: {', '.join(sorted(_VALID_HARNESS_KINDS))}, or remove the harness block",
+            schema_path="harness.kind",
         )
     if kind not in _VALID_HARNESS_KINDS:
         raise ConfigError(
-            f"harness.kind must be one of {sorted(_VALID_HARNESS_KINDS)}, got {kind!r}"
+            f"harness.kind must be one of {sorted(_VALID_HARNESS_KINDS)}, got {kind!r}",
+            fix=f"use one of: {', '.join(sorted(_VALID_HARNESS_KINDS))}",
+            schema_path="harness.kind",
         )
     auto_mode = h.get("auto_mode")
     if auto_mode is not None and not isinstance(auto_mode, bool):
-        raise ConfigError(f"harness.auto_mode must be a bool, got {auto_mode!r}")
+        raise ConfigError(
+            f"harness.auto_mode must be a bool, got {auto_mode!r}",
+            schema_path="harness.auto_mode",
+        )
     mode = h.get("mode")
     if mode is not None and not isinstance(mode, str):
-        raise ConfigError(f"harness.mode must be a string, got {mode!r}")
+        raise ConfigError(f"harness.mode must be a string, got {mode!r}", schema_path="harness.mode")
     # harness.hook_bridge — wires the agents-hooks/v1 → CC dispatcher into settings.json so
     # installed agent-hooks actually FIRE (agent-tools#18). enabled defaults true; a custom
     # python interpreter is optional. Fail-closed on the wrong types (typo guard).
     bridge = h.get("hook_bridge")
     if bridge is not None:
         if not isinstance(bridge, dict):
-            raise ConfigError(f"harness.hook_bridge must be a mapping, got {bridge!r}")
+            raise ConfigError(
+                f"harness.hook_bridge must be a mapping, got {bridge!r}",
+                schema_path="harness.hook_bridge",
+            )
+        _reject_unknown_keys(bridge, "harness.hook_bridge")
         enabled = bridge.get("enabled")
         if enabled is not None and not isinstance(enabled, bool):
-            raise ConfigError(f"harness.hook_bridge.enabled must be a bool, got {enabled!r}")
+            raise ConfigError(
+                f"harness.hook_bridge.enabled must be a bool, got {enabled!r}",
+                schema_path="harness.hook_bridge.enabled",
+            )
         py = bridge.get("python")
         if py is not None and not isinstance(py, str):
-            raise ConfigError(f"harness.hook_bridge.python must be a string, got {py!r}")
+            raise ConfigError(
+                f"harness.hook_bridge.python must be a string, got {py!r}",
+                schema_path="harness.hook_bridge.python",
+            )
 
 
 # The keys the permissions block accepts. Listed once so the validator rejects a typo (fail-closed,
@@ -510,34 +776,37 @@ def _validate_permissions(p: dict[str, Any]) -> None:
     ``tools``/``extra``/``disable``, and a non-string ``settings_path``.
     """
     if not isinstance(p, dict):
-        raise ConfigError("permissions must be a mapping")
+        raise ConfigError("permissions must be a mapping", schema_path="permissions")
     if not p:
         return
-    unknown = set(p) - _PERMISSIONS_KEYS
-    if unknown:
-        raise ConfigError(f"unknown permissions key(s): {', '.join(sorted(unknown))}")
-    enabled = p.get("enabled")
-    if enabled is not None and not isinstance(enabled, bool):
-        raise ConfigError(f"permissions.enabled must be a bool, got {enabled!r}")
+    _reject_unknown_keys(p, "permissions")
+    _check_bool(p, "enabled", "permissions.enabled")
     kind = p.get("kind")
     if kind is not None:
         if not isinstance(kind, str):
-            raise ConfigError(f"permissions.kind must be a string, got {kind!r}")
+            raise ConfigError(f"permissions.kind must be a string, got {kind!r}", schema_path="permissions.kind")
         if kind in _NA_PERMISSIONS_KINDS:
             raise ConfigError(
                 f"permissions.kind '{kind}' has no additively-mergeable command allowlist "
                 f"(supported: {sorted(_VALID_PERMISSIONS_KINDS)}). Remove permissions.kind or use a "
-                f"supported harness."
+                f"supported harness.",
+                fix=f"use one of: {', '.join(sorted(_VALID_PERMISSIONS_KINDS))}, or remove permissions.kind",
+                schema_path="permissions.kind",
             )
         if kind not in _VALID_PERMISSIONS_KINDS:
             raise ConfigError(
-                f"permissions.kind must be one of {sorted(_VALID_PERMISSIONS_KINDS)}, got {kind!r}"
+                f"permissions.kind must be one of {sorted(_VALID_PERMISSIONS_KINDS)}, got {kind!r}",
+                fix=f"use one of: {', '.join(sorted(_VALID_PERMISSIONS_KINDS))}",
+                schema_path="permissions.kind",
             )
     for listkey in ("tools", "extra", "disable"):
         value = p.get(listkey)
         if value is not None:
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-                raise ConfigError(f"permissions.{listkey} must be a list of strings, got {value!r}")
+                raise ConfigError(
+                    f"permissions.{listkey} must be a list of strings, got {value!r}",
+                    schema_path=f"permissions.{listkey}",
+                )
             # A tool name becomes a Bash(<name>:*) / "<name> *" allowlist ENTRY — a space or shell
             # metachar would render a broken/surprising entry (Bash(git status:*), Bash(:*)). Restrict
             # to a plain command token so the rendered entry always means what the author intends.
@@ -546,19 +815,24 @@ def _validate_permissions(p: dict[str, Any]) -> None:
                     raise ConfigError(
                         f"permissions.{listkey} entry {v!r} is not a plain command name or "
                         "absolute path (allowed: letters, digits, '.', '_', '-', '/'; no spaces, "
-                        "metachars, or '..')"
+                        "metachars, or '..')",
+                        schema_path=f"permissions.{listkey}",
                     )
     settings_path = p.get("settings_path")
     if settings_path is not None:
         if not isinstance(settings_path, str):
-            raise ConfigError(f"permissions.settings_path must be a string, got {settings_path!r}")
+            raise ConfigError(
+                f"permissions.settings_path must be a string, got {settings_path!r}",
+                schema_path="permissions.settings_path",
+            )
         # both supported harnesses store the allowlist in a JSON file; a non-.json override would be
         # silently nested as <path>/settings.json by the runner. Require .json so the write lands
         # exactly where the user pointed.
         if not settings_path.endswith(".json"):
             raise ConfigError(
                 f"permissions.settings_path must end in .json (the harness allowlist is a JSON file), "
-                f"got {settings_path!r}"
+                f"got {settings_path!r}",
+                schema_path="permissions.settings_path",
             )
 
 
@@ -575,10 +849,17 @@ def parse_hhmm(value: str) -> tuple[int, int]:
     """
     parts = str(value).split(":")
     if len(parts) != 2 or not all(p.isdigit() for p in parts):
-        raise ConfigError(f"models.schedule.time must be 'HH:MM', got {value!r}")
+        raise ConfigError(
+            f"models.schedule.time must be 'HH:MM', got {value!r}",
+            fix="use a 24-hour time like '12:00'",
+            schema_path="models.schedule.time",
+        )
     hour, minute = int(parts[0]), int(parts[1])
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ConfigError(f"models.schedule.time out of range (00:00–23:59), got {value!r}")
+        raise ConfigError(
+            f"models.schedule.time out of range (00:00–23:59), got {value!r}",
+            schema_path="models.schedule.time",
+        )
     return hour, minute
 
 
@@ -591,29 +872,31 @@ def _validate_models(m: dict[str, Any]) -> None:
     EMPTY/absent block means "no schedule provisioned" — rig leaves the system cron alone.
     """
     if not isinstance(m, dict):
-        raise ConfigError("models must be a mapping")
+        raise ConfigError("models must be a mapping", schema_path="models")
     if not m:
         return
-    unknown = set(m) - {"enabled", "schedule", "checker_path"}
-    if unknown:
-        raise ConfigError(f"unknown models key(s): {', '.join(sorted(unknown))}")
+    _reject_unknown_keys(m, "models")
     enabled = m.get("enabled")
     if enabled is not None and not isinstance(enabled, bool):
-        raise ConfigError(f"models.enabled must be a bool, got {enabled!r}")
+        raise ConfigError(f"models.enabled must be a bool, got {enabled!r}", schema_path="models.enabled")
     checker_path = m.get("checker_path")
     if checker_path is not None and not isinstance(checker_path, str):
-        raise ConfigError(f"models.checker_path must be a string, got {checker_path!r}")
+        raise ConfigError(
+            f"models.checker_path must be a string, got {checker_path!r}",
+            schema_path="models.checker_path",
+        )
     schedule = m.get("schedule", {})
     if not isinstance(schedule, dict):
-        raise ConfigError("models.schedule must be a mapping")
-    unknown_sched = set(schedule) - {"time", "label"}
-    if unknown_sched:
-        raise ConfigError(f"unknown models.schedule key(s): {', '.join(sorted(unknown_sched))}")
+        raise ConfigError("models.schedule must be a mapping", schema_path="models.schedule")
+    _reject_unknown_keys(schedule, "models.schedule")
     if "time" in schedule:
         parse_hhmm(schedule["time"])  # fail-closed on a bad time
     label = schedule.get("label")
     if label is not None and not isinstance(label, str):
-        raise ConfigError(f"models.schedule.label must be a string, got {label!r}")
+        raise ConfigError(
+            f"models.schedule.label must be a string, got {label!r}",
+            schema_path="models.schedule.label",
+        )
 
 
 def _validate_agents_md(am: dict[str, Any]) -> None:
@@ -626,16 +909,17 @@ def _validate_agents_md(am: dict[str, Any]) -> None:
     knobs and unknown keys (typo guard), consistent with every other block.
     """
     if not isinstance(am, dict):
-        raise ConfigError("agents_md must be a mapping")
+        raise ConfigError("agents_md must be a mapping", schema_path="agents_md")
     if not am:
         return
-    unknown = set(am) - {"enabled", "symlink"}
-    if unknown:
-        raise ConfigError(f"unknown agents_md key(s): {', '.join(sorted(unknown))}")
+    _reject_unknown_keys(am, "agents_md")
     for knob in ("enabled", "symlink"):
         value = am.get(knob)
         if value is not None and not isinstance(value, bool):
-            raise ConfigError(f"agents_md.{knob} must be a bool, got {value!r}")
+            raise ConfigError(
+                f"agents_md.{knob} must be a bool, got {value!r}",
+                schema_path=f"agents_md.{knob}",
+            )
 
 
 # The default entries rig's managed block puts in the GLOBAL git excludes file. The harness
@@ -682,29 +966,34 @@ def _validate_gitignore(gi: dict[str, Any]) -> None:
     key (typo guard), a non-string ``excludesfile`` override, and a non-string-list ``entries``.
     """
     if not isinstance(gi, dict):
-        raise ConfigError("gitignore must be a mapping")
+        raise ConfigError("gitignore must be a mapping", schema_path="gitignore")
     if not gi:
         return
-    unknown = set(gi) - {"enabled", "entries", "excludesfile"}
-    if unknown:
-        raise ConfigError(f"unknown gitignore key(s): {', '.join(sorted(unknown))}")
+    _reject_unknown_keys(gi, "gitignore")
     enabled = gi.get("enabled")
     if enabled is not None and not isinstance(enabled, bool):
-        raise ConfigError(f"gitignore.enabled must be a bool, got {enabled!r}")
+        raise ConfigError(f"gitignore.enabled must be a bool, got {enabled!r}", schema_path="gitignore.enabled")
     excludesfile = gi.get("excludesfile")
     if excludesfile is not None and not isinstance(excludesfile, str):
-        raise ConfigError(f"gitignore.excludesfile must be a string, got {excludesfile!r}")
+        raise ConfigError(
+            f"gitignore.excludesfile must be a string, got {excludesfile!r}",
+            schema_path="gitignore.excludesfile",
+        )
     entries = gi.get("entries")
     if entries is not None:
         if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
-            raise ConfigError(f"gitignore.entries must be a list of strings, got {entries!r}")
+            raise ConfigError(
+                f"gitignore.entries must be a list of strings, got {entries!r}",
+                schema_path="gitignore.entries",
+            )
         # Reject an entry that carries one of rig's block markers: writing it inside the managed
         # block would make every later resolve see a duplicated marker and classify the file as a
         # permanent conflict (apply could never re-converge). Fail closed on the footgun.
         for e in entries:
             if GITIGNORE_BEGIN_MARKER in e or GITIGNORE_END_MARKER in e:
                 raise ConfigError(
-                    f"gitignore.entries may not contain a rig-managed marker line, got {e!r}"
+                    f"gitignore.entries may not contain a rig-managed marker line, got {e!r}",
+                    schema_path="gitignore.entries",
                 )
 
 
@@ -744,37 +1033,41 @@ def _validate_github(gh: dict[str, Any]) -> None:
     expressible here at all.
     """
     if not isinstance(gh, dict):
-        raise ConfigError("github must be a mapping")
+        raise ConfigError("github must be a mapping", schema_path="github")
     if not gh:
         return
-    unknown = set(gh) - {"ruleset"}
-    if unknown:
-        raise ConfigError(f"unknown github key(s): {', '.join(sorted(unknown))}")
+    _reject_unknown_keys(gh, "github")
     ruleset = gh.get("ruleset", {})
     if not isinstance(ruleset, dict):
-        raise ConfigError("github.ruleset must be a mapping")
-    unknown_rs = set(ruleset) - _GITHUB_RULESET_KEYS
-    if unknown_rs:
-        raise ConfigError(f"unknown github.ruleset key(s): {', '.join(sorted(unknown_rs))}")
+        raise ConfigError("github.ruleset must be a mapping", schema_path="github.ruleset")
+    _reject_unknown_keys(ruleset, "github.ruleset")
     for knob in _GITHUB_RULESET_BOOL_KNOBS:
         value = ruleset.get(knob)
         if value is not None and not isinstance(value, bool):
-            raise ConfigError(f"github.ruleset.{knob} must be a bool, got {value!r}")
+            raise ConfigError(
+                f"github.ruleset.{knob} must be a bool, got {value!r}",
+                schema_path=f"github.ruleset.{knob}",
+            )
     name = ruleset.get("name")
     if name is not None and not isinstance(name, str):
-        raise ConfigError(f"github.ruleset.name must be a string, got {name!r}")
+        raise ConfigError(
+            f"github.ruleset.name must be a string, got {name!r}",
+            schema_path="github.ruleset.name",
+        )
     reviews = ruleset.get("required_reviews")
     # NB: bool is an int subclass in Python — reject it explicitly so `true` can't masquerade
     # as a review count.
     if reviews is not None and (isinstance(reviews, bool) or not isinstance(reviews, int) or reviews < 0):
         raise ConfigError(
-            f"github.ruleset.required_reviews must be an int >= 0, got {reviews!r}"
+            f"github.ruleset.required_reviews must be an int >= 0, got {reviews!r}",
+            schema_path="github.ruleset.required_reviews",
         )
     checks = ruleset.get("required_status_checks")
     if checks is not None:
         if not isinstance(checks, list) or not all(isinstance(c, str) for c in checks):
             raise ConfigError(
-                f"github.ruleset.required_status_checks must be a list of strings, got {checks!r}"
+                f"github.ruleset.required_status_checks must be a list of strings, got {checks!r}",
+                schema_path="github.ruleset.required_status_checks",
             )
 
 
@@ -816,16 +1109,14 @@ def _validate_tmux(t: dict[str, Any]) -> None:
     ``continuum.save_interval`` that is not an int >= 1.
     """
     if not isinstance(t, dict):
-        raise ConfigError("tmux must be a mapping")
+        raise ConfigError("tmux must be a mapping", schema_path="tmux")
     if not t:
         return
-    unknown = set(t) - _TMUX_TOP_KEYS
-    if unknown:
-        raise ConfigError(f"unknown tmux key(s): {', '.join(sorted(unknown))}")
+    _reject_unknown_keys(t, "tmux")
 
     enabled = t.get("enabled")
     if enabled is not None and not isinstance(enabled, bool):
-        raise ConfigError(f"tmux.enabled must be a bool, got {enabled!r}")
+        raise ConfigError(f"tmux.enabled must be a bool, got {enabled!r}", schema_path="tmux.enabled")
     # `apply` PRESENT must be a valid enum string. A present null would `str(None)` into a bogus
     # "None" apply_mode, and an unhashable value (list/dict) would raise a raw TypeError from the
     # `in` check — so require a string in the enum. Only an ABSENT key falls back to the default.
@@ -833,26 +1124,27 @@ def _validate_tmux(t: dict[str, Any]) -> None:
         not isinstance(t["apply"], str) or t["apply"] not in _VALID_TMUX_APPLY
     ):
         raise ConfigError(
-            f"tmux.apply must be one of {sorted(_VALID_TMUX_APPLY)}, got {t['apply']!r}"
+            f"tmux.apply must be one of {sorted(_VALID_TMUX_APPLY)}, got {t['apply']!r}",
+            fix=f"use one of: {', '.join(sorted(_VALID_TMUX_APPLY))}",
+            schema_path="tmux.apply",
         )
     for pathkey in ("conf_path", "generated_dir"):
         # A key PRESENT with no value (YAML `conf_path:` → None) must fail closed: it can't fall
         # back to the default the way a truly-absent key does (the plan would `str(None)` it into
         # a literal "None" path). Only an absent key is allowed; a present non-string is rejected.
         if pathkey in t and not isinstance(t[pathkey], str):
-            raise ConfigError(f"tmux.{pathkey} must be a string, got {t[pathkey]!r}")
+            raise ConfigError(
+                f"tmux.{pathkey} must be a string, got {t[pathkey]!r}",
+                schema_path=f"tmux.{pathkey}",
+            )
 
-    for sub, allowed in _TMUX_SUBKEYS.items():
+    for sub in _TMUX_SUBKEYS:
         block = t.get(sub)
         if block is None:
             continue
         if not isinstance(block, dict):
-            raise ConfigError(f"tmux.{sub} must be a mapping, got {block!r}")
-        unknown_sub = set(block) - allowed
-        if unknown_sub:
-            raise ConfigError(
-                f"unknown tmux.{sub} key(s): {', '.join(sorted(unknown_sub))}"
-            )
+            raise ConfigError(f"tmux.{sub} must be a mapping, got {block!r}", schema_path=f"tmux.{sub}")
+        _reject_unknown_keys(block, f"tmux.{sub}")
 
     res = t.get("resurrect", {})
     if isinstance(res, dict):
@@ -941,17 +1233,21 @@ def _validate_tg_ctl(t: dict[str, Any]) -> None:
     ``config_dir``.
     """
     if not isinstance(t, dict):
-        raise ConfigError("tg_ctl must be a mapping")
+        raise ConfigError("tg_ctl must be a mapping", schema_path="tg_ctl")
     if not t:
         return
-    unknown = set(t) - _TG_CTL_KEYS
-    if unknown:
-        raise ConfigError(f"unknown tg_ctl key(s): {', '.join(sorted(unknown))}")
+    _reject_unknown_keys(t, "tg_ctl")
     for boolkey in ("enabled", "boot"):
         value = t.get(boolkey)
         if value is not None and not isinstance(value, bool):
-            raise ConfigError(f"tg_ctl.{boolkey} must be a bool, got {value!r}")
+            raise ConfigError(
+                f"tg_ctl.{boolkey} must be a bool, got {value!r}",
+                schema_path=f"tg_ctl.{boolkey}",
+            )
     for strkey in ("label", "bun_path", "tg_ctl_path", "config_dir"):
         value = t.get(strkey)
         if value is not None and not isinstance(value, str):
-            raise ConfigError(f"tg_ctl.{strkey} must be a string, got {value!r}")
+            raise ConfigError(
+                f"tg_ctl.{strkey} must be a string, got {value!r}",
+                schema_path=f"tg_ctl.{strkey}",
+            )

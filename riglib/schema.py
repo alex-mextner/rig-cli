@@ -381,31 +381,18 @@ def coerce(option: Option, raw: str) -> Any:
 
 
 def json_schema() -> dict[str, Any]:
-    """Emit a JSON-Schema document for the registered options (one source: this registry).
+    """Emit the COMPLETE JSON Schema for rig.yaml — delegated to ``config_schema`` (one emitter).
 
-    Generated, never hand-written — so the JSON-schema file the roadmap pairs with this work is
-    DERIVED from the registry. A minimal Draft-07 ``properties`` tree with the hint as
-    ``description`` and the registered default/enum, grouped by top-level category.
+    This wizard module owns a CURATED option subset (toggles + hints); the EXHAUSTIVE schema (every
+    block + key, ``additionalProperties: false``, the editor-facing artifact) lives in
+    :mod:`riglib.config_schema`, and is what ``schema/rig.schema.json`` is generated from. Kept as a
+    re-export here so the historical call site (``schema.json_schema()``) and its test stay valid
+    while there is still ONE generator. The wizard's own registry is reconciled against this schema
+    by the sync test (every wizard option key must be a node in the emitted schema).
     """
-    type_map = {KIND_BOOL: "boolean", KIND_STR: "string", KIND_INT: "integer", KIND_ENUM: "string"}
-    props: dict[str, Any] = {}
-    for o in all_options():
-        node: dict[str, Any] = {"type": type_map[o.kind], "description": o.hint, "default": o.default}
-        if o.kind == KIND_ENUM:
-            node["enum"] = list(o.choices)
-        # nest under category → … → leaf, building intermediate object schemas as we go
-        cur = props
-        parts = o.key.split(".")
-        for part in parts[:-1]:
-            obj = cur.setdefault(part, {"type": "object", "properties": {}})
-            cur = obj["properties"]
-        cur[parts[-1]] = node
-    return {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "rig.yaml",
-        "type": "object",
-        "properties": props,
-    }
+    from . import config_schema
+
+    return config_schema.json_schema()
 
 
 __all__ = [

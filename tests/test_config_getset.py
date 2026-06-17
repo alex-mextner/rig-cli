@@ -258,6 +258,41 @@ def test_cli_set_validation_rejects_bad_value(tmp_path, capsys, monkeypatch, _mo
     assert len(_mock_apply) == 0  # no reconcile on a rejected write
 
 
+def test_cli_set_bad_value_prints_three_part_error_with_schema_path(tmp_path, capsys, monkeypatch, _mock_apply):
+    # roadmap §5: the rejection is the 3-part block (what/why/fix) and names the schema path +
+    # the pointer into the published schema file, so the user can jump straight to the node.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(repo / "rig.yaml", "version: 1\nci: {items: {secret-scan: {tier: block}}}\n")
+    rc = main(["config", "set", "ci.items.secret-scan.tier", "loud", "-C", str(repo)])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "why:" in out and "fix:" in out
+    assert "schema path: ci.items.secret-scan.tier" in out
+    # the JSON pointer stops at the OPEN `items` map (item names aren't schema nodes), so it
+    # resolves in the published file rather than dangling at a non-existent .../secret-scan node.
+    assert "schema/rig.schema.json#/properties/ci/properties/items" in out
+
+
+def test_cli_set_unknown_key_rejected_with_accepted_keys(tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply):
+    # setting a TYPO key (not a real schema node) fails loudly and lists the accepted keys.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    original = (
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\nharness: {auto_mode: true}\n"
+    )
+    _w(repo / "rig.yaml", original)
+    rc = main(["config", "set", "harness.aut_mode", "false", "-C", str(repo)])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "unknown harness key: aut_mode" in out
+    assert "auto_mode" in out  # the accepted-keys hint
+    assert (repo / "rig.yaml").read_text(encoding="utf-8") == original  # untouched
+    assert len(_mock_apply) == 0
+
+
 def test_cli_set_rejects_version_bool(tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply):
     # `set version true` coerces to the bool True; validate() must reject it (bool is an int
     # subclass and True == 1, so a naive isinstance check would let it through). File untouched.
@@ -377,10 +412,11 @@ def test_cli_set_drops_legacy_scope_key(tmp_path, capsys, fake_agent_tools, monk
     assert written["harness"]["auto_mode"] is False
 
 
-def test_cli_set_preserves_unknown_nested_key_round_trip(tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply):
-    # docs claim a typo'd nested key in a non-strict section is tolerated and survives, exactly
-    # like a hand-edited rig.yaml. Prove the serializer round-trip keeps it (from_dict copies
-    # the whole dict — it does NOT drop unknown nested keys).
+def test_cli_set_rejects_when_existing_typo_in_strict_section(tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply):
+    # Roadmap §5 (ENFORCED schema): a typo'd key is rejected LOUDLY, not tolerated as a silent
+    # no-op. `config set` validates the WHOLE edited tree, so a pre-existing typo'd `harness` key
+    # (`aut_mode`) blocks the edit with exit 2 and the file is rolled back UNCHANGED. (The
+    # `harness` block used to tolerate unknown keys; the schema now closes it.)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     repo = tmp_path / "repo"
     _w(
@@ -388,13 +424,15 @@ def test_cli_set_preserves_unknown_nested_key_round_trip(tmp_path, capsys, fake_
         f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
-        "harness: {auto_mode: true, aut_mode: true}\n",  # aut_mode is a typo (no effect)
+        "harness: {auto_mode: true, aut_mode: true}\n",  # aut_mode is a typo — now REJECTED
     )
+    before = (repo / "rig.yaml").read_text(encoding="utf-8")
     rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo)])
-    assert rc == 0
-    written = config.load(repo).data
-    assert written["harness"]["auto_mode"] is False  # the real key was edited
-    assert written["harness"]["aut_mode"] is True  # the typo key survived the round-trip
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "unknown harness key" in out and "aut_mode" in out
+    # fail-closed: the file is left exactly as it was (the rejected edit never lands)
+    assert (repo / "rig.yaml").read_text(encoding="utf-8") == before
 
 
 def test_cli_set_global_targets_xdg_config(tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply):

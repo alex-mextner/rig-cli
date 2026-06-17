@@ -116,5 +116,7 @@ def test_state_write_has_header(tmp_path):
     state = SetupState.default(project_type="backend")
     out = state.write(tmp_path / "rig.yaml")
     text = out.read_text(encoding="utf-8")
-    assert text.startswith("# rig.yaml")
+    # first line is the editor schema modeline (completion/validation), then the rig.yaml header
+    assert text.startswith("# yaml-language-server: $schema=schema/rig.schema.json")
+    assert "# rig.yaml" in text
     assert "COMMITTED BY DEFAULT" in text

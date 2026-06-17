@@ -83,6 +83,77 @@ def test_apply_dryrun_with_config(tmp_path, capsys, fake_agent_tools, monkeypatc
     assert rc == 0
 
 
+def test_apply_rejects_malformed_config_three_part(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    # roadmap §5 "it should work" = a malformed config fails LOUDLY on apply: exit 2, the 3-part
+    # block, and the schema path of the offending key — not a silent partial reconcile.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    cfg = tmp_path / "rig.yaml"
+    cfg.write_text(
+        f"agent_tools_source: {fake_agent_tools}\nharness: {{aut_mode: true}}\n",  # typo key
+        encoding="utf-8",
+    )
+    rc = main(["apply", "-C", str(tmp_path), "--config", str(cfg), "--dry-run"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "unknown harness key: aut_mode" in out
+    assert "schema path: harness.aut_mode" in out
+    assert "fix:" in out
+
+
+def test_schema_command_prints_valid_json(capsys):
+    rc = main(["schema"])
+    assert rc == 0
+    import json
+
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["$schema"].startswith("http://json-schema.org/draft-07")
+    assert doc["additionalProperties"] is False
+    assert "harness" in doc["properties"]
+
+
+def test_schema_command_check_passes_for_committed_file(capsys):
+    # the committed schema file must be in sync — `rig schema --check` is a CI-usable gate.
+    rc = main(["schema", "--check"])
+    assert rc == 0
+    assert "in sync" in capsys.readouterr().out
+
+
+def test_schema_check_fails_when_file_missing(tmp_path, capsys, monkeypatch):
+    # point the resolver at a non-existent file → --check must exit 2 and say how to fix it.
+    target = tmp_path / "schema" / "rig.schema.json"
+    monkeypatch.setattr("riglib.config_schema.schema_file_path", lambda: target)
+    rc = main(["schema", "--check"])
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "missing or out of sync" in out
+    assert "rig schema --write" in out
+
+
+def test_schema_check_fails_when_file_stale(tmp_path, capsys, monkeypatch):
+    # a hand-edited / stale file (wrong bytes) is drift → --check exits 2.
+    target = tmp_path / "schema" / "rig.schema.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"stale": true}\n', encoding="utf-8")
+    monkeypatch.setattr("riglib.config_schema.schema_file_path", lambda: target)
+    rc = main(["schema", "--check"])
+    assert rc == 2
+    assert "out of sync" in capsys.readouterr().out
+
+
+def test_schema_write_regenerates_file(tmp_path, capsys, monkeypatch):
+    # --write (re)generates the file from the registry; a follow-up --check then passes.
+    from riglib import config_schema
+
+    target = tmp_path / "schema" / "rig.schema.json"
+    monkeypatch.setattr("riglib.config_schema.schema_file_path", lambda: target)
+    assert not target.exists()
+    rc = main(["schema", "--write"])
+    assert rc == 0
+    assert "wrote" in capsys.readouterr().out
+    assert target.read_text(encoding="utf-8") == config_schema.render_schema_json()
+    assert main(["schema", "--check"]) == 0
+
+
 def test_setup_dryrun_never_launches_wizard(tmp_path, capsys, fake_agent_tools, monkeypatch):
     # even though the wizard import would succeed here, --dry-run must stay headless.
     monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))

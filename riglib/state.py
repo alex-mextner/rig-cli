@@ -156,7 +156,11 @@ class SetupState:
     def write(self, path: Path) -> Path:
         path = Path(os.path.expanduser(str(path)))
         path.parent.mkdir(parents=True, exist_ok=True)
+        # The `yaml-language-server` modeline makes editors (VS Code YAML, neovim) load the
+        # committed JSON Schema → live key completion + unknown-key/bad-value squiggles, the same
+        # rules `rig apply` enforces. `rig validate`/`rig schema` keep the file in sync.
         header = (
+            "# yaml-language-server: $schema=schema/rig.schema.json\n"
             "# rig.yaml — declarative setup for this repo, applied by `rig apply`.\n"
             "# COMMITTED BY DEFAULT: this file is the reproducible source of truth.\n"
             "# Global defaults live at ~/.config/rig/config.yaml; this file overrides them.\n"

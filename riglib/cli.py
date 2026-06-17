@@ -59,6 +59,23 @@ def _bold(s: str) -> str:
     return _c("1", s)
 
 
+def _err_block(exc: Exception) -> str:
+    """Render an exception as the standard error block — 3-part for a config schema error.
+
+    A :class:`riglib.config.ConfigError` carries WHAT / WHY / FIX + the SCHEMA PATH (roadmap §5):
+    render the full block so a malformed config fails LOUDLY and points the user at the offending
+    node in ``schema/rig.schema.json``. Any other exception (catalog/plan/OS) keeps the existing
+    one-line ``error: <msg>`` shape. Used by every ``except`` site so config rejections read the
+    same whether they come from ``apply``, ``config set``, ``status``, or ``init``.
+    """
+    from .config import ConfigError as _ConfigError
+    from .config import render_config_error
+
+    if isinstance(exc, _ConfigError):
+        return render_config_error(exc, color=_USE_COLOR)
+    return _err(f"error: {exc}")
+
+
 def _fmt_scalar(value: object) -> str:
     """Render a coerced scalar in YAML/CLI casing (true/false/null), not Python's repr.
 
@@ -152,6 +169,19 @@ def build_parser() -> argparse.ArgumentParser:
     ep.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
     ep.add_argument("-o", "--output", default="rig.yaml", help="output path (default: rig.yaml)")
     ep.add_argument("--force", action="store_true", help="overwrite an existing file")
+
+    scp = sub.add_parser(
+        "schema",
+        help="print the rig.yaml JSON Schema (or --check / --write that it matches on disk)",
+        description="Emit the JSON Schema for rig.yaml + the global config (generated from the "
+        "single in-code registry). Editors point at the committed schema/rig.schema.json for "
+        "completion/validation; `--check` fails if the committed file is stale, `--write` "
+        "regenerates it.",
+    )
+    scp.add_argument("--check", action="store_true",
+                     help="exit non-zero if schema/rig.schema.json is missing or out of sync")
+    scp.add_argument("--write", action="store_true",
+                     help="(re)generate schema/rig.schema.json from the in-code registry")
 
     sub.add_parser("install-skill", help="register the rig agent skill with harnesses")
 
@@ -264,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
         "doctor": cmd_doctor,
         "export": cmd_export,
         "config": cmd_config,
+        "schema": cmd_schema,
         "install-skill": cmd_install_skill,
         "setup": cmd_setup_wizard,  # setup = the interactive config wizard (distinct from init)
         "stats": cmd_stats,
@@ -462,7 +493,7 @@ def _setup_headless(args: argparse.Namespace, *, use_default: bool) -> int:
         catalog = Catalog.scan(loaded.agent_tools_source)
         plan = build(loaded, catalog, project_type=env.project_type)
     except (ConfigError, CatalogError, PlanError) as exc:
-        print(_err(f"error: {exc}"))
+        print(_err_block(exc))
         return 2
 
     # plan is valid → now persist rig.yaml (the committed source of truth, never optional)
@@ -503,7 +534,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
     try:
         plan, loaded, env = _load_plan(args.cwd, args.config)
     except (ConfigError, CatalogError, PlanError) as exc:
-        print(_err(f"error: {exc}"))
+        print(_err_block(exc))
         return 2
 
     # fail-closed: with NO config layer (no --config, no ./rig.yaml, no global), the empty
@@ -613,7 +644,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(_err(f"error: {exc}"))
         return 2
     except (ConfigError, PlanError) as exc:
-        print(_err(f"error: {exc}"))
+        print(_err_block(exc))
         return 2
 
     print(_bold("rig status"))
@@ -1077,6 +1108,39 @@ def _read_target_yaml(path: Path):
     return read_yaml_file(path)
 
 
+def cmd_schema(args: argparse.Namespace) -> int:
+    """`rig schema` — print / verify / regenerate the rig.yaml JSON Schema.
+
+    Default: print the generated schema to stdout (pipe it into a file or an editor config).
+    ``--check``: exit 2 if the committed ``schema/rig.schema.json`` is missing or stale (the same
+    drift the sync test catches — usable as a CI gate). ``--write``: regenerate the committed file.
+    Bare print needs no repo; --check/--write operate on rig's OWN packaged schema file.
+    """
+    from . import config_schema
+
+    if args.write:
+        try:
+            path = config_schema.write_schema_file()
+        except OSError as exc:
+            # a bare pip install puts the path under a (possibly read-only) site-packages; the
+            # canonical symlink install always writes fine. Fail clearly, don't crash.
+            print(_err(f"error: cannot write {config_schema.schema_file_path()}: {exc}"))
+            print(_dim("  the schema file lives in the rig-cli checkout (symlink install); "
+                       "run from there, or redirect: rig schema > schema/rig.schema.json"))
+            return 2
+        print(_ok(f"wrote {path}"))
+        return 0
+    if args.check:
+        if config_schema.schema_file_in_sync():
+            print(_ok(f"{config_schema.schema_file_path()} is in sync with the registry"))
+            return 0
+        print(_err(f"error: {config_schema.schema_file_path()} is missing or out of sync"))
+        print(_dim("  regenerate it with: rig schema --write"))
+        return 2
+    print(config_schema.render_schema_json(), end="")
+    return 0
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     if not getattr(args, "config_command", None):
         print(_err("error: `rig config` needs a subcommand: get or set"))
@@ -1170,7 +1234,7 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         # catches e.g. harness.auto_mode="yes" before anything touches disk.
         validate(data)
     except ConfigError as exc:
-        print(_err(f"error: {exc}"))
+        print(_err_block(exc))
         return 2
     except Exception as exc:  # noqa: BLE001
         # nothing has touched disk yet (read/coerce/validate only). Anything unexpected here
@@ -1225,8 +1289,13 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         # a write IO error, or a serializer error on data the first gate let through) must roll
         # the file back and fail closed. Never leave a written-but-unreconcilable config behind.
         restored = _rollback()
-        kind = "" if isinstance(exc, (ConfigError, CatalogError, PlanError, OSError)) else f"{type(exc).__name__}: "
-        print(_err(f"error: {kind}{exc}"))
+        # A ConfigError (e.g. the isolated-global validation) renders 3-part with the schema path;
+        # a known catalog/plan/OS error stays one-line; an unexpected one is name-prefixed.
+        if isinstance(exc, ConfigError):
+            print(_err_block(exc))
+        else:
+            kind = "" if isinstance(exc, (CatalogError, PlanError, OSError)) else f"{type(exc).__name__}: "
+            print(_err(f"error: {kind}{exc}"))
         if restored:
             print(_dim(f"  (config not changed — {target} left untouched)"))
         else:
