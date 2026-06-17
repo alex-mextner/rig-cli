@@ -44,6 +44,7 @@ from .actions.runner import (
     resolve_agents_md,
     resolve_ci_workflow,
     resolve_global_excludes,
+    resolve_ship_delegator,
     schedule_plan_from_action,
     skill_harness_link_target,
     tg_ctl_plan_from_action,
@@ -130,6 +131,8 @@ def detect(
             _check_schedule(action, report)
         elif action.kind == "provision_agents_symlink":
             _check_agents_symlink(action, report)
+        elif action.kind == "provision_ship_delegator":
+            _check_ship_delegator(action, report)
         elif action.kind == "provision_github_ruleset":
             _check_github_ruleset(action, report)
         elif action.kind == "provision_tmux":
@@ -288,6 +291,61 @@ def _check_agents_symlink(action: Action, report: DriftReport) -> None:
         report.items.append(
             DriftItem("modified", "agents_md", "symlink", r.link, r.detail)
         )
+
+
+def _check_ship_delegator(action: Action, report: DriftReport) -> None:
+    """Flag drift on the per-repo ``.claude/scripts/pr-ship.sh`` (``gh ship`` delegator).
+
+    Switches on the SAME :func:`resolve_ship_delegator` ``state`` apply uses, so status and apply
+    read one classification:
+
+    - ``ok``       → no drift (file correct + git-ignored).
+    - ``create``   → ``missing``: the delegator file is absent (apply writes it + ignores it).
+    - ``update``   → ``modified`` when the FILE differs, else ``missing`` when the file is correct
+                     but the ``.git/info/exclude`` entry is gone (an un-ignored delegator would
+                     dirty the worktree → ship refuses). ``apply`` reconciles either.
+    - ``io_error`` → ``modified``: a directory/unreadable sits at the delegator path; apply errors.
+    """
+    # Mirror the runner's fail-closed guard: a malformed action with no canonical_ship must NOT be
+    # silently classified against Path(".") (which would render `canonical=.` and flag every existing
+    # delegator as modified — apply and drift would then disagree). Surface it as a modified item.
+    raw_canonical = str(action.options.get("canonical_ship", "")).strip()
+    if not raw_canonical:
+        report.items.append(
+            DriftItem("modified", "ship_delegator", "delegator", action.target,
+                      "ship_delegator action has no canonical_ship (malformed plan)")
+        )
+        return
+    canonical = Path(raw_canonical)
+    r = resolve_ship_delegator(action.target, canonical)
+    if r.state == "ok":
+        return
+    if r.state == "create":
+        report.items.append(
+            DriftItem("missing", "ship_delegator", "delegator", r.delegator_path,
+                      "pr-ship.sh not provisioned (apply writes it + ignores it in .git/info/exclude)")
+        )
+    elif r.state == "io_error":
+        report.items.append(
+            DriftItem("modified", "ship_delegator", "delegator", r.delegator_path, r.detail)
+        )
+    elif r.state == "update":
+        # The two degradations are INDEPENDENT and both must surface (apply fixes both, but status
+        # must show the full picture): (a) the FILE differs from the rig-generated delegator, and
+        # (b) the .git/info/exclude entry is missing (an un-ignored delegator dirties the worktree →
+        # ship refuses). The resolver already classified the file (``file_correct``), so trust it
+        # rather than re-reading (avoids a redundant, racy TOCTOU read).
+        if not r.file_correct:
+            report.items.append(
+                DriftItem("modified", "ship_delegator", "delegator", r.delegator_path,
+                          "provisioned pr-ship.sh differs from the rig-generated delegator")
+            )
+        if not r.exclude_ok:
+            report.items.append(
+                DriftItem("missing", "ship_delegator", "ignore", r.exclude_path or r.delegator_path,
+                          "pr-ship.sh present but NOT git-ignored (apply adds it to .git/info/exclude "
+                          "so it can't dirty the worktree)")
+            )
 
 
 def _check_github_ruleset(action: Action, report: DriftReport) -> None:

@@ -694,6 +694,18 @@
       },
       "additionalProperties": false
     },
+    "ship_delegator": {
+      "type": "object",
+      "description": "a per-repo .claude/scripts/pr-ship.sh delegator so `gh ship` works in this repo (ignored in .git/info/exclude).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the per-repo gh-ship delegator",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
     "scope": {
       "type": "string",
       "description": "removed legacy key (tolerated, ignored)",

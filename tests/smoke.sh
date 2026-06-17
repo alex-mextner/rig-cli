@@ -218,6 +218,7 @@ ci: { enabled: false }
 git_hooks: { dispatcher: { enabled: false } }
 mcp: { enabled: false }
 agents_md: { enabled: false }
+ship_delegator: { enabled: false }
 gitignore: { enabled: false }
 tg_ctl: { enabled: false }
 permissions: { enabled: false }

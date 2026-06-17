@@ -502,6 +502,56 @@ sync.
 
 ---
 
+## `ship_delegator`
+
+Provisions the per-repo **`gh ship` delegator** — `.claude/scripts/pr-ship.sh` — so the global
+`gh ship` alias (which runs `<repo>/.claude/scripts/pr-ship.sh`) works in **this** repo on a clean
+machine. Historically that delegator existed **only in agent-tools**, so `gh ship` failed in every
+other managed repo (papered over by a runtime alias fallback); this is the durable fix — rig
+provisions it everywhere. Default **ON** — on `rig init` AND `rig apply` rig writes/reconciles the
+delegator; idempotent (a re-apply that finds it correct is a no-op).
+
+```yaml
+ship_delegator:
+  enabled: true     # provision .claude/scripts/pr-ship.sh so `gh ship` works here. Default ON.
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision the delegator (set `false` to leave the repo untouched) |
+
+**What the delegator does.** It's a thin shim that `exec`s the **canonical** generalized ship
+implementation (agent-tools' `ci/ship/ship.sh`). It prefers a **repo-local** `ci/ship/ship.sh`
+(so agent-tools self-hosts and runs its own checked-out version), and otherwise execs the
+**rig-baked canonical path** — the `ci/ship/ship.sh` in the agent-tools checkout rig applied from,
+resolved and baked in at plan time so the file content is deterministic. A clean machine therefore
+gets a working `gh ship` in every repo with no alias hacks.
+
+**Repo-local shadowing is intentional (and a debugging footgun to know about).** Because the
+delegator runs a repo-local `ci/ship/ship.sh` first, any repo that happens to carry one — a stale,
+hand-edited, or old copy — will run THAT, not the rig-baked canonical, and rig emits **no drift**
+for it (rig reconciles the delegator's bytes, never the repo-local ship.sh it may exec). This is by
+design for agent-tools' self-hosting; if `gh ship` "runs the wrong thing" in another repo, check for
+a stray `ci/ship/ship.sh` in that repo.
+
+**Worktree hygiene — the provisioned file does NOT dirty the tree.** `ship` refuses to merge from
+a dirty worktree, so an un-ignored provisioned file would break the very command it enables. rig
+adds `.claude/scripts/pr-ship.sh` to the repo's **`.git/info/exclude`** (the per-repo,
+**never-committed** git exclude), worktree-aware: in a git worktree `info/exclude` is **per-worktree**
+(it lives in that worktree's private gitdir, and `.git` is a file not a dir), so rig resolves the real
+path via `git rev-parse --git-path info/exclude` rather than assuming `<repo>/.git/info/exclude`. The
+entry is fenced with rig markers and
+reconciled idempotently (duplicates collapse, every other line is preserved verbatim).
+
+**Fail-closed.** If the agent-tools checkout has no `ci/ship/ship.sh`, rig provisions **nothing**
+(a note explains why) rather than writing a delegator that would exec a non-existent script.
+
+**Drift.** `rig status` flags the delegator as drift when the file is missing, its bytes differ
+from the rig-generated delegator, or the file is present but **not** git-ignored (an un-ignored
+delegator would dirty the worktree). `rig apply` reconciles. Shown in the **repo** section.
+
+---
+
 ## `github`
 
 Provisions a **GitHub repository branch ruleset** — the modern replacement for branch

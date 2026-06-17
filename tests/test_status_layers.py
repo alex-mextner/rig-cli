@@ -363,13 +363,14 @@ def test_status_clean_repo_exits_zero(tmp_path, capsys, fake_agent_tools, monkey
     repo = _git_repo(tmp_path / "repo")
     cfg = repo / "rig.yaml"
     # everything OFF, including the default-on categories that would otherwise drift: agents_md
-    # (the symlink), gitignore (the GLOBAL core.excludesfile block), and permissions (the harness
-    # command allowlist) — all on by default.
+    # (the symlink), the ship_delegator (.claude/scripts/pr-ship.sh), gitignore (the GLOBAL
+    # core.excludesfile block), and permissions (the harness command allowlist) — all on by default.
     cfg.write_text(
         f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
-        "agents_md: {enabled: false}\ngitignore: {enabled: false}\npermissions: {enabled: false}\n",
+        "agents_md: {enabled: false}\nship_delegator: {enabled: false}\n"
+        "gitignore: {enabled: false}\npermissions: {enabled: false}\n",
         encoding="utf-8",
     )
     rc = main(["status", "-C", str(repo)])

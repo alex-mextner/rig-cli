@@ -521,6 +521,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── agents_md (AGENTS.md canonical + CLAUDE.md symlink) ────────────────────────
     _build_agents_symlink(config, plan)
 
+    # ── ship_delegator (per-repo .claude/scripts/pr-ship.sh so `gh ship` works here) ─
+    _build_ship_delegator(config, catalog, plan)
+
     # ── github (repository branch ruleset via gh api) ─────────────────────────────
     _build_github_ruleset(config, plan)
 
@@ -759,6 +762,47 @@ def _build_agents_symlink(config: LoadedConfig, plan: InstallPlan) -> None:
             source=config.repo_root,
             target=config.repo_root,
             options={},
+        )
+    )
+
+
+def _build_ship_delegator(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) -> None:
+    """Plan the per-repo ``.claude/scripts/pr-ship.sh`` (``gh ship`` delegator) provisioning.
+
+    Default **ON**: every managed repo should expose the delegator the global ``gh ship`` alias
+    runs, so ``gh ship`` works there on a clean machine — not only in agent-tools (the only repo that
+    historically carried it). Opt out with ``ship_delegator: { enabled: false }``.
+
+    Fail-CLOSED on a checkout lacking the canonical ``ci/ship/ship.sh``: rig never provisions a
+    delegator that would exec a non-existent script. The canonical path is resolved from the
+    agent-tools checkout NOW and baked into the action, so the generated delegator content is
+    deterministic (a re-apply / drift compare is a byte-for-byte no-op). The classify-and-converge
+    + the ``.git/info/exclude`` ignore handling live in ``actions/`` (they depend on what is on
+    disk); the plan emits one idempotent action anchored at the repo root. No carrier in agent-tools.
+    """
+    sd = config.data.get("ship_delegator")
+    if sd is None:
+        sd = {}
+    if not isinstance(sd, dict):
+        return  # validate() already fail-closed on a non-mapping block
+    if sd.get("enabled") is False:
+        return
+    canonical = catalog.source / "ci" / "ship" / "ship.sh"
+    if not canonical.is_file():
+        plan.notes.append(
+            "ship_delegator: skipped — no ci/ship/ship.sh in this agent-tools checkout "
+            f"({catalog.source}); `gh ship` cannot delegate (update agent-tools to a version "
+            "that ships the ship gate)"
+        )
+        return
+    plan.actions.append(
+        Action(
+            kind="provision_ship_delegator",
+            category="ship_delegator",
+            item="delegator",
+            source=catalog.source,
+            target=config.repo_root,
+            options={"canonical_ship": str(canonical)},
         )
     )
 

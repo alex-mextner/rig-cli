@@ -368,6 +368,13 @@ _GITIGNORE_BLOCK = Block(
     },
 )
 
+_SHIP_DELEGATOR_BLOCK = Block(
+    doc="a per-repo .claude/scripts/pr-ship.sh delegator so `gh ship` works in this repo (ignored in .git/info/exclude).",
+    leaves={
+        "enabled": Leaf("boolean", "provision the per-repo gh-ship delegator", default=True),
+    },
+)
+
 _TG_CTL_BLOCK = Block(
     doc="the tg-ctl inbound daemon auto-started as a per-machine boot LaunchAgent (macOS).",
     leaves={
@@ -402,6 +409,7 @@ BLOCKS: dict[str, Block] = {
     "tmux": _TMUX_BLOCK,
     "gitignore": _GITIGNORE_BLOCK,
     "tg_ctl": _TG_CTL_BLOCK,
+    "ship_delegator": _SHIP_DELEGATOR_BLOCK,
 }
 
 # Every valid TOP-LEVEL key (scalars + blocks). Mirrors config._VALID_TOP_KEYS; the sync test

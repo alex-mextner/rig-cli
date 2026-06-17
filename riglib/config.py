@@ -43,6 +43,7 @@ _VALID_TOP_KEYS = {
     "tmux",
     "gitignore",
     "tg_ctl",
+    "ship_delegator",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
@@ -525,6 +526,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_tmux(data.get("tmux", {}))
     _validate_gitignore(data.get("gitignore", {}))
     _validate_tg_ctl(data.get("tg_ctl", {}))
+    _validate_ship_delegator(data.get("ship_delegator", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -952,6 +954,57 @@ GITIGNORE_BLOCK_COMMENT = (
     "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/; "
     "rig ignores them globally."
 )
+
+
+# ── ship_delegator ─────────────────────────────────────────────────────────────────
+# rig provisions a per-repo ``.claude/scripts/pr-ship.sh`` thin delegator so the repo-keyed
+# ``gh ship`` alias (``gh ship`` → ``<repo>/.claude/scripts/pr-ship.sh``) works in EVERY managed
+# repo on a clean machine — not only in agent-tools, which is the only repo that historically
+# carried it. The delegator execs the canonical ``ci/ship/ship.sh`` (agent-tools' real ship
+# implementation): repo-local first (so agent-tools self-hosts), else the rig-baked canonical
+# path resolved from the agent-tools checkout at apply time. The provisioned file is IGNORED in
+# the repo's ``.git/info/exclude`` (a per-repo, never-committed exclude) so it does not dirty the
+# worktree — ship refuses a dirty tree, so an un-ignored provisioned file would break the very
+# command it enables. Defined here (the schema layer, stdlib-only) so the plan builder, runner,
+# and drift reference the SAME relative path + marker; the runner imports them so the two never
+# drift.
+SHIP_DELEGATOR_REL_PATH = ".claude/scripts/pr-ship.sh"
+
+# The markers that fence rig's managed entry in the per-repo ``.git/info/exclude``. Distinct text
+# from the GLOBAL excludes markers so the two managed blocks never collide if a future change put
+# both in one file (they don't today — global vs per-repo). Same begin/end shape the global block
+# uses, reconciled by the same marker-block machinery.
+SHIP_DELEGATOR_EXCLUDE_BEGIN_MARKER = "# >>> rig-managed ship delegator (do not edit) >>>"
+SHIP_DELEGATOR_EXCLUDE_END_MARKER = "# <<< rig-managed ship delegator (do not edit) <<<"
+SHIP_DELEGATOR_EXCLUDE_COMMENT = (
+    "# rig provisions .claude/scripts/pr-ship.sh (the `gh ship` delegator); ignored so it "
+    "does not dirty the worktree."
+)
+
+
+def _validate_ship_delegator(sd: dict[str, Any]) -> None:
+    """Validate the ``ship_delegator`` block — rig's per-repo ``gh ship`` delegator.
+
+    Default **ON**: every managed repo gets ``.claude/scripts/pr-ship.sh`` so ``gh ship`` works
+    there on a clean machine. The only knob is ``enabled`` (opt out with ``{ enabled: false }``).
+    Fail-closed, consistent with every other block, on a non-mapping block, a non-bool ``enabled``,
+    or an unknown key (typo guard).
+    """
+    if not isinstance(sd, dict):
+        raise ConfigError("ship_delegator must be a mapping", schema_path="ship_delegator")
+    if not sd:
+        return
+    _reject_unknown_keys(sd, "ship_delegator")
+    # `enabled` must be a real bool when PRESENT — and we reject an explicit `null` (`enabled: ~`)
+    # too: the published JSON Schema declares `boolean` (null is invalid there), so accepting null in
+    # the validator would let rig pass a config an editor / CI schema-lint flags. To take the default,
+    # OMIT the key; don't set it to null. (`"enabled" in sd`, not `.get()`, so an explicit null is
+    # caught rather than silently read as "absent".)
+    if "enabled" in sd and not isinstance(sd["enabled"], bool):
+        raise ConfigError(
+            f"ship_delegator.enabled must be a bool, got {sd['enabled']!r}",
+            schema_path="ship_delegator.enabled",
+        )
 
 
 def _validate_gitignore(gi: dict[str, Any]) -> None:

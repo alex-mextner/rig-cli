@@ -40,6 +40,7 @@ _CATEGORY_LAYER = {
     "tg_ctl": GLOBAL,
     # REPO — this repo, from ./rig.yaml
     "ci": REPO,
+    "ship_delegator": REPO,
     "agents_md": REPO,
     "github": REPO,
 }
