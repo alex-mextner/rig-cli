@@ -425,7 +425,7 @@ def test_cli_set_global_bad_value_not_masked_by_repo_override(
     # A --global set of a catalog-backed key (agent_tools_source) to a BAD value must be rejected
     # even when THIS repo's rig.yaml overrides the same key with a valid one. The merged cascade
     # would mask the breakage (repo wins), persisting a global config that fails in every other
-    # repo. The global layer is validated in isolation, so the write rolls back. (codex P2)
+    # repo. The global layer is validated in isolation, so the write rolls back.
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
     gpath = config.global_config_path()
     original_global = f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
@@ -447,6 +447,43 @@ def test_cli_set_global_bad_value_not_masked_by_repo_override(
     # fail-closed: the global file is rolled back to its prior, valid contents
     assert gpath.read_text(encoding="utf-8") == original_global
     assert len(_mock_apply) == 0  # rejected before any reconcile
+
+
+def test_cli_set_global_without_own_source_skips_isolated_catalog_scan(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply
+):
+    # A --global set of a NON-catalog key, where the global file does NOT pin its own
+    # `agent_tools_source`, must succeed: the checkout is legitimately deferred to the repo
+    # (or env), so the isolated global validation has no own coordinate to check and must NOT
+    # run a catalog scan against the global layer (which would fail for lack of a checkout).
+    # Guards the documented `agent_tools_source is None` early return against a future "fix".
+    import riglib.cli as cli_mod
+
+    isolated_calls: list = []
+    real_validate = cli_mod._validate_layer_in_isolation
+
+    def _spy(layer_path):
+        isolated_calls.append(layer_path)
+        return real_validate(layer_path)
+
+    monkeypatch.setattr(cli_mod, "_validate_layer_in_isolation", _spy)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    gpath = config.global_config_path()
+    _w(gpath, "version: 1\n")  # global file pins NO agent_tools_source — defers to the repo
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n",
+    )
+    rc = main(["config", "set", "defaults.on_conflict", "overwrite", "-C", str(repo), "--global"])
+    assert rc == 0  # the deferring global config is accepted, not spuriously rejected
+    assert isolated_calls == [gpath]  # isolation ran on the global layer …
+    # … but found no own agent_tools_source, so it no-op'd (the value still landed in global)
+    import yaml
+
+    assert yaml.safe_load(gpath.read_text(encoding="utf-8"))["defaults"]["on_conflict"] == "overwrite"
 
 
 def test_cli_get_outside_repo_fails_soft(tmp_path, capsys, monkeypatch):
