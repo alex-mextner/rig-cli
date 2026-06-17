@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .github_merge import GITHUB_MERGE_DEFAULTS
 from .github_ruleset import GITHUB_RULESET_DEFAULTS
 
 
@@ -37,6 +38,10 @@ def default_state(
     # plus the plan-gating `enabled` flag — so the committed rig.yaml and the action can never
     # drift apart.
     github_ruleset = {"enabled": True, **GITHUB_RULESET_DEFAULTS}
+    # The github merge-button policy scaffold mirrors the action's secure defaults exactly (one
+    # source), plus the plan-gating `enabled` flag — so the committed rig.yaml and the action can
+    # never drift apart.
+    github_merge = {"enabled": True, **GITHUB_MERGE_DEFAULTS}
 
     by_type_enable = [project_type] if project_type and project_type != "unknown" else []
     # Always the portable ``~/.config/git`` token (no machine-specific path, no env token
@@ -126,7 +131,12 @@ def default_state(
         # hand-made ruleset with it + zero bypass actors blocks every merge to main. Opt out
         # with ruleset.enabled: false. Add status checks with required_status_checks: [names].
         # The knobs come straight from the action's GITHUB_RULESET_DEFAULTS (one source).
-        "github": {"ruleset": github_ruleset},
+        # The github MERGE-button policy (squash-only, auto-delete head branch, allow auto-merge),
+        # reconciled via `PATCH /repos/{o}/{r}` on the same `gh api` backend — a no-op on a repo
+        # with no github remote. These are repo SETTINGS, not a ruleset, so they never lock anyone
+        # out. Opt out with merge.enabled: false. The knobs come straight from the action's
+        # GITHUB_MERGE_DEFAULTS (one source).
+        "github": {"ruleset": github_ruleset, "merge": github_merge},
         # NB: `gitignore` (the GLOBAL git-excludes block) is deliberately NOT scaffolded into this
         # generated, COMMITTED repo `rig.yaml`. It is GLOBAL (machine-wide) config — it belongs in
         # the global rig layer (~/.config/rig/config.yaml), with zero per-repo commits — and it is

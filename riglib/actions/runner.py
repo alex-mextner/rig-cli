@@ -24,6 +24,7 @@ from ..config import (
     GITIGNORE_BLOCK_COMMENT,
     GITIGNORE_END_MARKER,
 )
+from ..github_merge import build_merge_body, normalize_merge
 from ..github_ruleset import (
     build_ruleset_body,
     find_managed_ruleset,
@@ -2268,6 +2269,82 @@ def _do_provision_github_ruleset(action: Action, on_conflict: str) -> ActionResu
     return ActionResult(action, "updated", f"github-ruleset: updated '{name}' (id={rs_id}) on {owner}/{repo}")
 
 
+# ── rig-managed GitHub repo MERGE-button policy (§5 github.merge) ────────────────────
+# rig reconciles the repo's merge-button policy — the squash-only merge model, auto-delete head
+# branch on merge, allow-auto-merge — via `PATCH /repos/{owner}/{repo}` on the same `gh api`
+# backend as the ruleset. The DESIRED body, the managed-field set, and the normalized
+# desired-vs-actual comparison live in `riglib/github_merge.py` (pure, no Action dependency, so
+# plan/state import them without a cycle); this module holds only the live-API classification and
+# the Action handler. apply and drift share `github_merge_state` so they can never disagree on "in
+# sync". CAPABILITY DEGRADE: unlike the ruleset, these are repo SETTINGS (not a ruleset), so a
+# PATCH never locks anyone out — but a token without admin on the repo gets HTTP 403, which surfaces
+# as a visible error (apply) / "could not verify" (drift), never a silent green or a crash. The
+# RIG_GH_DRY_RUN seam skips the PATCH (GET still runs so drift can read the live state).
+def github_merge_state(action: Action) -> tuple[str, dict]:
+    """Classify the live-vs-desired merge policy — the one source apply + drift share.
+
+    Returns ``(state, info)`` where ``state`` is one of:
+      - ``no_remote`` — the repo has no github origin remote: nothing to provision.
+      - ``gh_error``  — reading the repo failed (gh missing / not authed / no admin / API error).
+      - ``update``    — the live merge fields differ from the desired body: apply PATCHes them.
+      - ``ok``        — the live merge fields already equal the desired body.
+    ``info`` carries ``owner``/``repo``/``desired`` and, on ``gh_error``, a ``detail`` string.
+    There is no ``create`` state: a github repo ALWAYS has merge settings, so the only outcomes
+    are converge (update) or already-converged (ok).
+    """
+    owner_repo = github_owner_repo(action.target)
+    desired = build_merge_body(action.options)
+    if owner_repo is None:
+        return "no_remote", {"desired": desired}
+    owner, repo = owner_repo
+    info: dict = {"owner": owner, "repo": repo, "desired": desired}
+    rc, out, err = _gh_api([f"repos/{owner}/{repo}"])
+    if rc != 0:
+        info["detail"] = err.strip() or out.strip() or f"gh api exited {rc}"
+        return "gh_error", info
+    try:
+        current = json.loads(out)
+    except ValueError:
+        info["detail"] = "gh api returned non-JSON repo object"
+        return "gh_error", info
+    if not isinstance(current, dict):
+        info["detail"] = "gh api returned a non-object repo response"
+        return "gh_error", info
+    if normalize_merge(current) == normalize_merge(desired):
+        return "ok", info
+    return "update", info
+
+
+def _do_provision_github_merge(action: Action, on_conflict: str) -> ActionResult:
+    """Provision (PATCH) the rig-managed GitHub merge-button policy via ``gh api``.
+
+    Shares :func:`github_merge_state` with drift, so status and apply read one classification. No
+    github remote → ``skipped`` (never an error). ``RIG_GH_DRY_RUN`` computes the PATCH but skips
+    it, returning what WOULD change. ``gh`` failures (missing binary, not authed, no admin on the
+    repo → 403) surface as an ``error`` result with the detail — degrade-loud, never a silent ok.
+    """
+    state, info = github_merge_state(action)
+    if state == "no_remote":
+        return ActionResult(action, "skipped", "github-merge: no github origin remote — nothing to provision")
+    if state == "gh_error":
+        return ActionResult(action, "error", f"github-merge: {info.get('detail', 'gh api failed')}")
+
+    owner, repo, desired = info["owner"], info["repo"], info["desired"]
+    if state == "ok":
+        return ActionResult(action, "skipped", f"github-merge: policy already matches on {owner}/{repo}")
+
+    # state == "update"
+    if _gh_dry_run():
+        return ActionResult(action, "updated", f"github-merge: RIG_GH_DRY_RUN — would UPDATE merge policy on {owner}/{repo} (not patched)")
+    rc, out, err = _gh_api(
+        ["--method", "PATCH", f"repos/{owner}/{repo}", "--input", "-"],
+        input_text=json.dumps(desired),
+    )
+    if rc != 0:
+        return ActionResult(action, "error", f"github-merge: update failed: {err.strip() or out.strip()}")
+    return ActionResult(action, "updated", f"github-merge: updated merge policy on {owner}/{repo}")
+
+
 # ── rig-managed GLOBAL git-excludes block ──────────────────────────────────────────
 # rig maintains a marker-delimited block in git's GLOBAL ``core.excludesfile`` so harness
 # artifacts (chiefly Claude Code's throwaway ``**/.claude/worktrees/``) are ignored in EVERY repo
@@ -2567,6 +2644,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_schedule": _do_provision_schedule,
     "provision_agents_symlink": _do_provision_agents_symlink,
     "provision_github_ruleset": _do_provision_github_ruleset,
+    "provision_github_merge": _do_provision_github_merge,
     "provision_tmux": _do_provision_tmux,
     "provision_global_excludes": _do_provision_global_excludes,
     "provision_tg_ctl": _do_provision_tg_ctl,

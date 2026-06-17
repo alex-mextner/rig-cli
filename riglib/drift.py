@@ -34,6 +34,7 @@ from .actions.runner import (
     descriptor_text,
     desired_harness_value,
     find_managed_bridge_hook,
+    github_merge_state,
     github_ruleset_state,
     harness_settings_file,
     hook_bridge_entries,
@@ -128,6 +129,8 @@ def detect(
             _check_agents_symlink(action, report)
         elif action.kind == "provision_github_ruleset":
             _check_github_ruleset(action, report)
+        elif action.kind == "provision_github_merge":
+            _check_github_merge(action, report)
         elif action.kind == "provision_tmux":
             _check_tmux(action, report)
         elif action.kind == "provision_global_excludes":
@@ -324,6 +327,33 @@ def _check_github_ruleset(action: Action, report: DriftReport) -> None:
         report.items.append(
             DriftItem("modified", "github", "ruleset", action.target,
                       f"could not verify ruleset '{name}' on {info.get('owner')}/{info.get('repo')} "
+                      f"({info.get('detail', 'gh api failed')}) — status unknown, not confirmed in sync")
+        )
+
+
+def _check_github_merge(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured GitHub merge-button policy and the live repo.
+
+    Switches on the SAME :func:`github_merge_state` apply uses (one classification), so status and
+    apply can never disagree on "in sync":
+
+    - ``update``    → ``modified``: the live merge fields differ from config (apply PATCHes them).
+    - ``ok``        → no drift item (in sync).
+    - ``no_remote`` → no drift item (a repo with no github origin has nothing to reconcile).
+    - ``gh_error``  → a VISIBLE "could not verify" item (not silent in-sync): rig couldn't read the
+                      repo (gh missing / not authed / no admin / API error), so it must NOT report
+                      in sync — that would mask a real drift behind a green status.
+    """
+    state, info = github_merge_state(action)
+    if state == "update":
+        report.items.append(
+            DriftItem("modified", "github", "merge", action.target,
+                      f"merge policy on {info['owner']}/{info['repo']} differs from config (apply converges it)")
+        )
+    elif state == "gh_error":
+        report.items.append(
+            DriftItem("modified", "github", "merge", action.target,
+                      f"could not verify merge policy on {info.get('owner')}/{info.get('repo')} "
                       f"({info.get('detail', 'gh api failed')}) — status unknown, not confirmed in sync")
         )
 

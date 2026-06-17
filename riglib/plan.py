@@ -26,6 +26,7 @@ from .config import (
     GITIGNORE_DEFAULT_EXCLUDESFILE,
     LoadedConfig,
 )
+from .github_merge import GITHUB_MERGE_DEFAULTS
 from .github_ruleset import GITHUB_RULESET_DEFAULTS
 
 
@@ -70,7 +71,7 @@ _DEFAULT_HARNESS_KIND = "claude-code"
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_tmux | provision_global_excludes
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_github_merge | provision_tmux | provision_global_excludes
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -521,6 +522,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── github (repository branch ruleset via gh api) ─────────────────────────────
     _build_github_ruleset(config, plan)
 
+    # ── github.merge (repository merge-button policy via gh api) ───────────────────
+    _build_github_merge(config, plan)
+
     # ── tmux (rig-managed tmux configuration) ──────────────────────────────────────
     _build_tmux(config, plan)
 
@@ -784,6 +788,43 @@ def _build_github_ruleset(config: LoadedConfig, plan: InstallPlan) -> None:
             kind="provision_github_ruleset",
             category="github",
             item="ruleset",
+            source=config.repo_root,
+            target=config.repo_root,
+            options=options,
+        )
+    )
+
+
+def _build_github_merge(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the GitHub repo merge-button-policy provisioning (``github.merge``).
+
+    Default **ON** (like ``github.ruleset``): rig reconciles the squash-only merge model +
+    auto-delete-head-branch + allow-auto-merge via ``PATCH /repos/{o}/{r}``. Opt out with
+    ``github: { merge: { enabled: false } }``. The whole GitHub-vs-desired classification lives
+    in ``actions/`` (it depends on the live API), so the plan emits ONE idempotent action carrying
+    the resolved knobs; the repo root is the target the action resolves ``owner/repo`` from. The
+    action returns ``skipped`` on a repo with no github remote, so "default ON when the repo has a
+    github remote" needs no detection here. ``enabled`` is a plan-gating meta-key (stripped before
+    the merge); an explicit ``null`` knob falls back to its secure default, never overlays it with
+    None.
+    """
+    gh = config.data.get("github")
+    if gh is None:
+        gh = {}
+    if not isinstance(gh, dict):
+        return  # validate() already fail-closed on a non-mapping block
+    merge = gh.get("merge", {})
+    if not isinstance(merge, dict):
+        return
+    if merge.get("enabled") is False:
+        return
+    overrides = {k: v for k, v in merge.items() if k != "enabled" and v is not None}
+    options = {**GITHUB_MERGE_DEFAULTS, **overrides}
+    plan.actions.append(
+        Action(
+            kind="provision_github_merge",
+            category="github",
+            item="merge",
             source=config.repo_root,
             target=config.repo_root,
             options=options,

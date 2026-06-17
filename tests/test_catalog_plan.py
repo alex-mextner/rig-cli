@@ -204,8 +204,8 @@ def test_xdg_config_home_maps_dispatcher_dir(fake_agent_tools, tmp_path, monkeyp
 
 def test_plan_disabled_category(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
-    # agents_md, the github ruleset, the global-excludes block, and tg_ctl are default-ON, so turn
-    # them off too to assert a truly empty plan.
+    # agents_md, the github ruleset + merge policy, the global-excludes block, and tg_ctl are
+    # default-ON, so turn them off too to assert a truly empty plan.
     cfg = _cfg(
         {
             "skills": {"enabled": False},
@@ -213,7 +213,7 @@ def test_plan_disabled_category(fake_agent_tools, tmp_path):
             "ci": {"enabled": False},
             "mcp": {"enabled": False},
             "agents_md": {"enabled": False},
-            "github": {"ruleset": {"enabled": False}},
+            "github": {"ruleset": {"enabled": False}, "merge": {"enabled": False}},
             "gitignore": {"enabled": False},
             "tg_ctl": {"enabled": False},
         },

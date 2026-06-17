@@ -638,17 +638,33 @@ _GITHUB_RULESET_KEYS = {
     "required_status_checks",
 }
 
+# The merge-button-policy knobs are ALL plain booleans (typo + type guard). `enabled` is the
+# plan-gating meta-key; the rest map to repo-edit API merge flags. Listed once so the validator
+# and the action builder reference the SAME knob set.
+_GITHUB_MERGE_BOOL_KNOBS = (
+    "enabled",
+    "squash_merge",
+    "merge_commit",
+    "rebase_merge",
+    "delete_branch_on_merge",
+    "allow_auto_merge",
+    "allow_update_branch",
+)
+_GITHUB_MERGE_KEYS = set(_GITHUB_MERGE_BOOL_KNOBS)
+
 
 def _validate_github(gh: dict[str, Any]) -> None:
-    """Validate the ``github`` block — the GitHub repository ruleset rig provisions.
+    """Validate the ``github`` block — the GitHub repository settings rig provisions.
 
-    rig reconciles a branch ruleset (the modern replacement for branch protection) on the
-    repo's default branch via ``gh api``, named by ``ruleset.name`` (rig owns rulesets with
-    that name). Default **ON** when the repo has a github remote; a repo without one is a
-    no-op (the action skips, never errors). Fail-closed, consistent with every other block,
-    on: a non-mapping block, an unknown ``github`` / ``github.ruleset`` key (typo guard), a
-    non-bool boolean knob, a ``required_reviews`` that is not an int >= 0, and a
-    ``required_status_checks`` that is not a list of strings.
+    Two sub-blocks, both default **ON** when the repo has a github remote, both no-ops on a repo
+    without one (the actions skip, never error): ``ruleset`` reconciles a branch ruleset (the
+    modern replacement for branch protection) on the repo's default branch via ``gh api``, named
+    by ``ruleset.name``; ``merge`` reconciles the repo merge-button policy (squash-only,
+    auto-delete head branch, allow-auto-merge) via ``PATCH /repos/{o}/{r}``. Fail-closed,
+    consistent with every other block, on: a non-mapping block, an unknown ``github`` /
+    ``github.ruleset`` / ``github.merge`` key (typo guard), a non-bool boolean knob, a
+    ``ruleset.required_reviews`` that is not an int >= 0, and a ``ruleset.required_status_checks``
+    that is not a list of strings.
 
     The footgun guard is structural, not a config knob: rig NEVER emits the ``update``
     ("Restrict updates") rule (it locks out every merge to a protected default branch), and
@@ -659,7 +675,7 @@ def _validate_github(gh: dict[str, Any]) -> None:
         raise ConfigError("github must be a mapping")
     if not gh:
         return
-    unknown = set(gh) - {"ruleset"}
+    unknown = set(gh) - {"ruleset", "merge"}
     if unknown:
         raise ConfigError(f"unknown github key(s): {', '.join(sorted(unknown))}")
     ruleset = gh.get("ruleset", {})
@@ -688,6 +704,16 @@ def _validate_github(gh: dict[str, Any]) -> None:
             raise ConfigError(
                 f"github.ruleset.required_status_checks must be a list of strings, got {checks!r}"
             )
+    merge = gh.get("merge", {})
+    if not isinstance(merge, dict):
+        raise ConfigError("github.merge must be a mapping")
+    unknown_mg = set(merge) - _GITHUB_MERGE_KEYS
+    if unknown_mg:
+        raise ConfigError(f"unknown github.merge key(s): {', '.join(sorted(unknown_mg))}")
+    for knob in _GITHUB_MERGE_BOOL_KNOBS:
+        value = merge.get(knob)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(f"github.merge.{knob} must be a bool, got {value!r}")
 
 
 # The nested sub-blocks the tmux block accepts, each with its own allowed keys. Listed once so
