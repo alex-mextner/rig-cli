@@ -78,6 +78,22 @@ def _isolate_scheduler(monkeypatch):
     monkeypatch.setattr(runner, "_write_crontab", _fake_write_crontab)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_tmux_activation(monkeypatch):
+    """Never let a test run the LIVE tmux activation (clone plugins / launchctl / first save).
+
+    ``_do_provision_tmux`` now ALSO activates the rig-managed tmux on a clean machine: it clones
+    tpm/resurrect/continuum, creates ~/.tmux/resurrect, ``launchctl load -w``s the boot agent,
+    takes a first ``resurrect save``, and cleans continuum's stale macOS boot Login Items
+    (DEFECTS 1/4/5/6). Those are real network + daemon + ``tmux``-server effects. This guard sets
+    ``RIG_TMUX_DRY_RUN=1`` suite-wide so the file-write path still runs (and is asserted) while the
+    live activation is skipped. The DEDICATED activation tests + the REAL e2e clear/override this
+    (``monkeypatch.delenv`` or ``setenv(..., "0")``) and stub the seams, so they exercise the real
+    logic safely. Mirrors ``_isolate_scheduler``.
+    """
+    monkeypatch.setenv("RIG_TMUX_DRY_RUN", "1")
+
+
 @pytest.fixture
 def fake_agent_tools(tmp_path: Path) -> Path:
     """A minimal but structurally-valid agent-tools checkout."""

@@ -486,6 +486,9 @@ tmux:
     session: main               # the canonical session name
   boot:
     enabled: true               # a launchd agent that brings tmux up after a macOS reboot
+  login_shell:
+    enabled: true               # restored panes are LOGIN shells (so ~/.zprofile/PATH is sourced)
+    shell: ""                   # "" → resolve the user's $SHELL at apply; else an absolute path
 ```
 
 | Key | Type | Default | Meaning |
@@ -503,7 +506,10 @@ tmux:
 | `cc_restore.enabled` | bool | `true` | wire cc-save/cc-restore via resurrect post-save/post-restore hooks |
 | `anti_sprawl.enabled` | bool | `true` | install the attach-or-create entry script |
 | `anti_sprawl.session` | str | `main` | the one canonical session name |
-| `boot.enabled` | bool | `true` | write a launchd agent (macOS) that starts tmux after a reboot |
+| `boot.enabled` | bool | `true` | write a launchd agent (macOS) that runs the boot script after a reboot, and `launchctl load -w` it on apply |
+| `boot.label` | str | `ai.hyperide.tmux-boot` | the launchd agent label (and plist filename stem) |
+| `login_shell.enabled` | bool | `true` | set a **login-shell** `default-command` so restored panes source `~/.zprofile`/PATH (resurrect otherwise restores a non-login shell with a broken env) |
+| `login_shell.shell` | str | `""` | login shell path. `""` resolves the user's `$SHELL` at apply (falling back to `/bin/zsh` then `/bin/sh`); a non-empty override **must be an absolute path** to the shell binary (a relative name or a command-with-args is rejected, so it can't silently produce a broken `default-command`) and is used verbatim. The path is **baked at generation** — NOT a tmux `${SHELL}` reference, because tmux rejects `${VAR:-default}` and would abort the whole config |
 
 **Apply mechanism — import-preferred, managed-block fallback.**
 
@@ -537,14 +543,35 @@ a weeks-stale session. rig's generator pins the order: plugin options → cc-res
 **Moshi tweak (opt-in, BEFORE continuum init)** → resurrect init → **continuum init LAST** → tpm
 init last-of-all. So the Moshi tweak can never wipe continuum's hook again.
 
+**Boot + live activation (clean machine → fully working, zero manual steps).** A `rig apply`
+with `boot.enabled` writes a launchd agent whose entrypoint is the generated **boot script**
+(`tmux-boot.sh`), then **`launchctl load -w`**s it so it fires at login across reboots. The boot
+script runs `tmux new-session -d` (NOT `tmux start-server`): a bare `start-server` starts an
+**empty** server that loads neither the config nor any plugin (tmux sources the conf only on the
+first session), so `@continuum-restore` never fires — `tmux ls` says "no server running" after
+login. Creating a session loads `~/.tmux.conf` → the sourced `rig.tmux.conf` → continuum →
+restore. The boot script is idempotent (`has-session` → exit 0), so a warm login never spawns a
+duplicate. On the same apply rig also: creates `~/.tmux/resurrect` (absent → resurrect writes no
+snapshot → nothing to restore); **clones** `tpm` + `tmux-resurrect` + `tmux-continuum` into
+`~/.tmux/plugins` if missing (so the `@plugin` decls resolve on a clean machine); takes a first
+`resurrect save` (so a reboot has something to restore); and on macOS **cleans continuum's own
+stale boot** (its `osx_iterm/terminal_start_tmux.sh` Login Items + an old `Tmux.Start` launchd
+agent) that would otherwise compete with rig's boot agent. Every step is idempotent and non-fatal
+(an offline machine just skips the clone and retries on the next apply). Set `RIG_TMUX_DRY_RUN=1`
+to write the on-disk artifacts but skip all live activation (CI / containers).
+
 **cc-restore — per-window Claude Code resume by exact session id.** rig installs two managed
 scripts and wires them via `@resurrect-hook-post-save-all` / `@resurrect-hook-post-restore-all`:
 
-- **`cc-save.sh`** — for every pane whose command is `claude`, take its cwd, find the **newest**
-  session id under `~/.claude/projects/<encoded-cwd>/`, and write a `window/pane → cwd →
-  session_id` map. **Encoding (verified against real on-disk dirs):** the projects-dir name is
-  the cwd with **every `/` and `.` replaced by `-`** (e.g. `/Users/u/.files` →
-  `-Users-u--files`).
+- **`cc-save.sh`** — for every pane whose **process tree** contains a `claude` process, take its
+  cwd, find the **newest** session id under `~/.claude/projects/<encoded-cwd>/`, and write a
+  `window/pane → cwd → session_id` map. **Detection is by the process TREE, not the command
+  string:** Claude Code shows up in `pane_current_command` as its VERSION (e.g. `2.1.178`), and
+  the real `claude` process is a CHILD of the pane's shell — so cc-save walks the pane's
+  descendants (`ps -eo pid,ppid,comm`) for a process whose command is `claude`. (Filtering on
+  `pane_current_command == claude` matched nothing → an empty map → cc never resumed.)
+  **Encoding (verified against real on-disk dirs):** the projects-dir name is the cwd with
+  **every `/` and `.` replaced by `-`** (e.g. `/Users/u/.files` → `-Users-u--files`).
 - **`cc-restore.sh`** — after a reboot, for each mapped window run `claude --resume <id>` —
   **only into a fresh shell pane** (never on top of a running `claude`). A stale/missing id
   falls back to `claude --continue` (most-recent session in that cwd) so a reboot is never left
@@ -572,17 +599,19 @@ user's shell rc): `[ -z "$TMUX" ] && exec ~/.config/rig/tmux/tmux-attach.sh`. On
 there is **one** canonical tmux path — the rumored second wrapper (`ln`/`.ln.conf`) does not
 exist here (`/bin/ln` is coreutils; no `~/.ln.conf`), so there is nothing to reconcile against.
 
-**boot.** rig's launchd agent is the **single** boot path. It writes
-`~/Library/LaunchAgents/ai.hyperide.tmux-boot.plist` (`RunAtLoad`) that runs `tmux start-server`
-at login; `@continuum-restore 'on'` then restores the saved session into it — less iTerm-coupled
-than the old `osx_iterm_start_tmux.sh` approach. **rig deliberately keeps `@continuum-boot 'off'`
-in the generated config:** `@continuum-boot 'on'` would make tmux-continuum install its OWN,
-untracked boot artifact (the iTerm-coupled `Tmux.Start.plist` on macOS / a systemd user unit on
-Linux) — a second, competing boot path rig can't manage. So continuum handles *restore*, rig's
-launchd agent handles *boot*. **rig writes the plist but does NOT `launchctl load` it,** and never
-runs `tmux source-file` against the user's **live** server — the on-disk result is prepared; the
-**user reloads / reboots** when ready (so an active session is never disrupted). The boot path can
-only be fully proven by an actual reboot.
+**boot.** rig's launchd agent is the **single** boot path; the mechanics are in the
+"Boot + live activation" section above — in short: the agent's `RunAtLoad` plist runs the
+generated **boot script** (`tmux-boot.sh` → `tmux new-session -d`, NOT a bare `tmux start-server`,
+which would start an empty server with no conf/plugins loaded), `@continuum-restore 'on'` restores
+the saved session into it, and `rig apply` **`launchctl load -w`s** the agent so it fires at login.
+**rig deliberately keeps `@continuum-boot 'off'`** in the generated config: `@continuum-boot 'on'`
+would make tmux-continuum install its OWN, untracked boot artifact (the iTerm-coupled
+`Tmux.Start.plist` on macOS / a systemd user unit on Linux) — a second, competing boot path; rig
+also **cleans** that stale artifact on macOS. So continuum handles *restore*, rig's launchd agent
+handles *boot*. rig never runs `tmux source-file` against the user's **live** server (the user
+reloads their config when ready); the boot agent's script is idempotent (`has-session` → exit 0,
+no duplicate, no pane touched), so loading it does not disrupt an active session. The
+boot-from-cold path can only be fully proven by an actual reboot.
 
 ---
 

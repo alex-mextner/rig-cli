@@ -37,6 +37,7 @@ weeks-stale session. Generating the region lets rig pin the order and end the bu
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 from dataclasses import dataclass
@@ -62,6 +63,31 @@ DEFAULT_RESURRECT_PROCESSES = ["ssh", "psql", "mysql", "sqlite3"]
 # explicit so a re-apply pins it rather than relying on the plugin default drifting.
 DEFAULT_SAVE_INTERVAL = 15
 
+# DEFECT 6: the tmux plugins rig installs on a CLEAN machine (empty ~/.tmux/plugins). The
+# `@plugin` declarations in rig.tmux.conf only RESOLVE once these are cloned; tpm itself reads
+# them. ONE source of truth — ``{dir_name: (clone_url, real_entrypoint)}`` — consumed by the
+# activation (clone-if-missing), the completeness check (is this a full checkout?), and drift,
+# so they can NEVER disagree on the entrypoint. NB the entrypoint is the PLUGIN's own basename,
+# NOT the repo dir name: tmux-resurrect ships ``resurrect.tmux`` (not ``tmux-resurrect.tmux``),
+# tmux-continuum ships ``continuum.tmux``, tpm ships ``tpm``. The generated
+# ``run-shell ~/.tmux/plugins/<dir>/<entry>`` lines use these exact names, so the completeness
+# check MUST match them or a REAL checkout is judged partial and re-cloned every apply (the
+# entrypoint-name-drift bug review caught).
+#
+# TRUST / UPDATE CONTRACT (explicit — these ARE the canonical upstream repos tpm itself clones):
+# the activation does a one-shot ``git clone --depth 1`` of each repo's DEFAULT BRANCH the first
+# time it is MISSING, and then NEVER touches it again (an existing complete checkout is left
+# exactly as-is — the user owns plugin updates via tpm's own ``prefix + U``). rig deliberately
+# does NOT pin a commit SHA: tpm's whole model is "clone the canonical plugin repos", a pinned SHA
+# would silently rot and diverge from what every other tpm user runs, and the user can already pin
+# via their own tooling. So the stored value is the repo URL (not ``url@sha``); the contract is
+# "install the canonical plugin if absent, never auto-upgrade" — NOT "pin an exact ref".
+PLUGINS = {
+    "tpm": ("https://github.com/tmux-plugins/tpm", "tpm"),
+    "tmux-resurrect": ("https://github.com/tmux-plugins/tmux-resurrect", "resurrect.tmux"),
+    "tmux-continuum": ("https://github.com/tmux-plugins/tmux-continuum", "continuum.tmux"),
+}
+
 # The canonical single-session name for the anti-sprawl attach-or-create entry. A reconnect
 # re-attaches THIS session instead of spawning a duplicate.
 DEFAULT_SESSION = "main"
@@ -85,6 +111,11 @@ CC_RESTORE_NAME = "cc-restore.sh"
 CC_MAP_NAME = "cc-sessions.map"
 ATTACH_NAME = "tmux-attach.sh"
 RIG_CONF_NAME = "rig.tmux.conf"
+# The boot entrypoint the launchd agent runs. DEFECT 1: the agent must NOT run a bare
+# `tmux start-server` (an EMPTY server — tmux loads ~/.tmux.conf only on the FIRST session, so
+# continuum-restore never fires). This script does `tmux new-session -d` (which loads the conf
+# → the sourced rig.tmux.conf → continuum → restore) so a cold boot actually comes up restored.
+BOOT_NAME = "tmux-boot.sh"
 
 # The base backup suffix for the migrated ~/.tmux.conf. The runner writes a UNIQUE timestamped
 # backup (`.rig-bak-<UTC>`) on every migrating apply (see runner._timestamped_backup_path), so a
@@ -115,6 +146,8 @@ class TmuxPlan:
     anti_sprawl_session: str
     boot_enabled: bool
     boot_label: str
+    login_shell_enabled: bool
+    login_shell: str  # "" → resolve $SHELL at config-eval time in the shell; else a literal path
 
     # ── resolved artifact paths ──────────────────────────────────────────────────────
     @property
@@ -137,9 +170,14 @@ class TmuxPlan:
     def attach_path(self) -> Path:
         return self.generated_dir / ATTACH_NAME
 
+    @property
+    def boot_script_path(self) -> Path:
+        return self.generated_dir / BOOT_NAME
+
     def managed_scripts(self) -> list[tuple[Path, str]]:
         """The (path, body) pairs apply writes and drift checks — ONE source so they can't
-        diverge: cc-save + cc-restore always, the attach-or-create entry when anti-sprawl is on.
+        diverge: cc-save + cc-restore always, the attach-or-create entry when anti-sprawl is on,
+        the boot script when boot is on (the launchd agent's entrypoint — DEFECT 1).
         """
         scripts = [
             (self.cc_save_path, self.render_cc_save()),
@@ -147,6 +185,8 @@ class TmuxPlan:
         ]
         if self.anti_sprawl_enabled:
             scripts.append((self.attach_path, self.render_attach_script()))
+        if self.boot_enabled:
+            scripts.append((self.boot_script_path, self.render_boot_script()))
         return scripts
 
     @property
@@ -199,6 +239,34 @@ class TmuxPlan:
         out.append(f"set -g @resurrect-capture-pane-contents '{'on' if self.capture_pane_contents else 'off'}'")
         out.append(f"set -g @continuum-restore '{'on' if self.continuum_restore else 'off'}'")
         out.append(f"set -g @continuum-save-interval '{self.save_interval}'")
+        # DEFECT 3 (the reboot bug): resurrect restores panes with a NON-login shell
+        # (its `default-command ''`), so ~/.zprofile (PATH, etc.) is NOT sourced → restored panes
+        # have a broken env. Set a LOGIN-shell default-command so every (new AND restored) pane
+        # sources the full login env. Default-on; configurable via tmux.login_shell.
+        #
+        # CRITICAL (live-cycle bug): the shell path is a CONCRETE path resolved at GENERATION time,
+        # NOT a tmux `${SHELL}` reference. tmux expands `${VAR}` itself in a double-quoted option
+        # value but does NOT support the `${VAR:-default}` bashism — `set -g default-command
+        # "${SHELL:-/bin/sh} -l"` makes tmux abort the WHOLE source-file with "invalid environment
+        # variable" at that line, so continuum/tpm/everything after it never loads → an empty,
+        # config-less server (caught only by the REAL e2e, never by a parse-check). So we bake the
+        # path. DETERMINISM: the plan resolves the shell ONCE (plan._build_tmux) and bakes the
+        # concrete path into the action — so render does NOT read $SHELL/FS here and rig.tmux.conf
+        # is identical across applies/status regardless of the ambient $SHELL (review Medium: a
+        # per-render resolve made drift flap). The `or resolve_login_shell()` is only a fallback
+        # for a direct build_tmux() with an empty shell (tests); the real path is plan-baked.
+        if self.login_shell_enabled:
+            shell = self.login_shell or resolve_login_shell()
+            # tmux's `default-command` takes ONE option value, which tmux then runs as a SHELL
+            # command (`sh -c "<value>"`). So the value must be a SINGLE tmux argument whose INNER
+            # text, when the shell parses it, is `<quoted-path> -l`. We therefore: shell-quote the
+            # path (so a path with a space stays one argv for the inner shell), append ` -l`, and
+            # wrap the whole thing in tmux double-quotes so tmux sees it as one value. e.g. a plain
+            # path → set -g default-command "/bin/zsh -l"; a spaced path →
+            # set -g default-command "'/Apps/My Shell/zsh' -l". A bare path without metachars stays
+            # unquoted by shlex (readable common case); only a risky path gets the inner quotes.
+            command = f"{shlex.quote(shell)} -l"
+            out.append(f'set -g default-command "{command}"')
         # @continuum-boot is emitted ONLY as the on/off that matches rig's OWN boot mechanism.
         # CRITICAL: `@continuum-boot 'on'` makes continuum install its OWN unmanaged boot artifact
         # (the iTerm-coupled `Tmux.Start.plist` on macOS / a systemd user unit on Linux) — exactly
@@ -267,6 +335,14 @@ class TmuxPlan:
     def render_cc_save(self) -> str:
         """cc-save: record each claude pane's cwd → newest Claude Code session id for that cwd.
 
+        DEFECT 2 (the reboot bug): Claude Code does NOT show up as ``claude`` in tmux's
+        ``pane_current_command`` — it shows as its VERSION string (e.g. ``2.1.178``), and the
+        REAL ``claude`` process is a CHILD of the pane's shell. Filtering on
+        ``pane_current_command == claude`` therefore matched NOTHING → the map stayed empty → cc
+        never resumed. So cc-save now walks the pane's process TREE: it takes ``pane_pid`` and
+        recursively descends children (``ps -eo pid,ppid,comm``) looking for a process whose
+        command basename is ``claude``. A pane with a ``claude`` descendant is a cc pane.
+
         Encoding (VERIFIED on a real machine, see module/test docs): the projects dir name is
         the cwd with every ``/`` AND ``.`` replaced by ``-`` (so ``/Users/u/.files`` →
         ``-Users-u--files``). The newest ``*.jsonl`` (by mtime) under that dir is the latest
@@ -282,9 +358,12 @@ class TmuxPlan:
         projects = "$HOME/.claude/projects"
         return f"""#!/usr/bin/env bash
 # rig-managed: cc-save — GENERATED by rig from rig.yaml. Do not hand-edit.
-# Records, for every tmux pane currently running `claude`, a map line:
+# Records, for every tmux pane whose process TREE contains a `claude` process, a map line:
 #   <session>:<window>.<pane><TAB><cwd><TAB><claude-session-id>
 # so cc-restore can relaunch `claude --resume <id>` in the right window after a reboot.
+# WHY a tree walk and not `pane_current_command == claude`: Claude Code shows up in
+# `pane_current_command` as its VERSION (e.g. 2.1.178); the real `claude` process is a CHILD of
+# the pane's shell. So we descend the pane PID's children and match a process named `claude`.
 # Encoding: the ~/.claude/projects/<enc> dir name is the pane cwd with every '/' and '.'
 # replaced by '-' (verified against real on-disk dirs).
 # Limitation: the session id is per-CWD (newest jsonl), not strictly per-pane — two claude
@@ -312,14 +391,41 @@ newest_session_id() {{
   basename "$newest" .jsonl
 }}
 
+# Snapshot the whole process table ONCE (pid ppid comm) — walking the tree per pane against a
+# live `ps` each time would race; one snapshot is consistent and cheap. `comm` is the basename
+# tmux/ps report (`claude`), not the full argv, so a path like /opt/homebrew/bin/claude still
+# reports `claude`. Stored as parallel maps pid->ppid and pid->comm for an O(depth) descent.
+PS_SNAPSHOT=$(ps -eo pid=,ppid=,comm= 2>/dev/null || true)
+
+pane_has_claude() {{
+  # BFS over the descendants of the pane's pid; return 0 if any descendant's command is `claude`.
+  local root="$1"
+  local -a queue=("$root")
+  local pid ppid comm cur
+  while [ "${{#queue[@]}}" -gt 0 ]; do
+    cur="${{queue[0]}}"
+    queue=("${{queue[@]:1}}")
+    # scan the snapshot for: (a) `cur`'s own command, and (b) `cur`'s direct children to enqueue.
+    while read -r pid ppid comm; do
+      [ -n "$pid" ] || continue
+      if [ "$pid" = "$cur" ]; then
+        case "$comm" in
+          claude|*/claude) return 0 ;;
+        esac
+      fi
+      if [ "$ppid" = "$cur" ]; then
+        queue+=("$pid")
+      fi
+    done <<< "$PS_SNAPSHOT"
+  done
+  return 1
+}}
+
 : > "$MAP_FILE"
-# iterate every pane; emit a map line only for panes whose command is `claude`.
-tmux list-panes -a -F '#{{session_name}}:#{{window_index}}.#{{pane_index}}	#{{pane_current_command}}	#{{pane_current_path}}' \\
-  | while IFS=$'\\t' read -r addr cmd cwd; do
-      case "$cmd" in
-        claude|*/claude) ;;
-        *) continue ;;
-      esac
+# iterate every pane; emit a map line only for panes whose process tree contains `claude`.
+tmux list-panes -a -F '#{{session_name}}:#{{window_index}}.#{{pane_index}}	#{{pane_pid}}	#{{pane_current_path}}' \\
+  | while IFS=$'\\t' read -r addr pane_pid cwd; do
+      pane_has_claude "$pane_pid" || continue
       enc=$(encode_cwd "$cwd")
       sid=$(newest_session_id "$PROJECTS/$enc") || continue
       printf '%s\\t%s\\t%s\\n' "$addr" "$cwd" "$sid" >> "$MAP_FILE"
@@ -407,29 +513,61 @@ else
 fi
 """
 
-    # ── the boot launchd plist (macOS) ───────────────────────────────────────────────
-    def render_boot_plist(self) -> str:
-        """A launchd agent that brings tmux up at login so continuum can restore.
+    # ── the boot script (DEFECT 1: load the conf via a real session, then restore) ────
+    def render_boot_script(self) -> str:
+        """The launchd agent's entrypoint: bring tmux up AT LOGIN with the config LOADED.
 
-        Less iTerm-coupled than the old ``osx_iterm_start_tmux.sh`` approach: it simply starts
-        a detached tmux server (``tmux start-server``) at load; continuum (``@continuum-boot
-        on`` + ``@continuum-restore on``) then restores the saved session into it. ``KeepAlive``
-        is false — we only need it to fire once at login.
+        DEFECT 1 (the reboot bug): the old plist ran ``tmux start-server`` directly, which starts
+        a server WITHOUT loading ~/.tmux.conf or any plugin (tmux sources the conf only on the
+        FIRST session), so ``@continuum-restore`` never fired → an EMPTY server → ``tmux ls`` said
+        "no server running" after login. This script instead creates a detached session
+        (``tmux new-session -d``), which DOES load the conf → the sourced ``rig.tmux.conf`` →
+        continuum's ``run-shell`` init → (with ``@continuum-restore on``) the saved session is
+        restored INTO the server. Idempotent: if the canonical session already exists (a warm
+        login), it does nothing rather than spawn a duplicate (anti-sprawl at boot).
         """
         tmux_bin = _resolve_tmux_bin()
+        session = shlex.quote(self.anti_sprawl_session)
+        # A non-default conf must be passed via `-f` (tmux only auto-loads ~/.tmux.conf), else the
+        # boot session starts WITHOUT the managed config → continuum/resurrect never set → no
+        # restore. Default path needs no -f. shlex.quote the path (a HOME with a space).
+        f_arg = ""
+        if self.conf_path != self.home / ".tmux.conf":
+            f_arg = f" -f {shlex.quote(str(self.conf_path))}"
+        tmux_q = shlex.quote(tmux_bin)
+        return f"""#!/usr/bin/env bash
+# rig-managed: tmux boot — GENERATED by rig from rig.yaml. Do not hand-edit.
+# The launchd agent runs THIS at login. It creates a detached session (which loads ~/.tmux.conf
+# → the sourced rig.tmux.conf → continuum), so `@continuum-restore on` restores the saved
+# session into the server. Merely starting a bare server would NOT load the conf (it loads only
+# on the first session) → continuum never fires → "no server running" after login.
+set -euo pipefail
+TMUX_BIN={tmux_q}
+SESSION={session}
+# already up (warm login) → do nothing (no duplicate session — anti-sprawl at boot).
+if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
+  exit 0
+fi
+# create the detached session — this loads the conf and triggers continuum-restore.
+"$TMUX_BIN"{f_arg} new-session -d -s "$SESSION"
+"""
+
+    # ── the boot launchd plist (macOS) ───────────────────────────────────────────────
+    def render_boot_plist(self) -> str:
+        """A launchd agent that runs the boot SCRIPT at login so continuum can restore.
+
+        DEFECT 1: the plist's single program argument is the generated boot script (NOT a bare
+        ``tmux start-server`` — that starts an EMPTY server with no conf/plugins loaded, so
+        continuum-restore never fires). The script does ``tmux new-session -d`` to load the conf
+        and trigger the restore. ``KeepAlive`` is false — we only need it to fire once at login;
+        ``rig apply`` ``launchctl load -w``s it so it is enabled across reboots.
+        """
         # plistlib gives idiomatic, escape-safe XML (no hand-rolled string concat / injection).
         import plistlib
 
-        # Honor a non-default conf path: tmux only auto-loads ~/.tmux.conf, so a custom
-        # conf_path must be passed via `-f` or the login server starts WITHOUT the managed
-        # config (continuum/resurrect options never set → no restore). Default path needs no -f.
-        args = [tmux_bin]
-        if self.conf_path != self.home / ".tmux.conf":
-            args += ["-f", str(self.conf_path)]
-        args.append("start-server")
         payload = {
             "Label": self.boot_label,
-            "ProgramArguments": args,
+            "ProgramArguments": [str(self.boot_script_path)],
             "RunAtLoad": True,
             "KeepAlive": False,
         }
@@ -450,6 +588,39 @@ def _resurrect_token(name: str) -> str:
 # Common tmux install locations, checked when PATH resolution fails (a non-interactive
 # `rig apply` env may have a bare PATH). Ordered: Apple-silicon brew, Intel brew, system.
 _TMUX_FALLBACK_PATHS = ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux")
+
+
+def resolve_login_shell() -> str:
+    """The user's login shell as a CONCRETE path, resolved from a STABLE source.
+
+    Baked into the action at PLAN time, NOT a tmux ``${SHELL}`` reference (tmux's option-value env
+    expansion rejects ``${VAR:-default}`` and a bare ``${SHELL}`` is fragile under launchd — a
+    wrong ref aborts the WHOLE source-file with "invalid environment variable", so continuum/tpm
+    never load).
+
+    CRITICAL — resolve from the PASSWD DATABASE, not ``$SHELL`` (review P1): ``apply`` and
+    ``status`` each rebuild a FRESH plan, so resolving from the volatile ``$SHELL`` env var would
+    bake a DIFFERENT shell when the two run under different environments (``SHELL=/bin/bash rig
+    apply`` then ``SHELL=/usr/bin/fish rig status``, or a launchd/cron status with no $SHELL) →
+    permanent flapping drift. ``pwd.getpwuid(getuid()).pw_shell`` is the user's REAL login shell
+    from the system account database — IDENTICAL across every invocation regardless of the ambient
+    env. We use it first; only if it is unavailable/empty do we fall back to ``$SHELL``, then
+    ``/bin/zsh`` (macOS default), then ``/bin/sh`` (always present).
+    """
+    try:
+        import pwd
+
+        passwd_shell = pwd.getpwuid(os.getuid()).pw_shell
+        if passwd_shell.startswith("/"):
+            return passwd_shell
+    except (KeyError, OSError, ImportError, AttributeError):
+        pass  # no passwd entry / non-POSIX — fall through to the env/default chain.
+    env_shell = os.environ.get("SHELL", "")
+    if env_shell.startswith("/"):
+        return env_shell
+    if Path("/bin/zsh").exists():
+        return "/bin/zsh"
+    return "/bin/sh"
 
 
 def _resolve_tmux_bin() -> str:
@@ -478,6 +649,7 @@ def build_tmux(
     cc_restore: dict | None = None,
     anti_sprawl: dict | None = None,
     boot: dict | None = None,
+    login_shell: dict | None = None,
 ) -> TmuxPlan:
     """Resolve the desired :class:`TmuxPlan` from the (already-validated) tmux config block.
 
@@ -485,7 +657,7 @@ def build_tmux(
     HOME-relative ``conf_path`` / ``generated_dir`` are expanded against it. Every nested
     knob defaults to the safe, root-cause-fixing value; an empty block yields the full default
     config (claude in resurrect, capture-pane on, continuum restore+boot, Moshi off, cc-restore
-    on, anti-sprawl on, boot on).
+    on, anti-sprawl on, boot on, login-shell default-command on).
     """
     resurrect = resurrect or {}
     continuum = continuum or {}
@@ -493,6 +665,7 @@ def build_tmux(
     cc_restore = cc_restore or {}
     anti_sprawl = anti_sprawl or {}
     boot = boot or {}
+    login_shell = login_shell or {}
 
     def _expand(p: str | Path) -> Path:
         s = str(p)
@@ -531,6 +704,10 @@ def build_tmux(
         anti_sprawl_session=str(_knob(anti_sprawl, "session", DEFAULT_SESSION)),
         boot_enabled=bool(_knob(boot, "enabled", True)),
         boot_label=str(_knob(boot, "label", DEFAULT_BOOT_LABEL)),
+        login_shell_enabled=bool(_knob(login_shell, "enabled", True)),
+        # An explicit shell override is used verbatim; "" means "resolve $SHELL in the shell at
+        # pane-spawn time" (the safe default — the login server inherits the user's $SHELL).
+        login_shell=str(_knob(login_shell, "shell", "")),
     )
 
 
