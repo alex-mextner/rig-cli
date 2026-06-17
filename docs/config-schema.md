@@ -35,6 +35,7 @@ git_hooks: { ... }
 ci: { ... }
 mcp: { ... }
 harness: { ... }              # agent harness auto/permission provisioning (auto-mode)
+permissions: { ... }          # per-harness command allowlist (pre-allow our CLIs + safe dev tools), default ON
 models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
 agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
 github: { ... }               # GitHub repo branch ruleset via gh api, default ON (no-op without a github remote)
@@ -281,6 +282,76 @@ runs the matching descriptors and translates their exit-10 BLOCK into CC's
 idempotent** — your other hooks (rtk-rewrite, tg-ctl, …) are preserved; a re-apply is a
 no-op; a drifted managed command (e.g. the checkout path moved) is rewritten in place.
 `rig status` reports the bridge as missing drift if a managed hook is absent.
+
+---
+
+## `permissions`
+
+Provisions the **per-harness command ALLOWLIST** so our ecosystem CLIs and the safe-to-allow
+external dev tools are **pre-allowed** — the agent never stops to ask permission for a
+known-safe command. **Default ON**: an absent/empty `permissions:` block still provisions the
+default tool set, so `rig init`/`rig apply` on a clean machine pre-allows everything below with
+no config at all. The list is **config-driven** — `tools` REPLACES the default set, `extra`
+adds, `disable` removes. The merge is **additive** — every existing allowlist entry (auto-mode,
+your accumulated list) is preserved, the desired entries are merged in, deduped; a re-apply is a
+no-op.
+
+**Scope of the default set, honestly.** rig pre-allows the *tools* in the list at the
+command-prefix level — for claude-code that is `Bash(<tool>:*)`, which DOES cover every subcommand
+and flag of that tool (so `git` includes `git push --force`, `gh` includes `gh repo delete`). The
+default set is therefore "tools we trust the agent to drive", not "only read-only subcommands". The
+restraint is in WHICH tools are on the list: it is dev/VCS tooling we already lean on, and it does
+NOT add inherently-destructive standalone commands (`rm`, `sudo`, `dd`, `mkfs`, …) — those stay
+behind a prompt. If you want a narrower grant (e.g. only `git status`/`git log`), set `tools` to a
+custom list and add the specific `Bash(...)` entries by hand in the harness settings.
+
+This is **GLOBAL-only** (the allowlist file is per-machine), like `tg_ctl`/`gitignore` — it is
+never scaffolded into a committed repo `rig.yaml`; declare it in `~/.config/rig/config.yaml` to
+override the tool list.
+
+```yaml
+permissions:
+  enabled: true                # provision the allowlist (false → leave the harness config alone)
+  # kind: opencode             # target opencode's allowlist (default: follow harness.kind / claude-code)
+  # tools: [tg, review, draw, 3d, rig, task, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES the default set
+  # extra: [kubectl]           # ADD to the (default or explicit) set
+  # disable: [gitleaks]        # drop from rig's desired set (won't ADD it; never removes a live entry)
+  # settings_path: ~/.claude/settings.json   # override the per-harness settings file (rare; .json)
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision the allowlist (set `false` to leave the harness config untouched) |
+| `kind` | `claude-code` \| `opencode` | follows `harness.kind`, else `claude-code` | which harness's allowlist to provision. `opencode` is supported here independently of `harness.kind` (whose auto-mode write reserves it); `codex`/`gemini`/`pi` are rejected (N/A) |
+| `tools` | str[] | the default set | the command names to pre-allow; **replaces** the default set wholesale |
+| `extra` | str[] | `[]` | command names to ADD on top of the (default or explicit) set |
+| `disable` | str[] | `[]` | command names to drop from rig's **desired** set, so rig won't ADD them. NB: this is additive-only — it does NOT delete an entry already in your allowlist (rig never removes the user's entries; that stays your call) |
+| `settings_path` | path (`.json`) | per-harness default | override the settings file to merge into (default: `~/.claude/settings.json` for claude-code, `~/.config/opencode/opencode.json` for opencode) |
+
+**Default tool set.** Our ecosystem CLIs — `tg`, `review`, `draw`, `3d`, `rig`, `task` — plus
+the external tools we lean on: `gh`, `git`, `rg`, `uv`, `bun`, `jq`, `gitleaks`.
+
+**What gets written, per harness (keyed off `harness.kind`).**
+
+- **claude-code** — `permissions.allow` in `~/.claude/settings.json` (a JSON array) gains an
+  entry per tool in the form `Bash(<tool>:*)` (matching the prefix-glob form CC honors). The
+  array is merged additively + deduped; every other entry survives.
+- **opencode** — `permission.bash` in `~/.config/opencode/opencode.json` (a JSON object) gains a
+  `"<tool> *": "allow"` entry per tool, only when the key is absent — an existing user
+  `"deny"`/`"ask"` is never downgraded.
+- **codex** — **N/A**. `~/.codex/config.toml` has no per-command allowlist rig can additively
+  merge; command execution is gated by `approval_policy`/`sandbox_mode` (coarse) and Starlark
+  `execpolicy` `.rules` files — a separate mechanism. Recorded N/A, never written.
+- **gemini / pi** — **N/A**. Gemini's `tools.core`/`coreTools` is a *toolset restriction* list,
+  not a per-command auto-approve: writing it to pre-allow a command would disable every unlisted
+  built-in tool. No safe per-command allowlist exists, so it is recorded N/A, never written.
+
+The write is **idempotent** (a re-apply with the same config is a no-op) and **backup-noted** (the
+prior file is backed up per `defaults.on_conflict` before converging; a file that fails to parse as
+JSON is backed up before being rewritten for any policy other than `skip`, which leaves it
+untouched and surfaces the drift). `rig status` reports a desired entry that is absent as `missing`
+drift `rig apply` would add; a wrong-shape file (non-object root, non-array/non-object container) as
+`modified` (matching the error `apply` would raise — status and apply agree on what to fix).
 
 ---
 

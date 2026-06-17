@@ -686,6 +686,160 @@ def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
     )
 
 
+# ── permission-allowlist provisioning (claude-code permissions.allow / opencode permission.bash) ──
+def permissions_settings_file(action: Action) -> Path:
+    """The settings file a ``provision_permissions`` action targets (shared with drift).
+
+    Mirrors :func:`harness_settings_file`: a ``.json`` target is the file itself, else a dir
+    holding the per-harness settings filename. The plan resolves an absolute path; this just
+    normalizes the file-vs-dir target.
+    """
+    target = action.target
+    return target if target.suffix == ".json" else target / "settings.json"
+
+
+def desired_permission_entries(action: Action) -> tuple[tuple[str, ...], str, list[str], str | None]:
+    """Return ``(key_path, container, entries, value)`` the allowlist should contain.
+
+    Shared by the install handler and drift so both agree on the on-disk shape: where the
+    allowlist lives (``key_path`` dotted segments), whether it is a JSON ``"array"`` or
+    ``"object"``, the per-harness entry strings, and the object-form ``value`` (``"allow"``).
+    Reads the resolved tool list + kind straight off the action options (the plan resolved them),
+    so the harness module is consulted ONCE at plan time and the runner stays pure of config.
+    """
+    from ..permissions import HARNESS_ALLOWLISTS, desired_entries
+
+    kind = str(action.options.get("kind", "claude-code"))
+    try:
+        spec = HARNESS_ALLOWLISTS[kind]
+    except KeyError:
+        # The plan only emits supported kinds (it gates on harness_supported), so this is a
+        # defensive guard — a stale/hand-built action with an N/A kind gets a clean error, not a
+        # raw KeyError traceback out of the runner/drift.
+        raise ValueError(f"no allowlist mechanism for harness kind {kind!r}") from None
+    tools = [str(t) for t in action.options.get("tools", [])]
+    return spec.key_path, spec.container, desired_entries(kind, tools), spec.value
+
+
+def _container_at(data: dict, key_path: tuple[str, ...]) -> tuple[dict, str]:
+    """Walk ``data`` to the PARENT of the allowlist container, creating intermediate dicts.
+
+    Returns ``(parent_dict, leaf_key)`` so the caller can read/set ``parent[leaf_key]`` — the
+    container itself (array/object) is created lazily by the caller so its shape is explicit.
+    Raises ``ValueError`` if an intermediate exists as a NON-dict (we never clobber the user's
+    differently-typed value silently — that surfaces as an action error).
+    """
+    cur = data
+    for seg in key_path[:-1]:
+        nxt = cur.get(seg)
+        if nxt is None:
+            nxt = {}
+            cur[seg] = nxt
+        elif not isinstance(nxt, dict):
+            raise ValueError(f"'{'.'.join(key_path)}' parent '{seg}' is not an object")
+        cur = nxt
+    return cur, key_path[-1]
+
+
+def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
+    """Merge the per-harness command allowlist into the harness settings JSON — ADDITIVE.
+
+    The invariant this enforces (and the tests assert): every existing allowlist entry is
+    PRESERVED, the desired ecosystem/external entries are MERGED IN, the result is DEDUPED, and a
+    re-apply with the same config is a true no-op. The accumulated ``permissions.allow`` in the
+    user's live settings (auto-mode, docker, psql, …) is never clobbered — we only ever ADD the
+    entries that are missing.
+
+    - array form (claude-code): append each missing entry to the existing list, order-stable.
+    - object form (opencode): set each missing entry KEY → ``"allow"`` only when absent (never
+      downgrade a user's ``"deny"``/``"ask"`` — that is the user's call, not rig's).
+
+    Backup-noted under ``on_conflict=backup`` when the file changes; ``skip`` leaves a malformed
+    file untouched; a non-dict settings root or a non-array/object container is a hard error
+    (never a blind overwrite of the user's data).
+    """
+    try:
+        key_path, container, entries, value = desired_permission_entries(action)
+    except ValueError as exc:
+        return ActionResult(action, "error", f"permissions/{action.item}: {exc}")
+    config_file = permissions_settings_file(action)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict = {}
+    backup_note = ""
+    existed = config_file.is_file()
+    if config_file.is_file():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+        except ValueError:
+            if on_conflict == "skip":
+                return ActionResult(
+                    action, "skipped",
+                    f"permissions/{action.item}: existing {config_file} is malformed JSON "
+                    "(on_conflict=skip), left untouched",
+                )
+            bak = fsutil.backup_path(config_file)
+            shutil.copy2(str(config_file), str(bak))
+            data = {}
+            backup_note = f" (backed up malformed config → {bak})"
+    if not isinstance(data, dict):
+        return ActionResult(action, "error", f"permissions/{action.item}: {config_file} is not a JSON object")
+
+    try:
+        parent, leaf = _container_at(data, key_path)
+    except ValueError as exc:
+        return ActionResult(action, "error", f"permissions/{action.item}: {exc} in {config_file}")
+
+    dotted = ".".join(key_path)
+    added = 0
+    if container == "array":
+        existing = parent.get(leaf)
+        if existing is None:
+            existing = []
+        if not isinstance(existing, list):
+            return ActionResult(action, "error", f"permissions/{action.item}: '{dotted}' is not an array in {config_file}")
+        present = set(existing)
+        for entry in entries:
+            if entry not in present:
+                existing.append(entry)
+                present.add(entry)
+                added += 1
+        parent[leaf] = existing
+    else:  # object form — entry KEY → value, only when the key is absent
+        existing = parent.get(leaf)
+        if existing is None:
+            existing = {}
+        if not isinstance(existing, dict):
+            return ActionResult(action, "error", f"permissions/{action.item}: '{dotted}' is not an object in {config_file}")
+        for entry in entries:
+            if entry not in existing:
+                existing[entry] = value
+                added += 1
+        parent[leaf] = existing
+
+    if added == 0:
+        detail = (
+            f"permissions/{action.item}: no desired entries to provision (empty tool set)"
+            if not entries
+            else f"permissions/{action.item}: all {len(entries)} entries already in {dotted} of {config_file}"
+        )
+        return ActionResult(action, "skipped", detail)
+
+    if _should_backup(on_conflict) and backup_note == "" and config_file.is_file():
+        bak = fsutil.backup_path(config_file)
+        shutil.copy2(str(config_file), str(bak))
+        backup_note = f" (backed up prior → {bak})"
+    config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    # "backed_up" when we preserved a prior copy; else "updated" if the file pre-existed (we merged
+    # entries into it), or "created" if we wrote it fresh. Don't report "created" for a file we
+    # actually modified under a non-backup policy (the review's misleading-status finding).
+    status = "backed_up" if backup_note else ("updated" if existed else "created")
+    return ActionResult(
+        action, status,
+        f"permissions/{action.item}: added {added} of {len(entries)} entries to {dotted} in {config_file}{backup_note}",
+    )
+
+
 # ── agents-hooks/v1 → Claude Code bridge (settings.json hook registration) ──────────
 # A managed cc_hook_bridge command is identified by this substring — so we can find,
 # update, and de-dup OUR entries without ever touching the user's other hooks.
@@ -2563,6 +2717,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "install_ci": _do_install_ci,
     "register_mcp": _do_register_mcp,
     "apply_harness": _do_apply_harness,
+    "provision_permissions": _do_provision_permissions,
     "register_hook_bridge": _do_register_hook_bridge,
     "provision_schedule": _do_provision_schedule,
     "provision_agents_symlink": _do_provision_agents_symlink,

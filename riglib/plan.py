@@ -70,7 +70,7 @@ _DEFAULT_HARNESS_KIND = "claude-code"
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_tmux | provision_global_excludes
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_tmux | provision_global_excludes
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -509,6 +509,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── harness (auto-mode / permission provisioning) ─────────────────────────────
     _build_harness(config, plan)
 
+    # ── permissions (per-harness command allowlist) ───────────────────────────────
+    _build_permissions(config, plan)
+
     # ── hook bridge (make agents-hooks/v1 descriptors FIRE in the harness) ─────────
     _build_hook_bridge(config, catalog, plan)
 
@@ -593,6 +596,76 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
                 "auto_mode": auto_mode,
                 "mode_value": str(mode_value),
             },
+        )
+    )
+
+
+def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the per-harness command-allowlist provisioning, unless ``enabled: false``.
+
+    Default **ON** (like ``agents_md``/``github``/``tg_ctl``): an ABSENT or empty ``permissions:``
+    block still provisions the allowlist with the default tool set, so ``rig init`` on a clean
+    machine pre-allows our ecosystem CLIs + the safe external dev tools with no config at all.
+
+    The tool list is CONFIG-DRIVEN — ``permissions.tools`` (a list) REPLACES the default set;
+    ``permissions.extra`` adds; ``permissions.disable`` removes. The action carries the RESOLVED
+    tool list (so the runner stays config-pure) and is keyed off ``harness.kind`` (exactly like
+    the auto-mode write), targeting the SAME per-harness user-scope settings file. A harness whose
+    kind has no additively-mergeable allowlist (codex, gemini/pi — see
+    :mod:`riglib.permissions`) emits NO action and is recorded N/A; a note explains why so
+    ``rig status`` isn't silently empty.
+    """
+    from .permissions import (
+        HARNESS_ALLOWLISTS,
+        HARNESS_ALLOWLIST_NA,
+        harness_supported,
+        resolve_tools,
+    )
+
+    p = config.data.get("permissions")
+    if p is None:
+        p = {}
+    if not isinstance(p, dict):
+        return  # validate() already fail-closed on a non-mapping block
+    if p.get("enabled") is False:
+        return
+
+    # The harness kind to provision for: an explicit `permissions.kind` wins (so opencode can be
+    # targeted INDEPENDENTLY of the auto-mode write, whose `harness.kind` validator rejects opencode
+    # as not-yet-implemented — the allowlist provisioning DOES support it); else follow `harness.kind`
+    # if pinned; else the built-in default (claude-code). One allowlist per harness, since each
+    # harness's settings file is distinct.
+    h = config.data.get("harness")
+    if p.get("kind"):
+        kind = str(p["kind"])
+    elif isinstance(h, dict) and h.get("kind"):
+        kind = str(h["kind"])
+    else:
+        kind = _DEFAULT_HARNESS_KIND
+
+    if not harness_supported(kind):
+        reason = HARNESS_ALLOWLIST_NA.get(kind, "no command-allowlist mechanism")
+        plan.notes.append(f"permissions: skipped — harness '{kind}' has no allowlist to provision ({reason})")
+        return
+
+    tools_cfg = p.get("tools")
+    tools = resolve_tools(
+        list(tools_cfg) if isinstance(tools_cfg, list) else None,
+        list(p.get("extra", []) or []) if isinstance(p.get("extra"), list) else [],
+        list(p.get("disable", []) or []) if isinstance(p.get("disable"), list) else [],
+    )
+    spec = HARNESS_ALLOWLISTS[kind]
+    # An explicit settings_path wins (lets a test/odd setup point elsewhere); else the harness's
+    # documented per-machine settings file (the SAME file the auto-mode write targets for CC).
+    settings_path = p.get("settings_path") or spec.settings_path
+    plan.actions.append(
+        Action(
+            kind="provision_permissions",
+            category="permissions",
+            item=kind,
+            source=config.repo_root,  # no carrier in agent-tools; anchor on the repo
+            target=_expand(str(settings_path), config.repo_root),
+            options={"kind": kind, "tools": tools},
         )
     )
 
