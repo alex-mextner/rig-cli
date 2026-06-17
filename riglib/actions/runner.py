@@ -2092,6 +2092,20 @@ def _is_real_file(p: Path) -> bool:
     return p.is_file() and not p.is_symlink()
 
 
+def _is_broken_symlink(p: Path) -> bool:
+    """True for a dangling symlink — a link whose target no longer resolves to anything.
+
+    The spec's "broken link": a pair rig provisioned (real canonical + symlink) where the
+    canonical was later deleted, leaving the link dangling. rig surfaces this by NAME (a broken
+    symlink, with how to recover) rather than as a generic "not a real file", but it never
+    auto-recreates the missing canonical — an empty placeholder would silently mask the loss of
+    the (possibly curated) content that was deleted, turning a visible, git-recoverable failure
+    into an invisible one. ``status`` flags it; the human restores the canonical or removes the
+    link.
+    """
+    return p.is_symlink() and not p.exists()
+
+
 def symlink_points_to(link: Path, canonical_name: str) -> bool:
     """True when ``link`` is a symlink already resolving to ``canonical_name`` (same dir).
 
@@ -2106,7 +2120,9 @@ def symlink_points_to(link: Path, canonical_name: str) -> bool:
         return True
     try:
         return (link.parent / current).resolve() == (link.parent / canonical_name).resolve()
-    except OSError:
+    except (OSError, RuntimeError):
+        # OSError: a broken/unreadable path. RuntimeError: pathlib raises it for a symlink loop
+        # (e.g. AGENTS.md → AGENTS.md). Either way the link does not resolve to the canonical.
         return False
 
 
@@ -2186,6 +2202,46 @@ def resolve_agents_md(repo_root: Path) -> AgentsMdResolution:
     claude_present = claude.is_symlink() or claude.exists()
     if not agents_present and not claude_present:
         return _r("create_both", "AGENTS.md", agents, claude)
+
+    # The spec's headline "broken link": EXACTLY one slot is a rig-shaped dangling link — a symlink
+    # whose target is the OTHER managed name, and that name is now missing — while the other slot
+    # is empty. This is precisely "rig provisioned the pair, then the real canonical was deleted".
+    # Name it with recovery guidance, but NEVER recreate the canonical: an empty placeholder would
+    # silently mask the loss of possibly-curated content (a visible, git-recoverable failure turned
+    # invisible). The narrow shape deliberately EXCLUDES a peer-link loop (the other slot is also a
+    # symlink, not empty → both "broken") and a foreign/competing occupant in the other slot, which
+    # would make the "canonical was deleted" narrative wrong; those fall through below.
+    for link, other, canonical in ((claude, agents, "AGENTS.md"), (agents, claude, "CLAUDE.md")):
+        if (
+            _is_broken_symlink(link)
+            and symlink_points_to(link, canonical)
+            and not (other.is_symlink() or other.exists())
+        ):
+            return _r("conflict", "AGENTS.md", agents, claude,
+                      detail=f"{link.name} → {canonical} (missing) is a broken symlink — its "
+                             f"canonical target {canonical} does not exist (deleted out from "
+                             "under a provisioned pair, or never created). Restore it from "
+                             "version control (e.g. git checkout) or remove the dangling link, "
+                             "then re-run; rig will not recreate it, to avoid masking lost content")
+
+    # Any other "neither real" shape that still contains a dangling link (a foreign/unresolved
+    # target, a peer-link loop, or a dangling link beside a competing occupant): name it as a
+    # broken link so status says what's wrong, WITHOUT the (here-inaccurate) "canonical deleted"
+    # narrative or git-restore advice.
+    dangling = [p.name for p in (agents, claude) if _is_broken_symlink(p)]
+    if dangling:
+        joined = " and ".join(dangling)
+        # plural/singular; the advice deliberately does NOT presume the target is absent — for a
+        # peer loop (A→B, B→A) each "target" exists as the other link, so "restore the target"
+        # would be incoherent. The universal fix is one real file plus a link to it.
+        subject = (
+            "are broken/dangling symlinks (their targets do not resolve)"
+            if len(dangling) > 1 else "is a broken/dangling symlink (its target does not resolve)"
+        )
+        return _r("conflict", "AGENTS.md", agents, claude,
+                  detail=f"{joined} {subject} — reconcile the pair to one real file plus a symlink "
+                         "to it (remove the dangling link(s); create or restore the canonical), "
+                         "then re-run")
     return _r("conflict", "AGENTS.md", agents, claude,
               detail="AGENTS.md/CLAUDE.md present but neither is a real file (a symlink or "
                      "directory occupies a slot) — reconcile to one real file, then re-run")
