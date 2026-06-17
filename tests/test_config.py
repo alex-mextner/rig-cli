@@ -60,6 +60,121 @@ def test_validate_rejects_unknown_top_key():
         config.validate({"version": 1, "bogus": 1})
 
 
+# ── roadmap §5: every block REJECTS an unknown key (no silent no-op), with a schema path ──
+@pytest.mark.parametrize(
+    "doc, schema_path, msg",
+    [
+        ({"version": 1, "harness": {"aut_mode": True}}, "harness.aut_mode", "unknown harness key"),
+        ({"version": 1, "skills": {"enabld": True}}, "skills.enabld", "unknown skills key"),
+        ({"version": 1, "defaults": {"on_conflic": "skip"}}, "defaults.on_conflic", "unknown defaults key"),
+        ({"version": 1, "git_hooks": {"dispatcher": {"enabld": True}}}, "git_hooks.dispatcher.enabld", "unknown git_hooks.dispatcher key"),
+        ({"version": 1, "ci": {"enabld": True}}, "ci.enabld", "unknown ci key"),
+        ({"version": 1, "mcp": {"enabld": True}}, "mcp.enabld", "unknown mcp key"),
+        ({"version": 1, "agent_hooks": {"enabld": True}}, "agent_hooks.enabld", "unknown agent_hooks key"),
+        ({"version": 1, "harness": {"hook_bridge": {"enabld": True}}}, "harness.hook_bridge.enabld", "unknown harness.hook_bridge key"),
+        ({"version": 1, "skills": {"universal": {"al": True}}}, "skills.universal.al", "unknown skills.universal key"),
+        ({"version": 1, "skills": {"by_type": {"enabl": []}}}, "skills.by_type.enabl", "unknown skills.by_type key"),
+        ({"version": 1, "models": {"schedule": {"tim": "12:00"}}}, "models.schedule.tim", "unknown models.schedule key"),
+        ({"version": 1, "github": {"ruleset": {"nam": "x"}}}, "github.ruleset.nam", "unknown github.ruleset key"),
+        ({"version": 1, "tmux": {"continuum": {"save_intervall": 5}}}, "tmux.continuum.save_intervall", "unknown tmux.continuum key"),
+        ({"version": 1, "tmux": {"boot": {"labl": "x"}}}, "tmux.boot.labl", "unknown tmux.boot key"),
+        ({"version": 1, "permissions": {"tols": []}}, "permissions.tols", "unknown permissions key"),
+        ({"version": 1, "gitignore": {"entres": []}}, "gitignore.entres", "unknown gitignore key"),
+        ({"version": 1, "tg_ctl": {"labl": "x"}}, "tg_ctl.labl", "unknown tg_ctl key"),
+        ({"version": 1, "agents_md": {"symlnk": True}}, "agents_md.symlnk", "unknown agents_md key"),
+    ],
+)
+def test_validate_rejects_unknown_block_key_with_schema_path(doc, schema_path, msg):
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate(doc)
+    err = ei.value
+    assert msg in err.what
+    assert err.schema_path == schema_path
+    assert err.fix  # an unknown-key error always offers the accepted keys
+
+
+def test_validate_rejects_bad_value_with_schema_path():
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate({"version": 1, "harness": {"auto_mode": "yes"}})
+    assert ei.value.schema_path == "harness.auto_mode"
+    with pytest.raises(config.ConfigError) as ei2:
+        config.validate({"version": 1, "defaults": {"on_conflict": "nuke"}})
+    assert ei2.value.schema_path == "defaults.on_conflict"
+
+
+def test_render_config_error_is_three_part_with_pointer():
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate({"version": 1, "harness": {"aut_mode": True}})
+    block = config.render_config_error(ei.value, color=False)
+    assert "error:" in block  # WHAT
+    assert "why:" in block and "fix:" in block  # WHY + FIX
+    # the schema path is shown both dotted and as a resolvable JSON pointer into the published file
+    # (the typo points at the PARENT block node, which exists, not the non-existent typo leaf).
+    assert "harness.aut_mode" in block
+    assert "schema/rig.schema.json#/properties/harness" in block
+
+
+def test_git_hooks_dispatcher_now_validated():
+    # git_hooks previously had NO validator — a typo'd dispatcher knob was silently ignored.
+    # It is now fail-closed, like every other block.
+    config.validate({"version": 1, "git_hooks": {"dispatcher": {"enabled": False}}})  # valid
+    with pytest.raises(config.ConfigError, match="git_hooks.dispatcher.enabled must be a bool"):
+        config.validate({"version": 1, "git_hooks": {"dispatcher": {"enabled": "nope"}}})
+
+
+def test_open_item_maps_still_accept_arbitrary_names():
+    # the strictness must NOT break the open `items`/`fragments` maps (catalog item names).
+    config.validate({"version": 1, "ci": {"items": {"secret-scan": {"tier": "block"}, "my-gate": {}}}})
+    config.validate({"version": 1, "mcp": {"items": {"review": {"command": "review"}}}})
+    config.validate({"version": 1, "agent_hooks": {"items": {"block-no-verify": {"on_error": "closed"}}}})
+    config.validate({"version": 1, "git_hooks": {"dispatcher": {"fragments": {"secret-scan": {"enabled": True}}}}})
+
+
+def test_fixed_typo_rejected_even_alongside_a_valid_open_map():
+    # a real item map must NOT mask a fixed-knob typo in the SAME block — `items` stays valid,
+    # `enabld` is rejected (the open map whitelists only its own key, not arbitrary fixed keys).
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate({"version": 1, "ci": {"items": {"secret-scan": {"tier": "block"}}, "enabld": True}})
+    assert ei.value.schema_path == "ci.enabld"
+
+
+@pytest.mark.parametrize(
+    "doc, schema_path",
+    [
+        ({"version": 1, "skills": {"enabled": "yes"}}, "skills.enabled"),
+        ({"version": 1, "ci": {"enabled": "yes"}}, "ci.enabled"),
+        ({"version": 1, "ci": {"target": 5}}, "ci.target"),
+        ({"version": 1, "agent_hooks": {"all": "no"}}, "agent_hooks.all"),
+        ({"version": 1, "mcp": {"enabled": "yes"}}, "mcp.enabled"),
+        ({"version": 1, "permissions": {"enabled": "yes"}}, "permissions.enabled"),
+    ],
+)
+def test_open_map_block_fixed_knobs_are_type_checked(doc, schema_path):
+    # roadmap §5: the runtime and the JSON schema agree — a bad-typed fixed knob in ci/mcp/skills/
+    # agent_hooks/permissions is rejected at runtime, not only by an editor.
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate(doc)
+    assert ei.value.schema_path == schema_path
+
+
+def test_agent_hooks_target_kind_enum_validated():
+    # the schema declares the enum; the runtime must enforce it too (no layer disagreement).
+    config.validate({"version": 1, "agent_hooks": {"target_kind": "claude-code"}})  # valid
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate({"version": 1, "agent_hooks": {"target_kind": "bogus"}})
+    assert ei.value.schema_path == "agent_hooks.target_kind"
+
+
+def test_mcp_non_dict_block_rejected_cleanly():
+    # a non-dict mcp must fail with a clean "must be a mapping" (the category check catches it
+    # first in validate()), never a nonsensical char-set error from set() over a string.
+    with pytest.raises(config.ConfigError, match="mcp.* must be a mapping"):
+        config.validate({"version": 1, "mcp": "nope"})
+    # and the dedicated validator's own guard is clean when called directly (belt-and-suspenders)
+    with pytest.raises(config.ConfigError, match="mcp must be a mapping"):
+        config._validate_mcp("nope")
+
+
 def test_validate_ignores_legacy_scope():
     # `scope` was removed (location-based cascade); a legacy key is tolerated, not rejected.
     config.validate({"version": 1, "scope": "everywhere"})

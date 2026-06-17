@@ -1,9 +1,11 @@
+# yaml-language-server: $schema=schema/rig.schema.json
 # rig.yaml — rig-cli dogfoods its own config.
 # COMMITTED BY DEFAULT: this file is the reproducible source of truth for this repo.
 # Global defaults live at ~/.config/rig/config.yaml; this file overrides them.
 # agent_tools_source is intentionally omitted → auto-detected (RIG_AGENT_TOOLS_SOURCE,
 # then ~/xp/agent-tools / ~/work/agent-tools / ~/agent-tools) so the file stays portable.
 # Apply with: rig apply   ·   Check drift with: rig status   ·   Schema: docs/config-schema.md
+# Machine-readable schema (editor completion/validation): schema/rig.schema.json
 
 version: 1
 

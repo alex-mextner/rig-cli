@@ -15,6 +15,31 @@ bad enum values, and unknown item names abort.
 **Round-trip invariant:** `init` → `rig.yaml` → `apply --config` produces the same plan.
 `riglib/state.py` (`SetupState`) is the single serializer; `riglib/config.py` the loader.
 
+## The JSON Schema (enforced + editor-facing)
+
+This document is the human-readable reference; the machine-readable schema is
+**`schema/rig.schema.json`** — a Draft-07 JSON Schema **generated from one in-code registry**
+(`riglib/config_schema.py`) and committed. Both layers ride the same source:
+
+- **Editors** read the committed file via the `# yaml-language-server: $schema=schema/rig.schema.json`
+  modeline at the top of every `rig.yaml` (and the global config) → live key completion and
+  unknown-key / bad-value squiggles, the *same* rules `rig apply` enforces.
+- **`rig apply` / `rig config set` / `rig status` / `rig init`** validate against the registry
+  (`riglib/config.py`, which mirrors the schema). A rejection is a **3-part error** — *what* is
+  wrong, *why* (with the **schema path**, e.g. `harness.auto_mode`, and a pointer into
+  `schema/rig.schema.json`), and *how to fix it* — and exits `2`.
+- **`rig schema`** prints the schema; **`rig schema --check`** fails if the committed file drifted
+  from the registry (a CI-usable gate); **`rig schema --write`** regenerates it. A test
+  (`tests/test_config_schema.py`) keeps the file, the registry, and `config.validate`'s key set in
+  lockstep, so the three never disagree.
+
+**Strict by default — an unknown key is rejected, not ignored.** Every block is closed
+(`additionalProperties: false`): a typo'd key (`aut_mode`, `enabld`) fails loudly with the schema
+path, rather than silently having no effect. The *only* open maps are the catalog-keyed `items:`
+(under `skills.by_type`, `agent_hooks`, `ci`, `mcp`) and `fragments:` (under
+`git_hooks.dispatcher`), whose keys are item names — a bad item *name* there is caught later as a
+catalog/unknown-item error (exit `4`), not a schema typo.
+
 ## Top-level shape
 
 ```yaml
@@ -56,6 +81,31 @@ the default candidates (`~/xp/agent-tools`, `~/work/agent-tools`, `~/agent-tools
 - Per-item overrides live under `items:` keyed by item name; absent items inherit the
   `all`/`enable`/`disable` decision.
 - Targets resolve item → category `target` → `defaults.<x>_target` → built-in default.
+
+---
+
+## `defaults`
+
+Cross-category fallback targets + the on-conflict policy. A category that does not set its own
+`target` falls back to the matching `defaults.<x>_target`; `on_conflict` governs what `apply` does
+when a target file/dir already exists.
+
+```yaml
+defaults:
+  skills_target: ~/.agents/skills
+  hooks_target: ~/.claude/hooks
+  ci_target: .github/workflows
+  mcp_target: ~/.claude/mcp
+  on_conflict: backup            # skip | overwrite | backup
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `skills_target` | path | `~/.agents/skills` | default skills install dir |
+| `hooks_target` | path | `~/.claude/hooks` | default agent-hooks dir |
+| `ci_target` | path | `.github/workflows` | default CI workflows dir |
+| `mcp_target` | path | `~/.claude/mcp` | default MCP config dir |
+| `on_conflict` | `skip`/`overwrite`/`backup` | `backup` | what `apply` does when a target already exists |
 
 ---
 
@@ -828,9 +878,10 @@ HINT (the why/how) next to each, and (3) APPLIES (`rig apply`) on the spot. Run 
 (piped / redirected) it prints USAGE for `init`/`apply`/`config get|set` rather than a
 half-wizard you can't answer.
 
-The wizard's option list + hints come from the in-code registry `riglib/schema.py` — the single
-source of truth, from which a JSON-Schema document is also emitted (`schema.json_schema()`), so
-the schema is generated from the registry, never maintained in parallel.
+The wizard's option list + hints come from the in-code registry `riglib/schema.py` (the curated
+toggle subset). The **complete** schema — every block and key — lives in `riglib/config_schema.py`
+and is what `schema/rig.schema.json` is generated from; `schema.json_schema()` delegates to it, so
+there is one emitter and the schema is never maintained in parallel (see "The JSON Schema" above).
 
 **Which file a change is written to.** Each option is routed to its **owning layer**:
 
@@ -889,29 +940,32 @@ rig config set harness.auto_mode false --no-apply        # write only, print the
 
 ## Validation
 
-`apply`/`status`/`init` validate before touching disk and **fail closed** on:
-unknown top-level keys, unsupported `version`, invalid `on_conflict` / ci `tier` /
-agent-hook `on_error`, an unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`,
-a non-mapping `harness.hook_bridge` / non-bool `hook_bridge.enabled` / non-string `hook_bridge.python`,
-a malformed/out-of-range `models.schedule.time` or unknown `models` key, a non-bool
-`agents_md.enabled`/`agents_md.symlink` or unknown `agents_md` key, an unknown
-`github`/`github.ruleset` key, a non-bool `github.ruleset` boolean knob, a
+`apply`/`status`/`init` validate before touching disk and **fail closed**. **Every block is
+strict**: an unknown FIXED key in *any* block — `defaults`, `skills`, `agent_hooks`, `git_hooks`
+(+ `dispatcher`), `ci`, `mcp`, `harness` (+ `hook_bridge`), `permissions`, `models` (+ `schedule`),
+`agents_md`, `github` (+ `ruleset`), `tmux` (+ every sub-block), `gitignore`, `tg_ctl` — is
+rejected with the schema path of the offender, not silently ignored. (The only open maps are the
+catalog-keyed `items:` / `fragments:` — see "Strict by default" above.) Bad-value rejections
+include: unsupported `version`, invalid `on_conflict` / ci `tier` / agent-hook `on_error`, an
+unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`, a non-mapping
+`harness.hook_bridge` / non-bool `hook_bridge.enabled` / non-string `hook_bridge.python`, a
+non-bool `git_hooks.dispatcher` bool knob, a malformed/out-of-range `models.schedule.time`, a
+non-bool `agents_md.enabled`/`symlink`, a non-bool `github.ruleset` boolean knob, a
 `github.ruleset.required_reviews` that is not an int ≥ 0, a `github.ruleset.required_status_checks`
-that is not a list of strings, an unknown `tmux`/`tmux.<sub>` key, a bad `tmux.apply` enum, a
-`tmux.resurrect.processes` that is not a list of strings, a `tmux.continuum.save_interval` that is
-not an int >= 1, a non-bool `tmux` boolean knob, a non-mapping `gitignore` block / non-bool
-`gitignore.enabled` / unknown `gitignore` key / non-string `gitignore.excludesfile` / a
-`gitignore.entries` that is not a list of strings or that contains a rig-managed marker line, an
-unknown `tg_ctl` key, a non-bool `tg_ctl.enabled`/`tg_ctl.boot`, a non-string
+that is not a list of strings, a bad `tmux.apply` enum, a `tmux.resurrect.processes` that is not a
+list of strings, a `tmux.continuum.save_interval` that is not an int ≥ 1, a non-bool `tmux` bool
+knob, a non-string `gitignore.excludesfile` / a `gitignore.entries` that is not a list of strings
+or that contains a rig-managed marker line, a non-bool `tg_ctl.enabled`/`boot`, a non-string
 `tg_ctl.label`/`bun_path`/`tg_ctl_path`/`config_dir`, and an `agent_tools_source` that is not an
-agent-tools checkout. `--dry-run` prints the resolved plan and exits 0 without writing.
+agent-tools checkout. Every rejection is the **3-part error** (what / why + schema path / fix) and
+exits `2`. `--dry-run` prints the resolved plan and exits 0 without writing.
 
 `rig config set` is **fail-closed** with full rollback: a malformed/non-mapping existing target
 file, a non-mapping intermediate on the dot path, or a schema-rejected resulting doc
 (`config.validate`) is reported **before any write**; a write IO error or a catalog-backed plan
 failure (the second gate — an unknown item, a bad `agent_tools_source`) rolls the file back to
-its prior contents (a freshly-created file, and any dir created for it, are removed). Validation
-matches a hand-edited `rig.yaml`: a typo'd key in a section *without* strict key-checking is
-tolerated and simply has no effect; sections that *do* enforce their key set (`models`,
-`agents_md`) reject an unknown key. After it passes, `set` reconciles (the same plan + apply
-engine as `rig apply`); `--no-apply` writes the key and prints the plan without converging.
+its prior contents (a freshly-created file, and any dir created for it, are removed). Because every
+block now enforces its key set, a `set` against a config that already carries a typo'd key
+surfaces it (the whole edited tree is validated) — the same strictness a hand-edited `rig.yaml`
+gets on `apply`. After it passes, `set` reconciles (the same plan + apply engine as `rig apply`);
+`--no-apply` writes the key and prints the plan without converging.
