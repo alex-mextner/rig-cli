@@ -43,6 +43,13 @@ pass "rig --help / --version"
 $RIG doctor >/dev/null 2>&1 || true
 pass "rig doctor"
 
+# ── 2b. setup with no TTY → prints USAGE for init/apply/config (never a half-wizard) ──
+# The smoke runs non-interactively (piped), so `rig setup` must degrade to the usage pointer.
+setup_out="$($RIG setup 2>&1 < /dev/null)" || fail "rig setup (non-interactive)"
+grep -q "rig config get" <<<"$setup_out" || fail "rig setup non-interactive: missing config-usage pointer"
+grep -q "non-interactive" <<<"$setup_out" || fail "rig setup non-interactive: not flagged non-interactive"
+pass "rig setup (no TTY) → usage for init/apply/config"
+
 # ── 3. headless setup against a sample config, isolated HOME ──────────────────
 # Apply FROM the agent-tools checkout resolved up top (before HOME gets isolated).
 SRC="$AGENT_TOOLS"

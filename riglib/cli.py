@@ -9,11 +9,12 @@ Subcommands:
 
     rig init     first-run onboarding — scaffold rig.yaml + wire the catalog in (the front door)
     rig apply    declarative reconcile: read rig.yaml, converge disk to it (idempotent)
+    rig setup    interactive config wizard (no TTY → usage for init/apply/config)
+    rig config   read/write one config value by dotted key (get|set)
     rig status   detect + report drift in BOTH directions (config↔disk)
     rig doctor   detect + (offer to) install required/optional dependencies
     rig export   serialize default/current config to rig.yaml without a TUI
     rig stats    tool-adoption analytics over agent-harness session logs (sub: `show`)
-    rig config   get/set a single config key by dot path; set reconciles (the apply engine)
 """
 
 from __future__ import annotations
@@ -144,38 +145,52 @@ def build_parser() -> argparse.ArgumentParser:
     ep.add_argument("-o", "--output", default="rig.yaml", help="output path (default: rig.yaml)")
     ep.add_argument("--force", action="store_true", help="overwrite an existing file")
 
-    # `config get|set` — the recommended way to read/change a single setting. get reads a
-    # nested key; set writes it and RECONCILES (runs the apply engine) so the change takes
-    # effect immediately. --global targets ~/.config/rig/config.yaml instead of ./rig.yaml.
-    cp = sub.add_parser("config", help="get/set a single config key (dot path), then reconcile")
-    csub = cp.add_subparsers(dest="config_command", metavar="<get|set>")
-
-    def _add_config_target_args(parser: argparse.ArgumentParser) -> None:
-        # -C/--cwd and --global are identical on get and set; declare them once so the two
-        # never drift apart (same help text, same dest).
-        parser.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
-        parser.add_argument(
-            "--global", dest="is_global", action="store_true",
-            help="target the global config (~/.config/rig/config.yaml) instead of ./rig.yaml",
-        )
-
-    cg = csub.add_parser("get", help="read a nested config key (e.g. harness.mode)")
-    cg.add_argument("path", help="dot path into the config tree (e.g. ci.items.secret-scan.tier)")
-    _add_config_target_args(cg)
-    cg.add_argument("--json", action="store_true", help="emit the value as JSON")
-
-    cs = csub.add_parser("set", help="write a nested config key, then reconcile (apply)")
-    cs.add_argument("path", help="dot path into the config tree (e.g. harness.mode)")
-    cs.add_argument("value", help="value to set (coerced: true/false/int/float/null, else string)")
-    _add_config_target_args(cs)
-    cs.add_argument("--no-apply", action="store_true",
-                    help="write the key but skip the reconcile (print the resulting plan only)")
-
     sub.add_parser("install-skill", help="register the rig agent skill with harnesses")
+
+    # `setup` IS the interactive wizard (not an alias for init/apply): in a TTY it shows what is
+    # enabled across every reconciled area, edits the local rig.yaml AND the global config, then
+    # applies; with no TTY it prints USAGE for init/apply/config (it never runs a half-wizard).
+    sp = sub.add_parser(
+        "setup",
+        help="interactive config wizard (no TTY → prints usage for init/apply/config)",
+        description="Interactive configuration wizard. In a terminal: show what is enabled across "
+        "all reconciled areas, change options in the local rig.yaml AND the global "
+        "~/.config/rig/config.yaml (each option carries an inline hint), then apply. "
+        "Non-interactive (piped/no TTY): print usage for init/apply/config get|set.",
+    )
+    sp.add_argument("-C", "--cwd", default=".", help="repo root to operate on (default: cwd)")
+
+    _add_config_parser(sub)
 
     _add_stats_parser(sub)
 
     return p
+
+
+def _add_config_parser(sub: "argparse._SubParsersAction") -> None:
+    """`rig config get|set <key> [value]` — read/write one config value by dotted key.
+
+    The headless counterpart to the wizard (and what non-interactive `rig setup` points at).
+    `get` reads the cascaded (global+repo) value; `set` writes to the key's OWNING layer by
+    default (REPO keys → ./rig.yaml, GLOBAL keys → ~/.config/rig/config.yaml), with --global to
+    force the global layer. The registry (riglib.schema) is the source of truth for the keys.
+    """
+    cp = sub.add_parser("config", help="read/write one config value by dotted key (get|set)")
+    cp.set_defaults(_config_parser=cp)
+    cact = cp.add_subparsers(dest="config_action", metavar="<action>")
+
+    cget = cact.add_parser("get", help="read a config value (e.g. rig config get harness.auto_mode)")
+    cget.add_argument("key", help="dotted config key, e.g. harness.auto_mode")
+    cget.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
+
+    cset = cact.add_parser("set", help="write a config value to its owning layer")
+    cset.add_argument("key", help="dotted config key, e.g. harness.auto_mode")
+    cset.add_argument("value", help="the new value (yes/no for a bool; coerced by the key's type)")
+    cset.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
+    cset.add_argument(
+        "--global", dest="global_layer", action="store_true",
+        help="write to the global config (~/.config/rig/config.yaml) regardless of the key's owning layer",
+    )
 
 
 def _add_stats_parser(sub: "argparse._SubParsersAction") -> None:
@@ -231,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         "export": cmd_export,
         "config": cmd_config,
         "install-skill": cmd_install_skill,
+        "setup": cmd_setup_wizard,  # setup = the interactive config wizard (distinct from init)
         "stats": cmd_stats,
     }
     # The single top-level error handler (error-system v2): any structured RigError a command
@@ -957,213 +973,113 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
-def _config_target(args: argparse.Namespace, *, need_repo: bool) -> tuple[Path, Path | None]:
-    """Resolve (config_file, repo_root) for a `config get|set` invocation.
-
-    --global → the XDG global config; otherwise the per-repo ./rig.yaml at the detected git
-    root (so the command works from any subdirectory, like apply/status).
-
-    ``need_repo`` gates the repo lookup: ``set`` always reconciles the repo afterwards (even a
-    --global edit must converge the repo in front of you), so it needs the root. A ``get
-    --global`` does NOT touch any repo, so it must NOT require one — ``detect_environment``
-    is skipped, and ``rig config get … --global`` works outside any git repo.
-    """
-    from .config import global_config_path, repo_config_path
-    from .detect import detect_environment
-
-    if args.is_global and not need_repo:
-        return global_config_path(), None
-    env = detect_environment(Path(args.cwd).resolve())
-    target = global_config_path() if args.is_global else repo_config_path(env.repo_root)
-    return target, env.repo_root
-
-
-def _read_target_yaml(path: Path):
-    """Parse a single config file to a dict (NOT the cascade), or None if it doesn't exist.
-
-    Delegates to the loader's single-file reader, which already wraps YAML errors and rejects
-    a non-mapping top level as a fail-closed :class:`ConfigError`.
-    """
-    from .config import read_yaml_file
-
-    if not path.is_file():
-        return None
-    return read_yaml_file(path)
-
-
 def cmd_config(args: argparse.Namespace) -> int:
-    if not getattr(args, "config_command", None):
-        print(_err("error: `rig config` needs a subcommand: get or set"))
-        print(_dim("  rig config get <dot.path>           # read a key"))
-        print(_dim("  rig config set <dot.path> <value>   # write a key, then reconcile"))
-        return 2
-    if args.config_command == "get":
-        return _cmd_config_get(args)
-    return _cmd_config_set(args)
+    """`rig config get|set <key> [value]` — read/write one config value by dotted key."""
+    from . import errors, schema
+    from .config import ConfigError, global_config_path, load, repo_config_path, validate
+    from .detect import detect_environment
+    from .layers import GLOBAL, REPO
+    from .setup_wizard import load_layer_config, write_layer_config
 
-
-def _cmd_config_get(args: argparse.Namespace) -> int:
-    from .config import ConfigError, get_path
-
-    try:
-        target, _repo_root = _config_target(args, need_repo=False)
-        data = _read_target_yaml(target)
-        if data is None:
-            raise ConfigError(f"config file not found: {target}")
-        value = get_path(data, args.path)
-    except ConfigError as exc:
-        # diagnostics go to STDERR so `get --json | jq` keeps a clean stdout (the exit code
-        # already signals failure); this matters most for the machine-readable --json path.
-        print(_err(f"error: {exc}"), file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001
-        # symmetric with set: anything unexpected (e.g. environment detection failing outside a
-        # git repo on a non-global get) must fail closed with a message, not a traceback.
-        print(_err(f"error: {type(exc).__name__}: {exc}"), file=sys.stderr)
-        return 2
-
-    if args.json:
-        import json
-
-        # default=str so a YAML date/datetime (or any non-JSON scalar) serializes instead of
-        # throwing an unhandled TypeError — get must always fail soft on output.
-        print(json.dumps(value, default=str))
-    elif isinstance(value, (dict, list)):
-        # a subtree: dump it as YAML so the structure is readable (and re-feedable to set's
-        # scalar children). Lazy yaml import keeps the no-yaml path light.
-        import yaml
-
-        print(yaml.safe_dump(value, sort_keys=False, default_flow_style=False).rstrip())
-    else:
-        print(_fmt_scalar(value))  # YAML/CLI casing for bool/null, str otherwise
-    return 0
-
-
-def _cmd_config_set(args: argparse.Namespace) -> int:
-    from .actions import run_plan
-    from .catalog import CatalogError
-    from .config import ConfigError, coerce_scalar, set_path, validate
-    from .plan import PlanError
-    from .state import SetupState
-
-    try:
-        target, _repo_root = _config_target(args, need_repo=True)
-    except ConfigError as exc:
-        print(_err(f"error: {exc}"), file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001 — environment detection failing must fail soft
-        print(_err(f"error: {type(exc).__name__}: {exc}"), file=sys.stderr)
-        return 2
-
-    # Refuse a repo-local `set` when ./rig.yaml does not exist yet: starting from {} and
-    # reconciling would let built-in defaults mutate disk with no committed source of truth —
-    # the same hazard `rig apply`'s no-config guard prevents. `rig init` (or `rig export`)
-    # creates the file first. (--global may legitimately create the machine-wide file, so it is
-    # not guarded here; its second gate still validates over the cascade.)
-    if not args.is_global and not target.is_file():
-        print(_err(f"error: no {target} — run `rig init` (or `rig export -o rig.yaml`) first."))
-        print(_dim("  `config set` edits an existing committed config; it does not bootstrap one."))
-        return 2
-
-    # `scope` is a removed key (the cascade is location-based). Refuse to SET it — the
-    # recommended editor must never (re)introduce a dead setting, even though the loader still
-    # tolerates it in old committed files.
-    if args.path == "scope" or args.path.startswith("scope."):
-        print(_err("error: `scope` is a removed setting — the cascade is by location "
-                   "(global vs repo), not a flag. Nothing to set."), file=sys.stderr)
-        return 2
-
-    try:
-        data = _read_target_yaml(target) or {}
-        # drop any legacy `scope` already in the file (mirrors config.load): we re-serialize the
-        # whole file, so leaving it would re-emit a key the schema no longer recognizes.
-        data.pop("scope", None)
-        value = coerce_scalar(args.value)
-        set_path(data, args.path, value)
-        # First gate: schema validation of the WHOLE edited tree (enum/type checks). This
-        # catches e.g. harness.auto_mode="yes" before anything touches disk.
-        validate(data)
-    except ConfigError as exc:
-        print(_err(f"error: {exc}"))
-        return 2
-    except Exception as exc:  # noqa: BLE001
-        # nothing has touched disk yet (read/coerce/validate only). Anything unexpected here
-        # must still fail closed with a message, not a traceback.
-        print(_err(f"error: {type(exc).__name__}: {exc}"))
-        return 2
-
-    # Capture the previous bytes BEFORE writing so a write IO error OR a SECOND, deeper
-    # validation failure (catalog-backed: a bad agent_tools_source or an unknown CI item —
-    # these live in plan.build(), not config.validate()) can fully ROLL BACK. The file must be
-    # untouched on ANY failure, exactly as the docs promise. The repo file carries the
-    # committed-source-of-truth header; the global file is a plain machine-wide dump.
-    original = target.read_text(encoding="utf-8") if target.is_file() else None
-    parent_existed = target.parent.exists()  # so rollback only removes a dir WE created
-
-    def _rollback() -> bool:
-        """Restore the file to its pre-set state. Returns True on success, False if the restore
-        itself failed (so the caller can tell the user the file is NOT actually untouched,
-        rather than printing a false reassurance)."""
-        try:
-            if original is None:
-                target.unlink(missing_ok=True)  # we created the file; remove our partial write
-                # only remove the parent if WE created it (a fresh ~/.config/rig for --global) —
-                # never rmdir a pre-existing dir like the repo root.
-                if not parent_existed:
-                    with contextlib.suppress(OSError):
-                        target.parent.rmdir()  # no-op if non-empty (e.g. a repo root has .git)
-            else:
-                target.write_text(original, encoding="utf-8")  # restore prior contents
-        except OSError:
-            return False
-        return True
-
-    # Write, then second gate: build the plan from the on-disk cascade (so a --global edit is
-    # validated together with the repo layer it merges into). A write IO error or a plan
-    # failure means the edit didn't take → roll back and fail closed.
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        state = SetupState.from_dict(data)
-        if args.is_global:
-            target.write_text(state.to_yaml(), encoding="utf-8")
-            # Validate the global layer alone before the cascade plan below — see
-            # _validate_layer_in_isolation for why the merged cascade can mask a global break.
-            _validate_layer_in_isolation(target)
-        else:
-            state.write(target)
-        plan, _loaded, _env = _load_plan(args.cwd, config=None)
-    except Exception as exc:  # noqa: BLE001
-        # the write happened (or partially did) — ANY failure from here (catalog/plan rejection,
-        # a write IO error, or a serializer error on data the first gate let through) must roll
-        # the file back and fail closed. Never leave a written-but-unreconcilable config behind.
-        restored = _rollback()
-        kind = "" if isinstance(exc, (ConfigError, CatalogError, PlanError, OSError)) else f"{type(exc).__name__}: "
-        print(_err(f"error: {kind}{exc}"))
-        if restored:
-            print(_dim(f"  (config not changed — {target} left untouched)"))
-        else:
-            # the restore itself failed — be honest: the file may hold the rejected edit.
-            print(_err(f"  WARNING: could not restore {target} — it may contain the rejected edit"))
-        return 2
-
-    print(_ok(f"set {args.path} = {_fmt_scalar(value)}  → {target}"))
-
-    # RECONCILE: a config change only matters once the disk reflects it. Run the SAME apply
-    # engine `rig apply` uses (scoped to the repo in front of you — a --global edit still has
-    # to converge this repo). --no-apply writes the key and prints the plan only.
-    _print_plan(plan)
-    if args.no_apply:
-        print(_dim("\n(--no-apply: config written, nothing reconciled)"))
+    action = getattr(args, "config_action", None)
+    if action not in ("get", "set"):
+        parser = getattr(args, "_config_parser", None)
+        if parser is not None:
+            parser.print_help()
         return 0
-    report = run_plan(plan)
-    _print_results(report)
-    return 1 if report.errors else 0
+
+    option = schema.option_for_key(args.key)
+    if option is None:
+        known = ", ".join(o.key for o in schema.all_options())
+        print(_err(f"error: unknown config key {args.key!r}"))
+        print(_dim(f"  known keys: {known}"))
+        return errors.EXIT_CONFIG
+
+    repo_root = detect_environment(Path(args.cwd).resolve()).repo_root
+
+    if action == "get":
+        try:
+            loaded = load(repo_root)
+        except ConfigError as exc:
+            print(_err(f"error: {exc}"))
+            return errors.EXIT_CONFIG
+        value = schema.effective_value(option, loaded.data)
+        print(_fmt_config_value(value))
+        return 0
+
+    # set: write to the key's OWNING layer (or the global layer with --global).
+    try:
+        value = schema.coerce(option, args.value)
+    except ValueError as exc:
+        print(_err(f"error: {exc}"))
+        return errors.EXIT_CONFIG
+    use_global = getattr(args, "global_layer", False) or option.layer != REPO
+    target_layer = GLOBAL if use_global else REPO
+    path = global_config_path() if use_global else repo_config_path(repo_root)
+    # read→seed→set→validate→write, all fail-closed: a malformed existing layer file
+    # (ConfigError from load_layer_config), a non-mapping intermediate (ValueError from set_path),
+    # or a schema violation (ConfigError from validate) is reported and NOTHING lands on disk.
+    try:
+        data = load_layer_config(path)
+        # a brand-new layer file gets the canonical `version: 1` first, matching
+        # state.default_state and every committed rig.yaml (so a config the CLI creates is canonical).
+        if not data:
+            data["version"] = 1
+        schema.set_path(data, option.key, value)
+        validate(data)
+    except (ValueError, ConfigError) as exc:
+        print(_err(f"error: {exc}"))
+        return errors.EXIT_CONFIG
+    write_layer_config(path, data)
+    print(_ok(f"set {option.key} = {_fmt_config_value(value)}  ({target_layer} → {path})"))
+    print(_dim("  run `rig apply` to converge disk to it."))
+    return 0
 
 
 def cmd_install_skill(args: argparse.Namespace) -> int:
     from .install import install_skill
 
     return install_skill()
+
+
+def cmd_setup_wizard(args: argparse.Namespace) -> int:
+    """`rig setup` — the interactive config wizard, or the non-interactive USAGE pointer.
+
+    In a TTY: open the wizard (show state across all reconciled areas → change options in the
+    local rig.yaml AND the global config → apply). With no TTY (piped/redirected): print usage
+    for init/apply/config and exit 0 — never a half-wizard the user can't answer.
+    """
+    from . import setup_wizard
+
+    if not setup_wizard.is_interactive():
+        return setup_wizard.print_non_interactive_usage()
+
+    from .detect import detect_environment
+
+    repo_root = detect_environment(Path(args.cwd).resolve()).repo_root
+
+    def _apply(root: Path) -> int:
+        # reuse the SAME engine as `rig apply` (one executor, never forked for the wizard).
+        # Build the namespace through the REAL `apply` subparser so it always carries every
+        # attribute cmd_apply reads — no hand-kept field list that can drift from the parser.
+        apply_args = build_parser().parse_args(["apply", "-C", str(root)])
+        return cmd_apply(apply_args)
+
+    # color hook so the wizard's rendered state matches the rest of the CLI's NO_COLOR handling.
+    return setup_wizard.run_setup(repo_root, apply_fn=_apply, color=_c)
+
+
+def _fmt_config_value(value: object) -> str:
+    # `rig config get` is MACHINE-readable output (scripts parse it) → emit YAML-native
+    # `true`/`false`. This INTENTIONALLY differs from the wizard's human `on`/`off`
+    # (setup_wizard._fmt_value): different audiences. Do not merge the two formatters.
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"  # YAML-native null, not the Python repr "None"
+    return str(value)
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
