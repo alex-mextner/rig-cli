@@ -196,6 +196,7 @@ git_hooks: { dispatcher: { enabled: false } }
 mcp: { enabled: false }
 agents_md: { enabled: false }
 gitignore: { enabled: false }
+tg_ctl: { enabled: false }
 YAML
   CLEANREPO="$TMP/clean-repo"; mkdir -p "$CLEANREPO"; ( cd "$CLEANREPO" && git init -q )
   cp "$CLEAN" "$CLEANREPO/rig.yaml"
