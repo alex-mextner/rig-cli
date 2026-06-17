@@ -38,6 +38,19 @@ the write or the catalog-backed plan build fails. `--global` targets the global 
 `--no-apply` writes the key and prints the plan only; a repo-local `set` refuses when `./rig.yaml`
 is absent (run `rig init` first). The dot-path engine lives in `riglib/config.py`.
 
+**`rig config-web` is the WEB front-end onto the same config engine** — a third surface beside
+the wizard and `config get|set`, never a parallel implementation. It serves a local `http.server`
+page (`riglib/config_web.py`) that renders every area from the SAME registry (`riglib/schema.py`,
+via `effective_value`) over the cascaded config, and an edit POSTs to `/edit` → `apply_edit`,
+which coerces + validates fail-closed and writes through the SAME `SetupState` serializer
+`config set` uses, routed to the OWNING layer (REPO → `./rig.yaml`, GLOBAL-only → the global
+config). It does NOT run `rig apply` (you reconcile explicitly). Its lifecycle
+(`run`/`start`/`stop`/`status`/`enable`/`disable` + launchd/systemd autostart) is delegated to the
+SHARED `agenttools-service` lib — NOT hand-rolled here; the seam is `riglib/config_web_service.py`
+(lazy-imports the lib so `rig --help` works without it, failing closed with a `MissingDepError`
+when a lifecycle verb actually needs it). The server binds `127.0.0.1` only and refuses cross-site
+(CSRF) writes. A bare `rig config-web` prints help, never launches.
+
 ## Hard rules
 
 - **Stdlib-only at import time.** Every `riglib/*` module imports only the standard library

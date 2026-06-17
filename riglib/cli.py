@@ -200,6 +200,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_config_parser(sub)
 
+    # `config-web` — a local web UI over the SAME config engine as the wizard / `config set`.
+    # Its lifecycle (run/start/stop/status/enable/disable + OS autostart) is delegated to the
+    # SHARED agenttools-service manager; the wiring lives in config_web_service.register (NOT
+    # here) so this module carries no copy of the service machinery. Lazy-imported so a missing
+    # agenttools-service lib can't break `rig --help` / the rest of the CLI.
+    from . import config_web_service
+
+    config_web_service.register(sub)
+
     _add_stats_parser(sub)
 
     return p
@@ -297,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         "schema": cmd_schema,
         "install-skill": cmd_install_skill,
         "setup": cmd_setup_wizard,  # setup = the interactive config wizard (distinct from init)
+        "config-web": cmd_config_web,  # web UI over the config engine; lifecycle via agenttools-service
         "stats": cmd_stats,
     }
     # The single top-level error handler (error-system v2): any structured RigError a command
@@ -1348,6 +1358,21 @@ def cmd_setup_wizard(args: argparse.Namespace) -> int:
 
     # color hook so the wizard's rendered state matches the rest of the CLI's NO_COLOR handling.
     return setup_wizard.run_setup(repo_root, apply_fn=_apply, color=_c)
+
+
+def cmd_config_web(args: argparse.Namespace) -> int:
+    """`rig config-web …` — view/edit the reconciled rig config in a local web UI.
+
+    A thin pass-through to :func:`riglib.config_web_service.dispatch_cli`, which routes the verb
+    (run/start/stop/status/enable/disable + the internal `_serve`) through the SHARED
+    agenttools-service manager. A bare `rig config-web` prints HELP and never launches a server.
+    The service module is imported lazily so a missing agenttools-service lib only bites when a
+    lifecycle verb is actually invoked (it raises a structured MissingDepError then), not at
+    `rig --help` time.
+    """
+    from . import config_web_service
+
+    return config_web_service.dispatch_cli(args)
 
 
 def cmd_stats(args: argparse.Namespace) -> int:

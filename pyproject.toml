@@ -21,6 +21,15 @@ dependencies = ["pyyaml"]
 # when rich is absent (it is lazy-imported), so this stays purely optional.
 tui = ["textual>=0.50", "rich>=13"]
 test = ["pytest"]
+# NOTE — `rig config-web`'s lifecycle (run/start/stop/status/enable/disable + launchd/systemd
+# autostart) is delegated to the SHARED `agenttools-service` manager (an agent-tools nested lib,
+# which in turn needs `agenttools-daemon`). It is deliberately NOT declared as a dependency here:
+# neither lib is published to PyPI (they live under the agent-tools checkout at
+# `lib/agenttools_service` / `lib/agenttools_daemon`), so a versioned requirement would make
+# `uv run` / `pip install` unresolvable for everyone. config-web LAZY-imports it, so `rig --help`,
+# `rig apply`, `rig status`, etc. all run without it; only the config-web lifecycle verbs need it
+# and they fail closed with an actionable MissingDepError (exit 127) carrying the install command:
+#   pip install -e <agent-tools>/lib/agenttools_daemon <agent-tools>/lib/agenttools_service
 
 [project.scripts]
 rig = "riglib.cli:main"
