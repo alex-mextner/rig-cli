@@ -340,8 +340,32 @@ class TmuxPlan:
         REAL ``claude`` process is a CHILD of the pane's shell. Filtering on
         ``pane_current_command == claude`` therefore matched NOTHING → the map stayed empty → cc
         never resumed. So cc-save now walks the pane's process TREE: it takes ``pane_pid`` and
-        recursively descends children (``ps -eo pid,ppid,comm``) looking for a process whose
-        command basename is ``claude``. A pane with a ``claude`` descendant is a cc pane.
+        recursively descends children (``ps -eo pid,ppid,args``) looking for the ``claude``
+        process. A pane with a ``claude`` descendant is a cc pane.
+
+        WHY the match is on the EXECUTABLE PATH, not just the basename ``claude`` (the 2026-06-17
+        incident): Claude Code installs as a SYMLINK ``~/.local/bin/claude`` →
+        ``…/claude/versions/<version>``, and the real executable FILE is named by its VERSION
+        (``2.1.179``). Launched via the ``claude`` symlink the kernel keeps the invoked name
+        ``claude`` — but launched by the RESOLVED path the process's name is the version string,
+        NOT ``claude``. A basename-only ``claude`` / ``*/claude`` match misses THAT process exactly
+        as the old command-string filter did → the map stays empty → cc never resumes after a
+        reboot (the live incident). So the tree walk reads the full command line (``ps -eo args``),
+        takes argv[0] (the executable = the line up to the first space), and matches THAT against:
+        ``claude`` / ``*/claude`` (symlink launch) OR a path under ``…/claude/versions/``
+        (direct-path launch of the versioned binary). Reading ``args`` — not ``comm`` (the
+        basename-only, 15-char-truncated value on Linux) — makes the versioned PATH visible on both
+        macOS and Linux. Keying on argv[0] ONLY (not the whole args line) is load-bearing: a
+        ``claude`` / ``claude/versions/`` token appearing in an ARGUMENT (``vim claude.md``,
+        ``grep -r x …/claude/versions/``, ``cp /opt/claude /tmp``) must NOT mark the pane as cc —
+        whole-line matching would write a bogus cc-map entry. (Limitations, both accepted: (a) an
+        install path with a SPACE truncates argv[0] at the space — isolating a spaced argv[0] from
+        ``ps args`` is not possible, and the whole-line match that would cover it reintroduces the
+        false positives; the default ``~/.local/share/claude/versions/<v>`` path has no space. (b) a
+        WRAPPER launch that rewrites argv[0] — ``npx claude`` / ``node …/cli.js`` / a shell function
+        — puts the real claude in argv[1+], so the pane is missed; the canonical installs this fix
+        targets exec the binary directly (``claude`` symlink or the versioned path), so argv[0] is
+        the claude executable. Matching argv[1+] would resurrect the argument false-positives.)
 
         Encoding (VERIFIED on a real machine, see module/test docs): the projects dir name is
         the cwd with every ``/`` AND ``.`` replaced by ``-`` (so ``/Users/u/.files`` →
@@ -363,7 +387,14 @@ class TmuxPlan:
 # so cc-restore can relaunch `claude --resume <id>` in the right window after a reboot.
 # WHY a tree walk and not `pane_current_command == claude`: Claude Code shows up in
 # `pane_current_command` as its VERSION (e.g. 2.1.178); the real `claude` process is a CHILD of
-# the pane's shell. So we descend the pane PID's children and match a process named `claude`.
+# the pane's shell. So we descend the pane PID's children and match the `claude` process.
+# WHY argv[0]'s PATH, not just basename `claude`: cc installs as a symlink
+# ~/.local/bin/claude -> .../claude/versions/<version>; launched by the RESOLVED path the process
+# name is the version (2.1.179), NOT `claude`. So we read the full `args` (argv[0] is the full
+# path on macOS AND Linux, unlike `comm` which is the truncated basename on Linux), take argv[0]
+# (up to the first space), and match `claude`/`*/claude` OR a path under `.../claude/versions/`.
+# Matching argv[0] ONLY (not the whole args) stops a `claude`/`claude/versions/` token in an
+# ARGUMENT (`grep .../claude/versions/`, `vim claude.md`) from a bogus match.
 # Encoding: the ~/.claude/projects/<enc> dir name is the pane cwd with every '/' and '.'
 # replaced by '-' (verified against real on-disk dirs).
 # Limitation: the session id is per-CWD (newest jsonl), not strictly per-pane — two claude
@@ -391,26 +422,49 @@ newest_session_id() {{
   basename "$newest" .jsonl
 }}
 
-# Snapshot the whole process table ONCE (pid ppid comm) — walking the tree per pane against a
-# live `ps` each time would race; one snapshot is consistent and cheap. `comm` is the basename
-# tmux/ps report (`claude`), not the full argv, so a path like /opt/homebrew/bin/claude still
-# reports `claude`. Stored as parallel maps pid->ppid and pid->comm for an O(depth) descent.
-PS_SNAPSHOT=$(ps -eo pid=,ppid=,comm= 2>/dev/null || true)
+# Snapshot the whole process table ONCE (pid ppid args) — walking the tree per pane against a
+# live `ps` each time would race; one snapshot is consistent and cheap. We capture `args` (the
+# full command line: executable path + argv), NOT `comm`, for PORTABILITY: macOS `comm` is the
+# full executable PATH, but LINUX `comm` is the 15-char-truncated BASENAME with no path — so the
+# versioned-binary install (.../claude/versions/<version>, basename = the VERSION) is INVISIBLE
+# to a comm match on Linux (comm would read `2.1.179`, no path). `args` carries the full path on
+# BOTH platforms, so the `.../claude/versions/` segment is matchable everywhere. The `read -r pid
+# ppid rest` below puts the WHOLE remaining line (the args) into `rest`, so variable-width argv
+# never breaks the 2-field key parse.
+PS_SNAPSHOT=$(ps -eo pid=,ppid=,args= 2>/dev/null || true)
 
 pane_has_claude() {{
-  # BFS over the descendants of the pane's pid; return 0 if any descendant's command is `claude`.
+  # BFS over the descendants of the pane's pid; return 0 if any descendant IS a `claude` process.
   local root="$1"
   local -a queue=("$root")
-  local pid ppid comm cur
+  local pid ppid rest exe cur
   while [ "${{#queue[@]}}" -gt 0 ]; do
     cur="${{queue[0]}}"
     queue=("${{queue[@]:1}}")
     # scan the snapshot for: (a) `cur`'s own command, and (b) `cur`'s direct children to enqueue.
-    while read -r pid ppid comm; do
+    while read -r pid ppid rest; do
       [ -n "$pid" ] || continue
       if [ "$pid" = "$cur" ]; then
-        case "$comm" in
+        # `rest` is the full command line: argv[0] (the EXECUTABLE) then its args. We match the
+        # EXECUTABLE ONLY — `exe=${{rest%% *}}` is argv[0] up to the first space — NOT the whole
+        # `rest`. Matching the whole line would let a `claude`/`claude/versions/` token appearing
+        # in an ARGUMENT false-positive (`grep -r x .../claude/versions/`, `cp /opt/claude /tmp`,
+        # `vim claude.md`) and write a bogus cc-map entry. Keying on argv[0] is the documented
+        # contract. (Limitation: an install path containing a SPACE truncates argv[0] here — but
+        # isolating a spaced argv[0] is impossible from `ps args` alone, and tolerating it would
+        # require the whole-line match that reintroduces the false positives, so we accept the rare
+        # spaced-install miss over false positives for everyone. The default install path
+        # ~/.local/share/claude/versions/<v> has no space.)
+        exe=${{rest%% *}}
+        case "$exe" in
+          # a binary/symlink named `claude` (the symlink-launch case: argv[0] basename is `claude`).
           claude|*/claude) return 0 ;;
+          # direct-path launch of the VERSIONED binary (e.g. ~/.local/share/claude/versions/2.1.179
+          # — its name is the VERSION, not `claude`). Matchable on macOS AND Linux because we read
+          # the full `args` PATH for argv[0], not `comm` (Linux `comm` is the truncated basename,
+          # no path). The leading `*/` requires `claude/versions/` to be a real path segment, so
+          # `…/notclaude/versions/…` never matches.
+          */claude/versions/*) return 0 ;;
         esac
       fi
       if [ "$ppid" = "$cur" ]; then

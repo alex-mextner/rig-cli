@@ -351,6 +351,81 @@ def test_cc_save_populates_map_from_a_real_claude_child(tmux_env, monkeypatch):
     assert any(str(work) in ln and sid in ln for ln in lines), lines
 
 
+def test_cc_save_detects_the_versioned_binary_install(tmux_env, monkeypatch):
+    """THE 2026-06-17 INCIDENT (versioned-binary half of DEFECT 2): cc installs as a symlink
+    ``~/.local/bin/claude`` → ``…/claude/versions/<version>``. Launched by the RESOLVED path (not
+    the ``claude`` symlink), the process's name is the VERSION string (``2.1.179``), NOT ``claude``
+    — so a basename-only ``claude``/``*/claude`` match missed it and the map stayed empty (cc never
+    resumed after a reboot, the live incident). cc-save must still detect it via the
+    ``…/claude/versions/`` path arm of the tree-walk match (which reads ``ps -o args`` so the path
+    is visible on both macOS and Linux — Linux ``comm`` is the truncated basename with no path).
+
+    We reproduce the EXACT install shape: a ``claude/versions/<version>`` symlink → ``sleep`` run by
+    its resolved PATH, as a real child of a pane shell, so its ``args`` (argv[0]) is
+    ``…/claude/versions/<version>``. A SYMLINK (not a copy) is used so the launcher works on macOS
+    too: macOS SIP refuses to exec an unsigned COPY of a protected system binary, but exec'ing a
+    symlink to it is allowed, and ``args`` reflects the invoked path either way.
+    """
+    home, socket, run = tmux_env
+    _apply_with_real_plugins(home, monkeypatch)
+    gen = home / ".config" / "rig" / "tmux"
+
+    work = home / "verproj"
+    work.mkdir()
+    version = "2.1.179"
+    versions_dir = home / ".local" / "share" / "claude" / "versions"
+    versions_dir.mkdir(parents=True)
+    versioned = versions_dir / version
+    real_sleep = shutil.which("sleep") or "/bin/sleep"
+    versioned.symlink_to(real_sleep)  # argv[0] == the versioned path under claude/versions/
+    launcher = home / "launch-ver.sh"
+    # run the versioned binary BY ITS RESOLVED PATH (the failing production case), backgrounded so
+    # it stays a genuine descendant of the launcher (which keeps the pane shell alive).
+    launcher.write_text(
+        f"#!/usr/bin/env bash\n{shlex.quote(str(versioned))} 300 &\nsleep 300\n", encoding="utf-8"
+    )
+    launcher.chmod(0o755)
+
+    # seed a Claude Code session file for that cwd so cc-save has an id to record.
+    enc = str(work).replace("/", "-").replace(".", "-")
+    proj = home / ".claude" / "projects" / enc
+    proj.mkdir(parents=True)
+    sid = "99999999-8888-7777-6666-555555555555"
+    (proj / f"{sid}.jsonl").write_text("{}\n", encoding="utf-8")
+
+    run(["tmux", "new-session", "-d", "-s", "main", "-c", str(work), str(launcher)])
+    # POLL the REAL generated cc-save until it records the pane (or time out). We assert on cc-save's
+    # OWN output — the production acceptance criterion — instead of a separate `ps` probe, so the
+    # test validates the exact production matcher on the exact platform (a flat `ps args` probe
+    # diverged from how the shimmed-socket tree walk sees the pane and flaked on CI). This loop also
+    # absorbs the launch→ps-visibility race. If cc-save can detect the versioned descendant, the map
+    # is non-empty; if it can't (the regression / a real platform gap), the loop times out and fails.
+    map_file = gen / "cc-sessions.map"
+    deadline = time.time() + 15
+    lines: list[str] = []
+    found = False
+    while time.time() < deadline:
+        r = run(["bash", str(gen / "cc-save.sh")])
+        assert r.returncode == 0, f"cc-save failed: {r.stderr}"
+        # cc-save has finished writing (sequential — `run` returns before we read), so the read is
+        # not racing a concurrent writer. Break ONLY when OUR versioned pane (this cwd + sid) is in
+        # the map — not merely on any non-empty map: cc-save scans ALL panes, so an unrelated claude
+        # process on the host (a parallel test, the dev's own session) could populate it without our
+        # descendant yet being visible, and an early break would then flake the final assertion.
+        if map_file.is_file():
+            lines = [ln for ln in map_file.read_text().splitlines() if ln.strip()]
+            if any(str(work) in ln and sid in ln for ln in lines):
+                found = True
+                break
+        time.sleep(0.3)
+    # the production matcher (the `.../claude/versions/` arm) found OUR versioned pane and recorded
+    # its exact cwd→session-id. A timeout here is the INCIDENT regression (or a real platform gap).
+    assert found, (
+        "INCIDENT: cc-save did NOT record the VERSIONED-binary cc pane "
+        f"(cwd={work}, sid={sid}); map lines={lines!r}"
+    )
+
+
 def test_cc_restore_relaunches_claude_resume_into_fresh_shell(tmux_env, monkeypatch):
     """DEFECT 2 (restore half): with a seeded map, cc-restore sends `cd <cwd> && claude --resume
     <id>` into a FRESH shell pane (never on top of a running claude / an editor)."""

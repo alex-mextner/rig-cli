@@ -570,8 +570,17 @@ scripts and wires them via `@resurrect-hook-post-save-all` / `@resurrect-hook-po
   `window/pane → cwd → session_id` map. **Detection is by the process TREE, not the command
   string:** Claude Code shows up in `pane_current_command` as its VERSION (e.g. `2.1.178`), and
   the real `claude` process is a CHILD of the pane's shell — so cc-save walks the pane's
-  descendants (`ps -eo pid,ppid,comm`) for a process whose command is `claude`. (Filtering on
-  `pane_current_command == claude` matched nothing → an empty map → cc never resumed.)
+  descendants (`ps -eo pid,ppid,args`) for a process whose **executable** (argv[0]) is `claude`.
+  (Filtering on `pane_current_command == claude` matched nothing → an empty map → cc never
+  resumed.) **It matches the versioned install too:** cc installs as a symlink
+  `~/.local/bin/claude → …/claude/versions/<version>`, so launched by the resolved path the
+  process name is the *version* (`2.1.179`), not `claude`; cc-save also matches an argv[0] under
+  `…/claude/versions/`. It reads the full `args` (not `comm`) so the path is visible on **both
+  macOS and Linux** (Linux `comm` is the truncated basename, with no path), and keys on argv[0]
+  only so a `claude` that is merely an *argument* (`vim claude.md`, `grep …/claude/versions/`)
+  never false-matches. *Accepted limitations:* an install path containing a **space**, or a
+  **wrapper** launch that rewrites argv[0] (`npx claude`, `node …/cli.js`), is not detected — both
+  are absent from the canonical direct-exec install this targets.
   **Encoding (verified against real on-disk dirs):** the projects-dir name is the cwd with
   **every `/` and `.` replaced by `-`** (e.g. `/Users/u/.files` → `-Users-u--files`).
 - **`cc-restore.sh`** — after a reboot, for each mapped window run `claude --resume <id>` —

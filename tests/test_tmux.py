@@ -274,6 +274,15 @@ def test_cc_save_matches_claude_basename_in_the_tree():
     assert "MAP_FILE" in body and ".jsonl" in body
 
 
+def test_cc_save_matches_the_versioned_binary_path():
+    """The generated match must also cover the versioned-binary install (the 2026-06-17 incident):
+    cc launched by its resolved path reports `comm` of `.../claude/versions/<version>`, basename =
+    the version, not `claude`. The case-glob must include the `*/claude/versions/*` arm or that
+    process is invisible to the tree walk (the map stays empty → cc never resumes)."""
+    body = _plan().render_cc_save()
+    assert "*/claude/versions/*" in body
+
+
 def test_cc_save_still_records_cwd_and_session_id():
     """Detection changed (tree walk), but the RECORDED data is unchanged: pane addr, cwd, id."""
     body = _plan().render_cc_save()
@@ -286,6 +295,8 @@ def _run_pane_has_claude(snapshot: str, root: str) -> int:
     """Extract the REAL `pane_has_claude` BFS from the generated cc-save script and run it against
     a SYNTHETIC ps snapshot — HERMETIC (no tmux/network/real processes), so the tree-walk logic is
     covered even when the e2e is opted out (opus finding: the BFS was only exercised in the e2e).
+    The snapshot lines are `<pid> <ppid> <args>` (args = the full command line, as the production
+    `ps -eo pid=,ppid=,args=` emits — argv[0] is the executable the matcher keys on).
     Returns the function's exit code (0 = a `claude` descendant of `root` was found)."""
     import shlex
     import subprocess
@@ -322,6 +333,126 @@ def test_pane_has_claude_matches_absolute_path_basename():
     """A descendant reported by its absolute path (`/opt/homebrew/bin/claude`) matches `*/claude`."""
     snap = "100 1 zsh\n200 100 /opt/homebrew/bin/claude\n"
     assert _run_pane_has_claude(snap, "100") == 0
+
+
+def test_pane_has_claude_matches_versioned_binary_under_claude_versions():
+    """THE 2026-06-17 INCIDENT: cc installs as a symlink ~/.local/bin/claude ->
+    .../claude/versions/<version>. Launched by the RESOLVED path, `ps comm` reports the full path
+    whose basename is the VERSION string (`2.1.179`), not `claude` — so a basename-only match
+    missed it and the cc map stayed empty (cc never resumed after a reboot). The tree walk must
+    catch a descendant whose path is under `.../claude/versions/`."""
+    snap = "100 1 /bin/zsh\n200 100 /Users/u/.local/share/claude/versions/2.1.179\n300 200 sleep\n"
+    assert _run_pane_has_claude(snap, "100") == 0
+
+
+def test_pane_has_claude_versioned_binary_deep_in_tree():
+    """The versioned cc binary several levels below the pane shell is still found by the BFS."""
+    snap = (
+        "100 1 zsh\n"
+        "200 100 node\n"
+        "300 200 /Users/u/.local/share/claude/versions/3.0.0-beta.1\n"
+    )
+    assert _run_pane_has_claude(snap, "100") == 0
+
+
+def test_pane_has_claude_no_false_positive_on_unrelated_versioned_path():
+    """A numeric-named process NOT under `claude/versions/` (e.g. a runtime under its own
+    `versions/` dir, or a bare version-named binary) must NOT match — the `claude/versions/`
+    path segment is required, so the rule can't be tripped by any dotted-numeric basename."""
+    snap = (
+        "100 1 bash\n"
+        "200 100 /opt/node/versions/20.11.0/bin/node\n"   # node, not claude
+        "300 100 /usr/local/foo/2.1.179\n"                # bare version, no claude/versions/
+    )
+    assert _run_pane_has_claude(snap, "100") != 0
+
+
+def test_pane_has_claude_matches_versioned_binary_with_args():
+    """The versioned binary launched WITH arguments (`…/claude/versions/2.1.179 --resume`) still
+    matches — the matcher keys on argv[0] (the executable path), ignoring the trailing args."""
+    snap = "100 1 /bin/zsh\n200 100 /Users/u/.local/share/claude/versions/2.1.179 --resume\n"
+    assert _run_pane_has_claude(snap, "100") == 0
+
+
+def test_pane_has_claude_ignores_claude_only_in_arguments():
+    """`claude` appearing only as an ARGUMENT (not argv[0]) must NOT match — the matcher reads
+    argv[0] only, so `vim claude-notes.md` / `grep claude` / `cat ~/claude/x` is not a cc pane."""
+    snap = (
+        "100 1 bash\n"
+        "200 100 /usr/bin/vim claude-notes.md\n"
+        "300 100 /usr/bin/grep claude /var/log/x\n"
+    )
+    assert _run_pane_has_claude(snap, "100") != 0
+
+
+def test_pane_has_claude_matches_symlink_launch_with_args():
+    """The common live case: `claude --resume` (argv[0] == `claude`, launched via the symlink)
+    matches even with trailing args — argv[0] basename equality."""
+    snap = "100 1 zsh\n200 100 claude --resume\n"
+    assert _run_pane_has_claude(snap, "100") == 0
+
+
+def test_pane_has_claude_does_not_false_match_claude_versions_in_an_argument():
+    """REGRESSION GUARD (review finding, 2 models): `claude/versions/` appearing in an ARGUMENT
+    (not argv[0]) must NOT mark the pane as cc — else a routine command writes a bogus cc-map entry.
+    The matcher keys on argv[0] (the executable) only, so a `grep`/`ls`/`tar` over the versions dir,
+    or a `cp` of a `claude` file, is correctly ignored."""
+    for argline in (
+        "/bin/grep -r foo /home/u/.local/share/claude/versions/",
+        "/bin/ls /home/u/.local/share/claude/versions/",
+        "/usr/bin/tar czf b.tgz /home/u/.local/share/claude/versions/2.1.179",
+        "/bin/cp /opt/claude /tmp/",
+        "/usr/bin/find / -path */claude/versions*",
+    ):
+        snap = f"100 1 bash\n200 100 {argline}\n"
+        assert _run_pane_has_claude(snap, "100") != 0, argline
+
+
+def test_pane_has_claude_no_match_on_notclaude_versions_path():
+    """The `*/claude/versions/*` glob requires `claude` to be a real path SEGMENT: a sibling
+    project like `/opt/notclaude/versions/2.0.0` (or `myclaude`) must NOT false-match."""
+    snap = "100 1 bash\n200 100 /opt/notclaude/versions/2.0.0 --x\n"
+    assert _run_pane_has_claude(snap, "100") != 0
+
+
+def test_pane_has_claude_spaced_install_path_is_a_known_limitation():
+    """DOCUMENTED LIMITATION (review finding): an install path containing a SPACE
+    (`/Users/J D/.local/share/claude/versions/2.1.179`) is NOT detected — argv[0] cannot be
+    isolated from `ps args` when it contains a space, and the whole-line match that would cover it
+    reintroduces the argument false-positives above. The default `~/.local/share/claude/versions/`
+    path has no space, so this never bites a normal install. This test PINS the accepted behavior
+    (not an aspiration): if a future change makes spaced paths match, revisit the false-positive
+    trade-off in `pane_has_claude` deliberately."""
+    snap = "100 1 /bin/zsh\n200 100 /Users/J D/.local/share/claude/versions/2.1.179 --resume\n"
+    assert _run_pane_has_claude(snap, "100") != 0
+
+
+def test_pane_has_claude_spaced_path_symlink_arm_is_a_known_limitation():
+    """Same accepted limitation for the plain `*/claude` symlink arm: a `claude` binary under a
+    path with a SPACE (`/Users/J D/bin/claude`) is truncated at the space and NOT detected. Pinned
+    so the symlink arm's contract can't silently change either (paired with the versions-arm pin)."""
+    snap = "100 1 zsh\n200 100 /Users/J D/bin/claude --resume\n"
+    assert _run_pane_has_claude(snap, "100") != 0
+
+
+def test_pane_has_claude_ignores_wrapper_launch_with_claude_in_argv1():
+    """DOCUMENTED LIMITATION: a WRAPPER that rewrites argv[0] (`npx claude`, `node …/cli.js`) puts
+    the real claude in argv[1+], so it is NOT detected — matching argv[1+] would resurrect the
+    argument false-positives. The canonical installs exec the binary directly (argv[0] = claude),
+    so this is an accepted miss. Pinned to make the trade-off explicit."""
+    snap = (
+        "100 1 bash\n"
+        "200 100 /usr/bin/node /home/u/.local/share/claude/cli.js\n"
+        "300 100 /usr/bin/npx claude --resume\n"
+    )
+    assert _run_pane_has_claude(snap, "100") != 0
+
+
+def test_pane_has_claude_tolerates_empty_or_bracketed_args_lines():
+    """A degenerate snapshot line — an empty `args` (kernel/zombie) or a bracketed kernel-thread
+    name (`[kthreadd]`) — must neither match nor error out the BFS (it just isn't a cc process)."""
+    snap = "100 1 bash\n200 100 [kthreadd]\n300 100 \n"  # 300 has empty args
+    assert _run_pane_has_claude(snap, "100") != 0
 
 
 def test_pane_has_claude_no_match_when_absent():
