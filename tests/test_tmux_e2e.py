@@ -11,10 +11,14 @@ clean-machine ``rig apply`` leaves tmux persistence FULLY working.
 
 How it is reached
 -----------------
-``pytest`` runs it by default. Every tmux call goes through a PRIVATE ``-L <socket>`` (a per-test
-``tmux`` shim on PATH injects ``-L``), so it NEVER touches the developer's real tmux server. A
-session-scoped teardown kills every spawned server/socket. If ``tmux``/``git`` is not installed
-the whole module skips (the unit suite already covers the render/plan/drift logic hermetically).
+The plugin-cloning tests are OPT-IN (``@_requires_tmux_e2e`` → ``RIG_TMUX_E2E=1`` + tmux + git +
+network); a plain ``pytest`` SKIPS them so default CI stays hermetic. The socket-leak REGRESSION
+(``test_teardown_unlinks_the_private_socket_file``) is gated on ``@_requires_tmux`` instead
+(tmux-present only, NO network) so it runs in default hermetic CI — it guards the leak that killed
+the dev's server, so it must NOT be hidden behind the network gate (INCIDENT 2026-06-17, follow-up
+a). Every tmux call goes through a PRIVATE ``-L <socket>`` (a per-test ``tmux`` shim on PATH injects
+``-L``), so it NEVER touches the developer's real tmux server. A session-scoped teardown kills every
+spawned server/socket. The unit suite already covers the render/plan/drift logic hermetically.
 
 What it proves (maps 1:1 to the six defects)
 --------------------------------------------
@@ -37,6 +41,9 @@ Invariants
   once accumulated ~185 ``rigtest-*`` files in ``/tmp/tmux-501/`` and starved the dev's server.
 - The generated scripts are run UNMODIFIED (via the PATH ``tmux`` shim) — testing the real
   artifact rig writes, not a paraphrase of it.
+- The per-test gating granularity (leak regression tmux-only, plugin tests opt-in network) is
+  PINNED by ``tests/test_tmux_e2e_gating.py`` — a separate, tamper-proof guard so a re-added
+  blanket ``pytestmark`` can never silently re-hide the leak regression (INCIDENT follow-up a).
 """
 
 from __future__ import annotations
@@ -67,21 +74,52 @@ def _github_reachable() -> bool:
         return False
 
 
-# This module drives a REAL tmux server AND clones the real plugins from GitHub — real network +
+# Most tests here drive a REAL tmux server AND clone the real plugins from GitHub — real network +
 # daemon access. The repo's plain `python -m pytest -q` is documented as fast + HERMETIC (AGENTS.md),
-# so this e2e is OPT-IN via `RIG_TMUX_E2E=1` (codex finding): default CI/pytest stays hermetic and
-# offline-safe; the BFS / artifact logic it exercises is ALSO covered hermetically (the unit suite
-# + `test_pane_has_claude_*` here, which run with no network). The acceptance gate the CTO runs is
-# `RIG_TMUX_E2E=1 pytest tests/test_tmux_e2e.py`. Even when opted in, it skips (never fails) when
+# so those e2e tests are OPT-IN via `RIG_TMUX_E2E=1` (codex finding): default CI/pytest stays hermetic
+# and offline-safe; the BFS / artifact logic they exercise is ALSO covered hermetically (the unit suite
+# + `test_pane_has_claude_*`, which run with no network). The acceptance gate the CTO runs is
+# `RIG_TMUX_E2E=1 pytest tests/test_tmux_e2e.py`. Even when opted in, they skip (never fail) when
 # tmux/git is absent or GitHub is unreachable. The autouse RIG_TMUX_DRY_RUN guard (conftest) is
 # cleared per-test where a live step is exercised.
+#
+# The gate is applied PER-TEST (the decorators below), NOT as a blanket module-level `pytestmark`,
+# because the gate's GRANULARITY differs by what a test actually needs (2026-06-17 INCIDENT
+# follow-up (a)):
+#   - `_requires_tmux_e2e` — the FULL opt-in + tmux + git + network gate, for the tests that clone
+#     the real plugins from GitHub (the reboot-cycle acceptance, cc-save/restore, resurrect snapshot,
+#     boot-cleanup). These genuinely need the network and stay opt-in so default CI is hermetic.
+#   - `_requires_tmux` — tmux-present ONLY (no opt-in flag, NO network), for the socket-leak
+#     REGRESSION (`test_teardown_unlinks_the_private_socket_file`). It boots a private `-L` server
+#     running `tail -f /dev/null` and asserts teardown UNLINKS the socket — it clones nothing and
+#     hits no network. Coupling it to `RIG_TMUX_E2E=1` + GitHub-reachability (the old blanket
+#     `pytestmark`) meant the one regression guarding the leak that actually KILLED the dev's tmux
+#     server (the ~185 leaked `rigtest-*` sockets of INCIDENT 2026-06-17 — 166 of them this fixture's)
+#     NEVER ran in default hermetic CI or offline — exactly when it matters. Decoupled here so it
+#     runs whenever tmux is installed.
 _E2E_OPTED_IN = os.environ.get("RIG_TMUX_E2E", "").strip() in ("1", "true", "yes")
-pytestmark = pytest.mark.skipif(
-    not _E2E_OPTED_IN
-    or shutil.which("tmux") is None
-    or shutil.which("git") is None
-    or not _github_reachable(),
+
+# Resolved ONCE at import — `_github_reachable()` does a 3s TCP probe, so calling it per-test (the
+# 6 network tests each evaluating the decorator) would add up; one probe is enough for the gate.
+# `_E2E_OPTED_IN` is the FIRST operand of the `and` chain ON PURPOSE: Python short-circuits, so the
+# 3s probe is NEVER run unless the e2e is opted in — a default hermetic `pytest` (RIG_TMUX_E2E unset)
+# pays ZERO network cost here, even offline. (Trade-off, same as the old `pytestmark`: the result is
+# precomputed at import, so a transient outage at collection skips the 6 network tests for the whole
+# session even if connectivity returns — acceptable; they are the opt-in acceptance gate, not CI.)
+_NETWORK_E2E_AVAILABLE = (
+    _E2E_OPTED_IN
+    and shutil.which("tmux") is not None
+    and shutil.which("git") is not None
+    and _github_reachable()
+)
+_requires_tmux_e2e = pytest.mark.skipif(
+    not _NETWORK_E2E_AVAILABLE,
     reason="real-tmux e2e is opt-in: set RIG_TMUX_E2E=1 (needs tmux + git + network; auto-skips offline)",
+)
+# tmux-only, no network, no opt-in flag — the socket-leak regression runs in default hermetic CI.
+_requires_tmux = pytest.mark.skipif(
+    shutil.which("tmux") is None,
+    reason="needs tmux installed (no network / no RIG_TMUX_E2E required)",
 )
 
 
@@ -250,6 +288,7 @@ def _apply_with_real_plugins(home, monkeypatch):
 
 
 # ── the acceptance e2e ───────────────────────────────────────────────────────────────────────
+@_requires_tmux_e2e
 def test_clean_machine_apply_brings_tmux_up_with_config_and_session(tmux_env, monkeypatch):
     """DEFECTS 1/3/4/6: a clean-HOME apply installs plugins + scripts + config + boot agent, the
     boot script brings a REAL server up WITH the config loaded AND a session present, and the
@@ -298,6 +337,7 @@ def test_clean_machine_apply_brings_tmux_up_with_config_and_session(tmux_env, mo
     assert ls2.stdout.count("main") == 1, f"boot spawned a duplicate session: {ls2.stdout}"
 
 
+@_requires_tmux_e2e
 def test_cc_save_populates_map_from_a_real_claude_child(tmux_env, monkeypatch):
     """DEFECT 2 (the headline reboot bug): a FAKE `claude` running as a CHILD of a pane's shell
     must make cc-save write a NON-EMPTY cwd->session-id map — the OLD `pane_current_command ==
@@ -351,6 +391,7 @@ def test_cc_save_populates_map_from_a_real_claude_child(tmux_env, monkeypatch):
     assert any(str(work) in ln and sid in ln for ln in lines), lines
 
 
+@_requires_tmux_e2e
 def test_cc_save_detects_the_versioned_binary_install(tmux_env, monkeypatch):
     """THE 2026-06-17 INCIDENT (versioned-binary half of DEFECT 2): cc installs as a symlink
     ``~/.local/bin/claude`` → ``…/claude/versions/<version>``. Launched by the RESOLVED path (not
@@ -426,6 +467,7 @@ def test_cc_save_detects_the_versioned_binary_install(tmux_env, monkeypatch):
     )
 
 
+@_requires_tmux_e2e
 def test_cc_restore_relaunches_claude_resume_into_fresh_shell(tmux_env, monkeypatch):
     """DEFECT 2 (restore half): with a seeded map, cc-restore sends `cd <cwd> && claude --resume
     <id>` into a FRESH shell pane (never on top of a running claude / an editor)."""
@@ -473,6 +515,7 @@ def test_cc_restore_relaunches_claude_resume_into_fresh_shell(tmux_env, monkeypa
     assert str(work).replace("\n", "") in joined, cap.stdout
 
 
+@_requires_tmux_e2e
 def test_resurrect_writes_a_real_snapshot(tmux_env, monkeypatch):
     """DEFECTS 4/6: with the resurrect dir present + the plugin installed, a real `resurrect save`
     writes a `tmux_resurrect_*.txt` snapshot — so a reboot has something to restore."""
@@ -492,9 +535,16 @@ def test_resurrect_writes_a_real_snapshot(tmux_env, monkeypatch):
     assert snaps, f"no resurrect snapshot written in {resurrect_dir}"
 
 
+@_requires_tmux
 def test_old_continuum_boot_cleanup_removes_stale_entries(tmux_env, monkeypatch):
     """DEFECT 5: a pre-existing stale continuum boot (its osx_disable.sh + an old Tmux.Start
-    launch agent) is cleaned by the activation. We MOCK their presence and assert removal."""
+    launch agent) is cleaned by the activation. We MOCK their presence and assert removal.
+
+    Gated ``@_requires_tmux`` (tmux-only), NOT the network gate: this test clones NOTHING and hits
+    no network — it fabricates the stale files, MOCKS ``_launchctl``, and calls
+    ``_clean_stale_continuum_boot`` directly. It only needs the ``tmux_env`` fixture (which installs
+    a tmux shim and tears a private server down, so it needs tmux on PATH but no GitHub). Running it
+    in default hermetic CI catches a DEFECT-5 cleanup regression on every PR, not only opt-in runs."""
     home, socket, run = tmux_env
     # simulate continuum's stale boot: an osx_disable.sh under the plugin + a Tmux.Start plist.
     cont = home / ".tmux" / "plugins" / "tmux-continuum" / "scripts"
@@ -526,14 +576,21 @@ def test_old_continuum_boot_cleanup_removes_stale_entries(tmux_env, monkeypatch)
 
 
 # ── socket-leak regression (the leak in the module docstring: ~185 rigtest-* sockets) ───────
+# Gated on `_requires_tmux` (tmux-present ONLY), NOT the full `_requires_tmux_e2e` network gate:
+# this clones nothing and hits no network, so coupling it to RIG_TMUX_E2E + GitHub-reachability
+# would hide the very regression that guards the leak which killed the dev's server (INCIDENT
+# 2026-06-17 follow-up a). With this marker it runs in default hermetic CI whenever tmux exists.
+@_requires_tmux
 def test_teardown_unlinks_the_private_socket_file():
     """REGRESSION for the socket leak described in the module docstring: ``_teardown_tmux_server``
     must leave NO socket file on disk (``kill-server`` alone leaks the inode on macOS). Drives the
     SAME teardown the fixture uses, against a REAL server, and asserts the file — not just the
     process — is gone."""
     real_tmux = shutil.which("tmux")
-    if not real_tmux:  # module-level pytestmark already skips when tmux is absent; belt-and-suspenders
-        pytest.skip("tmux not installed")
+    # The `@_requires_tmux` marker already guarantees tmux is on PATH; assert so that if it were
+    # ever absent at runtime (marker bypassed / tmux removed mid-session) we fail with a clear
+    # message instead of a confusing `None`-path TypeError further down.
+    assert real_tmux, "tmux must be on PATH (guarded by @_requires_tmux)"
     label = f"rigtest-leakcheck-{uuid.uuid4().hex[:8]}"
 
     # scrub TMUX_TMPDIR/TMUX so the server lands at the default /tmp path, and resolve the socket
