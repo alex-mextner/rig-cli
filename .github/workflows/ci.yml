@@ -52,6 +52,44 @@ jobs:
           RIG_TMUX_E2E: "1"
         run: python -m pytest tests/test_tmux_e2e.py -q -rs
 
+  # The clean-room / Docker e2e: `rig init` as a BRAND-NEW user on a pristine machine (a fresh
+  # python:3.x-slim container, a non-root user with an empty HOME, a self-contained fake
+  # agent-tools checkout). Asserts the four ROADMAP acceptance points — skills harness-discoverable
+  # (~/.claude/skills symlinks resolve), hooks/dispatcher/CI/auto-mode + the CC hook-bridge
+  # installed, idempotent re-apply, `rig status` clean — against the REAL CLI. The container RUN is
+  # fully OFFLINE (`docker run --network none`); the one-time image BUILD still needs apt/PyPI
+  # egress. Opt-in (RIG_CLEANROOM_E2E=1) + auto-skips when Docker is absent, so the hermetic
+  # `pytest -q` above never depends on a container runtime. ubuntu-latest ships Docker, so this
+  # runs (not skips) on every PR.
+  cleanroom-e2e:
+    name: clean-room (Docker) e2e
+    runs-on: ubuntu-latest
+    # cap the job so a hung pip/registry step can't hold a runner for the 360-min GHA default.
+    # The test's own build(900s)+run(600s) timeouts total ~25m and fail with a labeled message;
+    # this outer cap (45m) leaves real slack for checkout/setup/pip so the GHA hard kill (no
+    # diagnostic) is the last resort, not the first.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # best-effort warm-up of the base image; `docker build` pulls it anyway, so a transient
+      # registry hiccup here must not take the whole job down — but surface it as a warning so a
+      # persistent auth/quota problem isn't silently swallowed.
+      - name: Pre-pull the clean-room base image
+        run: docker pull python:3.12-slim || echo "::warning::base-image pre-pull failed; build will retry the pull"
+      # host-side needs pytest (the e2e shells out to docker) AND pyyaml — the hermetic helper
+      # test validates the clean-room rig.yaml string with `yaml.safe_load`. Both come from
+      # `.[test]`: pytest via the extra, pyyaml as rig's own runtime dependency. The CONTAINER
+      # does its own `pip install /opt/rig-cli` independently.
+      - name: Install test deps
+        run: pip install -e '.[test]'
+      - name: Clean-room Docker e2e (opt-in)
+        env:
+          RIG_CLEANROOM_E2E: "1"
+        run: python -m pytest tests/test_cleanroom_e2e.py -q -rs
+
   secret-scan:
     # Mirrors the agent-tools secret-scan gate (gitleaks, pinned). Block tier: a
     # high-confidence finding fails the job.

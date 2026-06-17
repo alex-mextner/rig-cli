@@ -87,6 +87,17 @@ should hard-code agent-tools paths.
   `-L` socket and clones the real plugins, so it needs tmux + git + network). It is OFF in the
   default `pytest` run to keep that hermetic; the tmux BFS / artifact logic it proves is ALSO
   covered hermetically by the unit suite (`test_pane_has_claude_*` etc.). Auto-skips offline.
+- `RIG_CLEANROOM_E2E=1 python -m pytest -q tests/test_cleanroom_e2e.py` — the **opt-in**
+  clean-room / Docker e2e: `rig init` as a BRAND-NEW user on a pristine machine. It builds a
+  fresh `python:3.x-slim` container with a non-root user + an empty `$HOME` and a self-contained
+  fake agent-tools checkout, then runs the REAL CLI end to end and asserts the four acceptance
+  points — skills harness-discoverable (`~/.claude/skills` symlinks resolve), hooks / dispatcher /
+  CI / auto-mode + the CC hook-bridge installed, idempotent re-apply, `rig status` clean. The
+  container RUN is OFFLINE (`docker run --network none`); the one-time image BUILD still needs
+  apt/PyPI egress. Needs a running Docker daemon; auto-skips when absent.
+  Unlike `smoke.sh` (a tmp-`$HOME` on the DEV machine, which inherits the dev's installed rig /
+  git config / `~/.claude` history), this proves the first-run experience for a stranger on a
+  machine that has never seen rig.
 - `bash tests/smoke.sh` — end-to-end: `--help`, `doctor`, a headless `init` against a
   sample config in a throwaway repo with an isolated `HOME`, idempotency, status, pytest.
   Needs a real agent-tools checkout (`RIG_AGENT_TOOLS_SOURCE`); self-skips the apply leg
