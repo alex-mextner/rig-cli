@@ -32,7 +32,9 @@ What it proves (maps 1:1 to the six defects)
 
 Invariants
 ----------
-- PRIVATE socket only (``-L``). Never the default server. Teardown kills it.
+- PRIVATE socket only (``-L``). Never the default server. Teardown kills the server AND unlinks
+  its socket file — ``kill-server`` ends the process but leaks the socket inode on macOS, which
+  once accumulated ~185 ``rigtest-*`` files in ``/tmp/tmux-501/`` and starved the dev's server.
 - The generated scripts are run UNMODIFIED (via the PATH ``tmux`` shim) — testing the real
   artifact rig writes, not a paraphrase of it.
 """
@@ -97,6 +99,36 @@ def _install_tmux_shim(bindir: Path, socket: str) -> None:
     shim.chmod(0o755)
 
 
+def _socket_path_for(label: str, env: dict[str, str] | None = None) -> Path:
+    """The on-disk path tmux uses for a ``-L <label>`` server: ``$TMUX_TMPDIR | /tmp`` +
+    ``/tmux-<uid>/<label>``, resolved against ``env`` (defaults to ``os.environ``). Callers MUST
+    pass the SAME env they launched the server with, else teardown resolves the wrong path and
+    leaks the socket (see module docstring). Matches tmux's ``server_create_socket``:
+    ``TMUX_TMPDIR`` is honored only when ABSOLUTE, else ``/tmp``."""
+    src = os.environ if env is None else env
+    tmpdir = src.get("TMUX_TMPDIR", "").strip()
+    if not tmpdir or not os.path.isabs(tmpdir):
+        tmpdir = "/tmp"
+    return Path(tmpdir) / f"tmux-{os.getuid()}" / label
+
+
+def _teardown_tmux_server(real_tmux: str, label: str, env: dict[str, str] | None = None) -> None:
+    """Kill the private ``-L <label>`` server AND remove its socket file, resolving the socket
+    path under ``env`` (the env the server was launched with). Both steps run best-effort: a
+    failed/timed-out kill (e.g. no server ever started) must STILL let the unlink run, and a
+    missing socket file must not raise. ``kill-server`` ends the process but leaks the socket
+    inode on macOS — see the module docstring."""
+    try:
+        subprocess.run(
+            [real_tmux, "-L", label, "kill-server"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass  # the unlink below must run regardless of how the kill went
+    finally:
+        _socket_path_for(label, env).unlink(missing_ok=True)
+
+
 @pytest.fixture
 def tmux_env(tmp_path, monkeypatch):
     """A throwaway HOME + a private tmux socket + a PATH shim, with teardown that kills the
@@ -137,9 +169,10 @@ def tmux_env(tmp_path, monkeypatch):
     try:
         yield home, socket, run
     finally:
-        # kill the private server (best-effort) — never leave a stray tmux around.
-        subprocess.run([real_tmux, "-L", socket, "kill-server"],
-                       capture_output=True, text=True, timeout=15)
+        # kill the private server AND unlink its socket file — never leave a stray tmux server
+        # OR a leaked socket inode behind (kill-server alone leaks the file on macOS). Resolve the
+        # socket path under the SAME scrubbed `env` the server ran with (it pops TMUX_TMPDIR).
+        _teardown_tmux_server(real_tmux, socket, env)
 
 
 def _wait_for_claude_descendant(run, *, timeout_s=10):
@@ -415,3 +448,36 @@ def test_old_continuum_boot_cleanup_removes_stale_entries(tmux_env, monkeypatch)
     assert any("Tmux.Start" in arg or "Tmux.Start" in verb for verb, arg in boot_calls), boot_calls
     # idempotent: a second run (now nothing present) cleans nothing and doesn't error.
     assert runner._clean_stale_continuum_boot(plan) is False
+
+
+# ── socket-leak regression (the leak in the module docstring: ~185 rigtest-* sockets) ───────
+def test_teardown_unlinks_the_private_socket_file():
+    """REGRESSION for the socket leak described in the module docstring: ``_teardown_tmux_server``
+    must leave NO socket file on disk (``kill-server`` alone leaks the inode on macOS). Drives the
+    SAME teardown the fixture uses, against a REAL server, and asserts the file — not just the
+    process — is gone."""
+    real_tmux = shutil.which("tmux")
+    if not real_tmux:  # module-level pytestmark already skips when tmux is absent; belt-and-suspenders
+        pytest.skip("tmux not installed")
+    label = f"rigtest-leakcheck-{uuid.uuid4().hex[:8]}"
+
+    # scrub TMUX_TMPDIR/TMUX so the server lands at the default /tmp path, and resolve the socket
+    # path under that SAME env — the whole bug being guarded is an env/path mismatch here.
+    env = dict(os.environ)
+    env.pop("TMUX", None)
+    env.pop("TMUX_TMPDIR", None)
+    sock = _socket_path_for(label, env)
+    try:
+        boot = subprocess.run(
+            [real_tmux, "-L", label, "new-session", "-d", "-s", "probe", "tail -f /dev/null"],
+            env=env, capture_output=True, text=True, timeout=15,
+        )
+        assert boot.returncode == 0, boot.stderr
+        assert sock.exists(), f"server did not create its socket at {sock}"
+
+        _teardown_tmux_server(real_tmux, label, env)
+
+        assert not sock.exists(), f"LEAK: socket file lingered after teardown: {sock}"
+    finally:
+        # belt-and-suspenders if an assert fired mid-way — reuse the production teardown.
+        _teardown_tmux_server(real_tmux, label, env)
