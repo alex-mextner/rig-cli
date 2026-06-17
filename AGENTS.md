@@ -23,9 +23,20 @@ change options in the local `rig.yaml` AND the global `~/.config/rig/config.yaml
 carrying an inline hint — then applies (`rig apply`) on the spot. With no TTY (piped/redirected)
 it prints USAGE for `init`/`apply`/`config get|set` instead of running a half-wizard. The option
 list + hints come from the in-code registry `riglib/schema.py` (the single source of truth, which
-also emits a JSON schema). `rig config get|set <key>` is its headless counterpart — `set` routes
-the value to the key's owning layer (REPO keys → `./rig.yaml`, GLOBAL-only keys like
-`gitignore`/`tg_ctl`/`tmux` → the global config; `--global` forces the global layer).
+also emits a JSON schema). The wizard's schema-key engine (owning-layer routing — REPO keys →
+`./rig.yaml`, GLOBAL-only keys like `gitignore`/`tg_ctl`/`tmux` → the global config) is INTERNAL
+to `rig setup`; it is NOT the `config get|set` command.
+
+**`rig config get|set <dot.path>` is the user-facing single-key editor** (the headless
+counterpart `rig setup` points at), and it is a DIFFERENT surface from the wizard's schema engine.
+`get <dot.path>` reads ONE nested key by dot-notation from the single target file (`./rig.yaml`,
+or `--global`; NOT the cascade) — `--json` emits the raw value, a subtree prints as YAML, a
+missing file/absent path exits non-zero. `set <dot.path> <value>` coerces the value conservatively
+(`true`/`false`/int/float/null; leading-zero / `1e3` / underscored / Unicode-digit values stay
+strings), writes it, then runs the SAME plan + apply engine as `rig apply` with full rollback if
+the write or the catalog-backed plan build fails. `--global` targets the global config;
+`--no-apply` writes the key and prints the plan only; a repo-local `set` refuses when `./rig.yaml`
+is absent (run `rig init` first). The dot-path engine lives in `riglib/config.py`.
 
 ## Hard rules
 
