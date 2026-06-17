@@ -527,6 +527,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── gitignore (rig-managed block in the GLOBAL git excludes file) ──────────────
     _build_global_excludes(config, plan)
 
+    # ── tg_ctl (rig-managed tg-ctl inbound daemon LaunchAgent) ─────────────────────
+    _build_tg_ctl(config, plan)
+
     return plan
 
 
@@ -919,6 +922,50 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
                 "anti_sprawl": dict(t.get("anti_sprawl", {}) or {}),
                 "boot": dict(t.get("boot", {}) or {}),
                 "login_shell": login_shell,
+            },
+        )
+    )
+
+
+def _build_tg_ctl(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the rig-managed tg-ctl inbound-daemon LaunchAgent, unless ``enabled: false``.
+
+    Default **ON** (like ``agents_md``/``github``): an ABSENT or empty ``tg_ctl:`` block still
+    provisions the daemon, so ``rig init`` on a clean machine sets it up with no config at all.
+    Only ``enabled: false`` opts out. This is a per-MACHINE concern (one inbound Telegram
+    control daemon per machine), so the block belongs in the GLOBAL layer
+    (``~/.config/rig/config.yaml``) — but it cascades into the merged config the same way.
+
+    Unlike tmux, the tg-ctl artifact paths are HOME-anchored per-machine (not repo-relative):
+    the runner resolves them against ``Path.home()`` at apply time (so a committed rig.yaml stays
+    portable and never anchors ~/.files/bin to a repo root). The action just carries the raw
+    config knobs; the bun path is discovered at apply time.
+    """
+    from .tg_ctl import DEFAULT_BOOT_LABEL
+
+    # An ABSENT key (None) defaults to provisioning (default-on). A PRESENT block (validate() has
+    # already guaranteed it is a mapping) opts in unless `enabled: false`.
+    t = config.data.get("tg_ctl") or {}
+    if t.get("enabled") is False:
+        return
+
+    plan.actions.append(
+        Action(
+            kind="provision_tg_ctl",
+            category="tg_ctl",
+            item="boot",
+            source=config.repo_root,  # no carrier; rig generates the plist
+            # target is the launchd LABEL (not a filesystem path) — the runner resolves the real
+            # ~/Library/LaunchAgents/<label>.plist against HOME at apply time. `label or DEFAULT`
+            # (not `get(key, default)`) so a YAML `label:` with no value (None) can't become the
+            # literal string "None".
+            target=Path(t.get("label") or DEFAULT_BOOT_LABEL),
+            options={
+                "boot": t.get("boot", True),
+                "label": t.get("label"),
+                "bun_path": t.get("bun_path"),
+                "tg_ctl_path": t.get("tg_ctl_path"),
+                "config_dir": t.get("config_dir"),
             },
         )
     )

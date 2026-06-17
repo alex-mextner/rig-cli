@@ -56,9 +56,18 @@ decided by TTY + config + flags. `init` is the canonical onboarding command (the
   `resurrect save`, and cleans continuum's stale boot. These are SAFE for an active session — the
   boot agent's script is idempotent (`has-session` → exit 0, never spawns a duplicate or touches
   existing panes), and a first `resurrect save` is read-only w.r.t. the live session. It mirrors
-  the `models` schedule exception (a non-interactive launchd agent is safe to (re)load). Gate the
-  whole activation behind `RIG_TMUX_DRY_RUN` (the unit suite + CI set it). Migration backs up the
-  original (`~/.tmux.conf.rig-bak-<UTC>`, timestamped) and never overwrites an existing backup.
+  the **stateless background daemons** exception (safe to (re)load because no live user session
+  rides on them): the `models` schedule (a non-interactive cron) and the `tg_ctl` inbound daemon
+  (`tg_ctl` block) both (re)load via launchd. `tg_ctl` writes the `ai.hyperide.tg-ctl.plist`
+  LaunchAgent **byte-exact** to the working hand-created file (so a re-apply is a no-op `skipped`,
+  never a spurious rewrite) and (re)loads it with `launchctl bootout`/`bootstrap` in the
+  `gui/<uid>` domain; it also boots out + removes the dead predecessor `com.ultra.codex-tg-bot`.
+  Gate the tmux activation behind `RIG_TMUX_DRY_RUN`, and `tg_ctl` behind `RIG_TG_CTL_DRY_RUN`
+  (mirrors `RIG_SCHEDULE_DRY_RUN`) — which writes the managed plist but skips every
+  live/destructive mutation (the `launchctl` bootstrap/bootout AND the stale-predecessor teardown:
+  no bootout, no on-disk backup+remove). The unit suite + CI set these, so tests/smoke NEVER touch
+  the real launchd domain or delete the predecessor file. Migration backs up the original
+  (`~/.tmux.conf.rig-bak-<UTC>`, timestamped) and never overwrites an existing backup.
 
 ## The integration seam (agent-tools)
 

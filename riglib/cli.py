@@ -549,6 +549,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     # surface the model-freshness schedule explicitly (installed / drifted / not configured),
     # so `rig status` answers "is the daily checker cron there?" at a glance.
     _print_schedule_status(plan, report)
+    # surface the tg-ctl inbound-daemon boot agent in the GLOBAL section (installed / drifted /
+    # disabled), so status answers "is the Telegram control daemon auto-starting?" at a glance.
+    _print_tg_ctl_status(plan, report)
 
     # missing-target: a hook command in the harness settings.json that points at a file gone
     # from disk (the dead-rtk-hook case) surfaces PROACTIVELY here, before it bites at runtime
@@ -674,6 +677,31 @@ def _print_schedule_status(plan, report) -> None:
         state = _ok("installed")
     print(f"\n  model-freshness schedule: {state}  "
           + _dim(f"(daily {when}, {platform}, '{opts.get('label', '')}')"))
+
+
+def _print_tg_ctl_status(plan, report) -> None:
+    """Report the tg-ctl inbound-daemon boot agent (GLOBAL): installed / drifted / disabled / unsupported.
+
+    A per-machine LaunchAgent, so it lives in the GLOBAL section of status (not per-repo). Resolves
+    the desired state through the SAME plan builder apply/drift use (so the label/boot flag never
+    drift). Off macOS the provisioner is a no-op, so status says 'unsupported' — never a misleading
+    'installed' (codex P2). Stays silent only when no ``provision_tg_ctl`` action is in the plan
+    (default-on, so that is unusual — keeps the helper defensive)."""
+    from .actions.runner import tg_ctl_plan_from_action
+    from .drift import _on_darwin
+
+    tg_actions = [a for a in plan.actions if a.kind == "provision_tg_ctl"]
+    if not tg_actions:
+        return
+    tg = tg_ctl_plan_from_action(tg_actions[0])  # shared resolution → boot_label / boot_enabled
+    if not _on_darwin():
+        state = _dim("unsupported (macOS-only; no-op off darwin)")
+    elif not tg.boot_enabled:
+        state = _dim("disabled (tg_ctl.boot=false)")
+    else:
+        drifted = [d for d in report.items if d.category == "tg_ctl" and d.direction != "extra"]
+        state = _warn(f"drifted ({drifted[0].detail})") if drifted else _ok("installed")
+    print(f"\n  [GLOBAL] tg-ctl inbound daemon: {state}  " + _dim(f"(launchd boot agent, '{tg.boot_label}')"))
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:

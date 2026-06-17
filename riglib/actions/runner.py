@@ -1107,6 +1107,54 @@ def _launchctl_load_enable(plist: Path) -> int:
     return res.returncode
 
 
+# ── gui-domain launchctl (modern bootstrap/bootout) ─────────────────────────────────
+# The model-freshness schedule uses the legacy ``launchctl load/unload`` (``_launchctl_loaded``
+# above); the tg-ctl inbound daemon uses the MODERN per-user ``gui/<uid>`` domain verbs
+# (``bootstrap``/``bootout``), which is what macOS recommends and what loads a fresh agent without
+# a reboot. Kept separate so the two services don't share a verb set.
+def _gui_domain() -> str:
+    """The per-user GUI launchd domain target ``gui/<uid>`` for the current user."""
+    return f"gui/{os.getuid()}"
+
+
+def _launchctl_gui(verb: str, plist_path: str) -> int:
+    """``launchctl <verb> gui/<uid> <plist>`` — bootstrap (load) / bootout (unload) an agent in
+    the per-user GUI domain. Returns the rc; a non-zero rc from ``bootout`` of an unloaded agent
+    is harmless (the caller bootstraps after). One shell for both verbs (DRY)."""
+    try:
+        res = subprocess.run(
+            ["launchctl", verb, _gui_domain(), plist_path],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 1
+    return res.returncode
+
+
+# Thin, self-documenting wrappers so call sites read as bootout/bootstrap (and tests can spy on
+# each verb independently).
+def _launchctl_bootout(plist_path: str) -> int:
+    return _launchctl_gui("bootout", plist_path)
+
+
+def _launchctl_bootstrap(plist_path: str) -> int:
+    return _launchctl_gui("bootstrap", plist_path)
+
+
+def _launchctl_gui_loaded(label: str) -> bool:
+    """True when ``label`` is loaded in the per-user GUI domain (``launchctl print gui/<uid>/
+    <label>`` returns 0). Used by the install no-op check + drift so a written-but-not-loaded
+    agent is still flagged."""
+    try:
+        res = subprocess.run(
+            ["launchctl", "print", f"{_gui_domain()}/{label}"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0
+
+
 # ── git/gh shells (isolated for testability) ──────────────────────────────────────
 def _git_global(key: str) -> str | None:
     try:
@@ -1671,6 +1719,199 @@ def _is_rig_import_line(line: str, import_line: str, rig_conf_name: str) -> bool
         arg = parts[-1].strip("'\"")
         return Path(arg).name == rig_conf_name
     return False
+
+
+# ── tg-ctl inbound-daemon LaunchAgent provisioning (macOS) ──────────────────────────
+def _tg_ctl_dry_run() -> bool:
+    """Honor RIG_TG_CTL_DRY_RUN — write the managed plist file but make NO live/destructive change.
+
+    For CI / containers / smoke where a real ``launchctl bootstrap`` (a per-user daemon mutation
+    HOME can't redirect) is unwanted. Under dry-run: the managed plist still lands under the
+    (HOME-isolated) path (so callers can assert the artifact), but the gui-domain (re)load AND the
+    stale-predecessor teardown (its ``bootout`` AND the on-disk backup+remove of its plist) are
+    BOTH skipped — dry-run never mutates the live launchd domain nor deletes the predecessor file,
+    it only reports what it would do. Mirrors ``RIG_SCHEDULE_DRY_RUN`` (the schedule's seam).
+    """
+    return os.environ.get("RIG_TG_CTL_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+
+
+def _tg_ctl_config_dir_default() -> str:
+    """The tg-cli config dir, honoring ``$TG_CTL_CONFIG_DIR`` (the daemon's own env), else the
+    documented default ``~/.config/tg-cli``. The launchd logs land here, next to the daemon's
+    .env/config.yaml, so everything tg-ctl is in one place."""
+    return os.environ.get("TG_CTL_CONFIG_DIR", "").strip() or "~/.config/tg-cli"
+
+
+def tg_ctl_plan_from_action(action: Action):
+    """Rebuild the pure :class:`~riglib.tg_ctl.TgCtlPlan` an action describes.
+
+    Shared by the install handler and the drift check so both agree on the exact desired plist
+    from the action's options. ``Path.home()`` is the resolved HOME at apply time (a test
+    monkeypatches it to a tmp HOME). The bun path is discovered at apply time unless pinned.
+    Lazy import keeps the actions package import-light.
+    """
+    from ..tg_ctl import DEFAULT_BOOT_LABEL, DEFAULT_TG_CTL_PATH, build_tg_ctl
+
+    opts = action.options
+    config_dir = opts.get("config_dir") or _tg_ctl_config_dir_default()
+    # `boot` is default-ON: a YAML `boot:` with no value (None) means "use the default" (True),
+    # NOT False — `bool(None)` would silently disable it (codex P1). Only an explicit `False` is off.
+    boot = opts.get("boot", True)
+    return build_tg_ctl(
+        home=Path.home(),
+        boot=True if boot is None else bool(boot),
+        boot_label=str(opts.get("label") or DEFAULT_BOOT_LABEL),
+        bun_path=opts.get("bun_path") or None,
+        tg_ctl_path=str(opts.get("tg_ctl_path") or DEFAULT_TG_CTL_PATH),
+        config_dir=str(config_dir),
+    )
+
+
+def _tg_ctl_teardown_stale(plan, dry: bool) -> tuple[Path | None, str | None]:
+    """Tear down the dead predecessor service (``com.ultra.codex-tg-bot``) if its plist exists:
+    bootout + timestamped backup + remove. Returns (backup_path, detail) or (None, None) when
+    there is nothing to tear down. Under ``dry`` it touches NOTHING — neither launchd nor disk —
+    and returns a "would remove" detail (the dry-run contract: no live mutation, no disk write).
+    """
+    stale = plan.stale_plist_path
+    if not stale.is_file():
+        return None, None
+    if dry:
+        return None, (
+            f"RIG_TG_CTL_DRY_RUN — would boot out + remove stale predecessor {stale.name}"
+        )
+    _launchctl_bootout(str(stale))  # harmless rc!=0 if it wasn't loaded
+    bak = _timestamped_backup_path(stale.with_name(stale.name + ".rig-bak"))
+    bak.write_text(stale.read_text(encoding="utf-8"), encoding="utf-8")
+    stale.unlink()
+    return bak, f"removed stale predecessor {stale.name} (booted out, backed up → {bak.name})"
+
+
+def _do_provision_tg_ctl(action: Action, on_conflict: str) -> ActionResult:
+    """Provision the tg-ctl inbound daemon as a macOS LaunchAgent (idempotent).
+
+    Mirrors the tmux-boot provisioning shape (render -> backup-differing -> write), but unlike
+    tmux this agent IS (re)loaded into launchd so a clean ``rig init`` starts it without a reboot:
+
+      - render ``~/Library/LaunchAgents/ai.hyperide.tg-ctl.plist`` (byte-exact to the working
+        hand-created file — see riglib.tg_ctl.render_plist's sort_keys note);
+      - back up any existing DIFFERING plist (on_conflict=backup) before rewrite;
+      - ensure the log dir (the tg-cli config dir) exists so launchd can open the logs;
+      - tear down the stale predecessor (``com.ultra.codex-tg-bot``): ``bootout`` + timestamped
+        backup + remove its plist, if present;
+      - (re)load via ``launchctl bootout``/``bootstrap`` in the per-user gui domain.
+
+    macOS-only (launchd). Off darwin it is a ``skipped`` no-op (no Linux equivalent yet).
+    A re-apply that finds the plist byte-identical AND the agent loaded is a ``skipped`` no-op —
+    the idempotency contract that keeps a re-apply against the live plist from rewriting it.
+    ``RIG_TG_CTL_DRY_RUN`` writes the plist but skips every live launchd mutation.
+    """
+    plan = tg_ctl_plan_from_action(action)
+
+    if sys.platform != "darwin":
+        return ActionResult(
+            action, "skipped",
+            "tg_ctl/boot: skipped (launchd is macOS-only; no Linux equivalent yet)",
+        )
+
+    details: list[str] = []
+    changed = False
+    headline_backup: Path | None = None
+    dry = _tg_ctl_dry_run()
+
+    # 0) tear down the dead predecessor service first (bootout + backup + remove its plist).
+    # Under dry-run this is a pure no-op that only REPORTS what it would do (no disk mutation).
+    stale_backup, stale_detail = _tg_ctl_teardown_stale(plan, dry)
+    if stale_detail:
+        details.append(stale_detail)
+    if stale_backup is not None:  # a real removal happened (never under dry-run)
+        headline_backup = stale_backup
+        changed = True
+
+    if not plan.boot_enabled:
+        # boot disabled: don't write/load the agent. A leftover plist is surfaced by drift as an
+        # EXTRA (it still auto-starts the daemon), but apply never deletes the user's own file.
+        if not changed:
+            return ActionResult(action, "skipped", "tg_ctl/boot: disabled (tg_ctl.boot=false) — nothing to provision")
+        return ActionResult(action, "backed_up" if headline_backup else "created",
+                            f"tg_ctl/boot: {'; '.join(details)}", headline_backup)
+
+    # 1) ensure the log dir (tg-cli config dir) exists so launchd can open StandardOut/ErrorPath.
+    plan.config_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2) write the plist (idempotent on identical bytes; honors on_conflict for a differing one).
+    plan.plist_path.parent.mkdir(parents=True, exist_ok=True)
+    desired = plan.render_plist()
+    already = plan.plist_path.is_file()
+    current = plan.plist_path.read_text(encoding="utf-8") if already else ""
+
+    # The install-if-missing no-op: present AND byte-identical AND already loaded → nothing to do.
+    # (Skip the loaded check under dry-run — it would query the real launchd domain.)
+    if already and current == desired and not changed and (dry or _launchctl_gui_loaded(plan.boot_label)):
+        return ActionResult(
+            action, "skipped",
+            f"tg_ctl/boot: launchd agent '{plan.boot_label}' already installed and loaded",
+        )
+
+    out = fsutil.write_file(plan.plist_path, desired, on_conflict)
+    if out.status == "error":
+        return ActionResult(action, "error", f"tg_ctl/boot: {out.detail}", out.backup)
+    if out.backup:
+        headline_backup = headline_backup or out.backup
+        details.append(f"backed up prior plist → {out.backup.name}")
+    # Conflict-skip: the existing plist DIFFERS but on_conflict=skip said don't write it. The
+    # desired agent never hit disk, so we must NOT (re)load the stale plist and must NOT report a
+    # change — surface the unresolved drift instead (mirrors the schedule conflict-skip path).
+    if out.status == "skipped" and already and current != desired:
+        if changed:  # the stale-predecessor removal still happened — report it, plus the skip.
+            details.append(
+                f"{plan.plist_path.name} differs but on_conflict=skip — left unchanged "
+                f"(drift NOT reconciled; re-run with on_conflict=backup/overwrite)"
+            )
+            return ActionResult(action, "backed_up" if headline_backup else "created",
+                                f"tg_ctl/boot: {'; '.join(details)}", headline_backup)
+        return ActionResult(
+            action, "skipped",
+            f"tg_ctl/boot: launchd plist {plan.plist_path} differs but on_conflict=skip — "
+            f"left unchanged (drift NOT reconciled; re-run with on_conflict=backup/overwrite)",
+        )
+    if out.status != "skipped":
+        changed = True
+        details.append(f"wrote {plan.plist_path.name}")
+
+    if dry:
+        return ActionResult(
+            action,
+            "backed_up" if headline_backup else ("created" if changed else "skipped"),
+            f"tg_ctl/boot: {'; '.join(details) or 'plist already current'} "
+            f"(RIG_TG_CTL_DRY_RUN — skipped launchctl bootstrap)",
+            headline_backup,
+        )
+
+    # 3) (re)load via the per-user gui domain so a changed plist is picked up without a reboot.
+    # bootout first is safe — it is a harmless no-op when the label isn't loaded. We (re)load
+    # whenever the plist was (re)written OR the agent isn't currently loaded.
+    needs_load = changed or not _launchctl_gui_loaded(plan.boot_label)
+    if needs_load:
+        _launchctl_bootout(str(plan.plist_path))
+        rc = _launchctl_bootstrap(str(plan.plist_path))
+        if rc != 0:
+            return ActionResult(
+                action, "error",
+                f"tg_ctl/boot: wrote {plan.plist_path} but `launchctl bootstrap` failed (rc={rc})",
+                headline_backup,
+            )
+        if not changed:  # plist byte-identical but the agent wasn't loaded → loading IS the change.
+            changed = True
+            details.append(f"loaded launchd agent '{plan.boot_label}'")
+        else:
+            details.append(f"(re)loaded launchd agent '{plan.boot_label}'")
+
+    if not changed:
+        return ActionResult(action, "skipped",
+                            f"tg_ctl/boot: launchd agent '{plan.boot_label}' already installed and loaded")
+    status = "backed_up" if headline_backup else "created"
+    return ActionResult(action, status, f"tg_ctl/boot: {'; '.join(details)}", headline_backup)
 
 
 # ── AGENTS.md / CLAUDE.md canonical + symlink ─────────────────────────────────────
@@ -2328,4 +2569,5 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_github_ruleset": _do_provision_github_ruleset,
     "provision_tmux": _do_provision_tmux,
     "provision_global_excludes": _do_provision_global_excludes,
+    "provision_tg_ctl": _do_provision_tg_ctl,
 }
