@@ -55,6 +55,182 @@ def test_doctor_missing_required_dep_uses_127_contract(tmp_path, capsys, monkeyp
     assert rc == errors.EXIT_MISSING_DEP
 
 
+def _corrupt_repo(tmp_path):
+    """Build a throwaway non-bare git repo and corrupt its core.bare → true."""
+    import subprocess
+
+    repo = tmp_path / "broken"
+    repo.mkdir()
+    for args in (["init", "-q", "."], ["config", "core.bare", "true"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+    return repo
+
+
+def test_doctor_flags_core_bare_corruption(tmp_path, capsys, monkeypatch):
+    """A corrupted cwd checkout (core.bare=true on a work tree) exits with the repo-corrupt class.
+
+    Doctor's dependency picture is irrelevant — repo corruption is the top-precedence failure, so
+    it must win the exit code even if every dep is present.
+    """
+    from riglib import errors
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # isolate ~/.claude scan
+    repo = _corrupt_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+    assert "core.bare=true" in out
+    assert "git is broken there" in out
+    assert rc == errors.EXIT_REPO_CORRUPT
+
+
+def test_doctor_fix_repairs_core_bare(tmp_path, capsys, monkeypatch):
+    """`rig doctor --fix` repairs the corruption and then exits 0 (clean).
+
+    Deps are mocked present so the exit code reflects the repair alone — otherwise a missing
+    required dep on the host would route to the 127 branch and the assertion would pass vacuously.
+    """
+    import subprocess
+
+    from riglib import doctor
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(doctor, "_python_present", lambda name: True)
+    repo = _corrupt_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    rc = main(["doctor", "--fix"])
+    out = capsys.readouterr().out
+    assert "fixed:" in out
+    val = subprocess.run(
+        ["git", "-C", str(repo), "config", "--get", "core.bare"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert val == "false"
+    assert rc == 0  # corruption repaired AND deps present → fully clean
+
+
+def test_doctor_repo_corrupt_outranks_missing_required_dep(tmp_path, capsys, monkeypatch):
+    """The CORE precedence claim: repo corruption (exit 7) beats a missing required dep (127).
+
+    Forces a missing required dep AND a corrupted cwd checkout — the exit code must be 7, not the
+    127 missing-dependency class, because a broken .git makes every other check unreliable.
+    """
+    from riglib import doctor, errors
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)  # every binary "absent"
+    monkeypatch.setattr(doctor, "_python_present", lambda name: False)
+    repo = _corrupt_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    rc = main(["doctor"])  # no --yes → would otherwise exit 127 for the missing required deps
+    out = capsys.readouterr().out
+    assert "core.bare=true" in out
+    assert rc == errors.EXIT_REPO_CORRUPT  # 7 wins over 127
+
+
+def _git_hookless(repo, *args):
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+         "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo), *args],
+        check=True, capture_output=True, text=True,
+    )
+
+
+def test_doctor_fix_never_touches_legit_bare_repo_worktree(tmp_path, capsys, monkeypatch):
+    """End-to-end destructive-trap guard: `rig doctor --fix` run from a worktree of a GENUINE bare
+    repo must NOT flag it and must NOT rewrite the bare repo's shared core.bare (which would break
+    that legitimate setup)."""
+    from riglib import errors
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git_hookless(seed, "init", "-q", "-b", "main", ".")
+    (seed / "f").write_text("x", encoding="utf-8")
+    _git_hookless(seed, "add", "f")
+    _git_hookless(seed, "commit", "-qm", "i")
+    bare = tmp_path / "repo.git"
+    _git_hookless(tmp_path, "init", "-q", "-b", "main", "--bare", str(bare))
+    _git_hookless(seed, "push", "-q", str(bare), "main")
+    wt = tmp_path / "bare-wt"
+    _git_hookless(bare, "worktree", "add", "-q", str(wt), "main")
+
+    monkeypatch.chdir(wt)
+    rc = main(["doctor", "--fix"])
+    out = capsys.readouterr().out
+    assert "corrupted git config" not in out  # not flagged
+    assert "fixed:" not in out  # nothing repaired
+    # the genuine bare repo's core.bare is untouched (still true → still a valid bare repo)
+    assert _git_hookless(bare, "config", "--get", "core.bare").stdout.strip() == "true"
+    assert rc != errors.EXIT_REPO_CORRUPT
+
+
+def test_doctor_fix_then_missing_dep_releases_precedence_to_127(tmp_path, capsys, monkeypatch):
+    """After --fix REPAIRS the corruption, the exit code must reflect the NEXT problem (a missing
+    required dep → 127), not stay at 7 — the repo-corrupt precedence is released once it's fixed."""
+    from riglib import doctor, errors
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)  # required deps absent
+    monkeypatch.setattr(doctor, "_python_present", lambda name: False)
+    repo = _corrupt_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    rc = main(["doctor", "--fix"])  # repairs core.bare, then surfaces the missing deps
+    out = capsys.readouterr().out
+    assert "fixed:" in out
+    assert rc == errors.EXIT_MISSING_DEP  # 127, not 7 — corruption gone, deps now govern
+
+
+def test_doctor_repo_corrupt_outranks_missing_target(tmp_path, capsys, monkeypatch):
+    """Precedence: repo corruption (exit 7) also beats a missing-target (exit 5).
+
+    Plants a dead hook reference in the harness settings.json AND a corrupted cwd checkout; the
+    exit code must be 7, matching the help epilog's "doctor exits 7 ahead of any other class".
+    """
+    import json
+
+    from riglib import errors
+
+    home = tmp_path / "home"
+    claude = home / ".claude"
+    claude.mkdir(parents=True)
+    # a hook command pointing at a script that does not exist → a missing-target finding
+    settings = {
+        "hooks": {
+            "PreToolUse": [
+                {"hooks": [{"type": "command", "command": str(tmp_path / "gone" / "hook.py")}]}
+            ]
+        }
+    }
+    (claude / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    repo = _corrupt_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+    assert "missing targets" in out  # the dead target IS reported …
+    assert "core.bare=true" in out  # … alongside the corruption …
+    assert rc == errors.EXIT_REPO_CORRUPT  # … but repo-corrupt (7) wins the exit code over 5
+
+
+def test_doctor_fix_failure_advises_manual_not_rerun(tmp_path, capsys, monkeypatch):
+    """When --fix is given but the repair FAILS, advise the manual fix, not a useless `--fix` re-run."""
+    from riglib import core_bare, errors
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(core_bare, "fix_core_bare", lambda finding: False)  # simulate a write failure
+    repo = _corrupt_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    rc = main(["doctor", "--fix"])
+    out = capsys.readouterr().out
+    assert "FAILED" in out
+    assert "re-run `rig doctor --fix`" not in out  # the misleading advice must NOT appear
+    assert rc == errors.EXIT_REPO_CORRUPT
+
+
 def test_setup_dryrun_default(tmp_path, capsys, fake_agent_tools, monkeypatch):
     monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
