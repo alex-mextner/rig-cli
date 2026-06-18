@@ -296,10 +296,16 @@ from `apply`.
 ```bash
 uv venv && . .venv/bin/activate
 uv pip install pytest pyyaml 'textual>=0.50'
-python -m pytest -q          # unit suite
-bash tests/smoke.sh          # end-to-end smoke (needs an agent-tools checkout)
-python docs/gen_svgs.py      # regenerate the diagrams
+python -m pytest -q                     # unit suite
+bash tests/smoke.sh                     # end-to-end smoke (needs an agent-tools checkout)
+bash tests/smoke.sh --fast              # the seconds-cheap pre-commit subset
+scripts/install-smoke-precommit.sh      # wire the fast smoke into .git/hooks (once per clone)
+python docs/gen_svgs.py                 # regenerate the diagrams
 ```
+
+Run `scripts/install-smoke-precommit.sh` once after cloning to gate your commits on the fast
+smoke locally — a commit that breaks the real `rig status` flow is then blocked before push,
+not just in CI.
 
 ## How rig compares
 
