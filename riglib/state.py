@@ -18,6 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .github_actions import GITHUB_ACTIONS_DEFAULTS
+from .github_browser import UI_ONLY_TOGGLES
+from .github_ghas import GITHUB_GHAS_DEFAULTS
+from .github_merge import GITHUB_MERGE_DEFAULTS
 from .github_ruleset import GITHUB_RULESET_DEFAULTS
 
 
@@ -33,10 +37,23 @@ def default_state(
     auto-detected sources (the caller only passes it when the user pinned one) — otherwise a
     machine-specific absolute path would disable the env/default fallback elsewhere.
     """
-    # The github ruleset scaffold mirrors the action's sensible defaults exactly (one source),
-    # plus the plan-gating `enabled` flag — so the committed rig.yaml and the action can never
-    # drift apart.
-    github_ruleset = {"enabled": True, **GITHUB_RULESET_DEFAULTS}
+    # The github scaffolds mirror each action's sensible defaults exactly (one source), plus the
+    # plan-gating `enabled` flag — so the committed rig.yaml and the actions can never drift apart.
+    # ruleset = branch protection; merge = merge-button policy; ghas = Advanced Security; actions =
+    # Actions permissions; browser = the API-unreachable toggles driven via agent-browser.
+    # Omit `required_status_checks` from the scaffold so the plan builder's §5 auto-default applies
+    # (it requires the merge-gating CI gates the repo actually provisions — PR Checklist +
+    # review-threads). Pinning an explicit `[]` here would read as a deliberate "require none" and
+    # suppress that default; leaving the key out lets rig derive the right checks per-repo. A user
+    # who wants a fixed set still adds `required_status_checks: [...]` by hand.
+    github_ruleset = {
+        "enabled": True,
+        **{k: v for k, v in GITHUB_RULESET_DEFAULTS.items() if k != "required_status_checks"},
+    }
+    github_merge = {"enabled": True, **GITHUB_MERGE_DEFAULTS}
+    github_ghas = {"enabled": True, **GITHUB_GHAS_DEFAULTS}
+    github_actions = {"enabled": True, **GITHUB_ACTIONS_DEFAULTS}
+    github_browser = {"enabled": True, **{k: v["default"] for k, v in UI_ONLY_TOGGLES.items()}}
 
     by_type_enable = [project_type] if project_type and project_type != "unknown" else []
     # Always the portable ``~/.config/git`` token (no machine-specific path, no env token
@@ -86,6 +103,10 @@ def default_state(
                 "dependency-review": {"enabled": True, "tier": "block"},
                 "leftover-grep": {"enabled": True, "tier": "block"},
                 "review-threads": {"enabled": True, "tier": "block"},
+                # PR-checklist gate (verifies every task-list checkbox is checked). Enabled so it
+                # both lands as a workflow AND becomes a required status check on the ruleset
+                # (ROADMAP §5 names "PR Checklist" + review-threads as the required merge gates).
+                "pr-checklist": {"enabled": True, "tier": "block"},
                 "ship": {"enabled": True, "install_to": "~/bin", "gh_alias": True},
             },
         },
@@ -126,7 +147,23 @@ def default_state(
         # hand-made ruleset with it + zero bypass actors blocks every merge to main. Opt out
         # with ruleset.enabled: false. Add status checks with required_status_checks: [names].
         # The knobs come straight from the action's GITHUB_RULESET_DEFAULTS (one source).
-        "github": {"ruleset": github_ruleset},
+        #
+        # The full github area is reconciled here, all default-ON, opt-out per sub-block:
+        #   merge   — squash-only merge model + auto-delete head branch + allow-auto-merge (PATCH).
+        #   ghas    — dependency graph + vuln-alerts + Dependabot + secret-scanning + CodeQL.
+        #   actions — Actions enabled + allowed_actions + READ-only GITHUB_TOKEN (least privilege).
+        #   browser — settings the REST API does NOT expose, driven via agent-browser (gated OFF at
+        #             apply unless RIG_GH_BROWSER=1; planned so `rig status` lists it).
+        # Every sub-block is a no-op on a repo with no github remote, and every gh-api mutation
+        # passes the #4136.1 auth gate (notify-and-wait for `gh auth login`) before it touches a
+        # live setting.
+        "github": {
+            "ruleset": github_ruleset,
+            "merge": github_merge,
+            "ghas": github_ghas,
+            "actions": github_actions,
+            "browser": github_browser,
+        },
         # NB: `gitignore` (the GLOBAL git-excludes block) is deliberately NOT scaffolded into this
         # generated, COMMITTED repo `rig.yaml`. It is GLOBAL (machine-wide) config — it belongs in
         # the global rig layer (~/.config/rig/config.yaml), with zero per-repo commits — and it is

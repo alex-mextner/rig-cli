@@ -326,9 +326,60 @@ _GITHUB_RULESET_BLOCK = Block(
     },
 )
 
+_GITHUB_MERGE_BLOCK = Block(
+    doc="the repo merge-button policy (squash-only, auto-delete head branch, allow-auto-merge) via PATCH /repos.",
+    leaves={
+        "enabled": Leaf("boolean", "provision the merge policy", default=True),
+        "squash_merge": Leaf("boolean", "allow_squash_merge (the only merge model by default)", default=True),
+        "merge_commit": Leaf("boolean", "allow_merge_commit", default=False),
+        "rebase_merge": Leaf("boolean", "allow_rebase_merge", default=False),
+        "delete_branch_on_merge": Leaf("boolean", "auto-delete the head branch on merge", default=True),
+        "allow_auto_merge": Leaf("boolean", "allow a PR to auto-merge when its gate is green", default=True),
+        "allow_update_branch": Leaf("boolean", "offer the 'Update branch' button", default=True),
+    },
+)
+
+_GITHUB_GHAS_BLOCK = Block(
+    doc="GitHub Advanced Security: dependency graph + vuln-alerts + Dependabot + secret-scanning + CodeQL.",
+    leaves={
+        "enabled": Leaf("boolean", "provision GHAS settings", default=True),
+        "vulnerability_alerts": Leaf("boolean", "the vulnerability-alerts sub-resource (Dependabot alerts)", default=True),
+        "automated_security_fixes": Leaf("boolean", "Dependabot security updates (automated-security-fixes)", default=True),
+        "secret_scanning": Leaf("boolean", "security_and_analysis.secret_scanning", default=True),
+        "secret_scanning_push_protection": Leaf("boolean", "secret-scanning push protection", default=True),
+        "code_scanning_default_setup": Leaf("boolean", "CodeQL default-setup (configured)", default=True),
+    },
+)
+
+_GITHUB_ACTIONS_BLOCK = Block(
+    doc="GitHub Actions permissions: enabled + allowed_actions + the default GITHUB_TOKEN scope.",
+    leaves={
+        "enabled": Leaf("boolean", "provision Actions permissions", default=True),
+        "actions_enabled": Leaf("boolean", "whether Actions runs at all", default=True),
+        "allowed_actions": Leaf("string", "which actions are allowed", enum=("all", "local_only", "selected"), default="all"),
+        "default_workflow_permissions": Leaf("string", "default GITHUB_TOKEN scope", enum=("read", "write"), default="read"),
+        "can_approve_pull_request_reviews": Leaf("boolean", "may a workflow approve/create PRs", default=False),
+    },
+)
+
+_GITHUB_BROWSER_BLOCK = Block(
+    doc="settings the REST API does NOT expose, driven via agent-browser (gated off at apply unless RIG_GH_BROWSER=1).",
+    leaves={
+        "enabled": Leaf("boolean", "plan the agent-browser backend (status lists it)", default=True),
+        "discussions": Leaf("boolean", "the Discussions UI-only toggle", default=False),
+        "projects": Leaf("boolean", "the Projects UI-only toggle", default=True),
+    },
+)
+
 _GITHUB_BLOCK = Block(
-    doc="GitHub repository settings rig reconciles via gh api.",
-    nested={"ruleset": _GITHUB_RULESET_BLOCK},
+    doc="GitHub repository settings rig reconciles via gh api + agent-browser.",
+    nested={
+        "ruleset": _GITHUB_RULESET_BLOCK,
+        "merge": _GITHUB_MERGE_BLOCK,
+        "ghas": _GITHUB_GHAS_BLOCK,
+        "actions": _GITHUB_ACTIONS_BLOCK,
+        "browser": _GITHUB_BROWSER_BLOCK,
+    },
 )
 
 _TMUX_BLOCK = Block(

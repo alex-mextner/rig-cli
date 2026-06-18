@@ -35,6 +35,9 @@ from .actions.runner import (
     desired_harness_value,
     desired_permission_entries,
     find_managed_bridge_hook,
+    github_actions_state,
+    github_ghas_state,
+    github_merge_state,
     github_ruleset_state,
     harness_settings_file,
     hook_bridge_entries,
@@ -139,6 +142,14 @@ def detect(
             _check_linter_config(action, report)
         elif action.kind == "provision_github_ruleset":
             _check_github_ruleset(action, report)
+        elif action.kind == "provision_github_merge":
+            _check_github_merge(action, report)
+        elif action.kind == "provision_github_ghas":
+            _check_github_ghas(action, report)
+        elif action.kind == "provision_github_actions":
+            _check_github_actions(action, report)
+        elif action.kind == "provision_github_browser":
+            pass  # the agent-browser backend has no cheap read-back; status doesn't probe the UI
         elif action.kind == "provision_tmux":
             _check_tmux(action, report)
         elif action.kind == "provision_global_excludes":
@@ -447,6 +458,75 @@ def _check_github_ruleset(action: Action, report: DriftReport) -> None:
         report.items.append(
             DriftItem("modified", "github", "ruleset", action.target,
                       f"could not verify ruleset '{name}' on {info.get('owner')}/{info.get('repo')} "
+                      f"({info.get('detail', 'gh api failed')}) — status unknown, not confirmed in sync")
+        )
+
+
+def _check_github_merge(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured GitHub merge-button policy and the live repo.
+
+    Switches on the SAME :func:`github_merge_state` apply uses (one classification): ``update`` →
+    ``modified`` (live differs, apply PATCHes); ``ok``/``no_remote`` → no item; ``gh_error`` → a
+    VISIBLE "could not verify" item (never a silent in-sync — that would mask real drift behind a
+    green status; gh missing / not authed / no admin / API error).
+    """
+    state, info = github_merge_state(action)
+    if state == "update":
+        report.items.append(
+            DriftItem("modified", "github", "merge", action.target,
+                      f"merge policy on {info['owner']}/{info['repo']} differs from config (apply converges it)")
+        )
+    elif state == "gh_error":
+        report.items.append(
+            DriftItem("modified", "github", "merge", action.target,
+                      f"could not verify merge policy on {info.get('owner')}/{info.get('repo')} "
+                      f"({info.get('detail', 'gh api failed')}) — status unknown, not confirmed in sync")
+        )
+
+
+def _check_github_ghas(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured GHAS settings and the live repo.
+
+    Switches on the SAME :func:`github_ghas_state` apply uses: ``update`` → ``modified``;
+    ``ok``/``no_remote`` → no item; ``gh_error`` (the repo read itself failed) → a VISIBLE "could
+    not verify" item. The signal covers the ``security_and_analysis`` block, the vuln-alerts /
+    Dependabot sub-resources, and code-scanning. A scanner that couldn't be READ (plan-gated on a
+    private repo) is reported in the same ``modified`` item (it forces ``update``) with an explicit
+    "could not verify" suffix, so status is honest that one scanner's state is unknown — rather than
+    masking it behind a green status (the old behavior turned this into a whole-block gh_error that
+    also blocked applying the free features).
+    """
+    state, info = github_ghas_state(action)
+    if state == "update":
+        detail = f"security settings on {info['owner']}/{info['repo']} differ from config (apply converges them)"
+        unverifiable = info.get("unverifiable") or []
+        if unverifiable:
+            detail += " — could not verify: " + "; ".join(unverifiable)
+        report.items.append(DriftItem("modified", "github", "ghas", action.target, detail))
+    elif state == "gh_error":
+        report.items.append(
+            DriftItem("modified", "github", "ghas", action.target,
+                      f"could not verify security settings on {info.get('owner')}/{info.get('repo')} "
+                      f"({info.get('detail', 'gh api failed')}) — status unknown, not confirmed in sync")
+        )
+
+
+def _check_github_actions(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured GitHub Actions permissions and the live repo.
+
+    Switches on the SAME :func:`github_actions_state` apply uses: ``update`` → ``modified``;
+    ``ok``/``no_remote`` → no item; ``gh_error`` → a VISIBLE "could not verify" item.
+    """
+    state, info = github_actions_state(action)
+    if state == "update":
+        report.items.append(
+            DriftItem("modified", "github", "actions", action.target,
+                      f"Actions permissions on {info['owner']}/{info['repo']} differ from config (apply converges them)")
+        )
+    elif state == "gh_error":
+        report.items.append(
+            DriftItem("modified", "github", "actions", action.target,
+                      f"could not verify Actions permissions on {info.get('owner')}/{info.get('repo')} "
                       f"({info.get('detail', 'gh api failed')}) — status unknown, not confirmed in sync")
         )
 

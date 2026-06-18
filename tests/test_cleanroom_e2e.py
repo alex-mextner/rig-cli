@@ -153,8 +153,8 @@ def _build_fake_agent_tools(root: Path) -> None:
 
     # CI slots: the script-backed ones the explicit clean-room config enables (secret-scan,
     # leftover-grep, review-threads) PLUS the slots the DEFAULT scaffold (riglib/state.py)
-    # references (codeql + variant, dependency-review, ship) — so the no-config `rig init --yes`
-    # leg below is satisfiable. Mirrors conftest.fake_agent_tools.
+    # references (codeql + variant, dependency-review, pr-checklist, ship) — so the no-config
+    # `rig init --yes` leg below is satisfiable. Mirrors conftest.fake_agent_tools.
     _write(root / "ci" / "secret-scan" / "secret-scan.yml", "name: secret-scan\n")
     _write(root / "ci" / "secret-scan" / "gitleaks.toml", "# not a workflow\n")
     _write(root / "ci" / "secret-scan" / "README.md", "# secret-scan\ngitleaks\n")
@@ -165,6 +165,19 @@ def _build_fake_agent_tools(root: Path) -> None:
         _write(root / "ci" / slot / "workflow.yml", f"name: {slot}\nrun: bash ci/{slot}/{slot}.sh\n")
         _write(root / "ci" / slot / f"{slot}.sh", f"#!/usr/bin/env bash\necho {slot}\n", executable=True)
         _write(root / "ci" / slot / "README.md", f"# {slot}\n")
+    # pr-checklist: a real, provisionable merge gate the DEFAULT scaffold enables. Unlike the other
+    # slots its companions install to FIXED paths (checklist-gate.mjs -> .github/scripts/,
+    # pull_request_template.md -> .github/) rather than ci/<slot>/, so the fixture ships BOTH
+    # companions to exercise that fixed-path vendoring (runner._CI_COMPANION_FIXED_PATHS) end to
+    # end. Its check-run CONTEXT (job `name:` "PR Checklist") differs from the slot id — mirror the
+    # real workflow's job structure so the fixture is a faithful proxy for the ruleset context map.
+    _write(
+        root / "ci" / "pr-checklist" / "workflow.yml",
+        "name: PR Checklist\non: pull_request_target\njobs:\n  checklist:\n    name: PR Checklist\n    runs-on: ubuntu-latest\n",
+    )
+    _write(root / "ci" / "pr-checklist" / "checklist-gate.mjs", "// checklist gate\n")
+    _write(root / "ci" / "pr-checklist" / "pull_request_template.md", "## Checklist\n- [ ] done\n")
+    _write(root / "ci" / "pr-checklist" / "README.md", "# pr-checklist\nverify checkboxes\n")
     _write(root / "ci" / "ship" / "ship.sh", "#!/usr/bin/env bash\necho ship\n", executable=True)
     _write(root / "ci" / "ship" / "README.md", "# ship\nmerge gate\n")
 

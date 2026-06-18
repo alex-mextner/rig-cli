@@ -197,9 +197,25 @@ def fake_agent_tools(tmp_path: Path) -> Path:
     _write(root / "ci" / "secret-scan" / "gitleaks.toml", "# not a workflow\n")
     _write(root / "ci" / "secret-scan" / "README.md", "# secret-scan\ngitleaks\n")
     for slot in ("dependency-review", "leftover-grep", "review-threads"):
-        _write(root / "ci" / slot / "workflow.yml", f"name: {slot}\nrun: bash ci/{slot}/{slot}.sh\n")
+        # review-threads is a merge-gating gate: model its real JOB structure (a `jobs:` block whose
+        # job `name:` is the check-run context `required_status_checks` matches) so the fixture is a
+        # faithful proxy. The other two are not in CI_GATE_CHECK_CONTEXTS, so a flat file suffices.
+        if slot == "review-threads":
+            wf = "name: review-threads\non: pull_request_target\njobs:\n  review-threads:\n    name: review-threads\n    runs-on: ubuntu-latest\n"
+        else:
+            wf = f"name: {slot}\nrun: bash ci/{slot}/{slot}.sh\n"
+        _write(root / "ci" / slot / "workflow.yml", wf)
         _write(root / "ci" / slot / f"{slot}.sh", f"#!/usr/bin/env bash\necho {slot}\n")
         _write(root / "ci" / slot / "README.md", f"# {slot}\n")
+    # pr-checklist imports its script from .github/scripts/ rather than ci/<slot>/, so it has no
+    # sibling .sh. Its check-run CONTEXT (what required_status_checks matches) is the JOB's `name:`
+    # ("PR Checklist"), which differs from the slot id — mirror the real workflow's job structure so
+    # the fixture is a faithful proxy for the lockout-safe context mapping.
+    _write(
+        root / "ci" / "pr-checklist" / "workflow.yml",
+        "name: PR Checklist\non: pull_request_target\njobs:\n  checklist:\n    name: PR Checklist\n    runs-on: ubuntu-latest\n",
+    )
+    _write(root / "ci" / "pr-checklist" / "README.md", "# pr-checklist\nverify checkboxes\n")
     _write(root / "ci" / "ship" / "ship.sh", "#!/usr/bin/env bash\necho ship\n")
     _write(root / "ci" / "ship" / "README.md", "# ship\nmerge gate\n")
 
