@@ -143,7 +143,15 @@ should hard-code agent-tools paths.
   sample config in a throwaway repo with an isolated `HOME`, idempotency, status, pytest.
   Needs a real agent-tools checkout (`RIG_AGENT_TOOLS_SOURCE`); self-skips the apply leg
   without one. The init leg sets `RIG_TMUX_DRY_RUN=1` so the tmux artifacts land without the
-  live activation.
+  live activation. Its **full-coverage leg** (`_real_catalog_full_coverage`) discovers AND
+  dry-run-plans EVERY item in the REAL catalog (`all:true` across skills/agent_hooks/ci/mcp +
+  dispatcher) and asserts zero unknown-item/slot errors plus that every `ci/<slot>/` on disk
+  is in the plan — the rig↔catalog drift guard the synthetic `pytest` fixture can't give (a
+  new slot / renamed dir rig can't resolve is unit-GREEN but live-BROKEN; "unknown ci item:
+  pr-checklist" was this class). The `real-catalog-smoke` CI job (`.github/workflows/ci.yml`)
+  checks out the public `alex-mextner/agent-tools` repo and runs this — best-effort, so an
+  unreachable catalog SKIPS the job loudly (`::warning::`) instead of hard-failing CI. The
+  opt-in pytest mirror is `RIG_SMOKE_FAST_E2E=1 … test_real_catalog_full_coverage_plans_every_item`.
 - `bash tests/smoke.sh --fast` — the **pre-commit subset** (seconds, not the full ~20s run).
   Runs only the cheap REAL-catalog legs (`--help`/`--version`/`doctor`/`setup`-usage and the
   `rig status` regression legs: a clean sample exits 0, a removed slot prints the 3-part error
