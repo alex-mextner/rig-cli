@@ -1863,10 +1863,17 @@ def _tmux_conf_with_managed(plan, existing: str, splice, neutralize) -> str:
     - import mode: neutralize the inline rig-owned lines (so the sourced rig config is
       authoritative), then ensure the single ``source-file`` import is present exactly once at
       the end (drop a prior copy so a moved generated path doesn't leave a stale import).
-    - block mode: splice the generated body between the managed sentinels (conda-init style).
+    - block mode: neutralize the SAME inline rig-owned lines in the user's region (a hand-written
+      conf carries the old plugin/continuum/resurrect init OUTSIDE where rig splices its block —
+      without neutralizing, the user's `run-shell …/continuum.tmux` still fires the double-init
+      the live machine hit), then splice the generated body between the sentinels (conda-init
+      style). `neutralize` itself skips lines INSIDE the managed block (they are rig's generated
+      config), so it never corrupts rig's own region — the correctness does NOT rely on splice
+      overwriting the interior.
     """
     if plan.apply_mode == "block":
-        return splice(existing, plan.render_rig_conf())
+        neutralized = neutralize(existing) if existing else existing
+        return splice(neutralized, plan.render_rig_conf())
     # import mode — neutralize the redundant/harmful inline rig-owned lines FIRST (so the
     # sourced rig.tmux.conf is authoritative; otherwise a leftover inline Moshi `status-right
     # ''` after the user's own continuum init still wipes continuum's hook), then ensure the

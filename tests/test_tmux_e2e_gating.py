@@ -54,10 +54,14 @@ import pytest
 
 # Tests that need tmux but NO network (run in default hermetic CI, @_requires_tmux):
 #   - the socket-leak regression (boots a private `-L` server, asserts teardown unlinks the socket);
-#   - the DEFECT-5 boot-cleanup test (fabricates stale files + MOCKS _launchctl, clones nothing).
+#   - the DEFECT-5 boot-cleanup test (fabricates stale files + MOCKS _launchctl, clones nothing);
+#   - the migrated-conf parse-validity checks (migrate a legacy conf / a comment-only brace body,
+#     load each in a private `-L` server, assert exit 0 — clone nothing, hit no network).
 _TMUX_ONLY_TEST_NAMES = frozenset({
     "test_teardown_unlinks_the_private_socket_file",
     "test_old_continuum_boot_cleanup_removes_stale_entries",
+    "test_migrated_conf_with_neutralized_legacy_init_parses",
+    "test_comment_only_brace_body_after_moshi_neutralize_parses",
 })
 # Tests that git-clone the real plugins from GitHub → opt-in network gate (@_requires_tmux_e2e):
 _NETWORK_TEST_NAMES = frozenset({

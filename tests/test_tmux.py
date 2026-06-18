@@ -888,33 +888,326 @@ def test_splice_is_idempotent():
 
 
 # ── neutralizing inline rig-owned lines on migration (the root-cause completion) ──────────
-def test_neutralize_comments_out_only_the_moshi_wipe():
-    """import-mode migration NEUTRALIZES ONLY the inline Moshi status wipe (the bug) — and
-    leaves every other line, including rig-adjacent options rig does not model, LIVE. (Lesson
-    from a real migration: an over-broad neutralize dropped @resurrect-strategy-vim /
-    @continuum-boot-options that rig doesn't re-emit.)
+def _live_lines(text):
+    return [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+
+
+def _is_neutralized(text, needle):
+    """True iff `needle` appears ONLY on neutralized (rig-migrated comment) lines, never live."""
+    hits = [ln for ln in text.splitlines() if needle in ln]
+    return bool(hits) and all(ln.lstrip().startswith(tmux.NEUTRALIZE_PREFIX) for ln in hits)
+
+
+def test_neutralize_comments_out_rig_owned_init_and_options():
+    """Migration neutralizes every rig-OWNED plugin/continuum/resurrect init line — the three
+    rig `@plugin` decls, all `@continuum-*`/`@resurrect-*`, both plugin-init `run-shell`s, and
+    tpm's `run` — plus the Moshi wipe. This is the live-machine double-init fix (2026-06-18):
+    a hand-written `run-shell …/continuum.tmux` fires continuum-restore BEFORE rig's appended
+    source-file sets the login-shell default-command, so the inline init MUST be neutralized.
     """
     original = (
+        "set -g @plugin 'tmux-plugins/tpm'\n"
+        "set -g @plugin 'tmux-plugins/tmux-resurrect'\n"
         "set -g @plugin 'tmux-plugins/tmux-continuum'\n"
         "set -g @continuum-restore 'on'\n"
-        "set -g @resurrect-strategy-vim 'session'\n"   # rig does NOT model this — keep live
-        "set -g @continuum-boot-options 'iterm'\n"      # rig does NOT model this — keep live
+        "set -g @continuum-boot 'on'\n"
+        "set -g @continuum-boot-options 'iterm'\n"
+        "set -g @resurrect-processes 'ssh psql ~rails'\n"
+        "set -g @resurrect-strategy-vim 'session'\n"
+        "set -g @resurrect-capture-pane-contents 'on'\n"
+        "run-shell ~/.tmux/plugins/tmux-resurrect/resurrect.tmux\n"
         "run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux\n"
-        "set -g mouse on  # USER LINE\n"
         "if-shell '[ -n \"$MOSHI_CLIENT\" ]' {\n"
         "  set -g status-right ''\n"
         "}\n"
         "run '~/.tmux/plugins/tpm/tpm'\n"
     )
     out = tmux.neutralize_inline_rig_lines(original)
-    # the Moshi if-shell wipe block IS neutralized (it's the actual bug)
-    live_wipe = [ln for ln in out.splitlines() if "status-right ''" in ln and not ln.lstrip().startswith("#")]
-    assert not live_wipe, "the inline Moshi status-right wipe must be neutralized"
-    # EVERYTHING else stays live — including options rig does not re-emit (no settings loss).
-    for kept in ("@continuum-restore", "@resurrect-strategy-vim", "@continuum-boot-options",
-                 "continuum.tmux", "tmux/plugins/tpm/tpm", "set -g mouse on  # USER LINE"):
-        live = [ln for ln in out.splitlines() if kept in ln and not ln.lstrip().startswith("#")]
-        assert live, f"line wrongly neutralized (settings loss): {kept}"
+    # the Moshi if-shell wipe block IS neutralized (the original root-cause line) …
+    assert not any("status-right ''" in ln for ln in _live_lines(out)), "Moshi wipe must be off"
+    # … and so is EVERY rig-owned init/option/decl line (the double-init completion).
+    for needle in (
+        "@plugin 'tmux-plugins/tpm'",
+        "@plugin 'tmux-plugins/tmux-resurrect'",
+        "@plugin 'tmux-plugins/tmux-continuum'",
+        "@continuum-restore", "@continuum-boot", "@continuum-boot-options",
+        "@resurrect-processes", "@resurrect-strategy-vim", "@resurrect-capture-pane-contents",
+        "tmux-resurrect/resurrect.tmux", "tmux-continuum/continuum.tmux",
+        "tmux/plugins/tpm/tpm",
+    ):
+        assert _is_neutralized(out, needle), f"rig-owned line not neutralized: {needle}"
+
+
+def test_neutralize_preserves_third_party_plugins_and_personal_prefs():
+    """Over-neutralization guard: a third-party `@plugin` (rig does NOT own it — rig's tpm loads
+    it) and every personal pref stay LIVE. Only the THREE rig-owned plugins are swept.
+    """
+    original = (
+        "set -g mouse on\n"
+        "set -g history-limit 100000\n"
+        "set -g base-index 1\n"
+        "set -g @plugin 'tmux-plugins/tmux-sensible'\n"  # third-party — rig does NOT own it
+        "set -g @plugin 'tmux-plugins/tmux-yank'\n"       # third-party — rig does NOT own it
+        "set -g @plugin 'tmux-plugins/tmux-resurrect'\n"  # rig-owned — neutralized
+        "set-option -ga update-environment ' MOSHI_CLIENT'\n"  # a pref, NOT the wipe
+        "set -g status-right '#{battery}'\n"              # a real value, not the empty wipe
+        "bind r source-file ~/.tmux.conf\n"
+    )
+    out = tmux.neutralize_inline_rig_lines(original)
+    live = "\n".join(_live_lines(out))
+    for kept in (
+        "set -g mouse on", "set -g history-limit 100000", "set -g base-index 1",
+        "tmux-plugins/tmux-sensible", "tmux-plugins/tmux-yank",
+        "update-environment ' MOSHI_CLIENT'", "status-right '#{battery}'",
+        "bind r source-file",
+    ):
+        assert kept in live, f"line wrongly neutralized (over-reach): {kept}"
+    # the one rig-owned plugin IS swept.
+    assert _is_neutralized(out, "@plugin 'tmux-plugins/tmux-resurrect'")
+
+
+def test_neutralize_does_not_over_reach_on_lookalikes():
+    """Tokens that LOOK rig-owned but aren't an init must stay live: a third-party plugin whose
+    name merely CONTAINS a rig plugin name, a fork under the same org, a `source-file` keybinding,
+    a `status-right` VALUE that mentions a rig token, a non-set directive carrying the token, and
+    a commented-out mention. The `@continuum-`/`@resurrect-` match is anchored to a set directive,
+    and `@plugin` to the QUOTED spec — so none of these false-match (review findings 1 + 3)."""
+    cases = (
+        "set -g @plugin 'someuser/tmux-resurrect-fork'\n",   # not the rig spec
+        "set -g @plugin 'tmux-plugins/tmux-resurrect-fork'\n",  # same-org fork — closing quote anchors
+        "bind r source-file ~/.tmux.conf\n",                 # a keybinding, not a plugin init
+        "set -g status-right 'continuum.tmux rules'\n",       # a real value, not a run-shell init
+        "set -g status-right '#(tmux show-option -gv @continuum-save-interval)'\n",  # value prints opt
+        "bind r run-shell 'tmux set @continuum-boot on'\n",   # keybind whose VALUE has the token
+        "display-message '@resurrect-processes test'\n",      # not a set directive at all
+        "# I once used tmux-continuum but stopped\n",         # a comment — never re-touched
+    )
+    for original in cases:
+        assert tmux.neutralize_inline_rig_lines(original) == original, original
+
+
+def test_neutralize_unquoted_rig_plugin_spec_but_not_fork():
+    """An UNQUOTED `set -g @plugin tmux-plugins/tpm` is valid tmux and IS the rig plugin → it
+    must be neutralized (the double-init source), while a fork `…/tmux-resurrect-fork` (quoted or
+    bare) is matched by EXACT spec value, not a prefix, so it stays live (review findings 2 + 3)."""
+    P = tmux.NEUTRALIZE_PREFIX
+    for owned in (
+        "set -g @plugin tmux-plugins/tpm\n",
+        "set -g @plugin tmux-plugins/tmux-resurrect\n",
+        "set -g @plugin 'tmux-plugins/tmux-continuum'\n",
+    ):
+        assert tmux.neutralize_inline_rig_lines(owned).lstrip().startswith(P), owned
+    for fork in (
+        "set -g @plugin tmux-plugins/tmux-resurrect-fork\n",
+        "set -g @plugin 'tmux-plugins/tmux-resurrect-fork'\n",
+    ):
+        assert tmux.neutralize_inline_rig_lines(fork) == fork, fork
+
+
+def test_neutralize_run_shell_init_anchored_not_nested_arg():
+    """The plugin-init match is on the run-shell/run COMMAND, not a substring: real inits (bare,
+    quoted, `-b`, absolute) are neutralized, but a command that merely MENTIONS the plugin path as
+    a nested ARGUMENT (a backup/copy) stays live — over-reach would change a line the user did not
+    ask to change (review finding 1)."""
+    P = tmux.NEUTRALIZE_PREFIX
+    for init in (
+        "run-shell ~/.tmux/plugins/tmux-resurrect/resurrect.tmux\n",
+        "run-shell '~/.tmux/plugins/tmux-continuum/continuum.tmux'\n",
+        "run-shell -b ~/.tmux/plugins/tmux-continuum/continuum.tmux\n",
+        "run-shell -b '~/.tmux/plugins/tmux-continuum/continuum.tmux'\n",  # -b AND quotes together
+        "run '~/.tmux/plugins/tpm/tpm'\n",
+        "run-shell /Users/me/.tmux/plugins/tmux-continuum/continuum.tmux\n",
+    ):
+        assert tmux.neutralize_inline_rig_lines(init).lstrip().startswith(P), init
+    for nested in (
+        'run-shell "tar czf bak.tgz ~/.tmux/plugins/tmux-continuum/continuum.tmux"\n',
+        "run-shell 'cp ~/.tmux/plugins/tmux-continuum/continuum.tmux /tmp'\n",
+    ):
+        assert tmux.neutralize_inline_rig_lines(nested) == nested, nested
+
+
+def test_neutralize_skips_moshi_lookalike_inside_managed_block():
+    """A `status-right ''` / `@continuum-restore` lookalike INSIDE rig's managed block (block apply
+    mode — rig's OWN generated config) must survive untouched: both neutralize passes skip the
+    region between BLOCK_BEGIN/BLOCK_END. Guards the block-skip so a future regression that removes
+    it (and lets neutralize corrupt rig's own block) fails here, not only via the splice masking."""
+    inside = (
+        "  set -g status-right ''\n"            # a Moshi-wipe lookalike (rig's own, when moshi on)
+        "  set -g @continuum-restore 'off'\n"   # rig's own option line
+        "  run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux\n"  # rig's own init
+    )
+    original = (
+        "set -g @continuum-restore 'on'\n"      # USER line above the block — neutralized
+        f"{tmux.BLOCK_BEGIN}\n{inside}{tmux.BLOCK_END}\n"
+        "set -g mouse on\n"                      # USER pref below the block — live
+    )
+    out = tmux.neutralize_inline_rig_lines(original)
+    b, e = out.index(tmux.BLOCK_BEGIN), out.index(tmux.BLOCK_END)
+    assert tmux.NEUTRALIZE_PREFIX not in out[b:e], "rig's own managed block was wrongly neutralized"
+    assert tmux.NEUTRALIZE_PREFIX in out[:b], "the USER line above the block must be neutralized"
+    assert "set -g mouse on" in out[e:], "the USER pref below the block must stay live"
+
+
+def test_neutralize_leaves_rig_option_inside_user_brace_block_live():
+    """A rig-owned option a user GUARDED inside a non-Moshi `if-shell '…' { … }` conditional stays
+    LIVE (multi- and single-line): commenting just the inner line would leave a dangling/empty
+    brace body (a parse hazard) and break the user's deliberate condition. Under-reach is preferred
+    over over-reach here (review findings 1+2). The Moshi wipe brace is still fully commented."""
+    multi = "if-shell '[ -n \"$SOME\" ]' {\n  set -g @continuum-restore 'on'\n}\n"
+    assert tmux.neutralize_inline_rig_lines(multi) == multi, "multi-line user brace must stay live"
+    single = "if-shell '[ -n \"$SOME\" ]' { set -g @continuum-restore 'on' }\n"
+    assert tmux.neutralize_inline_rig_lines(single) == single, "single-line user brace must stay live"
+    # contrast: the Moshi wipe brace IS fully commented (braces included → no dangling brace).
+    moshi = "if-shell '[ -n \"$MOSHI_CLIENT\" ]' {\n  set -g status-right ''\n}\n"
+    out = tmux.neutralize_inline_rig_lines(moshi)
+    assert not [ln for ln in out.splitlines() if not ln.lstrip().startswith("#")], \
+        "the Moshi wipe block must be fully commented (no dangling brace)"
+    # a top-level rig-owned option AFTER the brace block is still neutralized (brace_depth resets).
+    after = multi + "set -g @continuum-restore 'on'\n"
+    out2 = tmux.neutralize_inline_rig_lines(after)
+    live = [ln for ln in out2.splitlines() if not ln.lstrip().startswith("#")]
+    # the guarded one (inside braces) survives; the top-level one (after `}`) is neutralized.
+    assert sum(1 for ln in live if "@continuum-restore" in ln) == 1, \
+        "the guarded option survives; the top-level one after the brace is neutralized"
+
+
+def test_neutralize_decorative_brace_in_value_does_not_leak_skip():
+    """A literal `{` inside a quoted value (e.g. `status-left "…{…"`) must NOT be treated as a
+    block opener — otherwise the NEXT rig-owned line would be wrongly skipped (left live → the
+    double-init survives). The brace tracker keys on STRUCTURAL `{`-at-end-of-line, not a raw
+    count, so the following @plugin/run-shell init is still neutralized (review finding)."""
+    original = (
+        "set -g status-left \"session:#S{\"\n"   # decorative brace in a value
+        "set -g @plugin 'tmux-plugins/tmux-continuum'\n"
+        "run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux\n"
+    )
+    out = tmux.neutralize_inline_rig_lines(original)
+    live = [ln for ln in out.splitlines() if not ln.lstrip().startswith("#")]
+    assert any("status-left" in ln for ln in live), "the status-left value must survive"
+    assert not any("tmux-plugins/tmux-continuum'" in ln for ln in live), \
+        "the @plugin after a decorative brace must still be neutralized"
+    assert not any("continuum.tmux" in ln for ln in live), \
+        "the init after a decorative brace must still be neutralized"
+
+
+def test_neutralize_nested_user_braces_keep_inner_lines_live():
+    """NESTED `if-shell '…' { … if-shell '…' { … } … }` conditionals: an INNER `}` must not
+    re-expose the OUTER block (a boolean in-brace flag had that bug). Every rig-owned line at any
+    depth > 0 stays live (no dangling brace); a line after the OUTERMOST `}` is neutralized."""
+    original = (
+        "if-shell '[ -n \"$A\" ]' {\n"
+        "  if-shell '[ -n \"$B\" ]' {\n"
+        "    set -g @continuum-restore 'on'\n"   # depth 2 — live
+        "  }\n"
+        "  set -g @continuum-restore 'on'\n"     # depth 1 (after inner close) — live
+        "}\n"
+        "set -g @continuum-restore 'on'\n"       # depth 0 — neutralized
+    )
+    out = tmux.neutralize_inline_rig_lines(original)
+    live = [ln for ln in out.splitlines() if not ln.lstrip().startswith("#")]
+    assert sum(1 for ln in live if "@continuum-restore" in ln) == 2, \
+        "both nested (depth>0) lines stay live; only the top-level one is neutralized"
+    assert tmux.NEUTRALIZE_PREFIX in out, "the top-level line must be neutralized"
+
+
+def test_neutralize_closing_brace_with_trailing_text_decrements_depth():
+    """A closing brace line that is not a BARE `}` — `} # end` or `} <directive>` — must still
+    close the conditional, so a rig-owned init AFTER it is neutralized (else the double-init the
+    fix targets survives silently). A `}` inside a quoted VALUE never false-closes (it starts with
+    the set verb, not `}`)."""
+    original = (
+        "if-shell '[ -n \"$X\" ]' {\n"
+        "  set -g @continuum-restore 'on'\n"   # inside — live
+        "} # end conditional\n"
+        "run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux\n"  # after close — neutralized
+    )
+    out = tmux.neutralize_inline_rig_lines(original)
+    live = [ln for ln in out.splitlines() if not ln.lstrip().startswith("#")]
+    assert any("@continuum-restore" in ln for ln in live), "inside-brace line stays live"
+    assert not any("continuum.tmux" in ln for ln in live), \
+        "the init after `} # end` must be neutralized (depth decremented past the tailed close)"
+    # a literal `}` inside a value is not a closer.
+    value = "set -g status-right \"}\"\nset -g @plugin 'tmux-plugins/tpm'\n"
+    out2 = tmux.neutralize_inline_rig_lines(value)
+    assert tmux.NEUTRALIZE_PREFIX in out2, "the @plugin after a value-`}` is still neutralized"
+
+
+def test_neutralize_bare_wipe_inside_user_brace_stays_live():
+    """A bare `set -g status-right ''` a user GUARDED inside their OWN non-Moshi `{ … }` stays
+    live — commenting just it would dangle the brace. A bare wipe at TOP level is still
+    neutralized, and the Moshi-guarded wipe block is still commented whole."""
+    guarded = "if-shell '[ -n \"$X\" ]' {\n  set -g status-right ''\n}\n"
+    assert tmux.neutralize_inline_rig_lines(guarded) == guarded, "guarded bare wipe must stay live"
+    assert tmux.neutralize_inline_rig_lines("set -g status-right ''\n").lstrip().startswith(
+        tmux.NEUTRALIZE_PREFIX
+    ), "a top-level bare wipe is still neutralized"
+
+
+def test_neutralize_moshi_block_with_literal_brace_in_value_does_not_overconsume():
+    """The multi-line Moshi-block scan uses STRUCTURAL depth (end-of-line `{` / first-token `}`),
+    so a literal `{` inside a value WITHIN the block (`status-left \"x{\"`) does not over-consume
+    to EOF and swallow the lines after the block. The Moshi block is commented whole; the line
+    after the closing `}` stays live."""
+    original = (
+        "if-shell '[ -n \"$MOSHI_CLIENT\" ]' {\n"
+        "  set -g status-left \"x{\"\n"   # a literal brace in a value
+        "  set -g status-right ''\n"
+        "}\n"
+        "set -g mouse on\n"               # MUST stay live (not consumed past the close)
+    )
+    out = tmux.neutralize_inline_rig_lines(original)
+    live = [ln for ln in out.splitlines() if not ln.lstrip().startswith("#")]
+    assert any(ln.strip() == "set -g mouse on" for ln in live), "line after the block must stay live"
+    assert not any("status-right ''" in ln for ln in live), "the Moshi wipe must be commented"
+    assert not any("status-left" in ln for ln in live), "the whole Moshi block must be commented"
+
+
+def test_neutralize_known_limitation_set_hook_init_stays_live():
+    """KNOWN LIMITATION (pinned, not a bug): a continuum init run via an indirection rig does not
+    model — `set-hook -g session-created 'run-shell …/continuum.tmux'` — is NOT neutralized (the
+    run-shell is a quoted VALUE, not the directive). Documented in _is_rig_owned_legacy_line; this
+    test makes any future widening of the matcher a DELIBERATE change, not a silent one."""
+    original = "set-hook -g session-created 'run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux'\n"
+    assert tmux.neutralize_inline_rig_lines(original) == original
+
+
+def test_neutralize_known_limitation_xdg_plugin_init_stays_live():
+    """KNOWN LIMITATION (pinned, not a bug): rig models only the DEFAULT ~/.tmux/plugins/ location
+    (it clones plugins there and inits from that path). An init from a custom/XDG plugin dir
+    (~/.config/tmux/plugins/…) is NOT neutralized — but the path-independent @plugin decl + the
+    @continuum-*/@resurrect-* options of such a user still ARE. Documented at _PLUGIN_INIT_ENTRYPOINTS."""
+    xdg_init = "run-shell ~/.config/tmux/plugins/tmux-continuum/continuum.tmux\n"
+    assert tmux.neutralize_inline_rig_lines(xdg_init) == xdg_init
+    # the @plugin decl + options are still neutralized (path-independent).
+    P = tmux.NEUTRALIZE_PREFIX
+    assert tmux.neutralize_inline_rig_lines(
+        "set -g @plugin 'tmux-plugins/tmux-continuum'\n"
+    ).lstrip().startswith(P)
+
+
+def test_neutralize_handles_set_option_and_setw_variants():
+    """A rig-owned option set via `set-option` / `set-window-option` / `setw` (not just `set -g`)
+    is neutralized too — the matcher anchors on the verb + the option name, not a literal `set -g`."""
+    original = (
+        "set-option -ga @continuum-restore 'on'\n"
+        "set-window-option -g @resurrect-strategy-vim 'session'\n"
+        "setw -g @continuum-save-interval '5'\n"
+    )
+    out = tmux.neutralize_inline_rig_lines(original)
+    assert not [ln for ln in out.splitlines() if not ln.lstrip().startswith("#")], \
+        "set-option/setw rig-owned options must be neutralized"
+
+
+def test_neutralize_handles_indented_and_run_shell_tpm_variants():
+    """An INDENTED rig-owned init and tpm launched via `run-shell` (not bare `run`) are both
+    neutralized (the matcher works on the stripped line, and tpm accepts either run form)."""
+    original = (
+        "    run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux\n"
+        "run-shell '~/.tmux/plugins/tpm/tpm'\n"
+    )
+    out = tmux.neutralize_inline_rig_lines(original)
+    assert not [ln for ln in out.splitlines() if not ln.lstrip().startswith("#")], \
+        "every rig-owned init (indented / run-shell tpm) must be neutralized"
 
 
 def test_neutralize_bare_single_line_moshi_wipe():
@@ -971,6 +1264,21 @@ def test_detect_bare_moshi_wipe_triggers_backup():
     backup first (codex P2)."""
     bare = "set -g mouse on\nset -g status-right ''\n"
     assert tmux.has_inline_rig_settings(bare) is True
+
+
+def test_detect_update_environment_moshi_client_does_not_trigger_backup():
+    """`set-option -ga update-environment ' MOSHI_CLIENT'` is a PERSONAL pref migration keeps live
+    (NOT the wipe). It must NOT count as 'has inline settings' — the OLD substring `MOSHI_CLIENT`
+    marker made it trigger a backup on EVERY apply (perpetual churn). `has_inline_rig_settings` is
+    now defined AS 'neutralization changes the region', so the backup gate stays consistent with
+    what neutralization does — this pins that consistency directly (not just transitively)."""
+    pref = "set -g mouse on\nset-option -ga update-environment ' MOSHI_CLIENT'\n"
+    assert tmux.has_inline_rig_settings(pref) is False
+    # a fully-migrated import conf (commented legacy + the pref live) is likewise NOT migratable.
+    migrated = tmux.neutralize_inline_rig_lines(
+        "set -g @plugin 'tmux-plugins/tpm'\nset-option -ga update-environment ' MOSHI_CLIENT'\n"
+    )
+    assert tmux.has_inline_rig_settings(migrated) is False
 
 
 # ── plan building ────────────────────────────────────────────────────────────────────────
@@ -1206,18 +1514,200 @@ def test_apply_migrates_and_backs_up_handwritten_conf(tmp_path, monkeypatch):
     assert len(baks) == 1, f"expected one timestamped backup, got {baks}"
     bak_text = baks[0].read_text()
     assert "set -g mouse on" in bak_text and "status-right ''" in bak_text
-    # the new conf carries the import line.
+    # the new conf carries the import line exactly once.
     new_text = conf.read_text()
-    assert "source-file" in new_text
-    # the BUGGY Moshi wipe is neutralized (commented); the continuum line + user line stay LIVE
-    # (narrow neutralize — no settings loss).
-    live_wipe = [ln for ln in new_text.splitlines()
-                 if "status-right ''" in ln and not ln.lstrip().startswith("#")]
-    assert not live_wipe, "inline Moshi wipe must be neutralized on migration"
+    assert sum(1 for ln in new_text.splitlines() if ln.strip().startswith("source-file")) == 1
+    # the BUGGY Moshi wipe AND the rig-owned plugin/continuum init are neutralized (commented);
+    # the user's own line stays LIVE.
+    live = [ln for ln in new_text.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("status-right ''" in ln for ln in live), "Moshi wipe must be neutralized"
+    assert not any("@continuum-restore" in ln for ln in live), \
+        "rig-owned @continuum option must be neutralized (the double-init fix)"
+    assert not any("continuum.tmux" in ln for ln in live), \
+        "the rig-owned continuum init run-shell must be neutralized (the double-init bug)"
     assert "set -g mouse on  # user line" in new_text  # user line preserved live
-    live_cont = [ln for ln in new_text.splitlines()
-                 if "@continuum-restore" in ln and not ln.lstrip().startswith("#")]
-    assert live_cont, "the continuum option line must stay live (narrow neutralize)"
+
+
+_FULL_LEGACY_CONF = (
+    "# --- personal prefs ---\n"
+    "set -g mouse on\n"
+    "set -g history-limit 100000\n"
+    "set -g base-index 1\n"
+    "set -g @plugin 'tmux-plugins/tmux-sensible'\n"   # third-party — must survive
+    "set-option -ga update-environment ' MOSHI_CLIENT'\n"
+    "# --- the old hand-written tpm/resurrect/continuum init (rig-owned) ---\n"
+    "set -g @plugin 'tmux-plugins/tpm'\n"
+    "set -g @plugin 'tmux-plugins/tmux-resurrect'\n"
+    "set -g @plugin 'tmux-plugins/tmux-continuum'\n"
+    "set -g @resurrect-processes 'ssh psql ~rails'\n"
+    "set -g @resurrect-capture-pane-contents 'on'\n"
+    "set -g @continuum-restore 'on'\n"
+    "set -g @continuum-boot 'on'\n"
+    "set -g @continuum-boot-options 'iterm'\n"
+    "set -g @continuum-save-interval '5'\n"
+    "run-shell ~/.tmux/plugins/tmux-resurrect/resurrect.tmux\n"
+    "run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux\n"
+    "if-shell '[ -n \"$MOSHI_CLIENT\" ]' { set -g status-right '' }\n"
+    "run '~/.tmux/plugins/tpm/tpm'\n"
+)
+
+# the rig-owned legacy lines that MUST end up neutralized (commented) after migration.
+_RIG_OWNED_NEEDLES = (
+    "@plugin 'tmux-plugins/tpm'",
+    "@plugin 'tmux-plugins/tmux-resurrect'",
+    "@plugin 'tmux-plugins/tmux-continuum'",
+    "@resurrect-processes", "@resurrect-capture-pane-contents",
+    "@continuum-restore", "@continuum-boot", "@continuum-boot-options", "@continuum-save-interval",
+    "tmux-resurrect/resurrect.tmux", "tmux-continuum/continuum.tmux",
+    "tmux/plugins/tpm/tpm", "status-right ''",
+)
+# personal prefs + the third-party plugin that MUST stay live.
+_PRESERVED_NEEDLES = (
+    "set -g mouse on", "set -g history-limit 100000", "set -g base-index 1",
+    "@plugin 'tmux-plugins/tmux-sensible'", "update-environment ' MOSHI_CLIENT'",
+)
+
+
+def _user_region_lines(new_text):
+    """Live (non-comment) lines OUTSIDE rig's managed block. In block mode rig's OWN generated
+    block legitimately carries live `@plugin`/`run-shell` lines (that IS the managed config) —
+    the migration contract is only about the USER's hand-written region, so the assertions look
+    there. In import mode there is no block, so this is every live line."""
+    out, in_block = [], False
+    for ln in new_text.splitlines():
+        s = ln.strip()
+        if s == tmux.BLOCK_BEGIN:
+            in_block = True
+            continue
+        if s == tmux.BLOCK_END:
+            in_block = False
+            continue
+        if not in_block and not s.startswith("#"):
+            out.append(ln)
+    return out
+
+
+def _assert_full_migration(new_text):
+    live_joined = "\n".join(_user_region_lines(new_text))
+    # (a) every rig-owned init/option/decl line in the USER's region is neutralized (none live).
+    for needle in _RIG_OWNED_NEEDLES:
+        assert needle not in live_joined, f"rig-owned user line still LIVE (double-init): {needle}"
+    # (b) third-party plugin + personal prefs survive uncommented.
+    for needle in _PRESERVED_NEEDLES:
+        assert needle in live_joined, f"preserved line wrongly neutralized: {needle}"
+
+
+@pytest.mark.parametrize("apply_mode", ["import", "block"])
+def test_apply_full_legacy_init_neutralized_both_modes(tmp_path, monkeypatch, apply_mode):
+    """The live-machine bug fix end-to-end (2026-06-18): a hand-written conf with the FULL old
+    tpm/resurrect/continuum init + personal prefs + a third-party plugin. After migration in
+    BOTH apply modes: (a) every rig-owned init line is commented, (b) tmux-sensible + prefs stay
+    live, (c) the source-file import / managed block is present exactly once, (d) re-applying is
+    a no-op (no double-comment), and the original is backed up first.
+    """
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    conf = home / ".tmux.conf"
+    conf.write_text(_FULL_LEGACY_CONF, encoding="utf-8")
+
+    res = runner._do_provision_tmux(_tmux_action(home, apply_mode=apply_mode), "backup")
+    assert res.status in ("created", "updated", "backed_up")
+
+    # the original (with the live legacy init) is backed up before the rewrite.
+    baks = list(home.glob(".tmux.conf.rig-bak-*"))
+    assert len(baks) == 1, f"expected one timestamped backup, got {baks}"
+    assert "run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux" in baks[0].read_text()
+
+    migrated = conf.read_text()
+    _assert_full_migration(migrated)
+    # (c) the managed region is present exactly once.
+    if apply_mode == "import":
+        n = sum(1 for ln in migrated.splitlines() if ln.strip().startswith("source-file '"))
+        assert n == 1, f"expected exactly one source-file import, got {n}"
+    else:
+        assert migrated.count(tmux.BLOCK_BEGIN) == 1 and migrated.count(tmux.BLOCK_END) == 1
+
+    # (d) re-applying the already-migrated conf is a no-op: no double-comment, no extra backup,
+    # byte-identical result.
+    runner._do_provision_tmux(_tmux_action(home, apply_mode=apply_mode), "backup")
+    reapplied = conf.read_text()
+    assert reapplied == migrated, "re-apply must be byte-identical (idempotent migration)"
+    assert reapplied.count(tmux.NEUTRALIZE_PREFIX + tmux.NEUTRALIZE_PREFIX) == 0, "no double-comment"
+    assert len(list(home.glob(".tmux.conf.rig-bak-*"))) == 1, "clean re-apply must not re-backup"
+
+
+def test_apply_reusering_a_readded_rig_option_settles_to_idempotent(tmp_path, monkeypatch):
+    """The re-add path is HONEST + bounded (review finding 1): if the user re-adds a live rig-owned
+    option (rig owns the surface — a bare re-add inside ~/.tmux.conf is re-neutralized by design),
+    the next apply backs the conf up ONCE and neutralizes it, then SETTLES — it does NOT re-backup
+    or re-comment on every subsequent apply (that would break the idempotency contract)."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    conf = home / ".tmux.conf"
+    conf.write_text("set -g mouse on\nset -g @continuum-boot-options 'iterm'\n", encoding="utf-8")
+
+    runner._do_provision_tmux(_tmux_action(home), "backup")  # migrate
+    migrated = conf.read_text()
+    # clean re-applies never re-backup (already-migrated is stable).
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    assert conf.read_text() == migrated
+    assert len(list(home.glob(".tmux.conf.rig-bak-*"))) == 1, "clean re-apply must not re-backup"
+
+    # the user RE-ADDS the option live → exactly ONE more backup, then settle.
+    conf.write_text(conf.read_text() + "set -g @continuum-boot-options 'iterm'\n", encoding="utf-8")
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    settled = conf.read_text()
+    assert len(list(home.glob(".tmux.conf.rig-bak-*"))) == 2, "a live re-add backs up once"
+    runner._do_provision_tmux(_tmux_action(home), "backup")
+    assert conf.read_text() == settled, "after the re-add is neutralized, apply settles (idempotent)"
+    assert len(list(home.glob(".tmux.conf.rig-bak-*"))) == 2, "settled re-apply must not re-backup"
+
+
+def test_apply_block_mode_preserves_user_line_after_block_end(tmp_path, monkeypatch):
+    """Block mode (review finding 3): a personal line the user placed AFTER the managed BLOCK_END
+    survives migration uncommented (it's outside rig's region), and a rig-owned line the user put
+    after BLOCK_END is still neutralized (rig owns that surface everywhere in ~/.tmux.conf)."""
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    conf = home / ".tmux.conf"
+    # first migrate a legacy conf in block mode so a managed block exists.
+    conf.write_text(
+        "set -g @continuum-restore 'on'\n"
+        "run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux\n",
+        encoding="utf-8",
+    )
+    runner._do_provision_tmux(_tmux_action(home, apply_mode="block"), "backup")
+    # the user appends, AFTER the managed block, a personal pref + a stray rig-owned option.
+    migrated = conf.read_text()
+    conf.write_text(migrated + "set -g mouse on\nset -g @continuum-save-interval '99'\n", encoding="utf-8")
+
+    runner._do_provision_tmux(_tmux_action(home, apply_mode="block"), "backup")
+    final = conf.read_text()
+    all_lines = final.splitlines()
+    end_idx = next(i for i, ln in enumerate(all_lines) if ln.strip() == tmux.BLOCK_END)
+    after_end = all_lines[end_idx + 1:]  # the lines the user appended AFTER the managed block
+    live_after = [ln for ln in after_end if not ln.lstrip().startswith("#")]
+    # the personal pref the user put after the block stays live, IN that after-block region …
+    assert any(ln.strip() == "set -g mouse on" for ln in live_after), \
+        "user pref after BLOCK_END must survive live"
+    # … and the rig-owned line the user put after the block is neutralized (rig owns that surface
+    # everywhere in ~/.tmux.conf, not only above the block).
+    assert not any(
+        "@continuum-save-interval '99'" in ln for ln in all_lines if not ln.lstrip().startswith("#")
+    ), "a rig-owned line is neutralized wherever it sits in ~/.tmux.conf"
+    assert any("@continuum-save-interval '99'" in ln for ln in after_end), \
+        "the neutralized rig-owned line stays (as a comment) in the after-block region"
+    assert final.count(tmux.BLOCK_BEGIN) == 1 and final.count(tmux.BLOCK_END) == 1
 
 
 def test_apply_creates_a_fresh_timestamped_backup_each_migration(tmp_path, monkeypatch):

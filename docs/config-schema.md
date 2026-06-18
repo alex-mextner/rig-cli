@@ -936,16 +936,44 @@ tmux:
 (resurrect/continuum/tpm/Moshi), rig backs the **original** up to a UNIQUE timestamped
 `~/.tmux.conf.rig-bak-<UTC>` before wiring the managed region — so every migrating apply keeps its
 OWN restore point and a later apply (after a hand-edit) never loses the in-between state by
-skipping a backup. The migration is deliberately **conservative**: it neutralizes (comments out, with a
-`# rig-migrated (now in rig.tmux.conf):` marker) **only the inline Moshi `status-left`/
-`status-right` wipe** — the one line that is *actively harmful* (if it runs after the user's own
-continuum init it wipes continuum's autosave hook). **Every other line stays live**, including
-options rig does not model (e.g. `@resurrect-strategy-vim`, `@continuum-boot-options`) — so a
-migration never silently drops a user-tuned setting. rig's sourced `rig.tmux.conf` re-runs the
-plugin inits in the correct order *last*, so the surviving inline lines are harmless duplicates
-and the correctly-ordered tail wins. `rig status` reports drift on the **managed region only**
-(the generated file, the scripts, the boot plist, the import line / managed block) — never on the
-user's hand-written lines.
+skipping a backup. The migration **neutralizes** (comments out, with a
+`# rig-migrated (now in rig.tmux.conf):` marker) exactly the **rig-OWNED** init that rig now
+re-emits itself in `rig.tmux.conf` (in BOTH import and block apply mode):
+
+- the three rig-owned `@plugin` declarations — `tmux-plugins/tpm`, `…/tmux-resurrect`,
+  `…/tmux-continuum`;
+- every `@continuum-*` and `@resurrect-*` option (restore, boot, boot-options, save-interval,
+  processes, capture-pane-contents, strategy-vim, hooks, …);
+- the plugin **init** lines — `run-shell …/tmux-resurrect/resurrect.tmux`,
+  `run-shell …/tmux-continuum/continuum.tmux`, and tpm's `run '…/tpm/tpm'`;
+- the Moshi `status-left`/`status-right` wipe.
+
+This is the root-cause completion for the **double-init** bug: a hand-written
+`run-shell …/continuum.tmux` runs continuum-restore *before* rig's appended `source-file` sets the
+login-shell `default-command`, so restored panes spawn **non-login** (`~/.zprofile` skipped); and a
+live `@continuum-boot 'on'` / `@resurrect-processes '…'` fights rig's clean values. rig re-runs
+these inits in the pinned order at the END of its sourced file, so the inline copies must go.
+
+rig **owns the whole resurrect/continuum surface**, so it neutralizes *every* live `@continuum-*` /
+`@resurrect-*` set directive — including options it does not itself re-emit (e.g.
+`@resurrect-strategy-vim`, `@continuum-boot-options`). Those are **recoverable** from the
+timestamped `.rig-bak-<UTC>` backup. To keep a value rig models, set the matching `tmux:` knob in
+`rig.yaml`. An *unmodeled* option you truly need is best carried in a **separate** tmux file you
+`source-file` yourself **after** rig's import (rig only neutralizes lines IN `~/.tmux.conf`/the
+managed conf, never another file you source) — re-adding it as a bare line inside `~/.tmux.conf`
+will be re-neutralized on the next `rig apply`, by design (rig owns that surface). The match is
+anchored to a `set`/`set-option`/`set-window-option`/`setw` directive, so an
+`@continuum-…`/`@resurrect-…` token appearing only inside a `status-right` **value** or a
+keybinding is **not** neutralized.
+
+**What migration NEVER touches** (no over-reach): a **third-party** `@plugin`
+(`tmux-plugins/tmux-sensible`, `tmux-yank`, any non-rig plugin) — rig's tpm, run at the end of
+`rig.tmux.conf`, loads it — and every **personal pref** (`set -g mouse on`, history-limit,
+base-index, set-titles, `update-environment MOSHI_CLIENT`, key bindings, a real `status-right`
+value, status styling that isn't continuum's, …). The migration is **idempotent**: re-applying an
+already-migrated conf never double-comments and (when nothing else changed) writes nothing.
+`rig status` reports drift on the **managed region only** (the generated file, the scripts, the
+boot plist, the import line / managed block) — never on the user's hand-written lines.
 
 **The root-cause ordering guarantee.** tmux-continuum's autosave timer lives in `status-right`.
 A hand-written conf that ran `set -g status-right ''` (a Moshi tweak) **after**
