@@ -37,11 +37,20 @@ Invariants
   carry the tmux-only gate and NOT the network gate; (3) the plugin-cloning tests keep the network
   gate; (4) EXHAUSTIVELY, every ``test_*`` in the module is classified + correctly gated, so a new
   ungated test fails here instead of slipping through.
+- A SECOND guard (``test_ci_has_tmux_so_the_leak_regression_actually_runs``) closes the other half
+  of the INCIDENT: correct per-test gating is necessary but NOT sufficient — a tmux-only gate still
+  SKIPS on a runner without tmux. In CI (the ``CI`` env var) tmux MUST be on PATH, so a CI image
+  that drops the ``apt-get install tmux`` step fails LOUDLY here instead of silently skipping the
+  leak regression. Outside CI a tmux-less dev still gets the normal skip.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
+import shutil
+
+import pytest
 
 # Tests that need tmux but NO network (run in default hermetic CI, @_requires_tmux):
 #   - the socket-leak regression (boots a private `-L` server, asserts teardown unlinks the socket);
@@ -184,3 +193,24 @@ def test_tmux_e2e_gating_granularity_is_pinned():
             f"classified name '{name}' is no longer a test defined in test_tmux_e2e.py — it was "
             f"renamed or removed; update the classification set in test_tmux_e2e_gating.py"
         )
+
+
+def test_ci_has_tmux_so_the_leak_regression_actually_runs():
+    """In CI, tmux MUST be on PATH — otherwise the `@_requires_tmux` socket-leak regression and the
+    DEFECT-5 boot-cleanup test SILENTLY SKIP and the leak that killed the dev's server goes unguarded
+    (INCIDENT 2026-06-17 follow-up a). Correct per-test gating (pinned above) is necessary but NOT
+    sufficient: a tmux-only gate still skips on a runner that lacks tmux. The unit CI job
+    (`.github/workflows/ci.yml`) installs tmux for exactly this reason; this assertion makes a CI
+    image that DROPS that step fail LOUDLY here instead of reverting to a silent skip.
+
+    Gated to CI only (the `CI` env var, set to `true` by GitHub Actions and most runners): a local
+    dev machine without tmux still gets the normal `@_requires_tmux` skip, never a spurious failure.
+    """
+    if os.environ.get("CI", "").strip().lower() not in ("1", "true", "yes"):
+        pytest.skip("not in CI — tmux is required only on CI runners (set CI=true to enforce)")
+    assert shutil.which("tmux") is not None, (
+        "tmux is not installed on this CI runner — the @_requires_tmux socket-leak regression and "
+        "the DEFECT-5 boot-cleanup test would SILENTLY SKIP, leaving the leak that killed the dev's "
+        "tmux server unguarded (INCIDENT 2026-06-17 follow-up a). Add an `apt-get install -y tmux` "
+        "step before pytest in the unit job of .github/workflows/ci.yml."
+    )
