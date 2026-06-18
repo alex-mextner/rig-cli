@@ -706,6 +706,60 @@
       },
       "additionalProperties": false
     },
+    "linters": {
+      "type": "object",
+      "description": "per-repo linter + formatter config files rig provisions/reconciles (tool + content per repo).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the declared linter/formatter config files",
+          "default": true
+        },
+        "items": {
+          "type": "object",
+          "description": "the config files keyed by a label; each is `{ tool, role, path, content, enabled }` (e.g. an `oxfmt` formatter writing `.oxfmtrc.jsonc`, a `ruff` linter writing `ruff.toml`).",
+          "additionalProperties": {
+            "type": "object",
+            "description": "one linter/formatter config file rig writes/reconciles.",
+            "properties": {
+              "tool": {
+                "type": "string",
+                "description": "the tool name (informational; drives the status/log label)"
+              },
+              "role": {
+                "type": "string",
+                "description": "linter | formatter (status label only)",
+                "enum": [
+                  "linter",
+                  "formatter"
+                ],
+                "default": "linter"
+              },
+              "path": {
+                "type": "string",
+                "description": "repo-relative path of the config file (no leading '/' or '..')"
+              },
+              "content": {
+                "type": "string",
+                "description": "the exact bytes rig writes/reconciles"
+              },
+              "enabled": {
+                "type": "boolean",
+                "description": "provision this one file",
+                "default": true
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "tool",
+              "path",
+              "content"
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "scope": {
       "type": "string",
       "description": "removed legacy key (tolerated, ignored)",

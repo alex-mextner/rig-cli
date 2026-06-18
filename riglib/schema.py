@@ -261,6 +261,15 @@ AREAS: tuple[Area, ...] = (
                  "Auto-start the daemon at login via a launchd boot agent (macOS). Off = install but do not boot."),
         ),
     ),
+    Area(
+        "linters", "linter / formatter config files", "Per-repo linter + formatter config files rig writes/reconciles (tool + content per repo).",
+        (
+            _opt("linters.enabled", KIND_BOOL, True,
+                 "Provision the declared linter/formatter config files (the `linters.items` map). "
+                 "Per-item tool + path + content live in rig.yaml; this toggle gates the whole area. "
+                 "Never clobbers a hand-written config — a conflict is backed up before overwrite."),
+        ),
+    ),
 )
 
 

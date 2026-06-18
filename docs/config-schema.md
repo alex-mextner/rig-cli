@@ -552,6 +552,89 @@ delegator would dirty the worktree). `rig apply` reconciles. Shown in the **repo
 
 ---
 
+## `linters`
+
+Provisions this repo's **linter + formatter config files** — the same reconciled-area treatment
+skills/hooks/CI/ship get, applied to tool config. You declare, per repo, **which** config file each
+tool needs and the **exact bytes** it should hold; `rig init` / `rig apply` writes/repairs each
+file, and `rig status` reports drift. rig hardcodes **no** specific linter — the tool, the path, and
+the content are all per-repo config, so it provisions an `oxfmt` formatter, a `ruff` linter, an
+`eslint`/`prettier` pair, or anything else equally. Default **ON**; opt out of the whole area with
+`enabled: false`, or a single file with `items.<label>.enabled: false`.
+
+```yaml
+linters:
+  enabled: true                 # provision the declared config files. Default ON.
+  items:
+    oxfmt-format:               # a free-form LABEL (any unique key)
+      tool: oxfmt               # the tool name (informational; used in status/logs)
+      role: formatter           # linter | formatter (default linter; status label only)
+      path: .oxfmtrc.jsonc      # repo-relative file path (must stay inside the repo)
+      content: |                # the EXACT file content rig writes/reconciles
+        {
+          "indentWidth": 2,
+          "lineWidth": 100
+        }
+    ruff-lint:
+      tool: ruff
+      role: linter
+      path: ruff.toml
+      content: |
+        line-length = 100
+        [lint]
+        select = ["E", "F", "I"]
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision the declared config files (set `false` to skip the whole area) |
+| `items` | map | `{}` | the config files, keyed by a free-form label |
+| `items.<label>.tool` | string | — | the tool name (required; informational — drives the status/log label) |
+| `items.<label>.role` | enum | `linter` | `linter` or `formatter` — rendered in the apply/status label (`<role> <tool>:<item>`); both reconcile identically |
+| `items.<label>.path` | string | — | repo-relative path of the config file (required; no leading `/`, `..`, or `\`) |
+| `items.<label>.content` | string | — | the exact bytes rig writes/reconciles (required) |
+| `items.<label>.enabled` | bool | `true` | provision this one file (set `false` to skip it) |
+
+**Never-clobber.** A config file already on disk that **differs** from `content` is reconciled
+honoring `defaults.on_conflict`: `backup` (the default) moves the existing file to a
+`<name>.rig-bak-*` copy before writing rig's version, `skip` leaves the hand-edited file untouched,
+`overwrite` replaces it with no backup. rig never silently clobbers a hand-written config. A file
+whose bytes already match is a true no-op (no needless backup).
+
+**Containment.** A `path` is rejected at validation **and** re-checked at apply/drift time if it is
+absolute, escapes the repo with `..`, or contains a backslash (a Windows separator, ambiguous across
+platforms) — a committed `rig.yaml` can only provision files **inside** its own repo.
+
+**Line endings are normalized to LF.** rig writes the configured `content` with its line endings
+collapsed to `\n`, and the drift compare uses a universal-newline read, so CRLF vs LF is **never**
+spurious drift in either direction — a `\r\n`-on-disk file vs an `\n`-in-config file is equivalent
+(left untouched), and a `\r\n`-in-config literal converges (rig writes an LF file rather than
+rewriting it every run). rig does not churn a file solely over line endings. (A genuine content
+difference *is* drift.)
+
+**Symlinks are refused.** A symlink **anywhere** on the path — the final file or any parent
+directory, pointing inside the repo or out — is reported as drift that `rig apply` errors on. rig
+never writes **through** a link (that could clobber the link target or escape the repo). Resolve the
+link to a real file/dir first. A non-directory **parent** (a regular file where a directory must be,
+e.g. a file `config` with `path: config/x.toml`) is likewise an error, not a misleading "missing".
+
+**Drift.** `rig status` flags an item as drift when its file is missing or its bytes differ from
+the configured `content` (or a directory, a symlink-on-path, a non-directory parent, or an
+unreadable / non-UTF-8 file sits at the path). `rig apply` reconciles. Shown in the **repo** section.
+
+**Containment.** A `path` may not be absolute, contain `..`, a backslash, or a `.git` component (a
+write into the git dir could rewrite repo metadata / install a hook) — rejected at validation and
+re-checked at apply.
+
+**One-way drift (a known limit).** Drift is **config→disk** only: rig flags a declared file that is
+missing or wrong, but because a linter config lives at an arbitrary path (not a rig-owned directory
+rig can enumerate), **removing** an item from `rig.yaml` does **not** flag the previously-provisioned
+file as a disk→config `extra` — it is left in place (consistent with rig's "apply never deletes
+on-disk extras" safety rule). Delete the stale config file by hand when you drop its item. Two-way
+detection would need a managed manifest (a tracked follow-up).
+
+---
+
 ## `github`
 
 Provisions a **GitHub repository branch ruleset** — the modern replacement for branch

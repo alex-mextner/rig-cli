@@ -41,6 +41,7 @@ _CATEGORY_LAYER = {
     # REPO — this repo, from ./rig.yaml
     "ci": REPO,
     "ship_delegator": REPO,
+    "linters": REPO,
     "agents_md": REPO,
     "github": REPO,
 }

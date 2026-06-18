@@ -524,6 +524,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── ship_delegator (per-repo .claude/scripts/pr-ship.sh so `gh ship` works here) ─
     _build_ship_delegator(config, catalog, plan)
 
+    # ── linters (per-repo linter/formatter config files) ──────────────────────────
+    _build_linters(config, plan)
+
     # ── github (repository branch ruleset via gh api) ─────────────────────────────
     _build_github_ruleset(config, plan)
 
@@ -805,6 +808,54 @@ def _build_ship_delegator(config: LoadedConfig, catalog: Catalog, plan: InstallP
             options={"canonical_ship": str(canonical)},
         )
     )
+
+
+def _build_linters(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the per-repo linter/formatter config-file provisioning (the ``linters`` block).
+
+    Default **ON**: every declared, enabled item becomes one idempotent action that writes its
+    config file at the repo-relative ``path`` with the exact ``content`` from config (CTO decision
+    #4136.2 — linter settings are provisioned by rig like every other reconciled area). The tool +
+    path + content are PER-REPO config; the plan hardcodes no specific linter. Opt out of the whole
+    area with ``linters: { enabled: false }`` or a single item with ``items.<name>.enabled: false``.
+
+    One action per item (``item`` is the config label), anchored at the repo root. The
+    create/repair/never-clobber-without-backup write + the byte-compare drift live in ``actions/``
+    and ``drift.py`` (they depend on what is on disk), so this only resolves the desired files.
+    ``validate()`` already fail-closed on a malformed block, so the structural re-checks here are
+    belt-and-suspenders for a hand-built plan.
+    """
+    li = config.data.get("linters")
+    if li is None:
+        li = {}
+    if not isinstance(li, dict):
+        return  # validate() already fail-closed on a non-mapping block
+    if li.get("enabled") is False:
+        return
+    items = li.get("items", {})
+    if not isinstance(items, dict):
+        return
+    for name, spec in items.items():
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("enabled") is False:
+            continue
+        rel_path = spec.get("path")
+        content = spec.get("content")
+        if not isinstance(rel_path, str) or not isinstance(content, str) or not rel_path or not content:
+            continue  # validate() rejects this; skip rather than emit a broken action
+        tool = str(spec.get("tool") or "")
+        role = str(spec.get("role") or "linter")
+        plan.actions.append(
+            Action(
+                kind="provision_linter_config",
+                category="linters",
+                item=str(name),
+                source=config.repo_root,
+                target=config.repo_root,
+                options={"tool": tool, "role": role, "rel_path": rel_path, "content": content},
+            )
+        )
 
 
 def _build_global_excludes(config: LoadedConfig, plan: InstallPlan) -> None:

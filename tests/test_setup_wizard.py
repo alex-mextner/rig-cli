@@ -32,7 +32,7 @@ def test_registry_covers_every_status_area():
     cats = {a.category for a in schema.AREAS}
     expected = {
         "skills", "agent_hooks", "git_hooks", "ci", "mcp", "harness", "permissions",
-        "models", "agents_md", "github", "tmux", "gitignore", "tg_ctl",
+        "models", "agents_md", "github", "tmux", "gitignore", "tg_ctl", "linters",
     }
     assert cats == expected
 
@@ -286,11 +286,13 @@ def test_writable_layer_agrees_with_the_scaffold():
     from riglib.state import default_state
 
     scaffolded = set(default_state())
+    # REPO-writable areas that are default-ON at plan level and genuine repo artifacts, but carry NO
+    # scaffolded default content (so the scaffold can't pre-write them): agents_md (a file IN the
+    # repo) and linters (config files declared per-repo — there is no sensible default item to seed).
+    _repo_unscaffolded_ok = {"agents_md", "linters"}
     for area in schema.AREAS:
         if schema.writable_layer_for_category(area.category) == schema.REPO:
-            # a REPO-writable category is either scaffolded into rig.yaml, or default-on at plan
-            # level and a genuine repo artifact (agents_md — a file IN the repo).
-            assert area.category in scaffolded or area.category == "agents_md", area.category
+            assert area.category in scaffolded or area.category in _repo_unscaffolded_ok, area.category
         else:
             # a GLOBAL-only category must NOT be scaffolded into the committed repo file.
             assert area.category not in scaffolded, area.category
