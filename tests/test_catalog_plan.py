@@ -204,8 +204,9 @@ def test_xdg_config_home_maps_dispatcher_dir(fake_agent_tools, tmp_path, monkeyp
 
 def test_plan_disabled_category(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
-    # agents_md, the ship_delegator, the github ruleset, the global-excludes block, tg_ctl, and the
-    # permission allowlist are default-ON, so turn them off too to assert a truly empty plan.
+    # agents_md, the ship_delegator, every github sub-block (ruleset/merge/ghas/actions/browser),
+    # the global-excludes block, tg_ctl, and the permission allowlist are default-ON, so turn them
+    # off too to assert a truly empty plan.
     cfg = _cfg(
         {
             "skills": {"enabled": False},
@@ -214,7 +215,13 @@ def test_plan_disabled_category(fake_agent_tools, tmp_path):
             "mcp": {"enabled": False},
             "agents_md": {"enabled": False},
             "ship_delegator": {"enabled": False},
-            "github": {"ruleset": {"enabled": False}},
+            "github": {
+                "ruleset": {"enabled": False},
+                "merge": {"enabled": False},
+                "ghas": {"enabled": False},
+                "actions": {"enabled": False},
+                "browser": {"enabled": False},
+            },
             "gitignore": {"enabled": False},
             "tg_ctl": {"enabled": False},
             "permissions": {"enabled": False},

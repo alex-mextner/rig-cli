@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,23 @@ from ..config import (
     SHIP_DELEGATOR_REL_PATH,
     linter_path_escapes_repo,
 )
+from ..github_actions import (
+    build_permissions_body,
+    build_workflow_permissions_body,
+    normalize_permissions,
+    normalize_workflow_permissions,
+)
+from ..github_auth import ensure_browser_auth, ensure_gh_auth, reset_auth_gate
+from ..github_browser import build_command_plan as build_browser_plan
+from ..github_browser import desired_toggles as browser_desired_toggles
+from ..github_ghas import (
+    SUBRESOURCE_KNOBS,
+    build_security_analysis_body,
+    desired_code_scanning,
+    desired_subresource,
+    normalize_security_analysis,
+)
+from ..github_merge import build_merge_body, normalize_merge
 from ..github_ruleset import (
     build_ruleset_body,
     find_managed_ruleset,
@@ -80,6 +98,9 @@ def run_plan(
     progress: Callable[[ActionResult], None] | None = None,
 ) -> ApplyReport:
     """Execute (or dry-run) every action in the plan. Returns the collected report."""
+    # Fresh auth-gate state per run: a new apply re-notifies + re-waits for a missing login (the user
+    # may have logged in since), but WITHIN this run the per-action gate dedups (no ~5× push/wait).
+    reset_auth_gate()
     report = ApplyReport()
     for action in plan.actions:
         if dry_run:
@@ -3010,13 +3031,16 @@ def _do_provision_github_ruleset(action: Action, on_conflict: str) -> ActionResu
     """Provision (create/update) the rig-managed GitHub branch ruleset via ``gh api``.
 
     Shares :func:`github_ruleset_state` with drift, so status and apply read one
-    classification. No github remote → ``skipped`` (never an error). ``RIG_GH_DRY_RUN``
-    computes the create/update but skips the POST/PUT, returning what WOULD change. ``gh``
-    failures (missing binary, not authed) surface as an ``error`` result with the detail.
+    classification. No github remote → ``skipped`` (never an error). The #4136.1 auth gate runs
+    FIRST (before the live read), so an unauthenticated apply notifies + waits + resumes rather than
+    degrading to a plain read error. ``RIG_GH_DRY_RUN`` computes the create/update but skips both the
+    gate and the POST/PUT, returning what WOULD change. A read/write failure (no admin / API error)
+    surfaces as an ``error`` result with the detail.
     """
+    _owner, _repo, early = _github_action_preamble(action, "github-ruleset")
+    if early is not None:
+        return early
     state, info = github_ruleset_state(action)
-    if state == "no_remote":
-        return ActionResult(action, "skipped", "github-ruleset: no github origin remote — nothing to provision")
     if state == "gh_error":
         return ActionResult(action, "error", f"github-ruleset: {info.get('detail', 'gh api failed')}")
 
@@ -3048,6 +3072,620 @@ def _do_provision_github_ruleset(action: Action, on_conflict: str) -> ActionResu
     if rc != 0:
         return ActionResult(action, "error", f"github-ruleset: update failed: {err.strip() or out.strip()}")
     return ActionResult(action, "updated", f"github-ruleset: updated '{name}' (id={rs_id}) on {owner}/{repo}")
+
+
+# ── the #4136.1 auth gate — shared by every github.* gh-api mutation ─────────────────────
+# CTO #4136.1: rig must NOT silently fail when `gh` isn't authenticated for the admin scope it
+# needs. Every github.* provisioner calls `_require_gh_auth` BEFORE its first mutation: if `gh` is
+# already authed it returns None (proceed); otherwise it has ALREADY notified the user (via tg) and
+# waited up to the RIG_GH_AUTH_WAIT budget, and returns a LOUD error ActionResult the handler
+# returns as-is. Under RIG_GH_DRY_RUN the gate is skipped entirely (dry-run mutates nothing, so it
+# needs no auth) — that keeps the test suite and CI from ever blocking on a login prompt.
+def _require_gh_auth(action: Action, owner: str, repo: str, label: str) -> ActionResult | None:
+    """Block on the #4136.1 auth gate; return None to proceed, or a loud error ActionResult.
+
+    Skipped under RIG_GH_DRY_RUN (no mutation → no auth needed), so dry-run + tests never touch the
+    gate's notify/poll path. On a non-ok outcome the user has already been pinged and rig has waited
+    the configured budget; the returned ActionResult surfaces the exact `gh auth login` command so
+    the failure is actionable, never a silent green.
+
+    CALLED BEFORE THE FIRST READ. The #4136.1 contract is "not-authed → notify + WAIT → resume", and
+    the very FIRST thing every github.* provisioner does is a live `gh api` read inside its
+    `*_state` classifier — a read that itself FAILS without a token. So the gate must run BEFORE that
+    read (not just before the mutation), otherwise an unauthenticated apply degrades to a plain
+    `gh_error` and the notify-and-wait path is dead code on the exact case it exists for. Running it
+    first means an unauthenticated `rig apply` pings the user and blocks for login, then the read +
+    mutation proceed once authed.
+    """
+    if _gh_dry_run():
+        return None
+    outcome = ensure_gh_auth(owner=owner, repo=repo)
+    if outcome.ok:
+        return None
+    return ActionResult(action, "error", f"{label}: {outcome.detail}")
+
+
+def _github_action_preamble(
+    action: Action, label: str
+) -> tuple[str, str, ActionResult | None]:
+    """Resolve ``(owner, repo)`` and clear the #4136.1 auth gate BEFORE any live read.
+
+    Returns ``(owner, repo, early)``. When ``early`` is not None the caller returns it immediately:
+      - ``skipped`` — the repo has no github origin remote (nothing to provision).
+      - an auth ``error`` — gh is not authenticated and did not become so within the wait budget
+        (the user was already pinged via tg). Under RIG_GH_DRY_RUN the gate is skipped, so dry-run
+        never blocks and ``early`` is None whenever a remote exists.
+    On success ``early`` is None and the caller proceeds to read live state (now that gh is authed)
+    and mutate. Shared by every gh-api provisioner so the gate fires on the no-token case for all of
+    them, not just the ones whose first call happened to be the mutation.
+    """
+    owner_repo = github_owner_repo(action.target)
+    if owner_repo is None:
+        return "", "", ActionResult(action, "skipped", f"{label}: no github origin remote — nothing to provision")
+    owner, repo = owner_repo
+    gate = _require_gh_auth(action, owner, repo, label)
+    if gate is not None:
+        return owner, repo, gate
+    return owner, repo, None
+
+
+# ── rig-managed GitHub repo MERGE-button policy (§5 github.merge) ────────────────────
+# rig reconciles the repo's merge-button policy — squash-only merge model, auto-delete head branch
+# on merge, allow-auto-merge — via `PATCH /repos/{owner}/{repo}` on the same `gh api` backend as the
+# ruleset. The DESIRED body, managed-field set, and normalized comparison live in
+# `riglib/github_merge.py` (pure); this module holds only the live-API classification and the Action
+# handler. apply and drift share `github_merge_state`. CAPABILITY DEGRADE: these are repo SETTINGS,
+# not a ruleset, so a PATCH never locks anyone out — a no-admin token gets HTTP 403, surfaced as a
+# visible error (apply) / "could not verify" (drift), never a silent green or crash.
+def github_merge_state(action: Action) -> tuple[str, dict]:
+    """Classify the live-vs-desired merge policy — the one source apply + drift share.
+
+    States: ``no_remote`` (no github origin), ``gh_error`` (read failed: gh missing / not authed /
+    no admin / API error), ``update`` (live differs → apply PATCHes), ``ok`` (already converged).
+    There is no ``create`` — a github repo ALWAYS has merge settings, so the only outcomes are
+    converge or already-converged. ``info`` carries owner/repo/desired and, on gh_error, a detail.
+    """
+    owner_repo = github_owner_repo(action.target)
+    desired = build_merge_body(action.options)
+    if owner_repo is None:
+        return "no_remote", {"desired": desired}
+    owner, repo = owner_repo
+    info: dict = {"owner": owner, "repo": repo, "desired": desired}
+    rc, out, err = _gh_api([f"repos/{owner}/{repo}"])
+    if rc != 0:
+        info["detail"] = err.strip() or out.strip() or f"gh api exited {rc}"
+        return "gh_error", info
+    try:
+        repo_obj = json.loads(out)
+    except ValueError:
+        info["detail"] = "gh api returned non-JSON repo object"
+        return "gh_error", info
+    if normalize_merge(repo_obj) == normalize_merge(desired):
+        return "ok", info
+    return "update", info
+
+
+def _do_provision_github_merge(action: Action, on_conflict: str) -> ActionResult:
+    """Provision (PATCH) the repo merge-button policy via ``gh api``.
+
+    Shares :func:`github_merge_state` with drift. No github remote → ``skipped``. The #4136.1 auth
+    gate runs FIRST (before the live read), so an unauthenticated apply notifies + waits + resumes
+    rather than degrading to a plain read error. ``RIG_GH_DRY_RUN`` computes the PATCH but skips both
+    the gate and the mutation. A read/PATCH failure (no admin / API error) surfaces as a loud
+    ``error``.
+    """
+    _owner, _repo, early = _github_action_preamble(action, "github-merge")
+    if early is not None:
+        return early
+    state, info = github_merge_state(action)
+    if state == "gh_error":
+        return ActionResult(action, "error", f"github-merge: {info.get('detail', 'gh api failed')}")
+    owner, repo, desired = info["owner"], info["repo"], info["desired"]
+    if state == "ok":
+        return ActionResult(action, "skipped", f"github-merge: policy already matches on {owner}/{repo}")
+    if _gh_dry_run():
+        return ActionResult(action, "updated", f"github-merge: RIG_GH_DRY_RUN — would UPDATE merge policy on {owner}/{repo} (not patched)")
+    rc, out, err = _gh_api(
+        ["--method", "PATCH", f"repos/{owner}/{repo}", "--input", "-"],
+        input_text=json.dumps(desired),
+    )
+    if rc != 0:
+        return ActionResult(action, "error", f"github-merge: update failed: {err.strip() or out.strip()}")
+    return ActionResult(action, "updated", f"github-merge: updated merge policy on {owner}/{repo}")
+
+
+# ── rig-managed GitHub Advanced Security (§5 github.ghas) ────────────────────────────────
+# rig reconciles the repo's GHAS toggles — dependency graph + secret-scanning (+ push protection)
+# via `security_and_analysis` on `PATCH /repos/{o}/{r}`, vuln-alerts + Dependabot security updates
+# via their own `PUT/DELETE` sub-resources, and CodeQL default-setup via its own endpoint. The
+# DESIRED knobs/bodies live in `riglib/github_ghas.py` (pure). CAPABILITY DEGRADE: code/secret
+# scanning on a PRIVATE repo needs a GHAS-licensed plan; the API returns 403/422 there — that is a
+# loud "could not enable (plan does not include GHAS)", NOT a crash and NOT a silent green. Free
+# features (dep-graph / vuln-alerts / Dependabot) degrade independently so one unlicensed scanner
+# never masks a successfully-toggled free feature.
+def _gh_subresource_enabled(owner: str, repo: str, endpoint: str) -> bool | None:
+    """Read whether a GHAS sub-resource (vuln-alerts / Dependabot fixes) is ON. None = couldn't tell.
+
+    ``vulnerability-alerts`` is a presence endpoint: GET returns 204 when enabled, 404 when not (gh
+    reports the 404 as a non-zero rc). ``automated-security-fixes`` GET returns a JSON object with an
+    ``enabled`` field. We treat a clean 204/enabled as True and a 404 as False; any OTHER error
+    (auth/permission/network) → None so the caller can tell "off" apart from "couldn't check" and
+    never reports a confident in-sync behind a failed read.
+
+    The "off" signal is keyed on the HTTP STATUS (``HTTP 404``), NOT a loose substring like
+    "disabled" or "not found": gh prints the status as ``(HTTP 404)`` / ``HTTP 404:`` for the
+    not-enabled case, whereas a 403/422 validation body could legitimately contain the word
+    "disabled" and must NOT be misread as "the resource is off" (that would mask a real
+    auth/permission failure as a confident False). So we match the 404 status token only; anything
+    else with a non-zero rc is an honest "unknown" (None).
+    """
+    rc, out, err = _gh_api([f"repos/{owner}/{repo}/{endpoint}"])
+    if rc == 0:
+        if not out.strip():
+            return True  # 204 No Content (vulnerability-alerts enabled)
+        try:
+            obj = json.loads(out)
+        except ValueError:
+            return True  # a 2xx with a non-JSON body still means the resource is present/enabled
+        return bool(obj.get("enabled", True)) if isinstance(obj, dict) else True
+    blob = (err + out).lower()
+    # Match the 404 STATUS token (gh: "(HTTP 404)" / "HTTP 404:"), not a bare "404" anywhere or the
+    # word "disabled" — so a 422 body that happens to contain "disabled" isn't misread as "off".
+    if "http 404" in blob or "status: 404" in blob:
+        return False
+    return None  # a real error (auth/permission/network) — unknown, not "off"
+
+
+def _gh_code_scanning_state(owner: str, repo: str) -> str | None:
+    """Read CodeQL default-setup's state (``configured``/``not-configured``), or None if unreadable.
+
+    The endpoint is GHAS-plan-gated; on a repo whose plan doesn't include it the GET errors. We
+    return the state on a clean read and None on any error — the caller treats None as "could not
+    verify" (a loud unknown), never as a confident in-sync.
+    """
+    rc, out, err = _gh_api([f"repos/{owner}/{repo}/code-scanning/default-setup"])
+    if rc != 0:
+        return None
+    try:
+        return str(json.loads(out).get("state", ""))
+    except (ValueError, AttributeError):
+        return None
+
+
+def github_ghas_state(action: Action) -> tuple[str, dict]:
+    """Classify the live-vs-desired GHAS settings — the one source apply + drift share.
+
+    States: ``no_remote``, ``gh_error`` (the REPO read itself failed — no auth / repo gone, so
+    nothing can be classified), ``update`` (a readable setting differs OR an individual scanner is
+    unverifiable), ``ok`` (every managed setting was readable AND matches). The signal covers the
+    repo-object ``security_and_analysis`` block, the vuln-alerts / Dependabot sub-resources, AND
+    CodeQL default-setup — each via its own GET.
+
+    A SINGLE unreadable SCANNER endpoint (a GHAS-plan-gated 403/422 on a private repo without the
+    GHAS license) does NOT collapse the whole classification to ``gh_error`` — that would make rig
+    refuse to apply the FREE features (dep-graph / vuln-alerts / Dependabot) just because one
+    licensed scanner is unavailable, the exact opposite of the documented "free features applied
+    independently" design. Instead each unverifiable scanner is recorded in ``info["unverifiable"]``
+    and forces ``update`` (so a green status never masks it, and apply runs to degrade it loudly
+    while still applying everything else). Only a failed REPO read — where we can't classify
+    ANYTHING — is ``gh_error``. ``info`` carries owner/repo/desired, ``unverifiable`` (a list of
+    "endpoint (detail)" notes), and on gh_error a ``detail``.
+    """
+    owner_repo = github_owner_repo(action.target)
+    desired_sa = build_security_analysis_body(action.options)
+    if owner_repo is None:
+        return "no_remote", {"desired": desired_sa}
+    owner, repo = owner_repo
+    info: dict = {"owner": owner, "repo": repo, "desired": desired_sa, "unverifiable": []}
+    rc, out, err = _gh_api([f"repos/{owner}/{repo}"])
+    if rc != 0:
+        info["detail"] = err.strip() or out.strip() or f"gh api exited {rc}"
+        return "gh_error", info
+    try:
+        repo_obj = json.loads(out)
+    except ValueError:
+        info["detail"] = "gh api returned non-JSON repo object"
+        return "gh_error", info
+    desired_norm = {f: n["status"] for f, n in desired_sa.items()}
+    # Record the security_and_analysis-block drift SEPARATELY so apply can gate the repo PATCH on it
+    # (a PATCH when only a sub-resource / CodeQL drifted is a no-op that also prints a misleading
+    # "security_and_analysis converged"). The aggregate `drifted` still drives the overall state.
+    sa_drifted = normalize_security_analysis(repo_obj) != desired_norm
+    info["sa_drifted"] = sa_drifted
+    drifted = sa_drifted
+    # the sub-resources: an UNREADABLE one is recorded as unverifiable (forces `update` so status
+    # surfaces it and apply degrades it loudly) — NOT a whole-block gh_error that would also block
+    # the free features. Distinct from "read OK but off", which is plain drift.
+    for knob in SUBRESOURCE_KNOBS:
+        endpoint = "vulnerability-alerts" if knob == "vulnerability_alerts" else "automated-security-fixes"
+        live = _gh_subresource_enabled(owner, repo, endpoint)
+        if live is None:
+            info["unverifiable"].append(f"{endpoint} (could not read — plan-gated / no admin / API error)")
+            drifted = True
+        elif live != desired_subresource(action.options, knob):
+            drifted = True
+    # CodeQL default-setup: unreadable on a plan that gates it is unverifiable (degraded), not a
+    # whole-block gh_error — same reasoning as the sub-resources above.
+    want_codeql = "configured" if desired_code_scanning(action.options) else "not-configured"
+    live_codeql = _gh_code_scanning_state(owner, repo)
+    if live_codeql is None:
+        info["unverifiable"].append("code-scanning default-setup (could not read — plan-gated / no admin / API error)")
+        drifted = True
+    elif live_codeql != want_codeql:
+        drifted = True
+    return ("update", info) if drifted else ("ok", info)
+
+
+def _do_provision_github_ghas(action: Action, on_conflict: str) -> ActionResult:
+    """Provision the repo GHAS settings via ``gh api`` (PATCH + sub-resource PUT/DELETEs).
+
+    No github remote → ``skipped``. The #4136.1 auth gate runs FIRST (before the live read), so an
+    unauthenticated apply notifies + waits + resumes. ``RIG_GH_DRY_RUN`` computes what WOULD change
+    but mutates nothing. A GHAS-licensed scanner unavailable on the repo's plan degrades to a loud
+    note in the result detail and does NOT block the free features (dep-graph / vuln-alerts /
+    Dependabot), never a crash.
+    """
+    _owner, _repo, early = _github_action_preamble(action, "github-ghas")
+    if early is not None:
+        return early
+    state, info = github_ghas_state(action)
+    if state == "gh_error":
+        return ActionResult(action, "error", f"github-ghas: {info.get('detail', 'gh api failed')}")
+    owner, repo, desired_sa = info["owner"], info["repo"], info["desired"]
+
+    if _gh_dry_run():
+        verb = "already matches" if state == "ok" else "would UPDATE"
+        return ActionResult(action, "skipped" if state == "ok" else "updated",
+                            f"github-ghas: RIG_GH_DRY_RUN — {verb} security settings on {owner}/{repo} (not mutated)")
+
+    notes: list[str] = []
+    # Scanners that couldn't even be read (plan-gated on a private repo) are seeded into the loud
+    # degrade list up front — apply still runs the free features below; these surface as DEGRADED.
+    degraded: list[str] = list(info.get("unverifiable", []))
+    # GENUINE (non-plan-limit) write failures on a sub-resource / CodeQL go here — they make the
+    # whole action an ERROR at the end, so a real auth/permission failure is never a silent green.
+    hard_errors: list[str] = []
+    # 1) security_and_analysis block (dep-graph + secret-scanning + push protection) via repo PATCH.
+    # Gate on the SA-block's OWN drift (not the aggregate `state == update`): when only a sub-resource
+    # or CodeQL drifted, the SA block already matches, so PATCHing it is a no-op that would also print
+    # a misleading "security_and_analysis converged". `sa_drifted` is computed by the classifier.
+    if info.get("sa_drifted"):
+        rc, out, err = _gh_api(
+            ["--method", "PATCH", f"repos/{owner}/{repo}", "--input", "-"],
+            input_text=json.dumps({"security_and_analysis": desired_sa}),
+        )
+        if rc != 0:
+            detail = err.strip() or out.strip()
+            # A private repo without a GHAS-licensed plan → 403/422 on the scanners. Degrade loudly
+            # rather than failing the whole apply. A GENUINE failure goes into hard_errors (final
+            # status = error) but does NOT early-return — so the FREE features (vuln-alerts /
+            # Dependabot / CodeQL) are still attempted, matching the "applied independently" design
+            # and the symmetric handling of the sub-resource / CodeQL write failures below.
+            if _looks_like_ghas_unlicensed(detail):
+                degraded.append(f"secret-scanning/dep-graph (plan does not include GHAS: {detail[:80]})")
+            else:
+                hard_errors.append(f"security_and_analysis ({detail[:80]})")
+        else:
+            notes.append("security_and_analysis converged")
+    # 2) vuln-alerts + Dependabot security updates — their own PUT/DELETE sub-resources. Read the
+    # live state first and skip the mutation when it already matches, so a re-apply is a true no-op
+    # (reports `skipped`, not a phantom `updated`) instead of blindly PUTting every run.
+    #
+    # When the classifier ALREADY found this endpoint unreadable (a read-only / non-admin token gets
+    # 403 on the sub-resource while the repo GET itself passed), it is in `info["unverifiable"]` and
+    # thus already seeded into `degraded`. Skip the mutation then — it would 403 the same way and
+    # append a SECOND, redundant degrade line for the same endpoint (or, on a transient read failure
+    # followed by a lucky write, a contradictory "enabled" note vs. "could not read" degrade). Same
+    # guard as the CodeQL block below.
+    for knob in SUBRESOURCE_KNOBS:
+        want = desired_subresource(action.options, knob)
+        endpoint = "vulnerability-alerts" if knob == "vulnerability_alerts" else "automated-security-fixes"
+        if any(u.startswith(endpoint) for u in info.get("unverifiable", [])):
+            continue  # unreadable per the classifier — already degraded; a write would just 403 again
+        live = _gh_subresource_enabled(owner, repo, endpoint)
+        if live == want:
+            continue  # already in the desired state — no mutation, no churn
+        method = "PUT" if want else "DELETE"
+        rc, out, err = _gh_api(["--method", method, f"repos/{owner}/{repo}/{endpoint}"])
+        if rc != 0:
+            full = err.strip() or out.strip()  # classify on the FULL detail
+            # A plan/feature limit (dep-graph not on this plan) is an acceptable DEGRADE; a genuine
+            # auth/permission/network failure is a HARD error that must NOT be masked as
+            # "updated (degraded)" — else automation checking `status != error` reads a false green.
+            # Classify on the FULL string; truncate only the displayed copy (a verbose gh "Validation
+            # Failed" prefix could push the plan-limit phrase past a truncation and misclassify it).
+            (degraded if _looks_like_ghas_unlicensed(full) else hard_errors).append(f"{endpoint} ({full[:80]})")
+        else:
+            notes.append(f"{endpoint} {'enabled' if want else 'disabled'}")
+    # 3) CodeQL default-setup — its own endpoint with a `{state: configured|not-configured}` body.
+    # Both directions are reconciled: `false` sends `not-configured` so a user can turn CodeQL OFF
+    # again, not just on (a one-directional enable would strand the setting once enabled). Read the
+    # current state first and PATCH only on a real difference, so a converged repo stays a no-op
+    # rather than reporting `updated` every run.
+    #
+    # When the classifier ALREADY found this endpoint unreadable (plan-gated on a private repo), it
+    # is in `info["unverifiable"]` and thus already in `degraded` — so we skip the best-effort PATCH
+    # (it would 403 the same way and append a SECOND, redundant code-scanning degrade line). The
+    # endpoint being unreadable is already surfaced loudly; a doomed write adds noise, not signal.
+    codeql_unreadable = any("code-scanning" in u for u in info.get("unverifiable", []))
+    if not codeql_unreadable:
+        want_codeql = desired_code_scanning(action.options)
+        codeql_state = "configured" if want_codeql else "not-configured"
+        rc, out, err = _gh_api([f"repos/{owner}/{repo}/code-scanning/default-setup"])
+        live_codeql: str | None = None
+        if rc == 0:
+            try:
+                live_codeql = str(json.loads(out).get("state", ""))
+            except (ValueError, AttributeError):
+                live_codeql = None
+        if live_codeql != codeql_state:
+            rc, out, err = _gh_api(
+                ["--method", "PATCH", f"repos/{owner}/{repo}/code-scanning/default-setup", "--input", "-"],
+                input_text=json.dumps({"state": codeql_state}),
+            )
+            if rc != 0:
+                full = err.strip() or out.strip()  # classify on the FULL detail, truncate for display
+                # Same split as the sub-resources: a plan/feature limit degrades; a real failure is
+                # a hard error (CodeQL default-setup needs Actions enabled + GHAS — a 403 from a
+                # non-admin token must surface, not be swallowed as a silent green).
+                (degraded if _looks_like_ghas_unlicensed(full) else hard_errors).append(
+                    f"code-scanning default-setup ({full[:120]})"
+                )
+            else:
+                notes.append(f"code-scanning default-setup {codeql_state}")
+
+    summary = "; ".join(notes) or "GHAS settings reconciled"
+    if degraded:
+        summary += " — DEGRADED: " + "; ".join(degraded)
+    # A genuine (non-plan-limit) failure on ANY sub-resource / CodeQL write is a HARD error — never
+    # masked as "updated (degraded)", which automation checking `status != error` would read green.
+    if hard_errors:
+        summary += " — FAILED: " + "; ".join(hard_errors)
+        return ActionResult(action, "error", f"github-ghas: {summary} on {owner}/{repo}")
+    status = "skipped" if (state == "ok" and not notes and not degraded) else "updated"
+    return ActionResult(action, status, f"github-ghas: {summary} on {owner}/{repo}")
+
+
+def _looks_like_ghas_unlicensed(detail: str) -> bool:
+    """Heuristic: does this gh error mean the repo's plan does not include GHAS (vs. a real failure)?
+
+    A private repo without GitHub Advanced Security gets a 403/422 whose body mentions the missing
+    feature/plan. We degrade loudly on THAT (it's a capability limit, not a rig bug), but a genuine
+    auth/permission error — or a generic 422 validation/payload bug — must still surface as an
+    error. So we match the PLAN/FEATURE WORDING only; a bare status code (403 / 422) is NOT enough,
+    because that could equally be a no-admin token or a real request bug we want to see, not swallow.
+
+    The phrases are deliberately SPECIFIC to a plan/feature limit. A bare ``"not available"`` is NOT
+    matched on its own (a transient ``503 Service not available`` or a network ``… not available``
+    would be mis-swallowed as a capability limit); we require it paired with a feature/plan word
+    (``not available for``, ``feature is not available``) so only the real GHAS-not-on-this-plan body
+    degrades, and a transient/service error stays a hard error.
+    """
+    low = detail.lower()
+    # Phrases that unambiguously mean "this repo's PLAN doesn't include the feature". Deliberately
+    # NOT "must be enabled for" — CodeQL on a repo with Actions OFF fails "Actions must be enabled
+    # for default setup", which is a FIXABLE config collision (turn Actions on), not a plan limit, and
+    # must surface as a real error, not a degrade.
+    plain = ("advanced security", "not included in", "upgrade your plan", "ghas")
+    if any(s in low for s in plain):
+        return True
+    # "not available" only counts when it's about a feature/repo plan limit, not a service outage
+    return ("not available for" in low) or ("feature is not available" in low) or ("not available on" in low)
+
+
+# ── rig-managed GitHub Actions permissions (§5 github.actions) ───────────────────────────
+# rig reconciles the repo's Actions permissions on two endpoints: `PUT .../actions/permissions`
+# (Actions enabled + allowed_actions) and `PUT .../actions/permissions/workflow` (the default
+# GITHUB_TOKEN scope + whether workflows may approve PRs). Secure defaults: Actions enabled, but the
+# token is READ-only and workflows may NOT approve PRs (least privilege). The DESIRED bodies live in
+# `riglib/github_actions.py` (pure). Settings, not a ruleset — a mis-set value at worst restricts a
+# workflow token, never locks a human out.
+def github_actions_state(action: Action) -> tuple[str, dict]:
+    """Classify the live-vs-desired Actions permissions — the one source apply + drift share.
+
+    States: ``no_remote``, ``gh_error``, ``update`` (either endpoint differs), ``ok``. ``info``
+    carries owner/repo and the two desired bodies (and on gh_error a detail). Both endpoints are
+    read so a difference on EITHER reads as drift.
+    """
+    owner_repo = github_owner_repo(action.target)
+    perms = build_permissions_body(action.options)
+    wf = build_workflow_permissions_body(action.options)
+    if owner_repo is None:
+        return "no_remote", {"perms": perms, "wf": wf}
+    owner, repo = owner_repo
+    info: dict = {"owner": owner, "repo": repo, "perms": perms, "wf": wf}
+    rc, out, err = _gh_api([f"repos/{owner}/{repo}/actions/permissions"])
+    if rc != 0:
+        info["detail"] = err.strip() or out.strip() or f"gh api exited {rc}"
+        return "gh_error", info
+    try:
+        live_perms = json.loads(out)
+    except ValueError:
+        info["detail"] = "gh api returned non-JSON actions permissions"
+        return "gh_error", info
+    # When the config DISABLES Actions, the apply handler deliberately skips the workflow-permissions
+    # PUT (GitHub rejects it with Actions off). The classifier MUST mirror that: don't read or compare
+    # the workflow-token endpoint either — else its (now-irrelevant) live value would read as
+    # perpetual drift, making apply report `updated` every run and `rig status` show `modified`
+    # forever, never converging. With Actions disabled, only the permissions endpoint is in scope.
+    if not perms.get("enabled", True):
+        in_sync = normalize_permissions(live_perms) == normalize_permissions(perms)
+        return ("ok", info) if in_sync else ("update", info)
+    rc, out, err = _gh_api([f"repos/{owner}/{repo}/actions/permissions/workflow"])
+    if rc != 0:
+        info["detail"] = err.strip() or out.strip() or f"gh api exited {rc}"
+        return "gh_error", info
+    try:
+        live_wf = json.loads(out)
+    except ValueError:
+        info["detail"] = "gh api returned non-JSON workflow permissions"
+        return "gh_error", info
+    in_sync = (
+        normalize_permissions(live_perms) == normalize_permissions(perms)
+        and normalize_workflow_permissions(live_wf) == normalize_workflow_permissions(wf)
+    )
+    return ("ok", info) if in_sync else ("update", info)
+
+
+def _do_provision_github_actions(action: Action, on_conflict: str) -> ActionResult:
+    """Provision the repo Actions permissions via ``gh api`` (two PUTs).
+
+    No github remote → ``skipped``. The #4136.1 auth gate runs FIRST (before the live read), so an
+    unauthenticated apply notifies + waits + resumes. ``RIG_GH_DRY_RUN`` computes the PUTs but skips
+    both the gate and the mutation. A failure (no admin / API error) surfaces as a loud error.
+    """
+    _owner, _repo, early = _github_action_preamble(action, "github-actions")
+    if early is not None:
+        return early
+    state, info = github_actions_state(action)
+    if state == "gh_error":
+        return ActionResult(action, "error", f"github-actions: {info.get('detail', 'gh api failed')}")
+    owner, repo, perms, wf = info["owner"], info["repo"], info["perms"], info["wf"]
+    if state == "ok":
+        return ActionResult(action, "skipped", f"github-actions: permissions already match on {owner}/{repo}")
+    if _gh_dry_run():
+        return ActionResult(action, "updated", f"github-actions: RIG_GH_DRY_RUN — would UPDATE permissions on {owner}/{repo} (not put)")
+    rc, out, err = _gh_api(
+        ["--method", "PUT", f"repos/{owner}/{repo}/actions/permissions", "--input", "-"],
+        input_text=json.dumps(perms),
+    )
+    if rc != 0:
+        return ActionResult(action, "error", f"github-actions: permissions update failed: {err.strip() or out.strip()}")
+    # The default-workflow-token PUT only applies when Actions is ENABLED. When the config disables
+    # Actions (`actions_enabled: false`), GitHub rejects a workflow-permissions PUT (there are no
+    # workflows to scope), so issuing it would turn a legitimate "disable Actions" config into an
+    # error. Skip it — disabling Actions is the whole change, and the token scope is moot.
+    if not perms.get("enabled", True):
+        return ActionResult(action, "updated", f"github-actions: disabled Actions on {owner}/{repo}")
+    rc, out, err = _gh_api(
+        ["--method", "PUT", f"repos/{owner}/{repo}/actions/permissions/workflow", "--input", "-"],
+        input_text=json.dumps(wf),
+    )
+    if rc != 0:
+        return ActionResult(action, "error", f"github-actions: workflow permissions update failed: {err.strip() or out.strip()}")
+    return ActionResult(action, "updated", f"github-actions: updated permissions on {owner}/{repo}")
+
+
+# ── rig-managed GitHub settings via agent-browser (§5 — API-unreachable toggles) ─────────
+# A first-class second backend invoked INSIDE apply for settings the REST API does NOT expose. The
+# settings-page URL, the per-toggle accessibility selectors, and the agent-browser command PLAN are
+# pure (`riglib/github_browser.py`); this handler ensures a logged-in browser via the #4136.1 gate
+# (ensure_browser_auth) and replays the plan through a single `_agent_browser` seam. CAPABILITY
+# DETECTION: agent-browser absent / not logged in / the toggle not on the page → a loud "could not
+# drive the UI", never a silent green or a blind click.
+def _agent_browser(args: list[str]) -> tuple[int, str, str]:
+    """Run ``agent-browser <args>`` — the single seam every browser-backend call funnels through.
+
+    Tests monkeypatch THIS so no test launches a browser. A missing binary → rc 127 with a clear
+    message (the handler surfaces it as a degrade, never a crash).
+    """
+    if not shutil.which("agent-browser"):
+        return 127, "", "agent-browser not found on PATH"
+    try:
+        res = subprocess.run(
+            ["agent-browser", *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, "", f"agent-browser failed: {exc}"
+    return res.returncode, res.stdout, res.stderr
+
+
+def _do_provision_github_browser(action: Action, on_conflict: str) -> ActionResult:
+    """Provision API-unreachable GitHub settings by driving the settings UI with agent-browser.
+
+    No github remote → ``skipped``. ``RIG_GH_DRY_RUN`` builds + returns the command plan but runs
+    nothing. Ensures a logged-in browser via the #4136.1 gate first; on any per-step failure the
+    setting degrades loudly (the UI moved / the toggle is gone / not logged in) rather than a silent
+    green. ``RIG_GH_BROWSER`` gates the whole backend OFF by default — driving a real browser is a
+    heavier, slower path than gh api, so it only runs when explicitly enabled (so an ordinary
+    `rig apply` never spawns a browser unexpectedly); the plan is still computed for status/tests.
+    """
+    owner_repo = github_owner_repo(action.target)
+    desired = browser_desired_toggles(action.options)
+    if owner_repo is None:
+        return ActionResult(action, "skipped", "github-browser: no github origin remote — nothing to provision")
+    owner, repo = owner_repo
+    plan = build_browser_plan(owner, repo, desired)
+
+    # The backend-enabled gate is checked BEFORE dry-run so a preview reflects what apply would
+    # ACTUALLY do: with RIG_GH_BROWSER unset, a real apply is `skipped`, so the dry-run preview must
+    # say "would be skipped" too — not "would drive N steps" (which an apply in the same env never
+    # would). Only when the backend IS enabled does dry-run report the would-drive preview.
+    browser_enabled = os.environ.get("RIG_GH_BROWSER", "").strip().lower() in ("1", "true", "yes")
+    if not browser_enabled:
+        verb = "RIG_GH_DRY_RUN — would be SKIPPED" if _gh_dry_run() else "disabled"
+        return ActionResult(action, "skipped",
+                            f"github-browser: {verb} (set RIG_GH_BROWSER=1 to drive {len(plan)} UI step(s) on {owner}/{repo})")
+    if _gh_dry_run():
+        return ActionResult(action, "updated",
+                            f"github-browser: RIG_GH_DRY_RUN — would drive {len(plan)} UI step(s) on {owner}/{repo} (not run)")
+
+    outcome = ensure_browser_auth(owner=owner, repo=repo)
+    if not outcome.ok:
+        return ActionResult(action, "error", f"github-browser: {outcome.detail}")
+
+    # The #4136.1 notify-and-wait already happened above: `ensure_browser_auth` pinged the user and
+    # blocked for the browser to become available. This is the SECOND, per-page check it cannot do —
+    # whether the (now-present) browser session is actually LOGGED IN to github.com. The FIRST plan
+    # step is `open <settings-url>`; after navigating, probe the resulting URL. If GitHub bounced us
+    # to `/login` the session is logged out, so we degrade LOUDLY (a visible error telling the user
+    # to log in and re-run) rather than blind-clicking the login page. (We don't re-enter the
+    # notify/poll loop here — the gate already gave the user their chance; a still-logged-out session
+    # at this point is an explicit, actionable failure, not another wait.)
+    open_step, toggle_steps = plan[0], plan[1:]
+    rc, out, err = _agent_browser(open_step)
+    if rc != 0:
+        return ActionResult(action, "error",
+                            f"github-browser: could not open settings on {owner}/{repo}: {(err.strip() or out.strip())[:120]}")
+    if _browser_on_login_page(owner, repo):
+        return ActionResult(action, "error",
+                            f"github-browser: the browser session is not logged into github.com — log in and re-run "
+                            f"with RIG_GH_BROWSER=1 to provision the UI-only settings on {owner}/{repo}")
+
+    for step in toggle_steps:
+        rc, out, err = _agent_browser(step)
+        if rc != 0:
+            return ActionResult(action, "error",
+                                f"github-browser: UI step {' '.join(step)!r} failed on {owner}/{repo}: {(err.strip() or out.strip())[:120]}")
+    return ActionResult(action, "updated", f"github-browser: drove {len(toggle_steps)} UI toggle(s) on {owner}/{repo}")
+
+
+def _browser_on_login_page(owner: str, repo: str) -> bool:
+    """True iff the current browser URL is a github.com login/SSO page (i.e. NOT logged in).
+
+    Reads `agent-browser get url`. GitHub redirects an unauthenticated request for a repo settings
+    page to ``/login`` (or ``/sessions/...`` for SSO). A read that fails is treated as "assume logged
+    in" (the subsequent toggle step will surface a real failure loudly) so a transient probe error
+    doesn't block an otherwise-authenticated run. Seamed via `_agent_browser` so tests drive it.
+
+    The login signal is parsed via urllib, NOT a bare ``"/login" in url`` substring, which would
+    false-positive on a repo or OWNER literally named ``login`` (``github.com/login/<repo>/settings``
+    or ``github.com/<owner>/login/settings``) and abort a perfectly authenticated run. Two guards:
+      1. If the URL path is exactly our ``<owner>/<repo>`` page (the settings URL we navigated to),
+         it is the logged-IN destination — never a login page, even if owner or repo IS "login".
+      2. Otherwise, an auth bounce lands on a known sign-in path: ``/login`` or ``/sessions/...``
+         (password sign-in) OR ``/orgs/<org>/sso`` (a SAML/SSO redirect for an org-protected repo).
+         We match those path shapes; an unrecognized bounce still degrades later (the toggle step
+         fails to find its control), just with a generic message instead of this specific one.
+    """
+    rc, out, _ = _agent_browser(["get", "url"])
+    if rc != 0:
+        return False
+    parsed = urllib.parse.urlparse(out.strip())
+    segments = [s.lower() for s in parsed.path.split("/") if s]
+    # guard 1: our own settings page (…/<owner>/<repo>/…) is the logged-in destination
+    if len(segments) >= 2 and segments[0] == owner.lower() and segments[1] == repo.lower():
+        return False
+    if not segments:
+        return False
+    # guard 2a: password sign-in (/login, /sessions/…)
+    if segments[0] in ("login", "sessions"):
+        return True
+    # guard 2b: SAML/SSO redirect (/orgs/<org>/sso[...])
+    return len(segments) >= 3 and segments[0] == "orgs" and segments[2].startswith("sso")
 
 
 # ── rig-managed GLOBAL git-excludes block ──────────────────────────────────────────
@@ -3352,6 +3990,10 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_ship_delegator": _do_provision_ship_delegator,
     "provision_linter_config": _do_provision_linter_config,
     "provision_github_ruleset": _do_provision_github_ruleset,
+    "provision_github_merge": _do_provision_github_merge,
+    "provision_github_ghas": _do_provision_github_ghas,
+    "provision_github_actions": _do_provision_github_actions,
+    "provision_github_browser": _do_provision_github_browser,
     "provision_tmux": _do_provision_tmux,
     "provision_global_excludes": _do_provision_global_excludes,
     "provision_tg_ctl": _do_provision_tg_ctl,

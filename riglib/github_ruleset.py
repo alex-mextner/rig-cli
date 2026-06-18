@@ -67,6 +67,23 @@ GITHUB_RULESET_DEFAULTS: dict[str, Any] = {
     "admin_bypass": True,
 }
 
+# Map each merge-gating CI gate slot → the GitHub CHECK-RUN context it produces (the job `name:` in
+# its workflow, which is the string the required_status_checks rule matches). ROADMAP §5 names these
+# two — the PR-checklist gate and the unresolved-review-threads gate — as the required checks rig
+# adds to the ruleset, so a PR can't merge until both are green. The KEY (slot) matches the CI
+# catalog item name; the VALUE (context) matches the workflow's job name verbatim. One table so the
+# plan builder, the scaffold, and the docs never disagree on which check a gate reports as.
+#
+# ⚠️ THE LOCKOUT GUARD. A required status check whose check-run NEVER appears (the workflow isn't in
+# the repo) wedges every PR — GitHub holds the merge waiting for a check that can't report. So the
+# plan builder requires a context ONLY when that CI gate is actually enabled and being written for
+# the repo (see `_build_github_ruleset`); a repo without the gate gets no required check for it, and
+# `admin_bypass` (on by default) keeps an admin able to merge past a stuck check regardless.
+CI_GATE_CHECK_CONTEXTS: dict[str, str] = {
+    "pr-checklist": "PR Checklist",
+    "review-threads": "review-threads",
+}
+
 
 def parse_github_remote(url: str) -> tuple[str, str] | None:
     """Parse ``(owner, repo)`` from a github.com remote URL, or None if not github.

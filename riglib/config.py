@@ -1221,6 +1221,34 @@ def _validate_gitignore(gi: dict[str, Any]) -> None:
 
 # The ruleset knobs that are plain booleans (typo + type guard). Listed once so the
 # validator and the action builder reference the SAME knob set.
+# The bool knobs of each github sub-block — every one validated as a bool (fail-closed) so a typo'd
+# value (`enabled: yes`, `squash_merge: 1`) is rejected with the schema path. Listed once here so
+# the validator and the schema registry never disagree on the type of a knob. The allowed-key sets
+# themselves come from config_schema (the single source `_reject_unknown_keys` reads).
+_GITHUB_MERGE_BOOL_KNOBS = (
+    "enabled",
+    "squash_merge",
+    "merge_commit",
+    "rebase_merge",
+    "delete_branch_on_merge",
+    "allow_auto_merge",
+    "allow_update_branch",
+)
+_GITHUB_GHAS_BOOL_KNOBS = (
+    "enabled",
+    "vulnerability_alerts",
+    "automated_security_fixes",
+    "secret_scanning",
+    "secret_scanning_push_protection",
+    "code_scanning_default_setup",
+)
+_GITHUB_ACTIONS_BOOL_KNOBS = ("enabled", "actions_enabled", "can_approve_pull_request_reviews")
+_GITHUB_BROWSER_BOOL_KNOBS = ("enabled", "discussions", "projects")
+# Enum knobs of github.actions → their allowed values (fail-closed on anything else).
+_GITHUB_ACTIONS_ENUMS = {
+    "allowed_actions": ("all", "local_only", "selected"),
+    "default_workflow_permissions": ("read", "write"),
+}
 _GITHUB_RULESET_BOOL_KNOBS = (
     "enabled",
     "require_pull_request",
@@ -1291,6 +1319,68 @@ def _validate_github(gh: dict[str, Any]) -> None:
                 f"github.ruleset.required_status_checks must be a list of strings, got {checks!r}",
                 schema_path="github.ruleset.required_status_checks",
             )
+    # The other github sub-blocks (merge / ghas / actions / browser) — each a mapping, each with its
+    # allowed keys gated by _reject_unknown_keys (sourced from the schema registry), each bool knob
+    # validated as a bool, and github.actions' two enum knobs pinned to their allowed values.
+    merge = _validate_github_subblock(gh, "merge", _GITHUB_MERGE_BOOL_KNOBS)
+    # Skip the "at least one merge model" check on a DISABLED block: `_build_github_merge` doesn't
+    # provision it (enabled:false → no PATCH), so rejecting an all-off-but-disabled block would
+    # forbid a harmless combination the plan never acts on — keep validation aligned with the plan.
+    if merge is not None and merge.get("enabled") is not False:
+        # GitHub rejects (HTTP 422) a repo that allows NO merge model. Catch it at config time —
+        # a `rig.yaml` that leaves squash, merge-commit, AND rebase all off would otherwise fail only
+        # on the live PATCH. Each omitted knob falls back to its default (squash ON, the other two
+        # OFF), so "all off" is reachable by setting squash_merge:false alone (merge_commit and
+        # rebase_merge already default off). An explicit `null` resolves to the DEFAULT too — matching
+        # the plan builder, which drops `null` overrides (`v is not None`) so a `squash_merge: null`
+        # is squash-ON, not off. We resolve null→default here so the validator can't reject a config
+        # the plan would happily run.
+        _MERGE_MODEL_DEFAULTS = {"squash_merge": True, "merge_commit": False, "rebase_merge": False}
+
+        def _resolved(k: str, default: bool) -> bool:
+            v = merge.get(k, default)
+            return default if v is None else bool(v)
+
+        if all(not _resolved(k, default) for k, default in _MERGE_MODEL_DEFAULTS.items()):
+            raise ConfigError(
+                "github.merge disables every merge model (squash_merge, merge_commit, rebase_merge "
+                "all false) — GitHub requires at least one; enable one (squash_merge is the default)",
+                schema_path="github.merge",
+            )
+    _validate_github_subblock(gh, "ghas", _GITHUB_GHAS_BOOL_KNOBS)
+    actions = _validate_github_subblock(gh, "actions", _GITHUB_ACTIONS_BOOL_KNOBS)
+    if actions is not None:
+        for knob, allowed in _GITHUB_ACTIONS_ENUMS.items():
+            value = actions.get(knob)
+            if value is not None and value not in allowed:
+                raise ConfigError(
+                    f"github.actions.{knob} must be one of {', '.join(allowed)}, got {value!r}",
+                    schema_path=f"github.actions.{knob}",
+                )
+    _validate_github_subblock(gh, "browser", _GITHUB_BROWSER_BOOL_KNOBS)
+
+
+def _validate_github_subblock(
+    gh: dict[str, Any], name: str, bool_knobs: tuple[str, ...]
+) -> dict[str, Any] | None:
+    """Validate one ``github.<name>`` sub-block; return it (for further checks) or None if absent.
+
+    Fail-closed, consistent with every other block: a non-mapping sub-block, an unknown key (typo
+    guard, via the schema-sourced :func:`_reject_unknown_keys`), or a non-bool bool knob each raise
+    a 3-part ConfigError with the schema path. A sub-block ABSENT from the github block → returns
+    None (the caller skips its extra cross-knob checks — nothing was configured, defaults apply); an
+    empty sub-block (``merge: {}``) is present-but-default and returns ``{}``, so its cross-knob
+    checks still run on the resolved defaults.
+    """
+    if name not in gh:
+        return None  # absent → no sub-block to validate; caller's extra checks are skipped
+    block = gh.get(name, {})
+    if not isinstance(block, dict):
+        raise ConfigError(f"github.{name} must be a mapping", schema_path=f"github.{name}")
+    _reject_unknown_keys(block, f"github.{name}")
+    for knob in bool_knobs:
+        _check_bool(block, knob, f"github.{name}.{knob}")
+    return block
 
 
 # The nested sub-blocks the tmux block accepts, each with its own allowed keys. Listed once so

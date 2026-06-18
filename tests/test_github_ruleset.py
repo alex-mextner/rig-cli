@@ -93,6 +93,13 @@ def gh_repo(monkeypatch):
 
 def _install_gh(monkeypatch, recorder: _GhRecorder) -> None:
     monkeypatch.setattr(runner, "_gh_api", recorder)
+    # The #4136.1 auth gate runs before every github.* mutation. These ruleset tests exercise the
+    # POST/PUT mutation path with a stubbed `_gh_api`, so stub the gate as already-authed (the gate
+    # itself has its own dedicated tests in test_github_auth.py) — otherwise the gate's real
+    # `gh auth status` probe would intercept the mutation and return a not-authed error.
+    from riglib.github_auth import AuthOutcome
+
+    monkeypatch.setattr(runner, "ensure_gh_auth", lambda **kw: AuthOutcome("ok"))
 
 
 # ── desired body assembly + the footgun guard ──────────────────────────────────────

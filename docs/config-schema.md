@@ -63,7 +63,7 @@ harness: { ... }              # agent harness auto/permission provisioning (auto
 permissions: { ... }          # per-harness command allowlist (pre-allow our CLIs + safe dev tools), default ON
 models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
 agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
-github: { ... }               # GitHub repo branch ruleset via gh api, default ON (no-op without a github remote)
+github: { ... }               # repo settings: ruleset/merge/ghas/actions via gh api + browser via agent-browser, default ON
 tmux: { ... }                 # rig-managed tmux config (generate + migrate ~/.tmux.conf), opt-in
 gitignore: { ... }            # rig-managed block in the GLOBAL git excludesfile (ignores **/.claude/worktrees/ in EVERY repo), default ON
 tg_ctl: { ... }               # tg-ctl inbound daemon as a macOS boot LaunchAgent, default ON (macOS-only)
@@ -656,7 +656,8 @@ github:
     restrict_deletion: true       # deletion rule
     require_linear_history: false # required_linear_history rule
     require_signatures: false     # required_signatures rule
-    required_status_checks: []    # check/context names to require; empty = no rule
+    # required_status_checks: omit to auto-default to the merge-gating CI gates this repo
+    # provisions (PR Checklist + review-threads); set a list to pin, or [] to require none.
     admin_bypass: true            # add the repo Admin role to bypass_actors
 ```
 
@@ -670,7 +671,7 @@ github:
 | `restrict_deletion` | bool | `true` | emit the `deletion` rule (block deleting the branch) |
 | `require_linear_history` | bool | `false` | emit the `required_linear_history` rule |
 | `require_signatures` | bool | `false` | emit the `required_signatures` rule |
-| `required_status_checks` | list[str] | `[]` | contexts for the `required_status_checks` rule; **empty emits no rule** (never a no-op rule) |
+| `required_status_checks` | list[str] | *auto* | contexts for the `required_status_checks` rule. **When omitted**, rig defaults it (ROADMAP §5) to the merge-gating CI gates this repo actually provisions — `PR Checklist` and `review-threads` — so a PR can't merge until those are green, but ONLY for gates that are enabled and written (requiring an absent check would wedge every PR). An explicit list (including `[]` for "require none") wins verbatim. **An empty result emits no rule** (never a no-op rule) |
 | `admin_bypass` | bool | `true` | add the repo Admin role (`actor_id: 5`, `RepositoryRole`, `always`) to `bypass_actors` |
 
 **The footgun guard — rig never emits the `update` rule.** A hand-made ruleset with the
@@ -705,6 +706,141 @@ remote** is different: that is a clean no-op, no item.) GitHub Enterprise hosts 
 
 Set `RIG_GH_DRY_RUN=1` to compute what *would* change (the create/update is reported) but make
 **no `gh` POST/PUT** — for CI, smoke, or a dry inspection where mutating a real repo is unwanted.
+
+### `github.merge` — the repo merge-button policy (squash-only)
+
+Reconciles the repo's **merge-button policy** via `PATCH /repos/{owner}/{repo}`: squash is the
+only merge model (`merge_commit`/`rebase_merge` off → linear, one commit per PR), the head branch
+is auto-deleted on merge, and auto-merge is allowed so a PR lands the instant its gate goes green.
+These are repo **settings**, not a ruleset, so a mis-set value at worst disables a button — it can
+never lock anyone out of merging. Default **ON**; opt out with `merge.enabled: false`.
+
+```yaml
+github:
+  merge:
+    enabled: true                 # provision the merge policy (default ON)
+    squash_merge: true            # allow_squash_merge — the only model by default
+    merge_commit: false           # allow_merge_commit
+    rebase_merge: false           # allow_rebase_merge
+    delete_branch_on_merge: true  # auto-delete the head branch on merge
+    allow_auto_merge: true        # a PR auto-merges when its required checks pass
+    allow_update_branch: true     # offer the "Update branch" button
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision the merge policy |
+| `squash_merge` | bool | `true` | `allow_squash_merge` |
+| `merge_commit` | bool | `false` | `allow_merge_commit` |
+| `rebase_merge` | bool | `false` | `allow_rebase_merge` |
+| `delete_branch_on_merge` | bool | `true` | auto-delete the head branch on merge |
+| `allow_auto_merge` | bool | `true` | allow a PR to auto-merge when green |
+| `allow_update_branch` | bool | `true` | offer the "Update branch" button |
+
+### `github.ghas` — GitHub Advanced Security
+
+Reconciles the repo's supply-chain and secret-leak guards: **dependency graph** + **secret
+scanning** (+ push protection) via the repo's `security_and_analysis` block (`PATCH /repos`),
+**vulnerability alerts** + **Dependabot security updates** via their own `PUT/DELETE`
+sub-resources, and **CodeQL default-setup** via its own endpoint. Default **ON** (secure defaults).
+On a **private repo whose plan does not include GHAS** the licensed scanners return 403/422 — the
+action degrades **loudly** (a visible "could not enable — plan does not include GHAS" in the
+result), it does NOT crash and does NOT silently report green; the free features (dep-graph,
+vuln-alerts, Dependabot) are applied independently so one unlicensed scanner never masks them.
+
+```yaml
+github:
+  ghas:
+    enabled: true
+    vulnerability_alerts: true
+    automated_security_fixes: true
+    secret_scanning: true
+    secret_scanning_push_protection: true
+    code_scanning_default_setup: true
+```
+
+(There is no `dependency_graph` knob: on github.com cloud the dependency graph is not a
+separately-togglable repo setting via the API — it is always-on for public repos and is governed by
+the vuln-alerts / Dependabot sub-resources rig manages, so a standalone knob would have no effect.)
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision GHAS settings |
+| `vulnerability_alerts` | bool | `true` | the `vulnerability-alerts` sub-resource (Dependabot alerts) |
+| `automated_security_fixes` | bool | `true` | Dependabot security updates (`automated-security-fixes`) |
+| `secret_scanning` | bool | `true` | `security_and_analysis.secret_scanning` |
+| `secret_scanning_push_protection` | bool | `true` | secret-scanning push protection |
+| `code_scanning_default_setup` | bool | `true` | CodeQL default-setup (`configured`) |
+
+### `github.actions` — GitHub Actions permissions
+
+Reconciles the repo's Actions permissions on two endpoints: `PUT .../actions/permissions`
+(whether Actions runs + which actions are allowed) and `PUT .../actions/permissions/workflow`
+(the default `GITHUB_TOKEN` scope + whether workflows may approve PRs). Secure defaults: Actions
+**enabled** (don't silently break CI), but the token is **READ-only** (least privilege — a
+workflow that needs write declares it explicitly) and workflows may **not** approve PRs.
+
+```yaml
+github:
+  actions:
+    enabled: true
+    actions_enabled: true
+    allowed_actions: all          # all | local_only | selected
+    default_workflow_permissions: read   # read | write
+    can_approve_pull_request_reviews: false
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision Actions permissions |
+| `actions_enabled` | bool | `true` | whether Actions runs at all |
+| `allowed_actions` | enum | `all` | `all` / `local_only` / `selected` |
+| `default_workflow_permissions` | enum | `read` | default `GITHUB_TOKEN` scope: `read` / `write` |
+| `can_approve_pull_request_reviews` | bool | `false` | may a workflow approve/create PRs |
+
+### `github.browser` — settings the REST API does NOT expose (agent-browser backend)
+
+A first-class **second backend** for the handful of repo settings GitHub has never shipped an API
+for. rig drives the GitHub **settings UI** headlessly with `agent-browser` (accessibility-role
+selectors, not brittle CSS), invoked **inside** `rig apply` — not a manual "go click this" step.
+It is **planned** by default (so `rig status` lists it) but **gated off at apply** unless
+`RIG_GH_BROWSER=1` — driving a real browser is heavier and slower than `gh api`, so it runs only
+when explicitly enabled. If the toggle is absent from the page (org policy hid it / GitHub moved
+it) the action degrades loudly, never a blind click.
+
+```yaml
+github:
+  browser:
+    enabled: true                 # plan the backend (status lists it); apply gated by RIG_GH_BROWSER=1
+    discussions: false            # the Discussions UI-only toggle
+    projects: true                # the Projects UI-only toggle
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | plan the agent-browser backend (apply still needs `RIG_GH_BROWSER=1`) |
+| `discussions` | bool | `false` | the Discussions UI-only toggle |
+| `projects` | bool | `true` | the Projects UI-only toggle |
+
+### The auth gate (CTO #4136.1 — ASK and WAIT, never silently fail)
+
+Every `github.*` mutation passes a shared **auth gate** before it touches a live setting. If `gh`
+is **not authenticated** for the admin scope it needs (or, for the browser backend, `agent-browser`
+is unavailable), rig does **not** silently fail: it **notifies you via `tg`** with the exact
+`gh auth login` command and **blocks/waits** for auth to appear, then **resumes** the apply.
+
+- `RIG_GH_AUTH_WAIT` — max **seconds** to block waiting for login. **Unset/`0` (the default)** →
+  do not block: probe once and, if still unauthenticated, degrade loudly (so an **unattended**
+  `rig apply` in CI never hangs forever on a human). A positive value (e.g. `1800` = 30 min) opts
+  into the interactive "ask and wait": rig notifies once, then polls until you log in or the budget
+  elapses.
+- `RIG_GH_AUTH_POLL` — seconds between re-probes while blocking (default `5`).
+- Under `RIG_GH_DRY_RUN=1` the auth **gate is skipped** (dry-run performs no `gh` POST/PUT, so it
+  never blocks on a login prompt — this is why CI and the test suite don't hang). Note the dry-run
+  still performs the read-only `gh api` GET to classify live-vs-desired state, so on a repo with a
+  github remote a dry-run with **no token at all** reports a read error rather than a preview; an
+  offline/no-auth preview is only fully no-op on a repo with no github remote (skipped). In CI the
+  test suite monkeypatches the `gh` seam, so neither the gate nor the read ever runs for real.
 
 ---
 
@@ -1076,7 +1212,8 @@ rig config set harness.auto_mode false --no-apply        # write only, print the
 `apply`/`status`/`init` validate before touching disk and **fail closed**. **Every block is
 strict**: an unknown FIXED key in *any* block — `defaults`, `skills`, `agent_hooks`, `git_hooks`
 (+ `dispatcher`), `ci`, `mcp`, `harness` (+ `hook_bridge`), `permissions`, `models` (+ `schedule`),
-`agents_md`, `github` (+ `ruleset`), `tmux` (+ every sub-block), `gitignore`, `tg_ctl` — is
+`agents_md`, `github` (+ `ruleset` / `merge` / `ghas` / `actions` / `browser`), `tmux` (+ every
+sub-block), `gitignore`, `tg_ctl` — is
 rejected with the schema path of the offender, not silently ignored. (The only open maps are the
 catalog-keyed `items:` / `fragments:` — see "Strict by default" above.) Bad-value rejections
 include: unsupported `version`, invalid `on_conflict` / ci `tier` / agent-hook `on_error`, an
