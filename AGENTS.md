@@ -136,6 +136,44 @@ should hard-code agent-tools paths.
   Needs a real agent-tools checkout (`RIG_AGENT_TOOLS_SOURCE`); self-skips the apply leg
   without one. The init leg sets `RIG_TMUX_DRY_RUN=1` so the tmux artifacts land without the
   live activation.
+- `bash tests/smoke.sh --fast` — the **pre-commit subset** (seconds, not the full ~20s run).
+  Runs only the cheap REAL-catalog legs (`--help`/`--version`/`doctor`/`setup`-usage and the
+  `rig status` regression legs: a clean sample exits 0, a removed slot prints the 3-part error
+  + exit 4, a non-git dir doesn't nag). SKIPS the heavy `rig init --yes` apply and the full
+  pytest — those stay in CI. This is the subset the repo-local pre-commit gate runs.
+
+### The local pre-commit smoke gate (the CTO 2026-06-16 requirement)
+
+Two same-day prod failures were unit-GREEN but smoke-BROKEN (a stale `mcp.items.review`, a
+removed slot) and were caught only AFTER push, because smoke ran in CI but did not gate the
+commit locally. To close the LOCAL half:
+
+- `scripts/install-smoke-precommit.sh` — run **once per clone/worktree** to wire a
+  `.git/hooks/pre-commit` shim that execs the tracked gate. Idempotent; safe to re-run. Refuses
+  to mangle a symlinked pre-commit (a hook manager owns it); expands a `~`-prefixed
+  `core.hooksPath`.
+- `scripts/smoke-precommit-hook.sh` — the tracked gate: runs `bash tests/smoke.sh --fast` and
+  blocks the commit on failure, then chains the global git-hook dispatcher. Dedup is FAIL-SAFE:
+  it skips its own chain ONLY when a global `core.hooksPath` composer is active AND that
+  composer's `pre-commit` actually invokes the dispatcher (a path-canonicalized match, robust to
+  `~`/`$HOME`/symlink variants) — so the common composer setup never double-runs secret-scan. In
+  the rare PREPEND case (the installer prepended the gate ahead of a foreign hook that ALSO runs
+  the dispatcher), the gate keeps chaining and the scan may run twice — a deliberate trade: a
+  duplicate read-only scan is harmless, whereas guessing wrong and DROPPING it is a security
+  hole. Bypass (discouraged): `SKIP_RIG_SMOKE=1 git commit …`.
+- **No agent-tools checkout? Not blocked.** `tests/smoke.sh --fast` self-skips the catalog legs
+  (apply + the real-catalog `rig status` legs) and exits 0 when no `agent-tools` source is
+  found — so a contributor without one still commits; the catalog regression guard simply fires
+  for those who have the checkout (and always in CI). It is NOT a hard requirement to commit.
+- **Global `core.hooksPath` caveat.** The installer writes `<git-dir>/hooks/pre-commit`. The
+  rig global composer (`core.hooksPath = ~/.config/git/hooks`) trampolines into that file, so
+  the gate fires under it. But if you set a DIFFERENT global `core.hooksPath` that does NOT call
+  `$git_dir/hooks/pre-commit`, git runs only that global hook and the gate is bypassed — wire
+  the gate into your global hook (or run the rig composer) in that case.
+- Both are covered by `tests/test_smoke_precommit.py` (drives a real `git commit` through the
+  installed hook in a HOME-isolated throwaway repo and asserts allow/block).
+- CI keeps running the FULL `tests/smoke.sh` (the `--fast` gate is the local complement, not a
+  replacement).
 - Add a test with every behavior change. TDD red-first is the house style.
 
 ## Style

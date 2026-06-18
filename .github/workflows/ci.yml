@@ -27,6 +27,9 @@ jobs:
         run: python -m pytest -q
       # The smoke script self-skips the apply leg when no agent-tools checkout is present
       # (CI has none), so it exercises --help / doctor / export / pytest end to end here.
+      # The full run already covers every leg the --fast subset runs (--fast only GATES OFF the
+      # heavy apply/pytest), so there's no separate --fast CI step — the fast-mode plumbing
+      # (arg-parse, self-skip, banners) is covered hermetically by tests/test_smoke_precommit.py.
       - name: Smoke
         run: bash tests/smoke.sh
 

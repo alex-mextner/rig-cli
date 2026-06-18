@@ -10,7 +10,30 @@
 # smoke-BROKEN — a stale `mcp.items.review` (a slot removed in agent-tools #32) lingered in a
 # config and only the REAL `rig status`/`init` flow against the REAL catalog caught it. pytest
 # uses a fake catalog; smoke runs the real CLI against the real agent-tools checkout.
+#
+# --fast  — the PRE-COMMIT subset. Runs only the seconds-cheap legs that exercise the REAL
+#   catalog (`--help`/`--version`/`doctor`/`setup`-usage and the `rig status` legs: a clean
+#   sample exits 0, a removed slot prints the 3-part error + exit 4, a non-git dir doesn't nag).
+#   It SKIPS the heavy `rig init --yes` apply (skill installs / harness symlinks / tmux / tg-ctl
+#   provisioning) and the full pytest run — those belong in CI, not a per-commit local gate.
+#   This is the subset wired into the repo-local pre-commit hook (see scripts/install-smoke-
+#   precommit.sh) so a commit that breaks the real `rig status` flow is blocked LOCALLY, not
+#   just in CI — the gap the CTO flagged (2026-06-16): smoke ran in CI but never gated commits.
 set -euo pipefail
+
+FAST=0
+for arg in "$@"; do
+  case "$arg" in
+    --fast) FAST=1 ;;
+    -h|--help)
+      # Print the leading comment block only (lines 2 onward, up to the first non-`#` line —
+      # the shebang is line 1, `set -euo pipefail` ends the block), stripping the `# ` prefix.
+      sed -n '2,${/^#/!q;s/^# \{0,1\}//p;}' "$0"
+      exit 0
+      ;;
+    *) echo "smoke.sh: unknown argument '$arg' (use --fast or --help)" >&2; exit 2 ;;
+  esac
+done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RIG="python3 $ROOT/bin/rig"
@@ -106,6 +129,11 @@ mcp:
 YAML
   fi
 
+  # ── HEAVY apply legs (skipped under --fast: they install skills / harness symlinks / tmux /
+  #    tg-ctl and take seconds-to-minutes; CI runs them, the pre-commit subset does not). The
+  #    REAL-catalog `rig status` legs below (clean/removed-slot/non-git) DO run under --fast —
+  #    they are the cheap regression guard the pre-commit gate exists for. ──────────────────────
+  if [[ $FAST -eq 0 ]]; then
   # dry-run first (must write nothing)
   $RIG init -C "$TMP" --config "$TMP/rig.yaml" --yes --dry-run >/dev/null || fail "init --dry-run"
   [[ -d "$HOME/.agents/skills" ]] && fail "dry-run wrote skills"
@@ -179,6 +207,7 @@ PY
   # status reports in sync
   $RIG status -C "$TMP" --config "$TMP/rig.yaml" >/dev/null || fail "status nonzero when in sync"
   pass "rig status: in sync"
+  fi  # end HEAVY apply legs (--fast skips to the cheap real-catalog status legs below)
 
   # ── error-system v2: a removed slot prints the 3-part error + exit code 4 ──────
   # This is the exact regression class that was unit-green but smoke-broken: a stale
@@ -253,7 +282,10 @@ fi
 # the ISOLATED HOME and NO real `launchctl` call (RIG_TG_CTL_DRY_RUN, exported at the top).
 # macOS-only (launchd); skipped off darwin and when no agent-tools checkout is found (rig's plan
 # build requires a source even when carrier categories are off). Uses the source resolved up top.
-if [[ "$(uname -s)" != "Darwin" ]]; then
+# A real `rig apply` → HEAVY, so the --fast pre-commit subset skips it (CI still runs it).
+if [[ $FAST -ne 0 ]]; then
+  printf '  \033[33m○ skip\033[0m tg-ctl leg — --fast (apply leg; runs in CI)\n'
+elif [[ "$(uname -s)" != "Darwin" ]]; then
   printf '  \033[33m○ skip\033[0m tg-ctl leg — not macOS (launchd-only)\n'
 elif [[ -z "$AGENT_TOOLS" || ! -d "$AGENT_TOOLS/skills" ]]; then
   printf '  \033[33m○ skip\033[0m tg-ctl leg — no agent-tools checkout (set RIG_AGENT_TOOLS_SOURCE)\n'
@@ -303,6 +335,13 @@ fi
 # Run pytest the way the repo actually runs it: prefer `uv run --with pytest` (the documented
 # command — README/AGENTS.md), so a machine whose bare `python3` is a clean interpreter without
 # pytest installed still runs the suite. Fall back to `python3 -m pytest` when uv is absent.
+# Skipped under --fast: the full suite (~20s) is a CI gate, not a per-commit local one — the
+# pre-commit subset's job is the REAL-catalog `rig status` regression guard, kept seconds-cheap.
+if [[ $FAST -ne 0 ]]; then
+  printf '  \033[33m○ skip\033[0m pytest — --fast (full unit suite runs in CI)\n'
+  echo "smoke OK (--fast)"
+  exit 0
+fi
 echo "running pytest…"
 if command -v uv >/dev/null 2>&1; then
   uv run --with pytest python -m pytest -q "$ROOT/tests" || fail "pytest"
