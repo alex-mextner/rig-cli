@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from .harness_skills import KNOWN_HARNESS_KINDS as _KNOWN_HARNESS_KINDS
+
 CONFIG_FILENAME = "rig.yaml"
 
 _VALID_TOP_KEYS = {
@@ -51,11 +53,17 @@ _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
 _VALID_TIERS = {"block", "warn"}
 _VALID_ON_ERROR = {"open", "closed"}
 _VALID_TMUX_APPLY = {"import", "block"}
-# Harness kinds rig can provision an auto/permission setting for. claude-code is the only
-# one IMPLEMENTED in v0.1; opencode is reserved (documented in docs/config-schema.md) so a
-# config naming it fails closed with a clear message rather than silently doing nothing.
-_VALID_HARNESS_KINDS = {"claude-code"}
-_RESERVED_HARNESS_KINDS = {"opencode"}
+# Harness kinds rig knows a skill/instruction discovery convention for — the union of the
+# skills-DIRECTORY harnesses (claude-code, opencode) and the INSTRUCTION-FILE harnesses
+# (codex, gemini, pi, commandcode). A ``harness.kind`` in this set is ACCEPTED: rig can
+# provision skill discovery (and, for the supported kinds, the auto-mode write / allowlist)
+# for it. The single source of truth is :mod:`riglib.harness_skills`. The narrower
+# auto-mode-write capability is gated separately in plan.py (``_HARNESS_SETTINGS``) — a kind
+# accepted here but not auto-mode-capable self-skips that write with a plan note, not a crash.
+_VALID_HARNESS_KINDS = set(_KNOWN_HARNESS_KINDS)
+# No kind is "reserved + rejected" any longer — every documented kind is now provisionable for
+# skills. Kept as an (empty) set so the validator's reserved-kind branch stays well-defined.
+_RESERVED_HARNESS_KINDS: set[str] = set()
 
 
 class ConfigError(ValueError):
@@ -690,11 +698,15 @@ def _validate_skills(sk: dict[str, Any]) -> None:
 
 
 def _validate_harness(h: dict[str, Any]) -> None:
-    """Validate the ``harness`` block — the agent harness's auto/permission provisioning.
+    """Validate the ``harness`` block — the agent harness's skill + auto/permission provisioning.
 
-    Fail-closed on an unknown ``kind`` (typo guard) and a non-bool ``auto_mode``. A
-    *reserved* kind (opencode) is rejected with an explicit "not implemented yet" message
-    so the config author isn't left thinking rig wrote a setting it didn't.
+    Fail-closed on an unknown ``kind`` (typo guard) and a non-bool ``auto_mode``. Every harness
+    rig knows a skill/instruction discovery convention for (claude-code, opencode, codex, gemini,
+    pi, commandcode — :data:`_VALID_HARNESS_KINDS`) is ACCEPTED here: rig provisions its SKILL
+    discovery. The narrower auto/permission-MODE write is only implemented for some of them
+    (claude-code today) and self-skips the rest with a plan note (see plan.py ``_build_harness``)
+    rather than being rejected at validation — so a config can target a harness for skills even
+    where the auto-mode write isn't wired yet.
     """
     if not isinstance(h, dict):
         raise ConfigError("harness must be a mapping", schema_path="harness")

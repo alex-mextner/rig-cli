@@ -254,10 +254,18 @@ def test_validate_rejects_unknown_harness_kind():
         config.validate({"version": 1, "harness": {"kind": "bogus-harness"}})
 
 
-def test_validate_rejects_reserved_harness_kind_with_clear_message():
-    # opencode is documented but not implemented → fail closed with a helpful message
-    with pytest.raises(config.ConfigError, match="not implemented"):
-        config.validate({"version": 1, "harness": {"kind": "opencode", "auto_mode": True}})
+def test_validate_accepts_all_supported_harness_kinds():
+    # rig-cli#9: every harness rig knows a skill/instruction discovery convention for is now
+    # ACCEPTED in harness.kind (skills-dir harnesses claude-code/opencode + instruction-file
+    # harnesses codex/gemini/pi/commandcode). Previously opencode (and the rest) were rejected.
+    for kind in ("claude-code", "opencode", "codex", "gemini", "pi", "commandcode"):
+        config.validate({"version": 1, "harness": {"kind": kind}})
+
+
+def test_validate_rejects_typo_harness_kind_with_supported_list():
+    # a typo still fails closed — and the message names the supported kinds so the fix is obvious.
+    with pytest.raises(config.ConfigError, match="harness.kind must be one of"):
+        config.validate({"version": 1, "harness": {"kind": "claudecode"}})
 
 
 def test_validate_rejects_non_bool_auto_mode():
