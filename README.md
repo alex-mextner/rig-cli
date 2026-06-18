@@ -159,7 +159,7 @@ so autonomy is part of the reproducible config — not a manual per-machine togg
 ```yaml
 harness:
   enabled: true
-  kind: claude-code          # claude-code implemented; opencode documented (config-schema.md)
+  kind: claude-code          # skills-dir: claude-code|opencode · instruction-file: codex|gemini|pi|commandcode (config-schema.md)
   auto_mode: true            # RECOMMENDED: writes permissions.defaultMode=auto (user scope)
   hook_bridge: { enabled: true }   # wire the agents-hooks/v1 → CC dispatcher (default ON)
 ```

@@ -31,6 +31,8 @@ from .github_browser import UI_ONLY_TOGGLES
 from .github_ghas import GITHUB_GHAS_DEFAULTS
 from .github_merge import GITHUB_MERGE_DEFAULTS
 from .github_ruleset import CI_GATE_CHECK_CONTEXTS, GITHUB_RULESET_DEFAULTS
+from .harness_skills import HARNESS_SKILL_DIRS as _HARNESS_SKILL_DIRS
+from .harness_skills import instruction_file_for as _instruction_file_for
 
 
 class PlanError(ValueError):
@@ -57,16 +59,15 @@ _DEFAULTS_KEY = {
 }
 
 
-# Where each supported harness DISCOVERS Skill-tool skills. A skill installed into
-# ``skills_target`` (default ``~/.agents/skills``) is invisible to the harness unless it is
-# also present in this dir — claude-code lists/loads skills from ``~/.claude/skills`` (its
-# userSettings skill dir; symlinks there resolve to the real skill). So rig maintains an
-# idempotent symlink per enabled skill into the harness dir for the configured kind. Other
-# harnesses (documented for when they're implemented): opencode discovers skills from its
-# own config dir — add the path here when that kind is wired in plan/validation.
-_HARNESS_SKILL_DIRS = {
-    "claude-code": "~/.claude/skills",
-}
+# Per-harness skill/instruction discovery lives in ONE registry, :mod:`riglib.harness_skills`.
+# ``_HARNESS_SKILL_DIRS`` (imported above) is the skills-DIRECTORY map: a skill copied into
+# ``skills_target`` (default ``~/.agents/skills``) is invisible to a skills-dir harness unless it
+# is also present in that harness's discovery dir (claude-code → ``~/.claude/skills``, opencode →
+# ``~/.config/opencode/skill``), so rig maintains an idempotent symlink per enabled skill into the
+# harness dir for the configured kind. INSTRUCTION-FILE harnesses (codex/gemini/pi/commandcode)
+# have no skills dir — they surface guidance via a global AGENTS.md/GEMINI.md (the ``agents_md``
+# area), so :func:`_resolve_harness_skill_dir` returns None for them and records a status note.
+# (The module-level alias name is preserved so ``plan._HARNESS_SKILL_DIRS`` keeps resolving.)
 _DEFAULT_HARNESS_KIND = "claude-code"
 
 
@@ -148,8 +149,11 @@ def _resolve_harness_skill_dir(config: LoadedConfig) -> Path | None:
     """Resolve the harness skill-discovery dir to symlink installed skills into.
 
     Returns ``None`` when ``skills.harness_link`` is disabled or the harness kind has no
-    known discovery dir (don't guess a path). An explicit ``skills.harness_skill_dir``
-    overrides the per-harness default.
+    known discovery dir — either an INSTRUCTION-FILE harness (codex/gemini/pi/commandcode,
+    which surface skills via AGENTS.md/GEMINI.md, not a symlinked dir) or an unknown kind. We
+    never guess a path. An explicit ``skills.harness_skill_dir`` overrides the per-harness
+    default (and forces the link even for an instruction-file harness — the user pointed at a
+    real dir on purpose).
     """
     sk = config.category("skills")
     if sk.get("harness_link") is False:
@@ -161,6 +165,32 @@ def _resolve_harness_skill_dir(config: LoadedConfig) -> Path | None:
         if not raw:
             return None
     return _expand(str(raw), config.repo_root)
+
+
+def _skill_discovery_note(config: LoadedConfig) -> str | None:
+    """A status note explaining why no harness skill-link is emitted for an instruction-file
+    harness, or ``None`` when one is (skills-dir harness) or linking is disabled / overridden.
+
+    Keeps ``rig status`` honest: a codex/gemini/pi/commandcode config that links no skills isn't a
+    silent gap — the note says the kind reads a global AGENTS.md/GEMINI.md instead, so the skill
+    content reaches it through the ``agents_md`` area, not a per-skill symlink.
+    """
+    sk = config.category("skills")
+    if sk.get("enabled") is False:
+        return None  # no skills installed at all → nothing to say about their discovery
+    if sk.get("harness_link") is False or sk.get("harness_skill_dir"):
+        return None  # linking off, or an explicit dir override forces a real link → no note
+    kind = _harness_kind_for_skills(config)
+    if kind in _HARNESS_SKILL_DIRS:
+        return None  # skills-dir harness → a link IS emitted, no note needed
+    instr = _instruction_file_for(kind)
+    if instr is None:
+        return None  # unknown kind → handled by validation; nothing to say here
+    return (
+        f"skills: harness '{kind}' has no skill-discovery dir — it reads a global "
+        f"instruction file ({instr}); skills reach it via the agents_md area, not a per-skill "
+        "symlink (set skills.harness_skill_dir to force a directory link)"
+    )
 
 
 def resolve_category_target(config: LoadedConfig, category: str) -> Path | None:
@@ -331,6 +361,11 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ``..`` segment that makes the two dirs textually differ but point at the same place is
     # still recognized as the same dir (avoids a spurious self-link → real-dir warning).
     link_into_harness = harness_link_dir is not None and not _same_dir(harness_link_dir, skills_target)
+    # Instruction-file harness (codex/gemini/pi/commandcode) → no skill-link dir; record WHY so
+    # ``rig status`` shows "uses <AGENTS.md/GEMINI.md>" instead of a silent empty skill-link area.
+    skill_note = _skill_discovery_note(config)
+    if skill_note is not None:
+        plan.notes.append(skill_note)
     for item in _skills_enabled(config, catalog, project_type):
         installed = skills_target / item.path.name
         plan.actions.append(
@@ -589,7 +624,16 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
         return
     kind = str(h.get("kind", "claude-code"))
     if kind not in _HARNESS_SETTINGS:
-        # validate() already fail-closed on unknown/reserved kinds; defensive guard only.
+        # The config schema now ACCEPTS opencode/codex/gemini/pi/commandcode (rig provisions their
+        # SKILL discovery), but the auto/permission-MODE write is only implemented for the kinds in
+        # ``_HARNESS_SETTINGS`` (claude-code today). Skip the auto-mode write for the others — but
+        # say so, so a config that set ``auto_mode``/``mode`` on such a kind isn't a silent no-op.
+        if h.get("auto_mode") is not None or h.get("mode"):
+            plan.notes.append(
+                f"harness: auto-mode write skipped — kind '{kind}' has no rig auto/permission-mode "
+                "writer yet (its skills are still provisioned; set the mode in the harness's own "
+                "config for now)"
+            )
         return
     auto_mode = bool(h.get("auto_mode", False))
     # an explicit `mode:` override wins over the auto_mode → mode mapping (lets a config pin
@@ -711,9 +755,18 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
     if not isinstance(h, dict) or not h or h.get("enabled") is False:
         return
     kind = str(h.get("kind", _DEFAULT_HARNESS_KIND))
-    if kind not in _HOOK_BRIDGE_HARNESSES or kind not in _HARNESS_SETTINGS:
-        return
     bridge_cfg = h.get("hook_bridge")
+    if kind not in _HOOK_BRIDGE_HARNESSES or kind not in _HARNESS_SETTINGS:
+        # The schema now accepts opencode/codex/gemini/pi/commandcode (for skills), but the CC
+        # settings.json hook-bridge contract applies ONLY to claude-code. If a config EXPLICITLY
+        # asked for the bridge on such a kind, say it isn't wired (don't silently drop it) — the
+        # default-on case stays quiet since the bridge is a CC-only concept the user didn't pick.
+        if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is True:
+            plan.notes.append(
+                f"hook_bridge: skipped — kind '{kind}' does not use the claude-code settings.json "
+                "hook contract; the agents-hooks bridge is a claude-code-only concept"
+            )
+        return
     if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is False:
         return
     # No installed descriptors → the bridge would be a no-op carrier. Skip rather than wire

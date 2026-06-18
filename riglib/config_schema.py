@@ -32,6 +32,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .harness_skills import HARNESS_INSTRUCTION_FILES, HARNESS_SKILL_DIRS
+
+# Every harness kind rig provisions skill/instruction discovery for, listed skills-dir kinds first
+# (claude-code, opencode) then instruction-file kinds (codex, gemini, pi, commandcode) — a stable,
+# readable order for the published JSON-schema enum. Sourced from :mod:`riglib.harness_skills` so the
+# schema enum can never drift from what ``config.validate`` accepts.
+_HARNESS_KIND_ENUM: tuple[str, ...] = tuple(HARNESS_SKILL_DIRS) + tuple(HARNESS_INSTRUCTION_FILES)
+
 # ── the published-schema identity (referenced by editors via `$schema`/`$id`) ─────────
 SCHEMA_DIALECT = "http://json-schema.org/draft-07/schema#"
 SCHEMA_ID = "https://github.com/alex-mextner/rig-cli/blob/main/schema/rig.schema.json"
@@ -248,8 +256,10 @@ _HARNESS_BLOCK = Block(
         "enabled": Leaf("boolean", "provision the harness setting", default=True),
         "kind": Leaf(
             "string",
-            "which harness to write (claude-code; opencode reserved)",
-            enum=("claude-code", "opencode"),
+            "which harness to provision (skills-dir: claude-code/opencode; instruction-file: "
+            "codex/gemini/pi/commandcode). The auto/permission-MODE write is claude-code-only "
+            "today; other kinds still get their skill discovery provisioned.",
+            enum=_HARNESS_KIND_ENUM,
             default="claude-code",
         ),
         "auto_mode": Leaf("boolean", "true → auto-accept tool calls; false → interactive", default=True),

@@ -131,7 +131,7 @@ skills:
 | `enabled` | bool | `true` | install skills at all |
 | `target` | path | `~/.agents/skills` | where SKILL.md dirs are copied |
 | `harness_link` | bool | `true` | also symlink each installed skill into the harness's skill-discovery dir |
-| `harness_skill_dir` | path | per-harness default | where the harness discovers skills (claude-code: `~/.claude/skills`) |
+| `harness_skill_dir` | path | per-harness default | where the harness discovers skills (claude-code: `~/.claude/skills`; opencode: `~/.config/opencode/skill`). An explicit value forces a directory link even for an instruction-file harness |
 | `universal.all` | bool | `true` | enable all universal skills (opt-out) |
 | `universal.disable` / `universal.enable` | list[str] | `[]` | deltas on `all` |
 | `by_type.enable` | list[str] | the detected project type | which `by-type/<kind>` bundles to install whole |
@@ -142,12 +142,26 @@ auto-pulled.
 
 ### Harness skill discovery (why `harness_link`)
 
-The agent harness lists/loads Skill-tool skills from its **own** dir, not from `target`.
-For **claude-code** that is `~/.claude/skills` (its userSettings skill dir; symlinks there
-resolve to the real skill). A skill copied into `~/.agents/skills` (the default `target`) is
-therefore invisible to the harness until it is also present in the discovery dir. With
-`harness_link: true` (the default), `rig apply` maintains an idempotent symlink
-`<harness_skill_dir>/<skill> → <target>/<skill>` for every enabled skill:
+The agent harness lists/loads Skill-tool skills from its **own** location, not from `target`,
+and harnesses split into two families by *how* they discover skills:
+
+- **skills-directory harnesses** enumerate a directory of skill folders. rig makes an
+  installed skill discoverable by symlinking `<skill_dir>/<skill> → <target>/<skill>`:
+  - **claude-code** → `~/.claude/skills`
+  - **opencode** → `~/.config/opencode/skill` (XDG-aware: honors `$XDG_CONFIG_HOME`)
+- **instruction-file harnesses** have **no** per-skill directory; their guidance comes from a
+  single global instruction file that the [`agents_md`](#agents_md) area maintains, not from a
+  symlink. rig links **nothing** for these (it never invents a directory) and `rig status`
+  reports the kind as *N/A — uses `<file>`* so the empty link area is explained, not silent:
+  - **codex** → `~/.codex/AGENTS.md`
+  - **gemini** → `~/.gemini/GEMINI.md`
+  - **pi** → `~/.config/pi/AGENTS.md`
+  - **commandcode** → `~/.commandcode/AGENTS.md`
+
+A skill copied into `~/.agents/skills` (the default `target`) is invisible to a skills-dir
+harness until it is also present in the discovery dir. With `harness_link: true` (the
+default), `rig apply` maintains an idempotent symlink for every enabled skill on a skills-dir
+harness:
 
 - an existing **correct** symlink is a no-op;
 - a symlink to the **wrong** destination is re-pointed;
@@ -157,7 +171,9 @@ therefore invisible to the harness until it is also present in the discovery dir
 
 The discovery dir is keyed by the harness `kind` (defaulting to claude-code, or following
 `harness.kind` when a `harness:` block pins one). Set `harness_link: false` to opt out, or
-`harness_skill_dir` to point at a non-default location.
+`harness_skill_dir` to point at a non-default location — an explicit `harness_skill_dir`
+forces a directory link **even for an instruction-file harness** (you pointed at a real dir
+on purpose).
 
 The harness symlink is the **one action that does not consult `on_conflict`**: a wrong
 symlink is always re-pointed (a symlink carries no user data to back up), and a real dir is
@@ -284,8 +300,8 @@ the same apply and catch the dangerous tool calls before the side effect.
 ```yaml
 harness:
   enabled: true
-  kind: claude-code            # claude-code (implemented) | opencode (documented, reserved)
-  auto_mode: true              # true → auto-accept tool calls; false → interactive prompts
+  kind: claude-code            # skills-dir: claude-code | opencode · instruction-file: codex | gemini | pi | commandcode
+  auto_mode: true              # true → auto-accept tool calls; false → interactive prompts (claude-code write only)
   # mode: bypassPermissions    # optional: pin the exact mode value (overrides the auto_mode map)
   # settings_path: .claude/settings.json   # where to write (repo-local default; committed)
   hook_bridge:                 # wire the agents-hooks/v1 → CC dispatcher (default ON)
@@ -296,7 +312,7 @@ harness:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the harness setting (set `false` to leave the harness config untouched) |
-| `kind` | `claude-code` | `claude-code` | which harness to write. `opencode` is documented-but-reserved → fails closed until implemented |
+| `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `opencode`) get per-skill symlinks; instruction-file (`codex`, `gemini`, `pi`, `commandcode`) get their skill discovery via `AGENTS.md`/`GEMINI.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
 | `settings_path` | path | `.claude/settings.json` | the settings file to merge into (repo-relative default keeps it committed/reproducible) |
@@ -311,12 +327,15 @@ same value is a no-op) and **backup-noted** (a differing prior value is backed u
 `defaults.on_conflict` before converging). `rig status` reports drift if the on-disk value
 no longer matches the config.
 
-**opencode equivalent (documented, not yet written by rig).** opencode expresses the same
-intent through a `permission` block in its `opencode.json` — e.g.
-`"permission": { "edit": "allow", "bash": "allow" }` for auto-accept, vs `"ask"` for
-interactive. A config with `kind: opencode` is rejected with a clear "not implemented yet"
-message rather than silently doing nothing, so you are never misled into thinking rig wrote
-a setting it didn't.
+**Auto-mode write is claude-code-only (for now).** `kind: opencode` (and `codex`/`gemini`/
+`pi`/`commandcode`) are now **accepted** — rig provisions their **skill discovery** (see
+[Harness skill discovery](#harness-skill-discovery-why-harness_link)). But the auto/permission-
+**mode** write is still implemented only for `claude-code`. If you set `auto_mode`/`mode` on a
+kind without a mode-writer yet, rig **skips that write and says so** in a plan note (its skills
+are still provisioned) rather than silently doing nothing — set the mode in the harness's own
+config for now. opencode expresses the same intent through a `permission` block in its
+`opencode.json` (`"permission": { "edit": "allow", "bash": "allow" }` for auto-accept, vs
+`"ask"` for interactive); wiring that write is tracked separately.
 
 **The hook bridge (`hook_bridge`).** Claude Code only runs hooks declared in
 `settings.json` (`PreToolUse`/`Stop`) — it never reads the `~/.claude/hooks/*.json`

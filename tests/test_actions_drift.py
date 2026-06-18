@@ -580,6 +580,168 @@ def test_skill_harness_link_no_self_link_when_target_is_harness_dir(fake_agent_t
     assert not [a for a in plan.actions if a.kind == "link_skill_harness"]
 
 
+# ── per-harness skill/instruction discovery (rig-cli#9) ─────────────────────────────
+def _harness_skill_cfg(repo: Path, source: Path, kind: str) -> LoadedConfig:
+    """A config that pins ``harness.kind`` and lets the PER-HARNESS default discovery dir resolve.
+
+    No ``harness_skill_dir`` override: the skill-link dir (or the lack of one, for an
+    instruction-file harness) comes purely from the harness kind — exactly what these tests
+    exercise. HOME must be isolated by the caller (the default dirs are HOME-relative).
+    """
+    return LoadedConfig(
+        data={
+            "agent_tools_source": str(source),
+            "defaults": {"skills_target": str(repo / "skills-out"), "on_conflict": "backup"},
+            "skills": {"universal": {"enable": ["naming"], "all": False}, "by_type": {}},
+            "harness": {"kind": kind},
+            "agent_hooks": {"enabled": False}, "ci": {"enabled": False}, "mcp": {"enabled": False},
+            "git_hooks": {"dispatcher": {"enabled": False}},
+            # default-on areas that would otherwise try to reach HOME / a github remote — off, to
+            # keep these unit tests hermetic and focused on the skill-discovery surface.
+            "agents_md": {"enabled": False}, "github": {"ruleset": {"enabled": False},
+            "merge": {"enabled": False}, "ghas": {"enabled": False}, "actions": {"enabled": False},
+            "browser": {"enabled": False}}, "tg_ctl": {"enabled": False},
+            "gitignore": {"enabled": False}, "ship_delegator": {"enabled": False},
+            "permissions": {"enabled": False},
+        },
+        repo_root=repo,
+    )
+
+
+@pytest.mark.parametrize(
+    "kind, rel_dir",
+    [("claude-code", ".claude/skills"), ("opencode", ".config/opencode/skill")],
+)
+def test_skills_dir_harness_links_into_its_own_dir(fake_agent_tools, tmp_path, monkeypatch, kind, rel_dir):
+    """A skills-DIRECTORY harness (claude-code, opencode) gets each skill symlinked into ITS dir."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_harness_skill_cfg(repo, fake_agent_tools, kind), cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    link = home / rel_dir / "naming"
+    assert link.is_symlink(), f"{kind}: skill not symlinked into {rel_dir}"
+    assert link.resolve() == (repo / "skills-out" / "naming").resolve()
+    assert (link / "SKILL.md").is_file()
+
+
+@pytest.mark.parametrize("kind", ["claude-code", "opencode"])
+def test_skills_dir_harness_link_idempotent_and_drift(fake_agent_tools, tmp_path, monkeypatch, kind):
+    """A skills-dir harness link is idempotent (re-apply = skipped) and drift-free once synced."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_harness_skill_cfg(repo, fake_agent_tools, kind), cat, project_type="unknown")
+    # before apply: the missing harness link is reported as config→disk drift
+    pre = detect(plan)
+    assert [d for d in pre.items if "harness link" in d.item], f"{kind}: missing link not flagged"
+    run_plan(plan)
+    # after apply: no harness-link drift remains
+    post = detect(plan)
+    assert not [d for d in post.items if "harness link" in d.item], f"{kind}: drift after apply"
+    # re-apply is a pure no-op for the link
+    second = run_plan(plan)
+    links = [r for r in second.results if r.action.kind == "link_skill_harness"]
+    assert links and all(r.status == "skipped" for r in links), [r.detail for r in links]
+
+
+@pytest.mark.parametrize(
+    "kind, instr_marker",
+    [("codex", "AGENTS.md"), ("gemini", "GEMINI.md"), ("pi", "AGENTS.md"), ("commandcode", "AGENTS.md")],
+)
+def test_instruction_file_harness_emits_no_link_but_a_note(fake_agent_tools, tmp_path, monkeypatch, kind, instr_marker):
+    """An INSTRUCTION-FILE harness (codex/gemini/pi/commandcode) links no skill but records WHY.
+
+    No skills dir exists for these kinds, so rig emits zero ``link_skill_harness`` actions (it never
+    guesses a dir). The skill is still COPIED to skills_target; a plan note explains the kind reads a
+    global AGENTS.md/GEMINI.md instead — so ``rig status`` isn't a silent empty area.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_harness_skill_cfg(repo, fake_agent_tools, kind), cat, project_type="unknown")
+    # no harness symlink action for an instruction-file harness
+    assert not [a for a in plan.actions if a.kind == "link_skill_harness"], f"{kind}: unexpected link"
+    # the skill is still installed (copy_skill) — it reaches the harness via the instruction file
+    assert [a for a in plan.actions if a.kind == "copy_skill"], f"{kind}: skill not even copied"
+    # a note names the instruction file (so the empty link area is explained, not silent)
+    notes = " ".join(plan.notes)
+    assert kind in notes and instr_marker in notes, f"{kind}: no explanatory note ({plan.notes})"
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+
+
+def test_instruction_file_harness_with_explicit_dir_does_link(fake_agent_tools, tmp_path):
+    """An explicit ``harness_skill_dir`` overrides the no-link default even for codex (user opt-in)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    harness = repo / "codex-skills"
+    cfg = _harness_skill_cfg(repo, fake_agent_tools, "codex")
+    cfg.data["skills"]["harness_skill_dir"] = str(harness)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(cfg, cat, project_type="unknown")
+    # the explicit dir forces a real link (and suppresses the instruction-file note)
+    assert [a for a in plan.actions if a.kind == "link_skill_harness"], "explicit dir did not link"
+    assert not any("instruction file" in n for n in plan.notes), plan.notes
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert (harness / "naming").resolve() == (repo / "skills-out" / "naming").resolve()
+
+
+@pytest.mark.parametrize("kind", ["opencode", "codex", "gemini", "pi", "commandcode"])
+def test_auto_mode_on_non_claude_kind_skips_write_with_note(fake_agent_tools, tmp_path, kind):
+    """A kind with no auto/permission-MODE writer self-skips the write — but says so, not silently.
+
+    The schema now accepts these kinds (for skill provisioning); the auto-mode WRITE is
+    claude-code-only. Setting ``auto_mode`` on such a kind must NOT emit an ``apply_harness``
+    action AND must leave a note, so the request is never a silent no-op (the failure mode this
+    PR set out to remove).
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _harness_skill_cfg(repo, fake_agent_tools, kind)
+    cfg.data["harness"]["auto_mode"] = True
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(cfg, cat, project_type="unknown")
+    assert not [a for a in plan.actions if a.kind == "apply_harness"], f"{kind}: unexpected write"
+    assert any("auto-mode write skipped" in n and kind in n for n in plan.notes), plan.notes
+
+
+@pytest.mark.parametrize("kind", ["opencode", "codex"])
+def test_explicit_hook_bridge_on_non_claude_kind_notes_skip(fake_agent_tools, tmp_path, kind):
+    """Explicitly enabling hook_bridge on a non-claude kind is reported skipped, not silently dropped."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _harness_skill_cfg(repo, fake_agent_tools, kind)
+    cfg.data["harness"]["hook_bridge"] = {"enabled": True}
+    cfg.data["agent_hooks"] = {"all": True}  # bridge is only relevant with hooks present
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(cfg, cat, project_type="unknown")
+    assert not [a for a in plan.actions if a.kind == "register_hook_bridge"], f"{kind}: unexpected bridge"
+    assert any("hook_bridge: skipped" in n and kind in n for n in plan.notes), plan.notes
+
+
+def test_no_skill_discovery_note_when_skills_disabled(fake_agent_tools, tmp_path):
+    """With skills.enabled: false, an instruction-file harness gets NO discovery note (nothing installed)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _harness_skill_cfg(repo, fake_agent_tools, "codex")
+    cfg.data["skills"] = {"enabled": False}
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(cfg, cat, project_type="unknown")
+    assert not any("instruction file" in n for n in plan.notes), plan.notes
+    assert not [a for a in plan.actions if a.category == "skills"], "no skill actions when disabled"
+
+
 def test_skill_harness_link_drift_missing_then_synced(fake_agent_tools, tmp_path):
     """Drift: a missing harness link is config→disk drift; after apply it is in sync."""
     repo = tmp_path / "repo"
