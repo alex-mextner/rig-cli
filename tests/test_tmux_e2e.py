@@ -613,3 +613,132 @@ def test_teardown_unlinks_the_private_socket_file():
     finally:
         # belt-and-suspenders if an assert fired mid-way — reuse the production teardown.
         _teardown_tmux_server(real_tmux, label, env)
+
+
+# ── migrated-conf parse validity (the legacy-init neutralization fix, 2026-06-18) ───────────
+# Gated `@_requires_tmux` (tmux-present ONLY, no network, no opt-in): it clones nothing and
+# fabricates everything in a throwaway HOME, so it runs in default hermetic CI and guards the
+# neutralization fix on every PR — a future change that produces a syntactically broken migrated
+# ~/.tmux.conf (e.g. a mangled `# rig-migrated:` comment, an unbalanced if-shell brace) fails
+# LOUDLY here instead of only on a live machine.
+@_requires_tmux
+def test_migrated_conf_with_neutralized_legacy_init_parses(tmux_env, monkeypatch):
+    """A hand-written conf carrying the FULL old tpm/resurrect/continuum init + personal prefs is
+    migrated (import mode) by the REAL runner, then loaded by a REAL tmux on a private socket:
+    `tmux -L <iso> -f <migrated ~/.tmux.conf> new-session -d` must exit 0 (the neutralized lines
+    are valid comments, the surviving prefs + source-file parse cleanly).
+
+    @continuum-restore is forced OFF in the generated config (continuum.restore=False) so even if
+    the (absent) continuum plugin's run-shell were reachable, NOTHING restores into the throwaway
+    server. login_shell + boot are off to keep the load self-contained. Teardown kills the server
+    AND unlinks the socket (the fixture's `finally`)."""
+    home, socket, run = tmux_env
+    real_tmux = shutil.which("tmux")
+    assert real_tmux, "tmux must be on PATH (guarded by @_requires_tmux)"
+
+    conf = home / ".tmux.conf"
+    conf.write_text(
+        "set -g mouse on\n"
+        "set -g history-limit 100000\n"
+        "set -g @plugin 'tmux-plugins/tmux-sensible'\n"   # third-party — survives, but no plugin dir
+        "set -g @plugin 'tmux-plugins/tpm'\n"
+        "set -g @plugin 'tmux-plugins/tmux-resurrect'\n"
+        "set -g @plugin 'tmux-plugins/tmux-continuum'\n"
+        "set -g @resurrect-processes 'ssh psql ~rails'\n"
+        "set -g @continuum-restore 'on'\n"
+        "set -g @continuum-boot 'on'\n"
+        "run-shell ~/.tmux/plugins/tmux-resurrect/resurrect.tmux\n"
+        "run-shell ~/.tmux/plugins/tmux-continuum/continuum.tmux\n"
+        "if-shell '[ -n \"$MOSHI_CLIENT\" ]' { set -g status-right '' }\n"
+        # a rig-owned option a user GUARDED inside a NESTED non-Moshi conditional — left LIVE by
+        # migration (under-reach); the resulting `{ { … } }` must still PARSE. (Proves the
+        # structural brace-skip never leaves a dangling/empty brace that breaks the load, including
+        # nested braces where a boolean flag would have re-exposed the outer block — review.)
+        "if-shell '[ -n \"$SOME_FLAG\" ]' {\n"
+        "  if-shell '[ -n \"$OTHER\" ]' {\n"
+        "    set -g @continuum-save-interval '7'\n"
+        "  }\n"
+        "  set -g @resurrect-strategy-vim 'session'\n"
+        "}\n"
+        "run '~/.tmux/plugins/tpm/tpm'\n",
+        encoding="utf-8",
+    )
+
+    # migrate via the REAL runner (no live activation: dry-run + boot/login_shell off). With
+    # continuum.restore off and login_shell off, the generated rig.tmux.conf neither restores nor
+    # bakes a default-command, so loading it is side-effect-free in the throwaway server.
+    monkeypatch.setenv("RIG_TMUX_DRY_RUN", "1")
+    action = _action(
+        home,
+        boot={"enabled": False},
+        login_shell={"enabled": False},
+        continuum={"restore": False},
+        anti_sprawl={"enabled": False},
+    )
+    runner._do_provision_tmux(action, "backup")
+
+    migrated = conf.read_text()
+    # sanity: the legacy continuum init is neutralized (commented), the pref survives live.
+    assert "# rig-migrated (now in rig.tmux.conf): run-shell ~/.tmux/plugins/tmux-continuum" in migrated
+    assert any(
+        ln.strip() == "set -g mouse on" for ln in migrated.splitlines()
+    ), "personal pref must survive migration"
+
+    # load the migrated user conf in a REAL tmux on the private socket — must parse with exit 0.
+    res = run([
+        "tmux", "-L", socket, "-f", str(conf),
+        "new-session", "-d", "-s", "parsecheck", "tail -f /dev/null",
+    ])
+    assert res.returncode == 0, (
+        f"migrated ~/.tmux.conf failed to parse (rc={res.returncode}):\n"
+        f"STDERR:\n{res.stderr}\nCONF:\n{migrated}"
+    )
+    # the server came up with the session — a parse abort would have left no server.
+    listed = run(["tmux", "-L", socket, "list-sessions"])
+    assert "parsecheck" in listed.stdout, listed.stdout + listed.stderr
+
+
+@_requires_tmux
+def test_comment_only_brace_body_after_moshi_neutralize_parses(tmux_env):
+    """A Moshi wipe block nested inside an OUTER user conditional: migration comments the inner
+    Moshi block WHOLE, leaving the outer `{ … }` around a COMMENT-ONLY body. tmux must still parse
+    `{ # … }` — proven against a REAL tmux on a private socket, not only on a live machine. This is
+    the one structural shape the unit suite can't fully vouch for (it can't run the tmux parser)."""
+    home, socket, run = tmux_env
+    real_tmux = shutil.which("tmux")
+    assert real_tmux, "tmux must be on PATH (guarded by @_requires_tmux)"
+
+    conf = home / ".tmux.conf"
+    raw = (
+        "set -g mouse on\n"
+        "if-shell '[ -n \"$OUTER\" ]' {\n"
+        "  if-shell '[ -n \"$MOSHI_CLIENT\" ]' {\n"
+        "    set -g status-right ''\n"
+        "  }\n"
+        "}\n"
+    )
+    conf.write_text(raw, encoding="utf-8")
+    # neutralize via the pure helper (the same one apply uses), then load the RESULT in tmux.
+    migrated = tmod.neutralize_inline_rig_lines(raw)
+    conf.write_text(migrated, encoding="utf-8")
+    # sanity: the inner Moshi block (incl. its braces) is commented; the OUTER braces stay live →
+    # a comment-only body inside `{ … }`.
+    lines = migrated.splitlines()
+    assert any(ln.strip() == "if-shell '[ -n \"$OUTER\" ]' {" for ln in lines), "outer brace live"
+    assert not any(
+        "status-right ''" in ln and not ln.lstrip().startswith("#") for ln in lines
+    ), "the inner Moshi wipe must be commented"
+    assert any(
+        ln.lstrip().startswith(tmod.NEUTRALIZE_PREFIX) and "status-right ''" in ln for ln in lines
+    ), "the wipe survives as a rig-migrated comment inside the live outer braces"
+
+    res = run([
+        "tmux", "-L", socket, "-f", str(conf),
+        "new-session", "-d", "-s", "braceparse", "tail -f /dev/null",
+    ])
+    assert res.returncode == 0, (
+        f"comment-only-brace-body conf failed to parse (rc={res.returncode}):\n"
+        f"STDERR:\n{res.stderr}\nCONF:\n{migrated}"
+    )
+    listed = run(["tmux", "-L", socket, "list-sessions"])
+    assert "braceparse" in listed.stdout, listed.stdout + listed.stderr

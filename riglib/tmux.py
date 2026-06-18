@@ -23,16 +23,27 @@ Invariants
   among plugin inits, AFTER resurrect's init AND after the Moshi ``status-right`` tweak.
 - **The Moshi tweak is opt-in** (``tmux.moshi.enabled``) and, when on, is emitted BEFORE
   continuum init so it can never wipe continuum's autosave hook.
-- **rig only ever rewrites ITS OWN region** — the generated ``rig.tmux.conf`` wholesale (import
-  mode) or the text between the sentinel markers (block mode). User-written lines are untouched.
+- **rig writes ITS OWN region, and NEUTRALIZES the rig-owned init it now replaces.** rig owns the
+  generated ``rig.tmux.conf`` wholesale (import mode) or the text between the sentinel markers
+  (block mode). In the user's ``~/.tmux.conf`` it leaves every personal pref and every third-party
+  ``@plugin`` LIVE, but comments out (``# rig-migrated (now in rig.tmux.conf): …``) the rig-OWNED
+  plugin/continuum/resurrect init lines it re-emits itself — the three rig ``@plugin`` decls, all
+  ``@continuum-*`` / ``@resurrect-*`` options, the plugin-init ``run-shell``s, tpm's ``run``, and
+  the Moshi wipe (see :func:`neutralize_inline_rig_lines`). This is what stops the DOUBLE-INIT.
 
-Past bug this fixes
--------------------
-The machine's stale-session-on-reboot bug: a hand-written ``~/.tmux.conf`` ran
-``if-shell '[ -n "$MOSHI_CLIENT" ]' { set -g status-right '' }`` at the END of the file —
-AFTER ``run-shell …/continuum.tmux``. tmux-continuum's autosave timer lives in ``status-right``,
-so the Moshi tweak wiped it → continuum silently stopped saving → a reboot restored a
-weeks-stale session. Generating the region lets rig pin the order and end the bug.
+Past bugs this fixes
+--------------------
+1. The stale-session-on-reboot bug: a hand-written ``~/.tmux.conf`` ran
+   ``if-shell '[ -n "$MOSHI_CLIENT" ]' { set -g status-right '' }`` at the END of the file —
+   AFTER ``run-shell …/continuum.tmux``. tmux-continuum's autosave timer lives in ``status-right``,
+   so the Moshi tweak wiped it → continuum silently stopped saving → a reboot restored a
+   weeks-stale session. Generating the region lets rig pin the order and end the bug.
+2. The DOUBLE-INIT bug (live machine 2026-06-18): migration only APPENDED rig's ``source-file``
+   line and left the user's pre-existing tpm/resurrect/continuum init LIVE above it. That old
+   ``run-shell …/continuum.tmux`` fired continuum-restore BEFORE rig's sourced config set the
+   login-shell ``default-command`` → restored panes spawned non-login (``~/.zprofile`` skipped),
+   and the old ``@continuum-boot 'on'`` / ``@resurrect-processes '…'`` fought rig's clean values.
+   Migration now NEUTRALIZES that rig-owned init so only rig's correctly-ordered tail runs.
 """
 
 from __future__ import annotations
@@ -785,41 +796,77 @@ def splice_managed_block(original: str, body: str) -> str:
     return original + sep + block + "\n"
 
 
-# rig-owned settings whose presence inline means the original ~/.tmux.conf is migratable.
-_INLINE_MARKERS = (
-    "tmux-resurrect",
-    "tmux-continuum",
-    "@resurrect-",
-    "@continuum-",
-    "tmux/plugins/tpm",
-    "MOSHI_CLIENT",
-)
-
 # The marker rig prepends when it neutralizes (comments out) an inline line, so a re-apply
 # recognizes its own work (idempotent) and a human sees what rig disabled and why.
 NEUTRALIZE_PREFIX = "# rig-migrated (now in rig.tmux.conf): "
 
+# The THREE plugins rig owns and re-declares + re-inits in rig.tmux.conf — the `@plugin` SPEC
+# (`<org>/<repo>`) DERIVED from each PLUGINS url, so this can never drift from the canonical repos
+# rig actually clones/inits (one source of truth — a review finding: a hardcoded copy would
+# silently desync if a plugin's url/org moved). An inline `set -g @plugin '<owned>'` is a
+# DUPLICATE of rig's own declaration → neutralized; any OTHER `@plugin` (tmux-sensible, tmux-yank,
+# a third-party) is the USER's and stays LIVE (rig's tpm, run at the END of rig.tmux.conf, loads
+# it). Matched WITH the closing quote (`'<spec>'`) so neither `tmux-plugins/tmux-sensible` NOR a
+# fork `tmux-plugins/tmux-resurrect-fork` is swept by a bare-prefix substring check.
+_RIG_OWNED_PLUGIN_SPECS = tuple(
+    "/".join(url.rstrip("/").split("/")[-2:]) for url, _entry in PLUGINS.values()
+)
+
+# The rig-owned plugin INIT entrypoints, as the `run-shell <path>` / `run '<path>'` directives
+# end (the path under ~/.tmux/plugins/<dir>/<entry>). A hand-written init names one of these as
+# the run COMMAND; we match the command's SUFFIX so `~/…`, `$HOME/…`, and absolute forms all hit,
+# while a path appearing only as a nested ARGUMENT of another command does not (see
+# `_run_command_target`). The `<dir>/<entry>` pairs come from PLUGINS (one source of truth).
+#
+# KNOWN LIMITATION (accepted, matches rig's own model): the suffix is the DEFAULT
+# `~/.tmux/plugins/` location — an init from a custom/XDG plugin dir
+# (`~/.config/tmux/plugins/<dir>/<entry>`) is NOT matched, so that init line stays live. This is
+# consistent: rig CLONES plugins into `~/.tmux/plugins` and its generated `rig.tmux.conf` inits
+# them from that exact path, so rig does not model XDG plugin dirs at all. (The `@plugin` decls
+# and `@continuum-*`/`@resurrect-*` options of such a user ARE still neutralized — they are
+# path-independent.) Pinned by `test_neutralize_known_limitation_xdg_plugin_init_stays_live`.
+_PLUGIN_INIT_ENTRYPOINTS = tuple(
+    f".tmux/plugins/{name}/{entry}" for name, (_url, entry) in PLUGINS.items()
+)
+
+
+def _strip_managed_block(conf_text: str) -> str:
+    """Drop the lines inside rig's managed block (block apply mode — between :data:`BLOCK_BEGIN` /
+    :data:`BLOCK_END`, sentinels included), leaving ONLY the user's own region. That block is
+    rig's GENERATED config (it carries live ``@continuum-*`` / ``run-shell …continuum.tmux`` by
+    design); it is not a migration target, so the backup/migration decision must ignore it."""
+    out, in_block = [], False
+    for line in conf_text.splitlines(keepends=True):
+        s = line.strip()
+        if s == BLOCK_BEGIN:
+            in_block = True
+            continue
+        if s == BLOCK_END:
+            in_block = False
+            continue
+        if not in_block:
+            out.append(line)
+    return "".join(out)
+
 
 def has_inline_rig_settings(conf_text: str) -> bool:
-    """True if a NON-comment line of the hand-written conf names a rig-owned setting to migrate.
+    """True iff migrating ``conf_text`` would actually NEUTRALIZE a live user line — i.e. the
+    user's own region still carries a rig-owned plugin/continuum/resurrect init or the Moshi
+    wipe that :func:`neutralize_inline_rig_lines` comments out.
 
-    Used by the first-apply migration to decide whether to back the original up before wiring
-    the managed region. Scans only live (non-comment) lines so a commented-out mention (e.g.
-    ``# I disabled tmux-resurrect``) does not trigger a spurious backup. A plain user conf with
-    no live rig settings is left alone except for the single import line / managed block.
+    Single source of truth: it is defined AS "neutralization changes the user's region", so the
+    backup gate can never disagree with what neutralization does. This matters for idempotency —
+    a personal pref that merely MENTIONS a rig token but is NOT neutralized (e.g.
+    ``set-option -ga update-environment ' MOSHI_CLIENT'``, which migration deliberately keeps
+    live) must NOT keep reporting "migratable" forever, or a re-apply would back the conf up on
+    EVERY run though nothing changes. rig's own managed block (block mode) is excluded first via
+    :func:`_strip_managed_block` (its live ``@continuum-*`` lines are rig's, not the user's).
+
+    Used by the first-apply migration to decide whether to back the original up before wiring the
+    managed region; a commented-out mention never triggers it (neutralization is a no-op on it).
     """
-    for line in conf_text.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        if any(marker in s for marker in _INLINE_MARKERS):
-            return True
-        # a BARE Moshi `set -g status-right ''` (not wrapped in a MOSHI_CLIENT if-shell, so the
-        # marker scan above misses it) is still something migration will NEUTRALIZE — so it must
-        # trigger the pre-neutralize backup too, or the original is lost (the backup contract).
-        if _is_moshi_status_wipe(line):
-            return True
-    return False
+    user_region = _strip_managed_block(conf_text)
+    return neutralize_inline_rig_lines(user_region) != user_region
 
 
 def _is_moshi_status_wipe(line: str) -> bool:
@@ -832,68 +879,319 @@ def _is_moshi_status_wipe(line: str) -> bool:
     )
 
 
-def neutralize_inline_rig_lines(conf_text: str) -> str:
-    """Neutralize ONLY the inline Moshi ``status-left``/``status-right`` wipe — nothing else.
+# The two tmux verbs that SET a user option (`set`, `set-option`, and the `set-window-option` /
+# `setw` window variants). A rig-owned option is neutralized ONLY when it is the OPTION BEING SET
+# by one of these — never when an `@continuum-…` / `@resurrect-…` token merely appears inside a
+# VALUE (a `status-right '#(… @continuum-save-interval)'`) or a keybinding (`bind r run-shell
+# 'tmux set @continuum-boot on'`). Anchoring to the directive is what keeps those user lines live.
+_SET_VERBS = ("set-option", "set-window-option", "setw", "set")
 
-    The root-cause completion, kept deliberately NARROW (a lesson from a real migration: an
-    over-broad neutralize silently dropped user-tuned options rig does not model, like
-    ``@resurrect-strategy-vim`` / ``@continuum-boot-options``). The ONLY inline line that is
-    actively harmful is the Moshi ``status-right ''`` wipe: if it runs AFTER the user's own
-    continuum init it wipes continuum's autosave hook → the stale-session bug. rig's sourced
-    ``rig.tmux.conf`` re-runs the plugin inits in the correct order LAST (continuum prepends its
-    hook to whatever ``status-right`` is), so leaving the user's other rig-adjacent lines live is
-    harmless — tmux just re-applies them, and rig's correctly-ordered tail wins. So we comment
-    out ONLY the wipe (the ``if-shell '[ -n "$MOSHI_CLIENT" ]' { … }`` block that sets
-    status-left/right, or a bare ``set -g status-right ''``), prefixed with
-    :data:`NEUTRALIZE_PREFIX`; the full original is in a timestamped ``~/.tmux.conf.rig-bak-<UTC>``. Everything else
-    — plugin decls, resurrect/continuum options (modeled or not), the inits — stays LIVE.
-    Idempotent: an already-neutralized line is left as-is.
+
+def _set_option_name(s: str) -> str | None:
+    """If ``s`` is a tmux option-SET directive, return the option name it sets, else ``None``.
+
+    tmux option-set grammar: ``<set-verb> [-flags…] <option-name> [value]``. We take the verb,
+    then the FIRST non-flag token after it as the option name (tmux flags are single-dash, e.g.
+    ``-g`` / ``-ga`` / ``-gq``; a value never begins with a single ``-``). So ``set -g @plugin
+    'x'`` → ``@plugin`` and ``set -ga @continuum-restore 'on'`` → ``@continuum-restore``, while a
+    ``status-right`` whose VALUE contains ``@continuum-…`` returns ``status-right`` (not the
+    embedded token) and a ``bind``/``run-shell`` line returns ``None`` (not a set verb).
+
+    KNOWN LIMITATION (accepted, same class as the documented set-hook/XDG ones): tmux accepts
+    UNAMBIGUOUS command ABBREVIATIONS (``set-o``, ``set-opt``, ``run-s``). We match the full verbs
+    (+ the common ``setw`` alias) by exact equality; an abbreviated verb returns ``None`` → the
+    line stays live. Canonical / generated configs spell verbs in full, so this is a rare hand-edit
+    edge, not the targeted path."""
+    parts = s.split()
+    if len(parts) < 2 or parts[0] not in _SET_VERBS:
+        return None
+    for tok in parts[1:]:
+        if tok.startswith("-") and not tok.startswith("--"):
+            continue  # a single-dash flag (-g/-ga/-gq/…)
+        return tok
+    return None
+
+
+def _set_option_value(s: str) -> str | None:
+    """The VALUE token of a set directive — the token right AFTER the option name (e.g.
+    ``set -g @plugin 'tmux-plugins/tpm'`` → ``'tmux-plugins/tpm'``), or ``None`` if absent.
+    Used only for ``@plugin`` (a single-token spec, quoted or bare); options with multi-word
+    values are matched by NAME, not value, so the simple next-token read is enough here."""
+    parts = s.split()
+    seen_name = False
+    for tok in parts[1:]:
+        if tok.startswith("-") and not tok.startswith("--"):
+            continue  # a single-dash flag
+        if not seen_name:
+            seen_name = True  # this token is the option NAME; the next non-flag is the value
+            continue
+        return tok
+    return None
+
+
+def _is_rig_owned_legacy_line(line: str) -> bool:
+    """True if ``line`` is a rig-OWNED plugin/continuum/resurrect init that rig now re-emits
+    itself in ``rig.tmux.conf`` — so a hand-written copy is a stale DUPLICATE to neutralize.
+
+    The set is exactly what ``render_rig_conf`` regenerates (and only that):
+      - ``set -g @plugin '<tmux-plugins/{tpm,tmux-resurrect,tmux-continuum}>'`` — the three rig
+        plugins, matched on the QUOTED spec (closing quote anchored) so a fork like
+        ``tmux-plugins/tmux-resurrect-fork`` is NOT swept. A THIRD-PARTY ``@plugin``
+        (``tmux-sensible``, ``tmux-yank``, …) is the user's and is NOT matched (rig's tpm loads it).
+      - ``set -g @continuum-*`` / ``set -g @resurrect-*`` — every continuum/resurrect option,
+        but ONLY when it is the option BEING SET by a set/set-option directive (not a token inside
+        a value or keybinding — see :func:`_set_option_name`). rig emits its OWN value for every
+        such option (the generated file is sourced AFTER ~/.tmux.conf), so a surviving inline
+        ``@continuum-restore 'on'`` / ``@resurrect-processes 'ssh … rails …'`` would otherwise win
+        or fight rig's clean values. rig OWNS the whole resurrect/continuum surface, so it
+        neutralizes ALL of them — including options it does not itself re-emit
+        (``@resurrect-strategy-vim``, ``@continuum-boot-options``): they are recoverable from the
+        timestamped ``.rig-bak-<UTC>`` backup, and leaving them live re-introduces the very
+        ordering/duplication this fix removes. (Set ``tmux:`` knobs in ``rig.yaml`` to re-add a
+        value rig models; an unmodeled option you truly need belongs in a SEPARATE file you
+        ``source-file`` yourself — rig never touches another file. A bare re-add inside
+        ``~/.tmux.conf`` is re-neutralized on the next apply, by design — which is also why this
+        function is safe to run on EVERY reconcile, not only the first migration: idempotent.)
+      - the plugin INIT lines: ``run-shell …/tmux-resurrect/resurrect.tmux``,
+        ``run-shell …/tmux-continuum/continuum.tmux`` and tpm's ``run[-shell] '…/tpm/tpm'`` —
+        matched on the run-shell/run COMMAND (its sole argument), NOT a substring, so a command
+        that merely mentions the plugin path as a nested ARGUMENT (``run-shell "tar …
+        …/continuum.tmux"``) is NOT swept (see :func:`_run_command_target`; over-reach is worse
+        than under-reach). These are the ACTIVELY harmful ones — the live machine's double-init bug
+        (2026-06-18): the hand-written ``run-shell …/continuum.tmux`` runs continuum-restore BEFORE rig's
+        appended ``source-file`` sets the login-shell ``default-command``, so restored panes
+        spawn NON-login and ~/.zprofile is skipped. rig re-runs these inits in the pinned order
+        at the END of its sourced file, so the inline copies must go.
+
+    Matched on the STRIPPED text; a comment / an already-neutralized line is handled by the
+    caller (``_comment`` is idempotent). Personal prefs (mouse, history-limit, key bindings,
+    ``update-environment MOSHI_CLIENT``, a real ``status-right`` value even one that PRINTS a
+    continuum option, …) never match here.
+
+    KNOWN LIMITATION (accepted): an init that runs the plugin via an INDIRECTION rig does not
+    model — e.g. ``set-hook -g session-created 'run-shell …/continuum.tmux'`` or a shell function
+    wrapping it — is NOT recognized (the ``run-shell`` is a quoted VALUE, not the directive), so a
+    user with that exotic setup keeps the double-init. The canonical tpm setup this fix targets
+    inits plugins with bare ``run-shell``/``run`` lines, which ARE caught. Pinned live by
+    ``test_neutralize_known_limitation_set_hook_init_stays_live`` so a future widening is deliberate.
     """
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return False
+    opt = _set_option_name(s)
+    if opt is not None:
+        # a set/set-option directive — neutralize only when the OPTION it sets is rig-owned.
+        if opt == "@plugin":
+            # compare the EXACT spec value (quotes stripped) so a fork `…/tmux-resurrect-fork`
+            # is not swept, AND a valid UNQUOTED `set -g @plugin tmux-plugins/tpm` still matches.
+            value = _set_option_value(s)
+            return value is not None and value.strip("'\"") in _RIG_OWNED_PLUGIN_SPECS
+        return opt.startswith("@continuum-") or opt.startswith("@resurrect-")
+    # the plugin INIT lines: `run-shell <plugin>` / `run '<plugin>'`. Match the run-shell/run
+    # COMMAND (its sole argument), NOT a substring — so a backup command that merely MENTIONS the
+    # plugin path as a nested arg (`run-shell "tar czf bak ~/.tmux/plugins/.../continuum.tmux"`)
+    # is NOT swept (over-reach is worse than under-reach: it changes a line the user didn't ask to).
+    target = _run_command_target(s)
+    if target is not None:
+        return any(target.endswith(entry) for entry in _PLUGIN_INIT_ENTRYPOINTS)
+    return False
+
+
+def _run_command_target(s: str) -> str | None:
+    """The COMMAND a ``run-shell``/``run`` directive runs, with surrounding quotes stripped, or
+    ``None`` if ``s`` is not such a directive. A plugin init is ``run-shell <path>`` / ``run
+    '<path>'`` — the path is the WHOLE command. We return that command so the caller can match the
+    plugin entrypoint as the command itself (``…/continuum.tmux``), never as a nested argument of
+    an unrelated command (``run-shell "tar … …/continuum.tmux"``, whose command is ``tar``)."""
+    parts = s.split(None, 1)
+    if not parts or parts[0] not in ("run-shell", "run"):
+        return None
+    if len(parts) == 1:
+        return ""
+    arg = parts[1].strip()
+    # drop a single leading `-b` (background) flag — the canonical plugin init has no flags, but
+    # tolerate `-b` so `run-shell -b <plugin>` still matches. Other flags (`-t <pane>`, `-C`) do
+    # not appear on a plugin init and are not stripped (a line carrying them is not a plugin init).
+    if arg.startswith("-b"):
+        arg = arg[2:].strip()
+    # strip ONE balanced pair of surrounding quotes; a path with no metachars is often unquoted.
+    if len(arg) >= 2 and arg[0] in "'\"" and arg[-1] == arg[0]:
+        arg = arg[1:-1]
+    # the command is the first whitespace-delimited token of the (unquoted) argument; a plugin
+    # init is a bare path with no args, so the token IS the path.
+    return arg.split()[0] if arg.split() else ""
+
+
+def _iter_scoped_lines(conf_text: str):
+    """Yield ``(line, protected)`` for each line, where ``protected`` is True when the line sits
+    in a region neutralization must NOT touch:
+
+    - INSIDE rig's own managed block (block apply mode — between :data:`BLOCK_BEGIN` /
+      :data:`BLOCK_END`, sentinels included): that region is rig's GENERATED config (live
+      ``@plugin`` / ``@continuum-*`` / ``run-shell …continuum.tmux`` by DESIGN); commenting it
+      would corrupt the config rig just wrote.
+    - INSIDE a user ``if-shell '…' { … }`` conditional (brace depth > 0, the opening/closing brace
+      lines included): commenting only an INNER line would leave a dangling/empty brace body (a
+      parse hazard) and break the user's deliberate condition — so a rig-owned line a user GUARDED
+      is left LIVE (under-reach, which the module prefers to over-reach).
+
+    Brace depth is STRUCTURAL — a non-comment line that ENDS with ``{`` opens a level, a line that
+    IS exactly ``}`` closes one (full NESTING, so an inner ``}`` does not prematurely re-expose the
+    outer block — the nested-brace bug a boolean flag had). A decorative ``{`` inside a quoted
+    value (``status-left "…{"``) or a comment never opens a level (it does not END the line as the
+    sole token), and a single-line ``{ … }`` neither ends with ``{`` nor is a bare ``}`` → depth
+    stays 0 (its inner directive is a normal top-level line)."""
+    in_block = False
+    depth = 0
+    for line in conf_text.splitlines(keepends=True):
+        s = line.strip()
+        if s == BLOCK_BEGIN:
+            in_block = True
+            yield line, True
+            continue
+        if s == BLOCK_END:
+            in_block = False
+            yield line, True
+            continue
+        if in_block:
+            yield line, True
+            continue
+        opening = s.endswith("{") and not s.startswith("#")
+        # a closer is a line whose FIRST token is `}` — matches a bare `}`, `} # end moshi`, or
+        # `} set -g x` (a brace plus a trailing directive), so a non-bare close still decrements
+        # depth (else every later rig-owned init would be judged "inside" and silently kept live →
+        # the double-init survives — review). A `}` inside a VALUE (`set -g x "}"`) starts with the
+        # set verb, not `}`, so it never false-closes.
+        closing = s.startswith("}")
+        # the brace LINES themselves are protected too (they bound the conditional).
+        protected = depth > 0 or opening
+        yield line, protected
+        if opening:
+            depth += 1
+        elif closing and depth > 0:
+            depth -= 1
+
+
+def _neutralize_legacy_plugin_lines(conf_text: str) -> str:
+    """Comment out every rig-OWNED plugin/continuum/resurrect init line (see
+    :func:`_is_rig_owned_legacy_line`) in the USER's UNPROTECTED region, idempotently, prefixed
+    with :data:`NEUTRALIZE_PREFIX`. Protected regions (rig's managed block, a user ``{ … }``
+    conditional) are skipped — see :func:`_iter_scoped_lines`.
+
+    A third-party ``@plugin`` and every personal pref are left untouched. Re-running on an
+    already-migrated file is a no-op (``_comment`` skips a line already commented).
+    """
+    out: list[str] = []
+    for line, protected in _iter_scoped_lines(conf_text):
+        out.append(_comment(line) if not protected and _is_rig_owned_legacy_line(line) else line)
+    return "".join(out)
+
+
+def neutralize_inline_rig_lines(conf_text: str) -> str:
+    """Neutralize the rig-OWNED inline lines so the sourced ``rig.tmux.conf`` is authoritative.
+
+    Two passes, both commenting with :data:`NEUTRALIZE_PREFIX` (idempotent, backed by the
+    timestamped ``~/.tmux.conf.rig-bak-<UTC>``):
+
+    1. :func:`_neutralize_legacy_plugin_lines` — the three rig-owned ``@plugin`` decls, every
+       ``@continuum-*`` / ``@resurrect-*`` option, and the plugin INIT lines
+       (``run-shell …/resurrect.tmux`` / ``…/continuum.tmux`` / tpm's ``run '…/tpm/tpm'``). These
+       are the DOUBLE-INIT the live machine hit (2026-06-18): the hand-written ``run-shell
+       …/continuum.tmux`` fires continuum-restore BEFORE rig's appended ``source-file`` sets the
+       login-shell ``default-command`` → restored panes spawn non-login; the old
+       ``@continuum-boot 'on'`` / ``@resurrect-processes '…'`` fight rig's clean values. rig
+       re-runs these inits in the pinned order at the END of its sourced file, so the inline
+       copies must be neutralized.
+    2. the Moshi ``status-left``/``status-right`` wipe (the original root-cause line): if it runs
+       AFTER the user's own continuum init it wipes continuum's autosave hook → the stale-session
+       bug. The ``if-shell '[ -n "$MOSHI_CLIENT" ]' { … }`` block (multi- or single-line) is
+       commented WHOLE (braces included); a BARE ``set -g status-right ''`` is commented only at
+       top level (a bare wipe a user guarded inside their OWN ``{ … }`` is left live).
+
+    PRESERVED (never matched): a THIRD-PARTY ``@plugin`` (``tmux-sensible``, ``tmux-yank`` — rig's
+    tpm loads it), ``update-environment MOSHI_CLIENT`` (a pref, not the wipe), a real
+    ``status-right`` value, and every personal pref (mouse, history-limit, key bindings, …). Both
+    passes skip rig's own managed block (block apply mode) AND a user ``{ … }`` conditional (full
+    structural nesting), so they never touch rig's generated config nor leave a dangling brace —
+    correctness does NOT rely on the splice overwriting the interior.
+    """
+    return _neutralize_moshi_wipe(_neutralize_legacy_plugin_lines(conf_text))
+
+
+def _neutralize_moshi_wipe(conf_text: str) -> str:
+    """Comment out the Moshi ``status-left``/``status-right`` wipe (the original root-cause line):
+    the ``if-shell '[ -n "$MOSHI_CLIENT" ]' { … }`` block (multi- or single-line) or a bare
+    ``set -g status-right ''``.
+
+    The Moshi if-shell BLOCK is commented WHOLE (its own braces included → never a dangling brace),
+    and its inner braces are consumed by the block scan so they don't disturb the surrounding
+    structural depth. A BARE wipe is commented only OUTSIDE rig's managed block AND outside a user
+    ``{ … }`` conditional — a bare ``status-right ''`` a user GUARDED in their own non-Moshi
+    condition is left LIVE (commenting just it would dangle the brace), mirroring
+    :func:`_neutralize_legacy_plugin_lines`."""
     lines = conf_text.splitlines(keepends=True)
     out: list[str] = []
-    i = 0
-    n = len(lines)
+    i, n = 0, len(lines)
+    in_block = False
+    depth = 0  # structural depth of USER `{ … }` conditionals (NOT rig's managed block)
     while i < n:
         raw = lines[i]
-        stripped = raw.strip()
-        # a Moshi if-shell block guarding $MOSHI_CLIENT that sets status-left/right: neutralize
-        # the whole brace block (the inline wipe is the bug). Multi-line `{ … }` only; a
-        # single-line variant is caught by the bare-wipe rule below.
-        if (
-            stripped.startswith("if-shell")
-            and "MOSHI_CLIENT" in stripped
-            and stripped.endswith("{")
-        ):
-            block = [raw]
-            j = i + 1
-            depth = 1
-            while j < n and depth > 0:
-                block.append(lines[j])
-                depth += lines[j].count("{") - lines[j].count("}")
-                j += 1
-            joined = "".join(block)
-            if "status-right" in joined or "status-left" in joined:
-                out.extend(_comment(b) for b in block)
-                i = j
-                continue
-            out.extend(block)
-            i = j
-            continue
-        # a single-line Moshi if-shell whose inline body sets status-left/right (e.g.
-        # `if-shell '[ -n "$MOSHI_CLIENT" ]' { set -g status-right '' }`).
-        if (
-            stripped.startswith("if-shell")
-            and "MOSHI_CLIENT" in stripped
-            and ("status-right" in stripped or "status-left" in stripped)
-        ):
-            out.append(_comment(raw))
+        s = raw.strip()
+        if s == BLOCK_BEGIN:
+            in_block = True
+            out.append(raw)
             i += 1
             continue
-        # a bare single-line Moshi status wipe.
-        if _is_moshi_status_wipe(raw):
-            out.append(_comment(raw))
-        else:
+        if s == BLOCK_END:
+            in_block = False
             out.append(raw)
+            i += 1
+            continue
+        if in_block:
+            out.append(raw)
+            i += 1
+            continue
+        # a Moshi if-shell brace block guarding $MOSHI_CLIENT that sets status-left/right —
+        # neutralize the WHOLE block (the inline wipe is the bug). Multi-line `{ … }`; the scan
+        # consumes to the matching close. Depth is STRUCTURAL (a line ending with `{` opens, a line
+        # whose first token is `}` closes), the SAME rule as _iter_scoped_lines — so a literal
+        # `{`/`}` inside a value (`status-left "x{"`) never over-consumes to EOF.
+        if s.startswith("if-shell") and "MOSHI_CLIENT" in s and s.endswith("{"):
+            block, j, bdepth = [raw], i + 1, 1
+            while j < n and bdepth > 0:
+                inner = lines[j].strip()
+                block.append(lines[j])
+                if inner.endswith("{") and not inner.startswith("#"):
+                    bdepth += 1
+                elif inner.startswith("}"):
+                    bdepth -= 1
+                j += 1
+            joined = "".join(block)
+            wipe = "status-right" in joined or "status-left" in joined
+            if wipe:
+                out.extend(_comment(b) for b in block)
+            else:
+                out.extend(block)
+            i = j
+            continue
+        # a single-line Moshi if-shell whose inline body sets status-left/right (its own `{ … }`
+        # is balanced on the one line, so it never opens a user conditional).
+        single_moshi = (
+            s.startswith("if-shell")
+            and "MOSHI_CLIENT" in s
+            and ("status-right" in s or "status-left" in s)
+        )
+        # a bare wipe is neutralized only at top level (depth 0) — a wipe a user guarded inside
+        # their OWN `{ … }` stays live (no dangling brace). The Moshi single-line case above is
+        # self-contained, so it is safe to comment regardless of depth.
+        bare_wipe = _is_moshi_status_wipe(raw) and depth == 0
+        out.append(_comment(raw) if single_moshi or bare_wipe else raw)
+        # track USER brace depth structurally (same rule as _iter_scoped_lines: a closer is any
+        # line whose first token is `}`, so `} # end` / `} set …` still decrement).
+        if s.endswith("{") and not s.startswith("#"):
+            depth += 1
+        elif s.startswith("}") and depth > 0:
+            depth -= 1
         i += 1
     return "".join(out)
 
