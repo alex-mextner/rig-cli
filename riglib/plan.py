@@ -532,10 +532,15 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     _build_linters(config, plan)
 
     # ── github (repository settings via gh api + agent-browser) ───────────────────
+    # ORDER MATTERS — actions run in this build order (runner.run_plan iterates plan.actions
+    # in sequence, no sort). Enable GitHub Actions BEFORE GHAS: CodeQL default-setup
+    # (provisioned by _build_github_ghas) requires Actions to be enabled — GitHub rejects
+    # default-setup with "Actions must be enabled for default setup" otherwise. Building
+    # actions first makes a brand-new repo converge in ONE apply instead of needing a second.
     _build_github_ruleset(config, catalog, plan)
     _build_github_merge(config, plan)
-    _build_github_ghas(config, plan)
     _build_github_actions(config, plan)
+    _build_github_ghas(config, plan)
     _build_github_browser(config, plan)
 
     # ── tmux (rig-managed tmux configuration) ──────────────────────────────────────

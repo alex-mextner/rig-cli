@@ -92,6 +92,25 @@ def test_plan_codeql_variant_selected(fake_agent_tools, tmp_path):
     assert codeql.options["variant"] == "selfgate"
 
 
+def test_plan_github_actions_provisioned_before_ghas(fake_agent_tools, tmp_path):
+    """Enable-Actions must be ordered BEFORE GHAS in plan.actions (runner runs them in sequence).
+
+    CodeQL default-setup (provisioned by the GHAS action) requires GitHub Actions to be enabled,
+    so the actions action must run first or a brand-new repo's first apply hard-fails CodeQL and
+    needs a second apply to converge. This pins the order by ACTION INDEX (what the runner actually
+    executes), so a future re-sort/regroup of the _build_github_* calls that reintroduces the bug
+    fails here instead of only surfacing on a fresh repo. See riglib/plan.py (github build order)."""
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"skills": {"enabled": False}, "github": {"enabled": True}}, tmp_path)
+    plan = build(cfg, cat, project_type="unknown")
+    kinds = [a.kind for a in plan.actions]
+    assert "provision_github_actions" in kinds, "github.actions provisioning not planned"
+    assert "provision_github_ghas" in kinds, "github.ghas provisioning not planned"
+    assert kinds.index("provision_github_actions") < kinds.index("provision_github_ghas"), (
+        "enable-Actions must be planned before GHAS (CodeQL default-setup needs Actions enabled)"
+    )
+
+
 def test_plan_unknown_universal_skill_fails_closed(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
     cfg = _cfg({"skills": {"universal": {"disable": ["shell-timeout"]}}}, tmp_path)  # typo
