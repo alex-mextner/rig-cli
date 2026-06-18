@@ -114,11 +114,15 @@ def build_parser() -> argparse.ArgumentParser:
             "  4    unknown item (config names a catalog item that doesn't exist / was removed)\n"
             "  5    missing target (config references a path/binary that's gone on disk)\n"
             "  6    not a git repository (a repo-scoped command run outside a repo)\n"
+            "  7    repo corrupt (a working checkout's git config is broken, e.g. core.bare=true)\n"
             "  127  missing dependency (a required external tool isn't installed)\n"
             "\n"
-            "  precedence: when `rig status` finds BOTH a missing target and config↔disk drift,\n"
-            "  it prints both but exits 5 (missing-target outranks drift — the dead reference\n"
-            "  fails at runtime, so it's the more urgent class).\n"
+            "  precedence (doctor): `rig doctor` exits 7 (repo corrupt) ahead of any other class —\n"
+            "  a broken .git (e.g. core.bare=true on a working checkout) makes every git-backed\n"
+            "  check unreliable, so it is fixed first.\n"
+            "  precedence (status): when `rig status` finds BOTH a missing target and config↔disk\n"
+            "  drift, it prints both but exits 5 (missing-target outranks drift — the dead\n"
+            "  reference fails at runtime, so it's the more urgent class).\n"
         ),
     )
     p.add_argument("--version", action="version", version=f"rig {__version__}")
@@ -164,6 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
     dp = sub.add_parser("doctor", help="detect + (offer to) install dependencies")
     dp.add_argument("--yes", action="store_true", help="install missing deps non-interactively")
     dp.add_argument("--optional", action="store_true", help="also install optional deps")
+    dp.add_argument(
+        "--fix",
+        action="store_true",
+        help="auto-repair detected repo corruption (e.g. reset a wrong core.bare=true)",
+    )
 
     ep = sub.add_parser("export", help="write a rig.yaml from default/current config")
     ep.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
@@ -579,6 +588,22 @@ def _scan_missing_targets() -> list:
 
     settings = Path(_os.path.expanduser("~/.claude/settings.json"))
     return scan_settings_hooks(settings)
+
+
+def _scan_core_bare() -> list:
+    """Scan the cwd repo + its worktrees for the core.bare corruption class.
+
+    A working checkout with ``core.bare=true`` silently breaks every git op there + ship's
+    main-refresh; this surfaces it as a structured finding with the one-line fix. Returns ``[]``
+    when cwd is not a repo / git is absent (the scanner degrades to nothing, never raises).
+    """
+    from .core_bare import scan_repo
+
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        return []  # cwd was deleted out from under us — honor the "never raises" contract
+    return scan_repo(cwd)
 
 
 def _print_non_git_note() -> None:
@@ -1000,23 +1025,67 @@ def _print_tg_ctl_status(plan, report) -> None:
     print(f"\n  [GLOBAL] tg-ctl inbound daemon: {state}  " + _dim(f"(launchd boot agent, '{tg.boot_label}')"))
 
 
+def _print_dep_statuses(report) -> None:
+    """Print the per-dependency present/absent lines + the install hint for each absent one."""
+    for st in report.statuses:
+        tag = "required" if st.dep.required else "optional"
+        if st.present:
+            print(f"  {_ok('✔')} {st.dep.name:<12} {_dim('(' + tag + ')')}  {st.dep.why}")
+            continue
+        mark = _err("✗") if st.dep.required else _warn("○")
+        print(f"  {mark} {st.dep.name:<12} {_dim('(' + tag + ')')}  {st.dep.why}")
+        if st.install_cmd:
+            print(f"      install: {_dim(' '.join(st.install_cmd))}")
+        else:
+            print(f"      {_dim('install: (no package mapping for this OS — install manually)')}")
+
+
+def _handle_core_bare(do_fix: bool) -> bool:
+    """Report (and, when ``do_fix``, repair) core.bare corruption in the cwd repo + worktrees.
+
+    Returns True iff an UNFIXED corruption remains — the caller folds that into a non-zero exit
+    (the repo-corrupt class takes precedence over a mere missing dependency). A clean scan prints
+    nothing and returns False.
+    """
+    from .core_bare import finding_to_error, fix_core_bare
+
+    findings = _scan_core_bare()
+    if not findings:
+        return False
+    print(_err(_bold(f"\n  ▸ corrupted git config ({len(findings)}) — a working checkout claims core.bare=true:")))
+    unfixed = False
+    for finding in findings:
+        err = finding_to_error(finding)
+        print(f"    {_err('✗')} {err.what}")
+        print(f"      {_dim('why:')} {err.why}")
+        if do_fix and fix_core_bare(finding):
+            print(f"      {_ok('fixed:')} set core.bare=false on {finding.path}")
+            continue
+        # not repaired: show the manual command. Suggest `--fix` only when it was NOT already
+        # tried (a failed --fix would just fail again — don't advise re-running it). The command
+        # writes the LOCAL scope; if `true` is sourced from a worktree/include scope it won't bite,
+        # so always note that possibility rather than imply the one command is guaranteed.
+        if do_fix:
+            hint = f"{err.fix}   (if this doesn't help, `true` comes from a --worktree/[include] scope — clear it there)"
+        else:
+            hint = f"{err.fix}   (or re-run `rig doctor --fix`)"
+        print(f"      {_ok('fix:')} {hint}")
+        unfixed = True
+    return unfixed
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from . import errors
     from .doctor import bootstrap, diagnose
 
     report = diagnose()
     print(_bold(f"rig doctor — {report.os.pretty}") + _dim(f"  (pkg manager: {report.os.package_manager or 'none detected'})"))
     print()
-    for st in report.statuses:
-        tag = "required" if st.dep.required else "optional"
-        if st.present:
-            print(f"  {_ok('✔')} {st.dep.name:<12} {_dim('(' + tag + ')')}  {st.dep.why}")
-        else:
-            mark = _err("✗") if st.dep.required else _warn("○")
-            print(f"  {mark} {st.dep.name:<12} {_dim('(' + tag + ')')}  {st.dep.why}")
-            if st.install_cmd:
-                print(f"      install: {_dim(' '.join(st.install_cmd))}")
-            else:
-                print(f"      {_dim('install: (no package mapping for this OS — install manually)')}")
+    _print_dep_statuses(report)
+
+    # repo corruption: a working checkout with core.bare=true silently breaks every git op +
+    # ship. This is the most severe class — surface it (and --fix it) ahead of any dep shortfall.
+    repo_corrupt = _handle_core_bare(do_fix=args.fix)
 
     # missing-target: proactively flag a dead hook reference in the harness settings.json (the
     # rtk-hook case) so it's caught here, not at runtime as a generic harness error.
@@ -1028,19 +1097,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"      {_ok('fix:')} {f.fix}")
 
     missing_req = report.missing_required
-    if not missing_req and not (args.optional and report.missing_optional) and not dead_targets:
+    only_deps_clean = not missing_req and not (args.optional and report.missing_optional)
+    # repo corruption is the top-precedence failure: a broken .git makes every other git-backed
+    # check unreliable. An UNFIXED corruption is non-zero regardless of the dependency picture.
+    if repo_corrupt:
+        # When --fix was already given but a repair failed, do NOT advise "re-run --fix" — it would
+        # just fail again. The local-write manual command can also be ineffective if `true` comes
+        # from a worktree/include scope (the very case fix_core_bare re-checks), so point at BOTH
+        # the unwritable-config and the other-scope possibilities rather than a single command.
+        if args.fix:
+            print(_err("\n  the core.bare repair above FAILED — config may be unwritable, or `true` comes from a worktree/include scope; check it manually — git is broken there"))
+        else:
+            print(_err("\n  fix the corrupted core.bare above (or re-run `rig doctor --fix`) — git is broken there"))
+        return errors.EXIT_REPO_CORRUPT
+    if only_deps_clean and not dead_targets:
         print(_ok("\n  all required dependencies present"))
         return 0
     # a dead target (but no missing dep) is still a problem worth a non-zero exit.
-    if not missing_req and not (args.optional and report.missing_optional) and dead_targets:
-        from . import errors
-
+    if only_deps_clean and dead_targets:
         print(_warn("\n  a missing target above needs attention (re-run `rig apply` or remove the stale entry)"))
         return errors.EXIT_MISSING_TARGET
 
     if not args.yes:
-        from . import errors
-
         print(_warn("\n  missing dependencies above. Re-run with --yes to install them"))
         print(_dim("  (add --optional to also install optional deps)"))
         # honor the documented exit-code contract: a missing REQUIRED dep is the 127 class
@@ -1054,8 +1132,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, rc in results:
         print(f"    {_ok('✔') if rc == 0 else _err('✗')} {name} (rc={rc})")
     if failed:
-        from . import errors
-
         # an install that left a REQUIRED dep absent is still the missing-dependency class;
         # a failed optional install is advisory (generic non-zero).
         req_names = {st.dep.name for st in report.statuses if st.dep.required and not st.present}

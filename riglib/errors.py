@@ -35,6 +35,7 @@ EXIT_DRIFT = 3  # `rig status` found drift (config and disk disagree)
 EXIT_UNKNOWN_ITEM = 4  # config names a catalog item that doesn't exist (typo / removed slot)
 EXIT_MISSING_TARGET = 5  # config references a path/binary that's gone on disk
 EXIT_NOT_A_REPO = 6  # a repo-scoped command run outside a git repository
+EXIT_REPO_CORRUPT = 7  # a managed checkout's git config is corrupted (e.g. core.bare=true)
 EXIT_MISSING_DEP = 127  # a required external tool/binary isn't installed (shell convention)
 
 
@@ -87,6 +88,13 @@ class NotARepoError(RigError):
     """A repo-scoped command was run outside a git repository. Exit 6."""
 
     exit_code: int = EXIT_NOT_A_REPO
+
+
+@dataclass
+class RepoCorruptError(RigError):
+    """A managed checkout's git config is corrupted (e.g. core.bare=true on a work tree). Exit 7."""
+
+    exit_code: int = EXIT_REPO_CORRUPT
 
 
 @dataclass
@@ -270,4 +278,20 @@ def missing_target_error(
         what=f"missing {what_kind}: {target}",
         why=why,
         fix=regen,
+    )
+
+
+def core_bare_error(*, repo: str, fix_cmd: str) -> RepoCorruptError:
+    """Build the error for a working checkout whose ``core.bare`` is wrongly ``true``.
+
+    ``repo`` is the corrupted checkout's path; ``fix_cmd`` the one-line repair. A non-bare working
+    checkout with ``core.bare=true`` breaks every git op there (status/diff/commit/worktree) and
+    ship's main-refresh — so this is loud and names the exact one-line fix.
+    """
+    return RepoCorruptError(
+        what=f"corrupted git config (core.bare=true) on a working checkout: {repo}",
+        why="this checkout has a working tree but its core.bare is true — every git operation "
+        "here (status/diff/commit/worktree) and ship's main-refresh will fail with "
+        "`fatal: this operation must be run in a work tree`",
+        fix=fix_cmd,
     )
