@@ -21,6 +21,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # tmux is REQUIRED for the hermetic unit suite, not optional: the socket-leak regression and
+      # the DEFECT-5 boot-cleanup test are gated `@_requires_tmux` (tmux-present, NO network), so a
+      # runner WITHOUT tmux silently SKIPS them — the leak that killed the dev's server would then
+      # go unguarded in CI (INCIDENT 2026-06-17 follow-up a). `ubuntu-latest` ships no tmux, so we
+      # install it here. `test_tmux_e2e_gating.py` asserts tmux is on PATH, so a future image that
+      # drops this step fails LOUDLY instead of reverting to a silent skip.
+      - name: Install tmux (the @_requires_tmux unit tests must RUN, not skip)
+        run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Install package + test deps
         run: pip install -e '.[test]' pyyaml
       - name: Unit suite
