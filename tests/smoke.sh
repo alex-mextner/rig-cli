@@ -55,6 +55,96 @@ done
 pass() { printf '  \033[32m✔\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31m✗ %s\033[0m\n' "$1"; exit 1; }
 
+# ── real-catalog full-coverage helpers ───────────────────────────────────────────
+# These exercise the integration seam the synthetic fixtures CAN'T: rig must discover AND
+# dry-run-plan EVERY item in the REAL agent-tools catalog with zero unknown-item/slot errors.
+# The fake-catalog pytest suite only carries a curated handful of slots, so a NEW real slot
+# (this exact class — "unknown ci item: pr-checklist" — has bitten before) or a renamed dir
+# rig can't resolve would pass pytest and only break on a live machine. This catches that drift.
+
+# Write an "everything-on" config so the planner is forced to resolve every catalog item.
+# $1 dest path, $2 agent-tools source. by_type enables every kind found on disk (so every
+# by-type skill is pulled in); the provisioning categories (github/tmux/tg_ctl/models) are off
+# — they touch the network/daemon and aren't part of catalog DISCOVERY, which is all we assert.
+_write_full_coverage_config() {
+  local dest="$1" src="$2" kinds
+  kinds="$(for d in "$src"/skills/by-type/*/; do [[ -d "$d" ]] && basename "$d"; done | paste -sd, -)"
+  cat > "$dest" <<YAML
+version: 1
+agent_tools_source: $src
+skills:
+  universal: { all: true }
+  by_type: { enable: [${kinds}] }
+agent_hooks: { all: true }
+ci: { all: true }
+mcp: { enabled: true }
+git_hooks:
+  dispatcher: { enabled: true }
+github: { ruleset: { enabled: false }, merge: { enabled: false }, ghas: { enabled: false }, actions: { enabled: false }, browser: { enabled: false } }
+tmux: { enabled: false }
+tg_ctl: { enabled: false }
+models: { enabled: false }
+gitignore: { enabled: false }
+agents_md: { enabled: false }
+ship_delegator: { enabled: false }
+permissions: { enabled: false }
+YAML
+}
+
+# Assert every ci/<slot>/ dir present on disk in the real catalog appears in the dry-run plan,
+# so a slot rig's SCANNER silently drops (discovered-on-disk but absent-from-plan) is caught —
+# not just a config naming a slot that doesn't exist. $1 plan output file, $2 agent-tools source.
+# Fails VACUOUS coverage too: if ci/ is gone/empty (a renamed or deleted catalog dir), the loop
+# would otherwise find nothing and pass hollow — exactly the drift this leg must catch loudly.
+_assert_every_ci_slot_planned() {
+  local plan_out="$1" src="$2" slot found=0
+  for d in "$src"/ci/*/; do
+    [[ -d "$d" ]] || continue
+    slot="$(basename "$d")"
+    found=$((found + 1))
+    # FIXED-string match (`-F`), not a regex: a slot name with a regex metachar (`.`/`+`/`*`)
+    # would otherwise match as a PATTERN and could false-pass. Anchor on the action-line BULLET
+    # (`• ci/<slot> `): plan action lines are `  • ci/<slot> → <target>`, and a target PATH that
+    # happens to contain `ci/<slot>` (e.g. `→ …/ci/x/…`) never carries the `• ci/` bullet prefix —
+    # so a slot that dropped as a SOURCE but appears inside another line's target can't false-pass.
+    grep -qF "• ci/$slot " "$plan_out" \
+      || fail "real-catalog coverage: ci slot '$slot' on disk but NOT in the plan (scanner dropped it?)"
+  done
+  [[ "$found" -gt 0 ]] \
+    || fail "real-catalog coverage: NO ci slots found under $src/ci (renamed/removed catalog dir? coverage would be vacuous)"
+}
+
+# Dry-run-plan the whole real catalog and assert: exit 0, no "unknown" item/slot error, nothing
+# written, and every ci slot covered. $1 throwaway HOME, $2 repo dir, $3 agent-tools source.
+_real_catalog_full_coverage() {
+  local cov_home="$1" repo="$2" src="$3"
+  local cfg="$repo/full-coverage.yaml" out rc ci_count
+  # Make the throwaway HOME real (so any HOME-relative read rig does resolves under it, never the
+  # dev's real home) and stamp a git identity on the throwaway repo (so a leg that touches git
+  # can't fail with an unrelated "please tell me who you are"). dry-run writes nothing regardless.
+  mkdir -p "$cov_home"
+  git -C "$repo" config user.email cov@rig.test
+  git -C "$repo" config user.name  rig-coverage
+  _write_full_coverage_config "$cfg" "$src"
+  set +e
+  out="$(HOME="$cov_home" RIG_TMUX_DRY_RUN=1 $RIG apply -C "$repo" --config "$cfg" --dry-run 2>&1)"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 0 ]] || { echo "$out" | tail -8; fail "real-catalog coverage: dry-run exit $rc != 0 (rig can't plan the real catalog)"; }
+  # ERE (`-E`), NOT BRE `\|`: `\|` is a GNU-only extension — BSD grep on macOS (smoke runs there
+  # too) treats it as a literal pipe, so a BRE alternation would silently never match and this
+  # detector — the exact "unknown ci item" guard — would be dead on macOS. The rc!=0 check above
+  # is the primary backstop (rig exits 4 on unknown items); this catches a hypothetical
+  # warn-and-exit-0 regression, so it must actually fire on every platform.
+  echo "$out" | grep -Eqi "unknown .*item|unknown .*slot|unknown ci" \
+    && fail "real-catalog coverage: an 'unknown item/slot' error against the REAL catalog"
+  echo "$out" | grep -q "dry-run: nothing written" || fail "real-catalog coverage: dry-run claims it wrote something"
+  printf '%s\n' "$out" > "$repo/full-coverage.plan"
+  _assert_every_ci_slot_planned "$repo/full-coverage.plan" "$src"
+  ci_count="$(grep -c '• ci/' "$repo/full-coverage.plan" || true)"
+  pass "rig dry-run-plans the FULL real catalog (zero unknown items; $ci_count ci slots covered)"
+}
+
 echo "rig smoke — $ROOT"
 
 # ── 1. --help / --version ─────────────────────────────────────────────────────
@@ -275,6 +365,14 @@ YAML
   echo "$nongit_out" | grep -qi "should be committed" && fail "non-git: still nags 'should be committed'"
   echo "$nongit_out" | grep -qi "not a git repository" || fail "non-git: does not say 'not a git repository'"
   pass "rig status: non-git dir → no 'should be committed', repo layer N/A"
+
+  # ── real-catalog FULL coverage: discover + dry-run-plan EVERY catalog item ────────
+  # The regression class the synthetic fixtures miss: a new slot / renamed dir rig can't
+  # resolve. Runs in BOTH modes (incl. --fast) — it's a dry-run (writes nothing), so it's the
+  # cheap real-catalog guard the pre-commit gate is for. Uses fresh HOME/repo so the earlier
+  # apply legs' artifacts can't perturb the plan; it asserts only DISCOVERY + planning.
+  COVREPO="$TMP/cov-repo"; mkdir -p "$COVREPO"; ( cd "$COVREPO" && git init -q )
+  _real_catalog_full_coverage "$TMP/cov-home" "$COVREPO" "$SRC"
 fi
 
 # ── 3b. tg-ctl inbound-daemon LaunchAgent provisioning (macOS, dry-run isolated) ──

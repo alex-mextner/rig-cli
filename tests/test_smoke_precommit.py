@@ -551,3 +551,37 @@ def test_real_smoke_fast_exits_zero_and_skips_heavy_legs():
     assert "rig status: in sync" not in out, "fast mode ran the post-apply in-sync leg"
     assert "running pytest" not in out, "fast mode ran the full pytest leg"
     assert "smoke OK (--fast)" in out
+
+
+# ── the real-catalog FULL-coverage leg (OPT-IN e2e — needs a real agent-tools checkout) ──
+# rig must discover AND dry-run-plan EVERY item in the REAL agent-tools catalog with zero
+# unknown-item/slot errors. The hermetic `pytest -q` uses a SYNTHETIC fixture (a curated handful
+# of slots), so a NEW real slot / renamed dir rig can't resolve is unit-GREEN but live-BROKEN —
+# this exact class ("unknown ci item: pr-checklist") has bitten before. CI's `real-catalog-smoke`
+# job supplies the checkout; locally this runs only when RIG_SMOKE_FAST_E2E=1 AND a checkout is
+# reachable, and SKIPS LOUDLY otherwise (so a contributor without one is never blocked). The
+# leg is a dry-run (plan only — nothing on the machine is mutated).
+@pytest.mark.skipif(
+    os.environ.get("RIG_SMOKE_FAST_E2E") != "1",
+    reason="opt-in real-catalog smoke e2e (set RIG_SMOKE_FAST_E2E=1)",
+)
+def test_real_catalog_full_coverage_plans_every_item():
+    src = _agent_tools_source()
+    if src is None:
+        pytest.skip("no agent-tools checkout (set RIG_AGENT_TOOLS_SOURCE)")
+    env = dict(os.environ, RIG_AGENT_TOOLS_SOURCE=src)
+    # --fast still runs the dry-run coverage leg (it writes nothing), so use it to keep the test
+    # fast — the heavy apply/pytest legs are covered elsewhere.
+    res = subprocess.run(
+        ["bash", str(SMOKE), "--fast"],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    out = res.stdout + res.stderr
+    # the full-coverage leg ran and reported zero unknown items …
+    assert "dry-run-plans the FULL real catalog" in out, "real-catalog full-coverage leg did not run"
+    assert "zero unknown items" in out
+    # … and an 'unknown item/slot' error against the real catalog never leaked (the leg fails the
+    # smoke on one, so a green run already implies none — assert explicitly as a guard).
+    assert "unknown ci item" not in out
+    assert "scanner dropped it" not in out

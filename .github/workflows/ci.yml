@@ -101,6 +101,70 @@ jobs:
           RIG_CLEANROOM_E2E: "1"
         run: python -m pytest tests/test_cleanroom_e2e.py -q -rs
 
+  # The REAL-catalog smoke: check out the actual agent-tools repo and run rig's smoke against
+  # THAT catalog (not the synthetic in-repo fixtures the unit suite uses). rig + agent-tools
+  # co-evolve; a rig change that breaks against the real catalog layout (a NEW slot type, a
+  # renamed dir, a catalog item rig can't resolve) is unit-GREEN but live-BROKEN — this exact
+  # class ("unknown ci item: pr-checklist") has bitten before. The smoke's full-coverage leg
+  # discovers + dry-run-plans EVERY catalog item and asserts zero unknown-item/slot errors.
+  # The plain `test`/`smoke` job above carries no agent-tools checkout, so it self-skips these
+  # legs; this job supplies one.
+  #
+  # `smoke.sh --fast`, NOT the full run: --fast runs the full-coverage drift guard (a `rig apply
+  # --dry-run` that writes nothing) + the real-catalog `rig status` legs, and SKIPS the heavy
+  # `rig init --yes` apply. So the catalog is only PLANNED here, never applied — nothing on the
+  # runner is mutated and no catalog hook/script is executed. The heavy first-run apply is
+  # already covered against a self-contained fake catalog by `cleanroom-e2e`.
+  #
+  # The catalog is checked out at the DEFAULT branch HEAD (not a pinned SHA) ON PURPOSE: this is
+  # a co-evolution drift guard — it must catch a rig↔catalog mismatch against the CURRENT catalog,
+  # so pinning would freeze exactly the thing it watches.
+  #
+  # RESILIENT: the agent-tools checkout is best-effort (`continue-on-error`). If the repo is
+  # unreachable (renamed / made private / a fork without access), the job SKIPS the smoke
+  # LOUDLY (a `::warning::` + a visible "skip" line) instead of hard-failing CI on infra it
+  # doesn't own. When the catalog IS fetched (the normal case — agent-tools is public), the
+  # smoke runs for real and a real catalog/rig drift fails the job.
+  real-catalog-smoke:
+    name: real-catalog smoke (against agent-tools)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout rig-cli
+        uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package (rig parses YAML at runtime → pyyaml comes via .[test])
+        run: pip install -e '.[test]'
+      # Fetch the REAL agent-tools catalog into a sibling path. Best-effort: a checkout failure
+      # (private/renamed/unreachable) must SKIP the smoke loudly, not hard-fail this job.
+      - name: Checkout the real agent-tools catalog
+        id: catalog
+        continue-on-error: true
+        uses: actions/checkout@v5
+        with:
+          repository: alex-mextner/agent-tools
+          path: agent-tools-catalog
+          # a shallow checkout is enough — the smoke reads the working tree, not history.
+          fetch-depth: 1
+      - name: Real-catalog smoke --fast (skips LOUDLY if the catalog could not be fetched)
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/agent-tools-catalog"
+          # Guard the ci/ dir too: the full-coverage leg's slot loop is over $SRC/ci, so a
+          # renamed/missing ci/ must SKIP loudly here, not pass with vacuous coverage. (The leg
+          # itself also fails on zero slots, but skipping loudly is the right CI signal when the
+          # whole catalog couldn't be fetched.)
+          if [[ "${{ steps.catalog.outcome }}" != "success" \
+                || ! -d "$SRC/skills" || ! -d "$SRC/agent-hooks" || ! -d "$SRC/ci" ]]; then
+            echo "::warning title=real-catalog smoke skipped::could not fetch a complete agent-tools catalog (outcome=${{ steps.catalog.outcome }}); the rig<->catalog drift guard did NOT run"
+            echo "skip real-catalog smoke — agent-tools catalog unavailable/incomplete (see warning above)"
+            exit 0
+          fi
+          echo "agent-tools catalog at $SRC — running rig smoke --fast against the REAL catalog"
+          RIG_AGENT_TOOLS_SOURCE="$SRC" bash tests/smoke.sh --fast
+
   secret-scan:
     # Mirrors the agent-tools secret-scan gate (gitleaks, pinned). Block tier: a
     # high-confidence finding fails the job.
