@@ -45,7 +45,7 @@ def test_area_registry_covers_every_roadmap_area():
         "skills", "agent_hooks", "git_hooks", "gitignore", "mcp", "harness", "tmux",
         "models", "tg_ctl",
     }
-    expected_repo = {"ci", "ship", "agents_md", "github"}
+    expected_repo = {"ci", "ship", "agents_md", "github", "linters"}
     assert expected_global <= set(by_key)
     assert expected_repo <= set(by_key)
     for k in expected_global:
@@ -154,8 +154,31 @@ def test_status_area_summary_lists_all_areas(tmp_path, capsys, fake_agent_tools,
         "tmux config",
         "model-freshness cron",
         "tg-ctl",
+        "linter / formatter config files",
     ):
         assert label_substr in out, label_substr
+
+
+def test_status_linters_area_renders_under_repo_section(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """A declared `linters` item shows as drift in the REPO section (docs claim "the repo section")."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "rig.yaml").write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "linters:\n  items:\n    ruff:\n      tool: ruff\n      role: linter\n"
+        "      path: ruff.toml\n      content: \"line-length = 100\\n\"\n",
+        encoding="utf-8",
+    )
+    main(["status", "-C", str(repo)])
+    out = capsys.readouterr().out
+    # the REPO area-summary heading carries the linters drift count (1 declared-but-missing).
+    repo_summary = out.split("REPO — this repository")[1]
+    assert "linter / formatter config files: drift" in repo_summary
+    # and the per-item drift dump (also under REPO, never GLOBAL) carries the detail line — the
+    # label renders the role ("linter") so the per-item knob is reflected in output.
+    assert "linters/linter ruff:ruff: ruff.toml not provisioned" in out
 
 
 def test_status_area_summary_shows_in_sync_vs_drift_counts(tmp_path, capsys, fake_agent_tools, monkeypatch):

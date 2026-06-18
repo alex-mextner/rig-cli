@@ -50,14 +50,28 @@ def test_blocks_without_open_map_are_closed():
 
 
 def test_blocks_with_open_map_whitelist_only_that_map():
-    # ci/mcp/agent_hooks keep `items` (arbitrary gate/server names) but reject OTHER unknown keys.
+    # ci/mcp/agent_hooks/linters keep `items` (arbitrary gate/server/config names) but reject OTHER
+    # unknown keys (a typo in a FIXED knob like `enabled` still fails closed).
     doc = config_schema.json_schema()
-    for name, mapkey in (("ci", "items"), ("mcp", "items"), ("agent_hooks", "items")):
+    for name, mapkey in (("ci", "items"), ("mcp", "items"), ("agent_hooks", "items"), ("linters", "items")):
         block = doc["properties"][name]
         assert block["additionalProperties"] is False
         assert mapkey in block["properties"]
-        # the open map itself permits arbitrary item objects
-        assert block["properties"][mapkey]["additionalProperties"] == {"type": "object"}
+    # ci/mcp/agent_hooks model each item as a permissive object (catalog-defined, open by design)
+    for name in ("ci", "mcp", "agent_hooks"):
+        assert doc["properties"][name]["properties"]["items"]["additionalProperties"] == {"type": "object"}
+
+
+def test_linters_items_schema_enforces_item_shape():
+    # linters PINS the item shape (unlike ci/mcp), so an editor flags a missing content / bad role —
+    # the published schema now matches what _validate_linters enforces at load.
+    doc = config_schema.json_schema()
+    item = doc["properties"]["linters"]["properties"]["items"]["additionalProperties"]
+    assert item["additionalProperties"] is False  # unknown per-item key rejected
+    assert set(item["required"]) == {"tool", "path", "content"}
+    assert item["properties"]["role"]["enum"] == ["linter", "formatter"]
+    assert item["properties"]["content"]["type"] == "string"
+    assert item["properties"]["enabled"]["type"] == "boolean"
 
 
 # ── registry ↔ validator agreement (no drift between the two key sets) ─────────────────
@@ -72,6 +86,7 @@ def test_blocks_with_open_map_whitelist_only_that_map():
         ("models.schedule", {"time", "label"}),
         ("agents_md", {"enabled", "symlink"}),
         ("gitignore", {"enabled", "entries", "excludesfile"}),
+        ("linters", {"enabled", "items"}),
     ],
 )
 def test_registry_block_keys_match_validator(block_path, config_keys):

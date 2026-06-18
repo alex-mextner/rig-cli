@@ -79,9 +79,13 @@ class Block:
     ``open_map`` names an arbitrary-keyed child map this block permits (``items`` for ci/mcp/
     agent_hooks/skills.by_type, ``fragments`` for git_hooks.dispatcher) — its keys are catalog item
     names, so the block stays open under that ONE key while every other key is still rejected.
-    ``closed`` (default True) emits ``additionalProperties: false`` so an unknown FIXED key fails;
-    a block with an ``open_map`` carries an explicit ``additionalProperties`` allowing only the map.
-    ``doc`` is the block's one-line description.
+    ``open_map_item`` optionally pins the SHAPE of each map VALUE: when set, the published schema
+    models every item with that block's ``required``/``properties``/``enum`` (so an editor flags a
+    missing ``content`` or a bad ``role``), matching the Python validator. When ``None`` (ci/mcp/
+    agent_hooks — whose item shapes are catalog-defined and open by design) each item stays a
+    permissive ``{"type": "object"}``. ``closed`` (default True) emits ``additionalProperties: false``
+    so an unknown FIXED key fails; a block with an ``open_map`` carries an explicit
+    ``additionalProperties`` allowing only the map. ``doc`` is the block's one-line description.
     """
 
     doc: str
@@ -89,6 +93,8 @@ class Block:
     nested: dict[str, Block] = field(default_factory=dict)
     open_map: str | None = None
     open_map_doc: str = ""
+    open_map_item: Block | None = None
+    open_map_item_required: tuple[str, ...] = ()
     closed: bool = True
 
     def child_keys(self) -> set[str]:
@@ -105,14 +111,21 @@ class Block:
             props[name] = blk.to_node()
         node: dict[str, Any] = {"type": "object", "description": self.doc, "properties": props}
         if self.open_map:
-            # the open child map: an object whose keys are arbitrary item names. We don't model
-            # each item's inner shape (catalog-defined, open by design), so it is a permissive
-            # object-of-objects. additionalProperties false on the PARENT still rejects any other
-            # unknown key, but the map itself is whitelisted as a known property.
+            # the open child map: an object whose keys are arbitrary item names. By default we don't
+            # model each item's inner shape (catalog-defined, open by design) → a permissive object-
+            # of-objects. When `open_map_item` IS set (linters), we model the item shape so the
+            # published schema enforces required keys / enums exactly like the Python validator.
+            if self.open_map_item is not None:
+                item_node = self.open_map_item.to_node()
+                if self.open_map_item_required:
+                    item_node["required"] = list(self.open_map_item_required)
+                additional: Any = item_node
+            else:
+                additional = {"type": "object"}
             props[self.open_map] = {
                 "type": "object",
-                "description": self.open_map_doc or f"per-item overrides keyed by item name",
-                "additionalProperties": {"type": "object"},
+                "description": self.open_map_doc or "per-item overrides keyed by item name",
+                "additionalProperties": additional,
             }
         node["additionalProperties"] = False if self.closed else True
         return node
@@ -375,6 +388,34 @@ _SHIP_DELEGATOR_BLOCK = Block(
     },
 )
 
+# The SHAPE of one `linters.items.<label>` entry, modeled so the published schema enforces the same
+# required keys + `role` enum the Python validator does (an editor flags a missing `content` / a bad
+# `role` before `rig apply` ever runs). `closed=True` → an unknown per-item key is rejected too.
+_LINTERS_ITEM_BLOCK = Block(
+    doc="one linter/formatter config file rig writes/reconciles.",
+    leaves={
+        "tool": Leaf("string", "the tool name (informational; drives the status/log label)"),
+        "role": Leaf("string", "linter | formatter (status label only)", enum=("linter", "formatter"), default="linter"),
+        "path": Leaf("string", "repo-relative path of the config file (no leading '/' or '..')"),
+        "content": Leaf("string", "the exact bytes rig writes/reconciles"),
+        "enabled": Leaf("boolean", "provision this one file", default=True),
+    },
+)
+
+_LINTERS_BLOCK = Block(
+    doc="per-repo linter + formatter config files rig provisions/reconciles (tool + content per repo).",
+    leaves={
+        "enabled": Leaf("boolean", "provision the declared linter/formatter config files", default=True),
+    },
+    open_map="items",
+    open_map_doc=(
+        "the config files keyed by a label; each is `{ tool, role, path, content, enabled }` "
+        "(e.g. an `oxfmt` formatter writing `.oxfmtrc.jsonc`, a `ruff` linter writing `ruff.toml`)."
+    ),
+    open_map_item=_LINTERS_ITEM_BLOCK,
+    open_map_item_required=("tool", "path", "content"),
+)
+
 _TG_CTL_BLOCK = Block(
     doc="the tg-ctl inbound daemon auto-started as a per-machine boot LaunchAgent (macOS).",
     leaves={
@@ -410,6 +451,7 @@ BLOCKS: dict[str, Block] = {
     "gitignore": _GITIGNORE_BLOCK,
     "tg_ctl": _TG_CTL_BLOCK,
     "ship_delegator": _SHIP_DELEGATOR_BLOCK,
+    "linters": _LINTERS_BLOCK,
 }
 
 # Every valid TOP-LEVEL key (scalars + blocks). Mirrors config._VALID_TOP_KEYS; the sync test

@@ -42,15 +42,17 @@ from .actions.runner import (
     permissions_settings_file,
     _is_rig_import_line,
     resolve_agents_md,
+    _linter_label,
     resolve_ci_workflow,
     resolve_global_excludes,
+    resolve_linter_config,
     resolve_ship_delegator,
     schedule_plan_from_action,
     skill_harness_link_target,
     tg_ctl_plan_from_action,
     tmux_plan_from_action,
 )
-from .config import GITIGNORE_BEGIN_MARKER
+from .config import GITIGNORE_BEGIN_MARKER, linter_path_escapes_repo
 from .github_ruleset import DEFAULT_RULESET_NAME
 from .plan import Action, InstallPlan
 from .tg_ctl import STALE_PREDECESSOR_LABEL
@@ -133,6 +135,8 @@ def detect(
             _check_agents_symlink(action, report)
         elif action.kind == "provision_ship_delegator":
             _check_ship_delegator(action, report)
+        elif action.kind == "provision_linter_config":
+            _check_linter_config(action, report)
         elif action.kind == "provision_github_ruleset":
             _check_github_ruleset(action, report)
         elif action.kind == "provision_tmux":
@@ -346,6 +350,63 @@ def _check_ship_delegator(action: Action, report: DriftReport) -> None:
                           "pr-ship.sh present but NOT git-ignored (apply adds it to .git/info/exclude "
                           "so it can't dirty the worktree)")
             )
+
+
+def _check_linter_config(action: Action, report: DriftReport) -> None:
+    """Flag drift on ONE per-repo linter/formatter config file (the ``linters`` block).
+
+    Switches on the SAME :func:`resolve_linter_config` ``state`` apply uses, so status and apply read
+    one classification:
+
+    - ``ok``       → no drift (file present + bytes correct).
+    - ``create``   → ``missing``: the config file is absent (apply writes it).
+    - ``update``   → ``modified``: the file exists but its bytes differ from config (apply rewrites
+                     it, backing up a hand-edited file per ``on_conflict``).
+    - ``io_error`` → ``modified``: a directory, a symlink, or an unreadable/non-UTF-8 file sits at
+                     the path (or the path escapes the repo); apply errors.
+    """
+    # Do NOT strip rel_path — match the runner + validator (which reject whitespace-padded paths) so
+    # status and apply operate on the identical literal value.
+    rel_path = str(action.options.get("rel_path", ""))
+    content = action.options.get("content")
+    role = str(action.options.get("role") or "linter")
+    tool = str(action.options.get("tool") or "")
+    label = _linter_label(role, tool, str(action.item))
+    # Mirror the runner's fail-closed guards (same label scheme, so status and apply name the broken
+    # item identically): a malformed action, then a path that escapes the repo. Surface either as a
+    # `modified` item so status flags it rather than silently passing.
+    # `not content` rejects an empty string too (mirroring the runner + plan builder): the validator
+    # requires non-empty content, so an empty one means a synthetic / replayed Action — flag it as
+    # drift so status and apply agree it is broken rather than treating a 0-byte write as "in sync".
+    if not rel_path or not isinstance(content, str) or not content:
+        report.items.append(
+            DriftItem("modified", "linters", label, action.target,
+                      "linters action is missing rel_path/content (malformed plan)")
+        )
+        return
+    if linter_path_escapes_repo(rel_path):
+        report.items.append(
+            DriftItem("modified", "linters", label, action.target,
+                      f"linters path {rel_path!r} escapes the repo (apply refuses to write it)")
+        )
+        return
+    r = resolve_linter_config(action.target, rel_path, content)
+    if r.state == "ok":
+        return
+    if r.state == "create":
+        report.items.append(
+            DriftItem("missing", "linters", label, r.target_path,
+                      f"{rel_path} not provisioned (apply writes it from config)")
+        )
+    elif r.state == "io_error":
+        report.items.append(
+            DriftItem("modified", "linters", label, r.target_path, r.detail)
+        )
+    elif r.state == "update":
+        report.items.append(
+            DriftItem("modified", "linters", label, r.target_path,
+                      f"provisioned {rel_path} differs from the rig-managed config")
+        )
 
 
 def _check_github_ruleset(action: Action, report: DriftReport) -> None:

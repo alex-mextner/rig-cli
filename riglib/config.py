@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 CONFIG_FILENAME = "rig.yaml"
@@ -44,6 +44,7 @@ _VALID_TOP_KEYS = {
     "gitignore",
     "tg_ctl",
     "ship_delegator",
+    "linters",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
@@ -527,6 +528,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_gitignore(data.get("gitignore", {}))
     _validate_tg_ctl(data.get("tg_ctl", {}))
     _validate_ship_delegator(data.get("ship_delegator", {}))
+    _validate_linters(data.get("linters", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -1005,6 +1007,173 @@ def _validate_ship_delegator(sd: dict[str, Any]) -> None:
             f"ship_delegator.enabled must be a bool, got {sd['enabled']!r}",
             schema_path="ship_delegator.enabled",
         )
+
+
+# ── linters ──────────────────────────────────────────────────────────────────────
+# rig provisions per-repo LINTER + FORMATTER config files the same way it provisions skills/hooks/
+# CI/ship: a config-driven block declares, per repo, WHICH config file each tool needs and the
+# EXACT bytes it should hold (e.g. an `oxfmt` formatter writing `.oxfmtrc.jsonc`, a `ruff` linter
+# writing `ruff.toml`, an `eslint`/`prettier` pair, …). rig init/apply reconciles each file
+# (create when absent, repair when drifted, never clobber a hand-written file without an
+# on_conflict-honoring backup); rig status reports drift. The tool + path + content are PER-REPO
+# config — rig hardcodes NO specific linter. The keys below are the fixed per-item knobs, listed
+# once so the validator, the plan builder, the runner, and the schema registry reference the SAME
+# set and never disagree (the sync test asserts it).
+#
+# CTO decision #4136.2 ("linter settings must also be provisioned by rig"): linter config is now a
+# first-class reconciled area, not a thing each repo hand-maintains and silently lets drift.
+LINTER_ITEM_KEYS = {"tool", "role", "path", "content", "enabled"}
+# `role` is DESCRIPTIVE — it is rendered in the apply/drift label (`<role> <tool>:<item>`, see
+# runner._linter_label) so a formatter and a linter read distinctly; both roles reconcile identically
+# (a config file written + drift-compared). A foreign role is rejected so a typo (`role: format`)
+# fails loudly rather than rendering an odd label.
+_VALID_LINTER_ROLES = {"linter", "formatter"}
+
+
+def linter_path_escapes_repo(rel: str) -> bool:
+    """True when a ``linters.items.<n>.path`` would write OUTSIDE the repo (reject it).
+
+    A provisioned config file must stay inside the repo: a committed rig.yaml that could write
+    anywhere on disk (``../../etc/x``, ``/etc/x``, a Windows ``C:\\...`` / ``C:/...`` drive-absolute,
+    or a backslash path that escapes once interpreted on Windows) is a footgun. This is the SINGLE
+    predicate the validator (fail-closed at load) AND the runner/drift (defense-in-depth against a
+    hand-built or replayed Action) both call, so the containment rule lives in exactly one place.
+    Conservative by design — it rejects on ANY of: a POSIX, native, OR Windows-drive absolute (so a
+    config authored on one OS can't silently escape on another), a ``..`` component, a backslash, a
+    ``.git`` component (a path into the git dir would let a committed rig.yaml rewrite repo metadata
+    or install a hook on apply — a privilege-escalation footgun, never a real linter config location),
+    or a ``.``-only path (``.``/``./.``) that names the repo ROOT and so can never name a file.
+    """
+    if not isinstance(rel, str) or not rel:
+        return True
+    if "\\" in rel:
+        return True  # a Windows separator: ambiguous/unsafe across platforms — refuse it.
+    # Absolute under ANY interpretation: POSIX (`/x`), the running OS, OR a Windows DRIVE — the last
+    # catches `C:/tmp/x` (forward-slashed) on POSIX, where PurePosixPath sees a plain relative name
+    # but Windows would treat it as drive-absolute. PureWindowsPath.drive is non-empty for `C:/...`.
+    if PurePosixPath(rel).is_absolute() or os.path.isabs(rel):
+        return True
+    if PureWindowsPath(rel).is_absolute() or PureWindowsPath(rel).drive:
+        return True
+    # `..` as a path COMPONENT (not a substring — `..foo` is a legal filename). Check both the POSIX
+    # split and the OS-native split so `foo/../../bar` is caught regardless of the running platform.
+    parts = set(PurePosixPath(rel).parts) | set(Path(rel).parts)
+    if ".." in parts:
+        return True
+    # `.git` as ANY component: a provisioned file inside the git dir (`.git/config`,
+    # `.git/hooks/pre-commit`) would let a committed rig.yaml rewrite repo metadata or install a hook
+    # on `rig apply` — a privilege-escalation footgun. A linter config NEVER legitimately lives in
+    # `.git`, so reject it (case-insensitive: `.GIT` is the same dir on a case-insensitive FS).
+    if any(p.lower() == ".git" for p in parts):
+        return True
+    # A path that is ONLY `.` components (`.`, `./`, `./.`) names the repo ROOT, never a file — it
+    # has no `..`/abs so it would otherwise validate clean, yet can never converge (`repo_root / "."
+    # == repo_root`, a directory → io_error forever). Reject it at load too, consistent with the
+    # fail-closed-at-validation principle: never accept a "valid config that can never name a file".
+    return parts <= {"."}
+
+
+def _validate_linters(li: dict[str, Any]) -> None:
+    """Validate the ``linters`` block — rig's per-repo linter/formatter config provisioning.
+
+    Default **ON**: every declared item is provisioned on ``rig init`` AND ``rig apply``. The block
+    carries a fixed ``enabled`` flag plus an open ``items`` map keyed by an arbitrary LABEL; each
+    item declares ``{ tool, role?, path, content, enabled? }`` — the tool name, an optional role
+    (``linter``/``formatter``, default ``linter``, status-label only), the repo-relative file
+    ``path``, and the exact file ``content``. Fail-closed, consistent with every other block, on: a
+    non-mapping block, a non-bool ``enabled``, a non-mapping ``items``, a non-mapping item, an
+    unknown per-item key (typo guard), a missing/empty/non-string ``tool`` / ``path`` / ``content``,
+    an absolute or parent-escaping ``path`` (a provisioned file must stay inside the repo), a
+    non-bool item ``enabled``, a ``role`` outside the allowed set, and TWO enabled items targeting
+    the SAME normalized ``path`` (which would make apply/status churn forever).
+    """
+    if not isinstance(li, dict):
+        raise ConfigError("linters must be a mapping", schema_path="linters")
+    if not li:
+        return
+    # Only `enabled` and `items` are fixed keys; `items` is the open map. Reject any other top key.
+    for key in li:
+        if key not in {"enabled", "items"}:
+            raise ConfigError(
+                f"unknown linters key {key!r} (expected one of: enabled, items)",
+                schema_path="linters",
+            )
+    if "enabled" in li and not isinstance(li["enabled"], bool):
+        raise ConfigError(
+            f"linters.enabled must be a bool, got {li['enabled']!r}", schema_path="linters.enabled"
+        )
+    items = li.get("items", {})
+    if not isinstance(items, dict):
+        raise ConfigError("linters.items must be a mapping", schema_path="linters.items")
+    # Track the target path of each ENABLED item so two items can't both provision the same file:
+    # with different content `rig apply` would write one then the other and `rig status` would churn
+    # forever (each apply re-flags + re-backs-up the loser). One file = one item.
+    seen_paths: dict[str, str] = {}
+    for name, spec in items.items():
+        path = f"linters.items.{name}"
+        if not isinstance(spec, dict):
+            raise ConfigError(f"{path} must be a mapping", schema_path=path)
+        for key in spec:
+            if key not in LINTER_ITEM_KEYS:
+                raise ConfigError(
+                    f"unknown {path} key {key!r} (expected one of: {', '.join(sorted(LINTER_ITEM_KEYS))})",
+                    schema_path=path,
+                )
+        # tool / path / content are REQUIRED non-empty strings — a config file with no path or no
+        # bytes is meaningless; failing here beats writing a 0-byte file or crashing in the runner.
+        for req in ("tool", "path", "content"):
+            val = spec.get(req)
+            if not isinstance(val, str) or not val:
+                raise ConfigError(
+                    f"{path}.{req} must be a non-empty string, got {val!r}",
+                    schema_path=f"{path}.{req}",
+                )
+        rel = spec["path"]
+        # Reject leading/trailing whitespace in `path`: the runner/drift do NOT strip it (they operate
+        # on the literal bytes), so ` ../escape` would validate as one filename here yet escape at
+        # apply time, and ` config/x ` would validate as a quoted name but write to `config/x`. Fail
+        # closed on the ambiguity — a config path is a literal filename, never whitespace-padded.
+        if rel != rel.strip():
+            raise ConfigError(
+                f"{path}.path must not have leading/trailing whitespace, got {rel!r}",
+                schema_path=f"{path}.path",
+            )
+        # The provisioned file MUST stay inside the repo — see `linter_path_escapes_repo` (the one
+        # containment predicate the runner/drift also call, so the rule lives in a single place).
+        if linter_path_escapes_repo(rel):
+            raise ConfigError(
+                f"{path}.path must be a repo-relative path inside the repo (no leading '/', '..', or '\\'), got {rel!r}",
+                schema_path=f"{path}.path",
+            )
+        role = spec.get("role")
+        # `isinstance(role, str)` BEFORE the membership test: a non-string role (a YAML list/map, e.g.
+        # `role: [linter]`) is UNHASHABLE, so `role not in <set>` would raise a raw TypeError instead
+        # of a structured ConfigError. Guard the type first so every bad role fails the same clean way.
+        if role is not None and (not isinstance(role, str) or role not in _VALID_LINTER_ROLES):
+            raise ConfigError(
+                f"{path}.role must be one of {sorted(_VALID_LINTER_ROLES)}, got {role!r}",
+                fix=f"use one of: {', '.join(sorted(_VALID_LINTER_ROLES))}",
+                schema_path=f"{path}.role",
+            )
+        if "enabled" in spec and not isinstance(spec["enabled"], bool):
+            raise ConfigError(
+                f"{path}.enabled must be a bool, got {spec['enabled']!r}",
+                schema_path=f"{path}.enabled",
+            )
+        # Duplicate-target guard (enabled items only — a disabled item provisions nothing, so it can't
+        # collide). Normalize the path (`./a` vs `a`) so `a/b` and `./a/b` are recognized as the same
+        # file. Two items on one file is always a config smell; reject it rather than let apply/status
+        # churn. A disabled item is skipped, so toggling one off resolves a collision without an edit.
+        if spec.get("enabled") is not False:
+            norm = PurePosixPath(rel).as_posix()
+            if norm in seen_paths:
+                raise ConfigError(
+                    f"{path}.path {rel!r} is already provisioned by linters.items.{seen_paths[norm]} "
+                    "— two items must not target the same file",
+                    fix="give each item a distinct path, or disable one with `enabled: false`",
+                    schema_path=f"{path}.path",
+                )
+            seen_paths[norm] = name
 
 
 def _validate_gitignore(gi: dict[str, Any]) -> None:
