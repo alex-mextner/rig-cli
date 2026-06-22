@@ -47,17 +47,12 @@ class PlanError(ValueError):
 # Built-in default targets per category (used when config + defaults don't pin one).
 _BUILTIN_TARGETS = {
     "skills": "~/.agents/skills",
-    # Sub-agents install straight into the harness discovery dir (claude-code: ~/.claude/agents);
-    # unlike skills there is no install-then-symlink split. An ABSOLUTE/`~` target → GLOBAL; a
-    # RELATIVE target (e.g. ".claude/agents") → repo-local, anchored at repo_root by _expand.
-    "subagents": "~/.claude/agents",
     "agent_hooks": "~/.claude/hooks",
     "ci": ".github/workflows",
     "mcp": "~/.claude/mcp",
 }
 _DEFAULTS_KEY = {
     "skills": "skills_target",
-    "subagents": "subagents_target",
     "agent_hooks": "hooks_target",
     "ci": "ci_target",
     "mcp": "mcp_target",
@@ -80,7 +75,7 @@ _DEFAULT_HARNESS_KIND = "claude-code"
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | copy_subagent | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -418,27 +413,6 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
                             "on_error": spec.get("on_error") if isinstance(spec, dict) else None,
                             "agent_tools_source": str(catalog.source),
                         },
-                    )
-                )
-
-    # ── subagents (.claude/agents/*.md sub-agent definitions) ──────────────────────
-    # One copy_subagent action per enabled item — the install dir IS the harness discovery dir
-    # (claude-code: ~/.claude/agents global, or a repo-local .claude/agents), so no harness-link
-    # second action (unlike skills). GLOBAL vs REPO-LOCAL is purely the target shape: an
-    # absolute/`~` subagents_target → global; a relative one → anchored at repo_root by _expand.
-    sa = config.category("subagents")
-    if sa.get("enabled") is not False:
-        sa.setdefault("all", True)
-        subagents_target = _resolve_target(config, "subagents")
-        for item in catalog.by_category("subagents"):
-            if _item_enabled(sa, item, type_enabled=False):
-                plan.actions.append(
-                    Action(
-                        kind="copy_subagent",
-                        category="subagents",
-                        item=item.name,
-                        source=item.path,
-                        target=subagents_target / item.path.name,
                     )
                 )
 
