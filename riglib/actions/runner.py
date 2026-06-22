@@ -130,8 +130,23 @@ def _dispatch(action: Action, on_conflict: str) -> ActionResult:
 
 
 # ── handlers ────────────────────────────────────────────────────────────────────
+def _skill_backup_dir(skill_target: Path) -> Path:
+    """Where a conflict-backup of an installed skill goes — a sibling ``.rig-backups/`` OUTSIDE
+    the scanned skills dir.
+
+    ``skill_target`` is ``<skills_target>/<name>`` (e.g. ``~/.agents/skills/naming``), so its
+    parent is the natively-scanned skills dir. A same-parent ``<name>.rig-bak-*/`` backup still
+    holds a ``SKILL.md`` and opencode (which auto-scans ``~/.agents/skills``) re-discovers it as
+    a duplicate skill (rig-cli#57). Putting the backup one level up — next to the skills dir,
+    not inside it — keeps the restore point without it ever being scanned as a skill.
+    """
+    return skill_target.parent.parent / ".rig-backups"
+
+
 def _do_copy_skill(action: Action, on_conflict: str) -> ActionResult:
-    out = fsutil.copy_tree(action.source, action.target, on_conflict)
+    out = fsutil.copy_tree(
+        action.source, action.target, on_conflict, backup_dir=_skill_backup_dir(action.target)
+    )
     return ActionResult(action, out.status, out.detail, out.backup)
 
 
