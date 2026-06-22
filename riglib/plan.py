@@ -591,6 +591,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── gitignore (rig-managed block in the GLOBAL git excludes file) ──────────────
     _build_global_excludes(config, plan)
 
+    # ── tools (the personal CLI ecosystem: tg/review/task/draw/…) ──────────────────
+    _build_tools(config, plan)
+
     # ── tg_ctl (rig-managed tg-ctl inbound daemon LaunchAgent) ─────────────────────
     _build_tg_ctl(config, plan)
 
@@ -1344,6 +1347,38 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
                 "boot": dict(t.get("boot", {}) or {}),
                 "login_shell": login_shell,
             },
+        )
+    )
+
+
+def _build_tools(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the personal CLI ecosystem install (tg/review/task/draw/…), if ``tools:`` opts in.
+
+    Default **OFF** (opt-in, unlike ``tg_ctl``/``models``): an ABSENT, empty, or ``enabled: false``
+    ``tools:`` block emits NO action, so a clean ``rig init`` never clones four repos a user may not
+    have and the e2e suite never shells out to a real ``install.sh``. A machine opts in by listing
+    tools under ``tools.items``. This is a per-MACHINE concern (the tool ecosystem on this dev box),
+    so the block lives in the GLOBAL layer (``~/.config/rig/config.yaml``).
+
+    Emits ONE idempotent ``provision_tools`` action carrying every resolved :class:`ToolSpec` (as a
+    small JSON-ish dict each). The runner runs each tool's OWN ``install.sh`` only when the tool is
+    not already current; drift diffs declared-vs-on-disk. There is no agent-tools carrier — each
+    tool installs FROM its own checkout, so ``source`` is just the repo root for describe().
+    """
+    from . import tools as toolsmod
+
+    specs = toolsmod.resolve_tool_specs(config.data.get("tools"))
+    if not specs:
+        return
+
+    plan.actions.append(
+        Action(
+            kind="provision_tools",
+            category="tools",
+            item="ecosystem",
+            source=config.repo_root,  # no carrier; each tool installs from its own checkout
+            target=specs[0].bin_dir,  # the managed PATH dir (display/anchor only)
+            options={"specs": [toolsmod.spec_to_option(s) for s in specs]},
         )
     )
 

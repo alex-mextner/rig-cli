@@ -44,6 +44,7 @@ _VALID_TOP_KEYS = {
     "github",
     "tmux",
     "gitignore",
+    "tools",
     "tg_ctl",
     "ship_delegator",
     "linters",
@@ -534,6 +535,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_github(data.get("github", {}))
     _validate_tmux(data.get("tmux", {}))
     _validate_gitignore(data.get("gitignore", {}))
+    _validate_tools(data.get("tools", {}))
     _validate_tg_ctl(data.get("tg_ctl", {}))
     _validate_ship_delegator(data.get("ship_delegator", {}))
     _validate_linters(data.get("linters", {}))
@@ -1531,6 +1533,53 @@ def _validate_tmux(t: dict[str, Any]) -> None:
                     "tmux.login_shell.shell must be an absolute path to the shell BINARY with no "
                     f"arguments (rig adds `-l`), or empty to use $SHELL — got {shell!r}"
                 )
+
+
+def _validate_tools(t: dict[str, Any]) -> None:
+    """Validate the ``tools`` block — the personal CLI ecosystem rig installs at apply.
+
+    A per-MACHINE concern (the tool ecosystem on this dev box), so it belongs in the GLOBAL layer
+    (``~/.config/rig/config.yaml``), like ``harness``/``tmux``/``tg_ctl`` — NOT a committed repo
+    ``rig.yaml``. Default **OFF** (opt-in): an absent/empty block provisions nothing; a machine
+    opts in by listing tools under ``items``. Fail-closed, consistent with every other block, on:
+    a non-mapping block, an unknown FIXED key (typo guard — the open ``items`` map keeps arbitrary
+    tool NAMES valid), a non-bool ``enabled``, a non-string ``target``, a non-mapping ``items`` or
+    item, and a bad per-item ``enabled``/``repo``/``bin_dir`` type.
+    """
+    if not isinstance(t, dict):
+        raise ConfigError("tools must be a mapping", schema_path="tools")
+    if not t:
+        return
+    _reject_unknown_keys(t, "tools")
+    _check_bool(t, "enabled", "tools.enabled")
+    _check_str(t, "target", "tools.target")
+    items = t.get("items", {})
+    if not isinstance(items, dict):
+        raise ConfigError("tools.items must be a mapping", schema_path="tools.items")
+    for name, spec in items.items():
+        _validate_tools_item(name, spec)
+
+
+# The keys a tools.items.<name> entry accepts. Explicit set (mirrors LINTER_ITEM_KEYS) so the
+# validator rejects a per-item typo — _reject_unknown_keys can't, since block_child_keys only
+# walks .nested, never an open_map_item block.
+_TOOLS_ITEM_KEYS = {"enabled", "repo", "bin_dir"}
+
+
+def _validate_tools_item(name: str, spec: Any) -> None:
+    """Validate one ``tools.items.<name>`` entry — its shape and per-item knob types."""
+    path = f"tools.items.{name}"
+    if not isinstance(spec, dict):
+        raise ConfigError(f"{path} must be a mapping", schema_path=path)
+    for key in spec:
+        if key not in _TOOLS_ITEM_KEYS:
+            raise ConfigError(
+                f"unknown {path} key {key!r} (expected one of: {', '.join(sorted(_TOOLS_ITEM_KEYS))})",
+                schema_path=path,
+            )
+    _check_bool(spec, "enabled", f"{path}.enabled")
+    _check_str(spec, "repo", f"{path}.repo")
+    _check_str(spec, "bin_dir", f"{path}.bin_dir")
 
 
 # The keys the tg_ctl block accepts. Listed once so the validator rejects a typo (fail-closed,

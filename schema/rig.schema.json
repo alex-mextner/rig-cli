@@ -804,6 +804,47 @@
       },
       "additionalProperties": false
     },
+    "tools": {
+      "type": "object",
+      "description": "the personal CLI tool ecosystem (tg/review/task/draw/…) rig installs + advertises at apply, by running each tool's own install.sh. Default OFF (opt-in): list tools under items. A per-MACHINE concern — belongs in the GLOBAL layer, not a committed rig.yaml.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the listed tools (opt-in)",
+          "default": false
+        },
+        "target": {
+          "type": "string",
+          "description": "managed PATH dir each tool symlinks its bin into",
+          "default": "~/.local/bin"
+        },
+        "items": {
+          "type": "object",
+          "description": "per-tool spec keyed by command name (repo / bin_dir / enabled)",
+          "additionalProperties": {
+            "type": "object",
+            "description": "one declared tool: the repo whose install.sh rig runs, plus optional overrides.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "install this tool (default true)",
+                "default": true
+              },
+              "repo": {
+                "type": "string",
+                "description": "the tool's checkout dir (holds install.sh); default ~/xp/<name>-cli"
+              },
+              "bin_dir": {
+                "type": "string",
+                "description": "override the managed PATH dir for this one tool"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "tg_ctl": {
       "type": "object",
       "description": "the tg-ctl inbound daemon auto-started as a per-machine boot LaunchAgent (macOS).",
