@@ -577,17 +577,65 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 1 if report.errors else 0
 
 
-def _scan_missing_targets() -> list:
-    """Scan the harness settings.json for hook commands pointing at files that are gone.
+def _harness_settings_paths(plan) -> list[Path]:
+    """The claude-code settings.json file(s) THIS config provisions hooks/permissions into.
 
-    Resolves the claude-code harness settings file under HOME (``~/.claude/settings.json``) and
-    returns the missing-target findings. Kept a thin wrapper so cmd_status reads cleanly and a
-    future multi-harness expansion has one place to add settings paths.
+    The actions that write the harness settings file (auto-mode, the command allowlist, the
+    hook-bridge) all carry the RESOLVED settings path as ``action.target`` — honoring a
+    ``harness.settings_path`` / ``permissions.settings_path`` override and the harness kind
+    (e.g. a non-``auto`` mode writes the repo-local ``.claude/settings.json``, not the one
+    under HOME). Resolve from THOSE so the missing-target scan inspects the file rig actually
+    manages, not a hardcoded ``~/.claude/settings.json``. Deduped, order-preserving.
+
+    Scoped to **claude-code** actions: the scanner (:func:`missing_target.scan_settings_hooks`)
+    understands only the claude-code ``settings.json`` ``hooks`` shape. The allowlist write
+    CAN target opencode (its ``~/.config/opencode/opencode.json`` has a different schema with no
+    such ``hooks`` blocks), so an opencode ``provision_permissions`` action's target must NOT be
+    scanned here — feeding it to the claude-hook scanner would misread an opencode file as a
+    claude hooks file. We key off the harness kind every action carries in ``options['kind']``.
+    """
+    from .actions.runner import harness_settings_file
+
+    kinds = {"apply_harness", "provision_permissions", "register_hook_bridge"}
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for action in plan.actions:
+        if action.kind not in kinds:
+            continue
+        if action.options.get("kind") != "claude-code":
+            continue  # only the claude-code settings.json carries the hook shape we scan
+        resolved = harness_settings_file(action)
+        if resolved not in seen:
+            seen.add(resolved)
+            paths.append(resolved)
+    return paths
+
+
+def _scan_missing_targets(settings_paths: list[Path] | None = None) -> list:
+    """Scan the harness settings.json(s) for hook commands pointing at files that are gone.
+
+    ``settings_paths`` are the resolved harness settings files THIS config manages (from
+    :func:`_harness_settings_paths`). ``None`` — the ``rig doctor`` case, which loads no config —
+    falls back to the claude-code default under HOME (``~/.claude/settings.json``). An EMPTY
+    list is NOT the same as ``None``: it means this config provisions no harness settings file
+    (e.g. harness + permissions both disabled), so there is nothing to scan — scanning the HOME
+    default there would cry wolf on a file the config doesn't manage (the very false positive
+    this scan exists to avoid). Findings are deduped across files by the per-finding ``what``
+    line (``missing <kind>: <path>``) so the same dead target isn't reported twice.
     """
     from .missing_target import scan_settings_hooks
 
-    settings = Path(_os.path.expanduser("~/.claude/settings.json"))
-    return scan_settings_hooks(settings)
+    if settings_paths is None:
+        settings_paths = [Path(_os.path.expanduser("~/.claude/settings.json"))]
+    findings: list = []
+    seen: set[str] = set()
+    for settings in settings_paths:
+        for finding in scan_settings_hooks(settings):
+            if finding.what in seen:
+                continue
+            seen.add(finding.what)
+            findings.append(finding)
+    return findings
 
 
 def _scan_core_bare() -> list:
@@ -797,8 +845,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # missing-target: a hook command in the harness settings.json that points at a file gone
     # from disk (the dead-rtk-hook case) surfaces PROACTIVELY here, before it bites at runtime
-    # as a generic "PreToolUse error". This is independent of config↔disk drift.
-    dead_targets = _scan_missing_targets()
+    # as a generic "PreToolUse error". This is independent of config↔disk drift. Scan the
+    # settings file(s) THIS config actually provisions (honoring a settings_path / harness-kind
+    # override), not a hardcoded ~/.claude/settings.json.
+    dead_targets = _scan_missing_targets(_harness_settings_paths(plan))
     if dead_targets:
         print()
         print(_err(_bold(f"  ▸ missing targets ({len(dead_targets)}) — config points at files that are gone:")))
