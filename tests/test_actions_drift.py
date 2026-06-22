@@ -580,6 +580,71 @@ def test_skill_harness_link_no_self_link_when_target_is_harness_dir(fake_agent_t
     assert not [a for a in plan.actions if a.kind == "link_skill_harness"]
 
 
+# ── skill conflict-backup lands OUTSIDE the scanned skills dir (rig-cli#57) ──────────
+def test_skill_conflict_backup_is_outside_scanned_skills_dir(fake_agent_tools, tmp_path):
+    """A conflicting skill install backs the prior skill up OUTSIDE skills_target.
+
+    skills_target (``~/.agents/skills``) is auto-scanned by opencode, so a same-parent
+    ``<name>.rig-bak-*/`` backup — still carrying a ``SKILL.md`` — would be re-loaded as a
+    duplicate skill. The backup must relocate out of the scanned dir entirely.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    skills_out = repo / "skills-out"  # the natively-scanned skills_target
+    # a DIFFERING prior skill already occupies the install path → forces an on_conflict=backup move
+    prior = skills_out / "naming"
+    prior.mkdir(parents=True)
+    (prior / "SKILL.md").write_text("stale prior skill\n", encoding="utf-8")
+
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _skill_link_cfg(repo, fake_agent_tools, harness_dir=repo / "harness-skills",
+                        skills_target=skills_out),
+        cat, project_type="unknown",
+    )
+    report = run_plan(plan)  # default on_conflict=backup
+    assert not report.errors, [r.detail for r in report.errors]
+
+    skill_res = [r for r in report.results if r.action.kind == "copy_skill"]
+    backed = [r for r in skill_res if r.status == "backed_up"]
+    assert backed, [r.detail for r in skill_res]
+    bak = backed[0].backup
+    assert bak is not None
+
+    # 1) the backup is NOT under the scanned skills dir (the bug: it used to be a sibling there).
+    assert skills_out not in bak.parents, f"backup {bak} still under scanned skills dir {skills_out}"
+    # 2) and there is no *.rig-bak-* dir loitering INSIDE the scanned skills dir at all.
+    assert not list(skills_out.glob("*.rig-bak-*")), \
+        f"a rig-bak dir leaked into the scanned skills dir: {list(skills_out.glob('*.rig-bak-*'))}"
+    # 3) the prior skill's content is preserved at the relocated backup (data not lost).
+    assert (bak / "SKILL.md").read_text(encoding="utf-8") == "stale prior skill\n"
+    # 4) the fresh skill is installed at the canonical path.
+    assert (skills_out / "naming" / "SKILL.md").is_file()
+
+
+def test_skill_backup_under_skills_target_parent_sibling(fake_agent_tools, tmp_path):
+    """The relocated backup sits in a ``.rig-backups`` sibling of the skills dir (one level up)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # nest skills_target so its parent is meaningfully distinct (mirrors ~/.agents/skills)
+    skills_out = repo / "agents" / "skills"
+    prior = skills_out / "naming"
+    prior.mkdir(parents=True)
+    (prior / "SKILL.md").write_text("stale\n", encoding="utf-8")
+
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _skill_link_cfg(repo, fake_agent_tools, harness_dir=repo / "harness-skills",
+                        skills_target=skills_out),
+        cat, project_type="unknown",
+    )
+    report = run_plan(plan)
+    bak = [r for r in report.results if r.status == "backed_up"][0].backup
+    assert bak is not None
+    # backup dir is <skills_target>/../.rig-backups (a sibling of the skills dir, not inside it)
+    assert bak.parent == repo / "agents" / ".rig-backups"
+
+
 # ── per-harness skill/instruction discovery (rig-cli#9) ─────────────────────────────
 def _harness_skill_cfg(repo: Path, source: Path, kind: str) -> LoadedConfig:
     """A config that pins ``harness.kind`` and lets the PER-HARNESS default discovery dir resolve.
