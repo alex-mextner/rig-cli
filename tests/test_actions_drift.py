@@ -610,10 +610,10 @@ def _harness_skill_cfg(repo: Path, source: Path, kind: str) -> LoadedConfig:
 
 @pytest.mark.parametrize(
     "kind, rel_dir",
-    [("claude-code", ".claude/skills"), ("opencode", ".config/opencode/skill")],
+    [("claude-code", ".claude/skills"), ("codex", ".codex/skills")],
 )
 def test_skills_dir_harness_links_into_its_own_dir(fake_agent_tools, tmp_path, monkeypatch, kind, rel_dir):
-    """A skills-DIRECTORY harness (claude-code, opencode) gets each skill symlinked into ITS dir."""
+    """A skills-DIRECTORY harness (claude-code, codex) gets each skill symlinked into ITS dir."""
     repo = tmp_path / "repo"
     repo.mkdir()
     home = tmp_path / "home"
@@ -629,7 +629,7 @@ def test_skills_dir_harness_links_into_its_own_dir(fake_agent_tools, tmp_path, m
     assert (link / "SKILL.md").is_file()
 
 
-@pytest.mark.parametrize("kind", ["claude-code", "opencode"])
+@pytest.mark.parametrize("kind", ["claude-code", "codex"])
 def test_skills_dir_harness_link_idempotent_and_drift(fake_agent_tools, tmp_path, monkeypatch, kind):
     """A skills-dir harness link is idempotent (re-apply = skipped) and drift-free once synced."""
     repo = tmp_path / "repo"
@@ -654,10 +654,10 @@ def test_skills_dir_harness_link_idempotent_and_drift(fake_agent_tools, tmp_path
 
 @pytest.mark.parametrize(
     "kind, instr_marker",
-    [("codex", "AGENTS.md"), ("gemini", "GEMINI.md"), ("pi", "AGENTS.md"), ("commandcode", "AGENTS.md")],
+    [("gemini", "GEMINI.md"), ("pi", "AGENTS.md"), ("commandcode", "AGENTS.md")],
 )
 def test_instruction_file_harness_emits_no_link_but_a_note(fake_agent_tools, tmp_path, monkeypatch, kind, instr_marker):
-    """An INSTRUCTION-FILE harness (codex/gemini/pi/commandcode) links no skill but records WHY.
+    """An INSTRUCTION-FILE harness (gemini/pi/commandcode) links no skill but records WHY.
 
     No skills dir exists for these kinds, so rig emits zero ``link_skill_harness`` actions (it never
     guesses a dir). The skill is still COPIED to skills_target; a plan note explains the kind reads a
@@ -681,11 +681,15 @@ def test_instruction_file_harness_emits_no_link_but_a_note(fake_agent_tools, tmp
 
 
 def test_instruction_file_harness_with_explicit_dir_does_link(fake_agent_tools, tmp_path):
-    """An explicit ``harness_skill_dir`` overrides the no-link default even for codex (user opt-in)."""
+    """An explicit ``harness_skill_dir`` overrides the no-link default even for gemini (user opt-in).
+
+    gemini is instruction-file-only (no skills dir), so it links nothing by default; an explicit
+    dir forces a real link and suppresses the instruction-file note.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
-    harness = repo / "codex-skills"
-    cfg = _harness_skill_cfg(repo, fake_agent_tools, "codex")
+    harness = repo / "gemini-skills"
+    cfg = _harness_skill_cfg(repo, fake_agent_tools, "gemini")
     cfg.data["skills"]["harness_skill_dir"] = str(harness)
     cat = Catalog.scan(str(fake_agent_tools))
     plan = build(cfg, cat, project_type="unknown")
@@ -695,6 +699,30 @@ def test_instruction_file_harness_with_explicit_dir_does_link(fake_agent_tools, 
     report = run_plan(plan)
     assert not report.errors, [r.detail for r in report.errors]
     assert (harness / "naming").resolve() == (repo / "skills-out" / "naming").resolve()
+
+
+@pytest.mark.parametrize("kind", ["opencode"])
+def test_native_discovery_harness_links_nothing_but_notes_autoload(fake_agent_tools, tmp_path, monkeypatch, kind):
+    """A NATIVE-DISCOVERY harness (opencode) auto-loads skills_target, so rig links NOTHING but
+    records WHY — ``rig status`` says "discovers natively", not a silent empty area or a pointless
+    symlink into a dir the harness never reads.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_harness_skill_cfg(repo, fake_agent_tools, kind), cat, project_type="unknown")
+    # no harness symlink for a native-discovery harness (it reads skills_target directly)...
+    assert not [a for a in plan.actions if a.kind == "link_skill_harness"], f"{kind}: unexpected link"
+    # ...but the skill IS still copied to skills_target (which the harness auto-scans)...
+    assert [a for a in plan.actions if a.kind == "copy_skill"], f"{kind}: skill not copied"
+    # ...and a note explains it auto-loads natively (so the empty link area is not a silent gap).
+    notes = " ".join(plan.notes)
+    assert kind in notes and "natively" in notes and ".agents/skills" in notes, plan.notes
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
 
 
 @pytest.mark.parametrize("kind", ["opencode", "codex", "gemini", "pi", "commandcode"])

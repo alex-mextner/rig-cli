@@ -32,13 +32,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .harness_skills import HARNESS_INSTRUCTION_FILES, HARNESS_SKILL_DIRS
+from .harness_skills import (
+    HARNESS_INSTRUCTION_FILES,
+    HARNESS_NATIVE_SKILLS,
+    HARNESS_SKILL_DIRS,
+)
 
 # Every harness kind rig provisions skill/instruction discovery for, listed skills-dir kinds first
-# (claude-code, opencode) then instruction-file kinds (codex, gemini, pi, commandcode) — a stable,
-# readable order for the published JSON-schema enum. Sourced from :mod:`riglib.harness_skills` so the
-# schema enum can never drift from what ``config.validate`` accepts.
-_HARNESS_KIND_ENUM: tuple[str, ...] = tuple(HARNESS_SKILL_DIRS) + tuple(HARNESS_INSTRUCTION_FILES)
+# (claude-code, codex) then native-discovery (opencode) then instruction-file kinds (gemini, pi,
+# commandcode) — a stable, readable order for the published JSON-schema enum. ``dict.fromkeys``
+# DEDUPES because ``codex`` is a member of BOTH the skills-dir and instruction-file families (dual:
+# ~/.codex/skills + ~/.codex/AGENTS.md). Sourced from :mod:`riglib.harness_skills` so the schema
+# enum can never drift from what ``config.validate`` accepts.
+_HARNESS_KIND_ENUM: tuple[str, ...] = tuple(
+    dict.fromkeys((*HARNESS_SKILL_DIRS, *HARNESS_NATIVE_SKILLS, *HARNESS_INSTRUCTION_FILES))
+)
 
 # ── the published-schema identity (referenced by editors via `$schema`/`$id`) ─────────
 SCHEMA_DIALECT = "http://json-schema.org/draft-07/schema#"

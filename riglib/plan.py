@@ -33,6 +33,7 @@ from .github_merge import GITHUB_MERGE_DEFAULTS
 from .github_ruleset import CI_GATE_CHECK_CONTEXTS, GITHUB_RULESET_DEFAULTS
 from .harness_skills import HARNESS_SKILL_DIRS as _HARNESS_SKILL_DIRS
 from .harness_skills import instruction_file_for as _instruction_file_for
+from .harness_skills import native_skills_dir_for as _native_skills_dir_for
 
 
 class PlanError(ValueError):
@@ -183,6 +184,12 @@ def _skill_discovery_note(config: LoadedConfig) -> str | None:
     kind = _harness_kind_for_skills(config)
     if kind in _HARNESS_SKILL_DIRS:
         return None  # skills-dir harness → a link IS emitted, no note needed
+    native = _native_skills_dir_for(kind)
+    if native is not None:
+        return (
+            f"skills: harness '{kind}' auto-loads {native} natively — no per-skill symlink "
+            "needed (skills install to the default skills_target, which it already scans)"
+        )
     instr = _instruction_file_for(kind)
     if instr is None:
         return None  # unknown kind → handled by validation; nothing to say here

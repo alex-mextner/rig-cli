@@ -131,7 +131,7 @@ skills:
 | `enabled` | bool | `true` | install skills at all |
 | `target` | path | `~/.agents/skills` | where SKILL.md dirs are copied |
 | `harness_link` | bool | `true` | also symlink each installed skill into the harness's skill-discovery dir |
-| `harness_skill_dir` | path | per-harness default | where the harness discovers skills (claude-code: `~/.claude/skills`; opencode: `~/.config/opencode/skill`). An explicit value forces a directory link even for an instruction-file harness |
+| `harness_skill_dir` | path | per-harness default | where the harness discovers skills (claude-code: `~/.claude/skills`; codex: `~/.codex/skills`). An explicit value forces a directory link even for a native-discovery or instruction-file harness |
 | `universal.all` | bool | `true` | enable all universal skills (opt-out) |
 | `universal.disable` / `universal.enable` | list[str] | `[]` | deltas on `all` |
 | `by_type.enable` | list[str] | the detected project type | which `by-type/<kind>` bundles to install whole |
@@ -143,17 +143,22 @@ auto-pulled.
 ### Harness skill discovery (why `harness_link`)
 
 The agent harness lists/loads Skill-tool skills from its **own** location, not from `target`,
-and harnesses split into two families by *how* they discover skills:
+and harnesses split into three families by *how* they discover skills:
 
 - **skills-directory harnesses** enumerate a directory of skill folders. rig makes an
   installed skill discoverable by symlinking `<skill_dir>/<skill> → <target>/<skill>`:
   - **claude-code** → `~/.claude/skills`
-  - **opencode** → `~/.config/opencode/skill` (XDG-aware: honors `$XDG_CONFIG_HOME`)
+  - **codex** → `~/.codex/skills` (Codex CLI's native skills dir; codex does **not** read
+    `~/.agents/skills`, so rig must link here or codex sees no skills). codex is *also* an
+    instruction-file harness (`~/.codex/AGENTS.md`) — the two are complementary.
+- **native-discovery harnesses** auto-load the default `target` (`~/.agents/skills`) directly,
+  so a copied skill is already visible and rig links **nothing**. `rig status` reports
+  *discovers natively* instead of a pointless symlink:
+  - **opencode** → auto-loads `~/.agents/skills` (and `~/.claude/skills`) natively since ≥1.16
 - **instruction-file harnesses** have **no** per-skill directory; their guidance comes from a
   single global instruction file that the [`agents_md`](#agents_md) area maintains, not from a
   symlink. rig links **nothing** for these (it never invents a directory) and `rig status`
   reports the kind as *N/A — uses `<file>`* so the empty link area is explained, not silent:
-  - **codex** → `~/.codex/AGENTS.md`
   - **gemini** → `~/.gemini/GEMINI.md`
   - **pi** → `~/.config/pi/AGENTS.md`
   - **commandcode** → `~/.commandcode/AGENTS.md`
@@ -300,7 +305,7 @@ the same apply and catch the dangerous tool calls before the side effect.
 ```yaml
 harness:
   enabled: true
-  kind: claude-code            # skills-dir: claude-code | opencode · instruction-file: codex | gemini | pi | commandcode
+  kind: claude-code            # skills-dir: claude-code | codex · native: opencode · instruction-file: gemini | pi | commandcode
   auto_mode: true              # true → auto-accept tool calls; false → interactive prompts (claude-code write only)
   # mode: bypassPermissions    # optional: pin the exact mode value (overrides the auto_mode map)
   # settings_path: .claude/settings.json   # where to write (repo-local default; committed)
@@ -312,7 +317,7 @@ harness:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the harness setting (set `false` to leave the harness config untouched) |
-| `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `opencode`) get per-skill symlinks; instruction-file (`codex`, `gemini`, `pi`, `commandcode`) get their skill discovery via `AGENTS.md`/`GEMINI.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
+| `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`) auto-loads `~/.agents/skills`; instruction-file (`gemini`, `pi`, `commandcode`) get their skill discovery via `AGENTS.md`/`GEMINI.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
 | `settings_path` | path | `.claude/settings.json` | the settings file to merge into (repo-relative default keeps it committed/reproducible) |
