@@ -229,8 +229,13 @@ def fake_agent_tools(tmp_path: Path) -> Path:
     _write(disp / "global-hooks.d" / "commit-msg" / "10-conventional-commit", "#!/usr/bin/env bash\n")
     _write(disp / "README.md", "# dispatcher\nglobal hooks\n")
 
-    # mcp
-    _write(root / "mcp" / "review" / "README.md", "# review\nmulti-model review\n")
+    # mcp — a CLEARLY-SYNTHETIC item ("fake-mcp"). It must MIRROR catalog reality: the real
+    # agent-tools `mcp/` ships only a README + the one removed slot `mcp/review` (see
+    # riglib.errors._REMOVED_SLOTS). Never fabricate a slot rig classifies as removed — a fake
+    # `mcp/review` made `review` resolve VALID here while it errors against the real catalog,
+    # the exact divergence that let a dead `mcp.items.review` ship green (issue #61). The
+    # test_fake_catalog_never_fabricates_a_removed_slot guard fails if this regresses.
+    _write(root / "mcp" / "fake-mcp" / "README.md", "# fake-mcp\nsynthetic mcp fixture\n")
 
     # the model-freshness checker the `models:` schedule runs (its presence is checked by
     # plan._build_models before it provisions a cron).

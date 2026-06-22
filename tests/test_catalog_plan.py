@@ -20,7 +20,32 @@ def test_catalog_scan_finds_all_categories(fake_agent_tools):
     assert "codeql" in cat.names("ci")
     assert "secret-scan" in cat.names("ci")
     assert "dispatcher" in cat.names("git_hooks")
-    assert "review" in cat.names("mcp")
+    assert "fake-mcp" in cat.names("mcp")
+
+
+def test_fake_catalog_never_fabricates_a_removed_slot(fake_agent_tools):
+    """Anti-masking guard: no item the fake catalog fabricates may be a ``_REMOVED_SLOTS`` entry.
+
+    The fake catalog must MIRROR catalog reality. A fabricated slot that rig classifies as
+    removed (the old ``mcp/review``) resolves VALID here but errors (exit 4) against the real
+    catalog — the divergence that let a dead ``mcp.items.review`` ship green (issue #61). Every
+    drift/plan test that needs a generic mcp item leans on this fixture, so a regression here
+    would silently re-mask the whole class. This catches it in the unit suite, not only the
+    real-catalog e2e.
+    """
+    from riglib.errors import removed_slot
+
+    cat = Catalog.scan(str(fake_agent_tools))
+    offenders = [
+        f"{i.category}/{i.name}"
+        for i in cat.items
+        if removed_slot(i.category, i.name) is not None
+    ]
+    assert not offenders, (
+        f"fake catalog fabricates removed slot(s) {offenders} — a fixture must never use a name "
+        f"rig classifies as removed (see riglib.errors._REMOVED_SLOTS); pick a synthetic name "
+        f"instead, else dead-slot bugs only surface against the real catalog"
+    )
 
 
 def test_catalog_situational_default_off(fake_agent_tools):

@@ -34,7 +34,7 @@ def _full_cfg(repo_root: Path, source: Path) -> LoadedConfig:
             },
             "agent_hooks": {"all": True},
             "ci": {"items": {"codeql": {"enabled": True, "variant": "selfgate"}, "secret-scan": {"enabled": True}}},
-            "mcp": {"items": {"review": {"enabled": True, "command": "review --mcp"}}},
+            "mcp": {"items": {"fake-mcp": {"enabled": True, "command": "fake-mcp --serve"}}},
         },
         repo_root=repo_root,
     )
@@ -977,13 +977,13 @@ def test_mcp_command_shell_quoting(fake_agent_tools, tmp_path):
             "agent_tools_source": str(fake_agent_tools),
             "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
             "mcp": {"target": str(repo / "mcp-out"),
-                    "items": {"review": {"enabled": True, "command": '"/opt/my tools/run" --flag "a b"'}}},
+                    "items": {"fake-mcp": {"enabled": True, "command": '"/opt/my tools/run" --flag "a b"'}}},
         },
         repo_root=repo,
     )
     run_plan(build(cfg, cat, project_type="unknown"))
     data = json.loads((repo / "mcp-out" / "mcp.json").read_text())
-    entry = data["mcpServers"]["review"]
+    entry = data["mcpServers"]["fake-mcp"]
     assert entry["command"] == "/opt/my tools/run"  # quoted path with spaces kept whole
     assert entry["args"] == ["--flag", "a b"]  # quotes consumed, inner spaces preserved
 
@@ -1131,7 +1131,7 @@ def test_mcp_registers_under_configured_server_name(fake_agent_tools, tmp_path):
         data={
             "agent_tools_source": str(fake_agent_tools),
             "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
-            "mcp": {"target": str(repo / "mcp-out"), "items": {"review": {"enabled": True, "server": "custom-name", "command": "x --mcp"}}},
+            "mcp": {"target": str(repo / "mcp-out"), "items": {"fake-mcp": {"enabled": True, "server": "custom-name", "command": "x --mcp"}}},
         },
         repo_root=repo,
     )
@@ -1139,7 +1139,7 @@ def test_mcp_registers_under_configured_server_name(fake_agent_tools, tmp_path):
     run_plan(plan)
     data = json.loads((repo / "mcp-out" / "mcp.json").read_text())
     assert "custom-name" in data["mcpServers"]  # registered under the server name
-    assert "review" not in data["mcpServers"]
+    assert "fake-mcp" not in data["mcpServers"]
 
 
 def test_drift_agent_hook_descriptor_modified(fake_agent_tools, tmp_path):
@@ -1164,10 +1164,10 @@ def test_drift_mcp_command_modified(fake_agent_tools, tmp_path):
     run_plan(plan)
     mcp_json = repo / "mcp-out" / "mcp.json"
     data = json.loads(mcp_json.read_text())
-    data["mcpServers"]["review"] = {"command": "different", "args": []}
+    data["mcpServers"]["fake-mcp"] = {"command": "different", "args": []}
     mcp_json.write_text(json.dumps(data), encoding="utf-8")
     report = detect(plan)
-    assert any(i.direction == "modified" and i.category == "mcp" and i.item == "review" for i in report.items)
+    assert any(i.direction == "modified" and i.category == "mcp" and i.item == "fake-mcp" for i in report.items)
 
 
 def test_agent_hook_cmd_rewritten_absolute(fake_agent_tools, tmp_path):
@@ -1263,7 +1263,7 @@ def test_mcp_backup_converges_differing_entry(fake_agent_tools, tmp_path):
             "agent_tools_source": str(fake_agent_tools),
             "defaults": {"on_conflict": "backup"},
             "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
-            "mcp": {"target": str(repo / "mcp-out"), "items": {"review": {"enabled": True, "command": "review --mcp"}}},
+            "mcp": {"target": str(repo / "mcp-out"), "items": {"fake-mcp": {"enabled": True, "command": "fake-mcp --serve"}}},
         },
         repo_root=repo,
     )
@@ -1272,12 +1272,12 @@ def test_mcp_backup_converges_differing_entry(fake_agent_tools, tmp_path):
     # tamper the registered entry, then re-apply under backup → must converge + back up
     mcp_json = repo / "mcp-out" / "mcp.json"
     data = json.loads(mcp_json.read_text())
-    data["mcpServers"]["review"] = {"command": "stale", "args": []}
+    data["mcpServers"]["fake-mcp"] = {"command": "stale", "args": []}
     mcp_json.write_text(json.dumps(data), encoding="utf-8")
     report = run_plan(plan)
     assert not report.errors
     converged = json.loads(mcp_json.read_text())
-    assert converged["mcpServers"]["review"] == {"command": "review", "args": ["--mcp"]}
+    assert converged["mcpServers"]["fake-mcp"] == {"command": "fake-mcp", "args": ["--serve"]}
     assert any(p.name.startswith("mcp.json.rig-bak-") for p in (repo / "mcp-out").iterdir())
 
 
@@ -1349,8 +1349,8 @@ def test_mcp_idempotent_merge(fake_agent_tools, tmp_path):
     run_plan(plan)
     mcp_json = repo / "mcp-out" / "mcp.json"
     data = json.loads(mcp_json.read_text())
-    assert data["mcpServers"]["review"]["command"] == "review"
-    assert data["mcpServers"]["review"]["args"] == ["--mcp"]
+    assert data["mcpServers"]["fake-mcp"]["command"] == "fake-mcp"
+    assert data["mcpServers"]["fake-mcp"]["args"] == ["--serve"]
 
 
 def test_backup_on_conflict(fake_agent_tools, tmp_path):
