@@ -19,6 +19,11 @@ Design rules mirrored from the sibling Python CLIs (review-cli, tg-cli):
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+from ._version import resolve_version
+
+# Resolved from the single source of truth (pyproject `[project] version`) — never a
+# hardcoded literal that silently drifts from the packaged metadata (rig-cli#70). See
+# `riglib/_version.py` for the installed-vs-checkout resolution order.
+__version__ = resolve_version()
 
 __all__ = ["__version__"]
