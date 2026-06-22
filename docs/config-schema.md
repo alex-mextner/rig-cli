@@ -277,14 +277,15 @@ mcp:
   enabled: true
   target: ~/.claude/mcp            # or ./.mcp.json | export-only
   items:
-    review:
-      enabled: true
-      command: "review --mcp"      # the launch command merged into the harness MCP config
     code-search:
       enabled: true
-      server: serena
+      server: serena               # a code-search server (serena/sverklo) — see mcp/README.md
       command: ""                  # no command → nothing to register (reported, not an error)
 ```
+
+> `review` is **not** an MCP item — it is a CLI + skill, and its MCP slot was removed in
+> agent-tools #32. A config that still declares `mcp.items.review` is rejected as a removed
+> slot (`rig status` exits 4); remove it.
 
 The install action merges an MCP entry **idempotently by server name** into
 `<target>/mcp.json` (or the target file if it ends in `.json`) and never overwrites an

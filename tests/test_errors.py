@@ -13,6 +13,9 @@ All offline; no disk, no network.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 
 from riglib import errors
 
@@ -155,6 +158,71 @@ def test_removed_slot_error_names_it_and_the_fix():
 def test_removed_slot_unknown_returns_none():
     assert errors.removed_slot("mcp", "context7") is None
     assert errors.removed_slot("skills", "naming") is None
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_repo_rig_yaml_declares_no_removed_slot():
+    """The repo's OWN shipped rig.yaml must not declare a slot rig itself classifies as removed.
+
+    Regression for the dead ``mcp.items.review`` (``review --mcp`` was dropped in agent-tools
+    #32; the real catalog has no ``mcp/review`` item). A removed slot left in the SHIPPED
+    template makes ``rig status --config rig.yaml`` against the repo's own config exit 4 — and
+    the smoke clean-sample never exercised the real template, so it slipped through.
+
+    This is the fast, hermetic guard: it reads the actual committed file and the in-code
+    removed-slot registry — no catalog needed, so it runs in every CI leg. The end-to-end leg
+    below drives the REAL ``plan.build`` validation against the REAL catalog.
+    """
+    # Positive control: the detector MUST see the motivating slot, else a green result here would
+    # be meaningless (e.g. the registry got cleared) rather than proof the template is clean.
+    assert errors.removed_slot("mcp", "review") is not None
+
+    import yaml  # local import: stdlib-only at module top is the rig test convention
+
+    rig_yaml = _REPO_ROOT / "rig.yaml"
+    data = yaml.safe_load(rig_yaml.read_text(encoding="utf-8")) or {}
+
+    offenders: list[str] = []
+    for category, block in data.items():
+        if not isinstance(block, dict):
+            continue
+        items = block.get("items")
+        if not isinstance(items, dict):
+            continue
+        for name in items:
+            if errors.removed_slot(category, name) is not None:
+                offenders.append(f"{category}.items.{name}")
+    assert not offenders, (
+        f"rig.yaml ships removed slot(s) {offenders} — remove them from the template "
+        f"(see riglib.errors._REMOVED_SLOTS for why each was dropped)"
+    )
+
+
+def test_repo_rig_yaml_plans_clean_against_the_real_catalog():
+    """End-to-end: the repo's real rig.yaml plans against the REAL catalog with no item error.
+
+    The fast guard above checks the proxy registry; THIS exercises the same validation path the
+    ``rig status`` CLI runs — ``plan.build`` resolving every declared item against the live
+    agent-tools catalog (which, unlike the test's fake catalog, has NO ``mcp/review`` item). A
+    dead ``mcp.items.review`` in the template raised an unknown/removed-item error here (exit 4);
+    a clean template plans without raising. Skipped when no agent-tools checkout is reachable
+    (the catalog-less CI leg), exactly like the other real-catalog tests.
+    """
+    from riglib import config
+    from riglib.catalog import Catalog, CatalogError
+    from riglib.plan import build
+
+    try:
+        source = Catalog.scan(None)  # resolves the real agent-tools checkout; raises if absent
+    except CatalogError as exc:
+        pytest.skip(f"no real agent-tools catalog reachable: {exc}")
+
+    cfg = config.load(_REPO_ROOT, explicit_config=_REPO_ROOT / "rig.yaml", include_global=False)
+    # build() raises UnknownItemError (which the removed-slot path produces for `mcp.items.review`)
+    # if any declared item is absent from the real catalog. No raise == the template is clean.
+    build(cfg, source, project_type="cli")
 
 
 # ── missing-target ────────────────────────────────────────────────────────────────
