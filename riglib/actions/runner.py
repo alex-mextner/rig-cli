@@ -135,6 +135,15 @@ def _do_copy_skill(action: Action, on_conflict: str) -> ActionResult:
     return ActionResult(action, out.status, out.detail, out.backup)
 
 
+def _do_copy_subagent(action: Action, on_conflict: str) -> ActionResult:
+    # A sub-agent is a single .md (CC .claude/agents/<name>.md); copy the file straight into the
+    # harness agent dir (the install dir IS the discovery dir — no harness-link step). copy_file
+    # re-writes only on byte difference (idempotent) and honors on_conflict (skip/backup/overwrite)
+    # so a real hand-edited agent of the same name is never clobbered without a backup.
+    out = fsutil.copy_file(action.source, action.target, on_conflict)
+    return ActionResult(action, out.status, out.detail, out.backup)
+
+
 def skill_harness_link_target(action: Action) -> tuple[Path, Path]:
     """The (symlink_path, desired_destination) a ``link_skill_harness`` action maintains.
 
@@ -3985,6 +3994,7 @@ def _do_provision_global_excludes(action: Action, on_conflict: str) -> ActionRes
 _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "copy_skill": _do_copy_skill,
     "link_skill_harness": _do_link_skill_harness,
+    "copy_subagent": _do_copy_subagent,
     "install_agent_hook": _do_install_agent_hook,
     "install_dispatcher": _do_install_dispatcher,
     "install_ci": _do_install_ci,

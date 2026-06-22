@@ -147,6 +147,11 @@ _DEFAULTS_BLOCK = Block(
     doc="cross-category fallback targets + the on-conflict policy.",
     leaves={
         "skills_target": Leaf("string", "default skills install dir", default="~/.agents/skills"),
+        "subagents_target": Leaf(
+            "string",
+            "default sub-agent install dir (absolute/~ → global; relative → repo-local .claude/agents)",
+            default="~/.claude/agents",
+        ),
         "hooks_target": Leaf("string", "default agent-hooks dir", default="~/.claude/hooks"),
         "ci_target": Leaf("string", "default CI workflows dir", default=".github/workflows"),
         "mcp_target": Leaf("string", "default MCP config dir", default="~/.claude/mcp"),
@@ -205,6 +210,21 @@ _AGENT_HOOKS_BLOCK = Block(
     },
     open_map="items",
     open_map_doc="per-hook overrides (enabled / on_error) keyed by hook name",
+)
+
+_SUBAGENTS_BLOCK = Block(
+    doc="reusable sub-agent definitions (.claude/agents/*.md) installed into the harness agent dir.",
+    leaves={
+        "enabled": Leaf("boolean", "install the sub-agent library", default=True),
+        "target": Leaf(
+            "string",
+            "agent dir (absolute/~ → global ~/.claude/agents; relative → repo-local .claude/agents)",
+            default="~/.claude/agents",
+        ),
+        "all": Leaf("boolean", "install all catalog sub-agents", default=True),
+    },
+    open_map="items",
+    open_map_doc="per-sub-agent overrides (enabled) keyed by sub-agent name",
 )
 
 _GIT_HOOKS_BLOCK = Block(
@@ -499,6 +519,7 @@ _TOP_LEAVES: dict[str, Leaf] = {
 BLOCKS: dict[str, Block] = {
     "defaults": _DEFAULTS_BLOCK,
     "skills": _SKILLS_BLOCK,
+    "subagents": _SUBAGENTS_BLOCK,
     "agent_hooks": _AGENT_HOOKS_BLOCK,
     "git_hooks": _GIT_HOOKS_BLOCK,
     "ci": _CI_BLOCK,
