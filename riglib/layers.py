@@ -38,6 +38,7 @@ _CATEGORY_LAYER = {
     "gitignore": GLOBAL,
     "tmux": GLOBAL,
     "tg_ctl": GLOBAL,
+    "tools": GLOBAL,
     # REPO — this repo, from ./rig.yaml
     "ci": REPO,
     "ship_delegator": REPO,

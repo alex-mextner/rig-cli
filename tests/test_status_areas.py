@@ -103,6 +103,66 @@ def test_every_known_category_is_covered_by_some_area():
     assert not uncovered, f"categories with no Area (summary would under-count them): {uncovered}"
 
 
+def _emitted_reconcile_categories(drift_module) -> set[str]:
+    """The reconcile categories the drift detector can emit, introspected from its source.
+
+    Every ``DriftItem(direction, category, …)`` the ``_check_*`` helpers build names its category as
+    a string literal at the call site, so the categories are exactly the second positional argument
+    of each ``DriftItem(...)`` constructed in ``drift.py``. Parsing the module's AST for those
+    literals gives the live set without a hand-kept list (which would re-introduce the very
+    omission this guard exists to catch). ``"tools"`` (the #67 category) is among them.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(drift_module))
+    cats: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "DriftItem"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            cats.add(node.args[1].value)
+    assert "tools" in cats, "introspection sanity: the tools category must be discoverable in drift.py"
+    return cats
+
+
+def test_plan_drift_categories_are_registered_in_both_summary_registries():
+    """Catch the #67 class of bug: a reconcile category wired into the plan/drift layer but
+    registered in NEITHER ``layers._CATEGORY_LAYER`` NOR ``AREAS`` escapes both summary registries
+    and is silently invisible in ``rig status`` (the area heading never prints, the layer falls
+    through to the GLOBAL default with no Area to count it). The two exhaustiveness guards above
+    only compare ``_CATEGORY_LAYER`` against ``AREAS`` — a category absent from BOTH has nothing to
+    compare, the exact blind spot that let #67's ``tools`` category ship unnoticed. Drive the check
+    off the categories the drift detector can actually EMIT (introspected, not a hand-kept list) and
+    require each one to be in BOTH registries.
+    """
+    import riglib.drift as drift
+    from riglib.layers import _CATEGORY_LAYER
+
+    emitted = _emitted_reconcile_categories(drift)
+    area_categories = {cat for area in AREAS for cat in area.categories}
+    for cat in emitted:
+        assert cat in _CATEGORY_LAYER, f"category {cat!r} emitted by drift but absent from _CATEGORY_LAYER"
+        assert cat in area_categories, f"category {cat!r} emitted by drift but no Area covers it (status under-counts it)"
+
+
+def test_tools_category_is_in_both_summary_registries():
+    """The #67 regression, pinned directly: the ``tools`` category (the personal CLI ecosystem rig
+    provisions) must be classified in ``layers._CATEGORY_LAYER`` AND covered by a GLOBAL ``Area``.
+    Before this fix it was in neither, so ``rig status`` never printed a CLI-ecosystem line."""
+    from riglib.layers import _CATEGORY_LAYER
+
+    assert _CATEGORY_LAYER.get("tools") == GLOBAL, "tools must be classified GLOBAL in the layer registry"
+    tools_areas = [a for a in AREAS if "tools" in a.categories]
+    assert tools_areas, "tools must be covered by an Area (else status under-counts the CLI ecosystem)"
+    assert all(a.layer == GLOBAL for a in tools_areas), "the tools area is a machine-wide GLOBAL concern"
+
+
 def test_every_area_category_is_layer_classified():
     """The inverse guard: every category an Area claims must be known to the layer registry, and
     the Area's layer must agree with the registry's classification (no split-brain ownership)."""
@@ -154,9 +214,49 @@ def test_status_area_summary_lists_all_areas(tmp_path, capsys, fake_agent_tools,
         "tmux config",
         "model-freshness cron",
         "tg-ctl",
+        "personal CLI ecosystem",
         "linter / formatter config files",
     ):
         assert label_substr in out, label_substr
+
+
+def test_status_area_summary_tools_renders_under_global_as_drift(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    """A configured ``tools:`` block (the personal CLI ecosystem) renders as a GLOBAL area with its
+    drift count — proving the #67 category is now visible in status, not silently uncounted. The
+    block is GLOBAL/opt-in, so it needs an explicit ``tools:`` entry (the repo-only configs in the
+    other tests never enable it). A declared tool with a nonexistent repo + an isolated, empty
+    bin/skill dir never resolves on PATH → exactly one ``missing`` drift, deterministically."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    # an isolated managed bin dir under the test HOME so no real ~/.local/bin symlink masks drift,
+    # and a tool name unlikely to collide with any real binary on PATH → bin never resolves.
+    bin_dir = home / "managed-bin"
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "rig.yaml").write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
+        "agents_md: {enabled: false}\ngitignore: {enabled: false}\n"
+        "tools:\n"
+        "  enabled: true\n"
+        f"  target: {bin_dir}\n"
+        "  items:\n"
+        f"    zzqnonexistenttool:\n      repo: {tmp_path / 'no-such-repo'}\n",
+        encoding="utf-8",
+    )
+    rc = main(["status", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == errors.EXIT_DRIFT
+    summary = out.split("areas rig manages")[1].split("REPO — this repository")[0]
+    tools_line = next(ln for ln in summary.splitlines() if "personal cli ecosystem" in ln.lower())
+    # configured + nothing installed → drift, NOT a false in-sync and NOT "not configured"
+    assert "drift (1 declared-but-missing/modified)" in tools_line
+    assert "in sync" not in tools_line.lower()
+    assert "not configured" not in tools_line.lower()
 
 
 def test_status_linters_area_renders_under_repo_section(tmp_path, capsys, fake_agent_tools, monkeypatch):

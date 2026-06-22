@@ -65,6 +65,7 @@ AREAS: tuple[Area, ...] = (
     Area("tmux", "tmux config", GLOBAL, ("tmux",)),
     Area("models", "model-freshness cron", GLOBAL, ("models",)),
     Area("tg_ctl", "tg-ctl inbound daemon", GLOBAL, ("tg_ctl",)),
+    Area("tools", "personal CLI ecosystem (tg/review/task/draw/…)", GLOBAL, ("tools",)),
     # ── REPO — this repository, from ./rig.yaml ──
     Area("ci", "CI gates", REPO, ("ci",), ship_slot=False),
     Area("ship", "ship / `gh ship` merge gate", REPO, ("ci",), ship_slot=True),
