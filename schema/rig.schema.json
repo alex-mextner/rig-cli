@@ -288,8 +288,8 @@
           "description": "which harness to provision (skills-dir: claude-code/opencode; instruction-file: codex/gemini/pi/commandcode). The auto/permission-MODE write is claude-code-only today; other kinds still get their skill discovery provisioned.",
           "enum": [
             "claude-code",
-            "opencode",
             "codex",
+            "opencode",
             "gemini",
             "pi",
             "commandcode"
