@@ -517,3 +517,132 @@ def test_export_writes_file(tmp_path, capsys, fake_agent_tools, monkeypatch):
     # refuses to overwrite without --force
     rc2 = main(["export", "-C", str(tmp_path), "-o", str(out_path)])
     assert rc2 == 2
+
+
+# ── version: pyproject is the single source of truth, no drift (rig-cli#70) ───────────
+
+
+def _pyproject_project_version() -> str:
+    """Read `[project] version` straight from the repo's pyproject.toml — an INDEPENDENT
+    parse (not via `riglib._version`) so the drift guard also catches a resolver bug."""
+    import re
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    body = text.split("[project]", 1)[1].split("\n[", 1)[0]
+    match = re.search(r"""^version\s*=\s*['"]([^'"]+)['"]""", body, re.MULTILINE)
+    assert match is not None, "pyproject [project] version not found"
+    return match.group(1)
+
+
+def _force_checkout_resolution(monkeypatch) -> None:
+    """Force the live-checkout code path: make `importlib.metadata` report rig-cli absent.
+
+    rig actually runs from its repo via the `bin/rig` sys.path shim (no installed dist
+    metadata), so the pyproject fallback is the production path. CI, however, often has
+    rig-cli pip/uv-installed, where `_dist_version` would short-circuit on possibly-stale
+    editable metadata — making the drift guard pass/fail for an install-state reason rather
+    than real drift. Forcing PackageNotFoundError pins the test to the path rig truly uses.
+    """
+    from importlib.metadata import PackageNotFoundError
+
+    from riglib import _version
+
+    def _raise(_name):
+        raise PackageNotFoundError
+
+    monkeypatch.setattr(_version, "_dist_version", _raise)
+
+
+def _version_output(capsys, monkeypatch) -> str:
+    """Run `rig --version` and return the printed version token (argparse exits 0).
+
+    `riglib.__version__` is resolved once at package import — before any test monkeypatch —
+    so re-resolve it now against the (possibly patched) `_version` and patch the value the
+    CLI reads, so `--version` reflects the path under test.
+    """
+    import pytest
+
+    import riglib
+    from riglib import _version as _vmod
+
+    monkeypatch.setattr(riglib, "__version__", _vmod.resolve_version())
+    # cli imported `__version__` by value (`from . import __version__`); patch its binding.
+    monkeypatch.setattr("riglib.cli.__version__", _vmod.resolve_version())
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out.strip()
+    # argparse prints `rig <version>`.
+    assert out.startswith("rig "), out
+    return out.split(" ", 1)[1].strip()
+
+
+def test_version_prints(capsys, monkeypatch):
+    printed = _version_output(capsys, monkeypatch)
+    assert printed  # non-empty
+
+
+def test_version_matches_pyproject_no_drift(capsys, monkeypatch):
+    """THE durable guard: `rig --version` must equal pyproject `[project] version`.
+
+    Pinned to the live-checkout path (PackageNotFoundError forced) so it measures REAL
+    drift, not local install state. A hardcoded `__version__` literal that nobody bumps
+    (the rig-cli#70 bug) cannot drift from pyproject if this passes; reintroduce a literal,
+    or bump pyproject without the dynamic read flowing through, and this fails.
+    """
+    _force_checkout_resolution(monkeypatch)
+    assert _version_output(capsys, monkeypatch) == _pyproject_project_version()
+
+
+def test_version_is_not_the_stale_literal(capsys, monkeypatch):
+    """The old permanently-stale `0.1.0` literal is gone — the bump landed."""
+    _force_checkout_resolution(monkeypatch)
+    assert _version_output(capsys, monkeypatch) != "0.1.0"
+
+
+def test_resolve_version_falls_back_to_pyproject_in_checkout(monkeypatch):
+    """In a live checkout (no installed dist metadata), `resolve_version()` parses pyproject.
+
+    rig runs from its repo via the `bin/rig` sys.path shim, so `importlib.metadata` raises
+    PackageNotFoundError; the pyproject fallback must produce the real version, not the
+    `0.0.0+unknown` sentinel.
+    """
+    from riglib import _version
+
+    _force_checkout_resolution(monkeypatch)
+    assert _version.resolve_version() == _pyproject_project_version()
+    assert _version.resolve_version() != _version._UNKNOWN
+    # The independent parser also matches (covers a resolver-vs-parser disagreement).
+    assert _version._version_from_pyproject() == _pyproject_project_version()
+
+
+def test_parse_project_version_scoped_and_array_robust():
+    """The pyproject `version` parser is scoped to `[project]` and survives `[`-arrays.
+
+    Two ways a naive parse breaks: (a) a `version` key in another table is read by mistake;
+    (b) a multi-line array whose continuation line starts with `[` prematurely ends the
+    `[project]` table. Both must resolve to the real `[project] version`.
+    """
+    from riglib import _version
+
+    toml = (
+        "[build-system]\n"
+        'version = "99.0.0"\n'  # decoy: not the project version
+        "\n"
+        "[project]\n"
+        'name = "rig-cli"\n'
+        "classifiers = [\n"
+        '    ["a", "b"],\n'  # continuation line starting with `[` — must NOT end the table
+        "]\n"
+        'version = "0.2.0"\n'
+        "\n"
+        "[tool.x]\n"
+        'version = "1.2.3"\n'  # decoy after the table
+    )
+    assert _version._parse_project_version(toml) == "0.2.0"
+    # No `[project]` table at all → None (resolver then falls to the sentinel).
+    assert _version._parse_project_version("[tool.x]\nversion = '1.0.0'\n") is None
