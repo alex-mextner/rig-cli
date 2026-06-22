@@ -33,7 +33,6 @@ _VALID_TOP_KEYS = {
     "defaults",
     "agent_tools_source",
     "skills",
-    "subagents",
     "agent_hooks",
     "git_hooks",
     "ci",
@@ -49,7 +48,7 @@ _VALID_TOP_KEYS = {
     "ship_delegator",
     "linters",
 }
-_VALID_CATEGORIES = {"skills", "subagents", "agent_hooks", "git_hooks", "ci", "mcp"}
+_VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
 _VALID_TIERS = {"block", "warn"}
 _VALID_ON_ERROR = {"open", "closed"}

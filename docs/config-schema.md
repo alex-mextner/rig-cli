@@ -93,7 +93,6 @@ when a target file/dir already exists.
 ```yaml
 defaults:
   skills_target: ~/.agents/skills
-  subagents_target: ~/.claude/agents
   hooks_target: ~/.claude/hooks
   ci_target: .github/workflows
   mcp_target: ~/.claude/mcp
@@ -103,7 +102,6 @@ defaults:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `skills_target` | path | `~/.agents/skills` | default skills install dir |
-| `subagents_target` | path | `~/.claude/agents` | default sub-agent install dir (absolute/`~` → global; relative → repo-local `.claude/agents`) |
 | `hooks_target` | path | `~/.claude/hooks` | default agent-hooks dir |
 | `ci_target` | path | `.github/workflows` | default CI workflows dir |
 | `mcp_target` | path | `~/.claude/mcp` | default MCP config dir |
@@ -138,33 +136,6 @@ skills:
 | `universal.disable` / `universal.enable` | list[str] | `[]` | deltas on `all` |
 | `by_type.enable` | list[str] | the detected project type | which `by-type/<kind>` bundles to install whole |
 | `by_type.items.<by-type/kind/name>.enabled` | bool | inherited | per-skill override |
-
----
-
-## `subagents`
-
-Reusable sub-agent definitions (Claude Code `.claude/agents/*.md`: YAML frontmatter with
-`name`/`description`/`tools`/`model`, body = system prompt) installed straight into the harness
-agent dir. Unlike skills the install dir IS the discovery dir, so there is no harness-link step.
-**GLOBAL vs REPO-LOCAL is purely the `target` shape:** an absolute/`~` target (default
-`~/.claude/agents`) installs a machine-wide library; a relative target (e.g. `.claude/agents`)
-anchors at the repo root so the agents travel committed with the repo.
-
-```yaml
-subagents:
-  enabled: true
-  target: ~/.claude/agents          # global; or ./.claude/agents for a repo-local set
-  all: true                         # install all catalog sub-agents (opt-out model)
-  items:
-    ship-pr: { enabled: false }     # fine-grained per-sub-agent override
-```
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `enabled` | bool | `true` | install the sub-agent library at all |
-| `target` | path | `~/.claude/agents` | agent dir (absolute/`~` → global; relative → repo-local `.claude/agents`) |
-| `all` | bool | `true` | install all catalog sub-agents (opt-out) |
-| `items.<name>.enabled` | bool | inherited | per-sub-agent override |
 
 If `by_type.enable` is empty and the detected project type is known, that type's bundle is
 auto-pulled.

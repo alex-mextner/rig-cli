@@ -13,7 +13,6 @@ agent-tools on-disk layout this scanner understands::
 
     skills/universal/<name>/SKILL.md            → category "skills", group "universal"
     skills/by-type/<kind>/<name>/SKILL.md       → category "skills", group "by-type/<kind>"
-    subagents/<name>.md                         → category "subagents"
     agent-hooks/<name>/<name>.<point>.json      → category "agent_hooks"
     ci/<name>/{workflow.yml,*.sh}               → category "ci"
     git-hooks/{global-dispatcher,pre-commit,…}  → category "git_hooks"
@@ -46,7 +45,7 @@ class Item:
     """One installable unit discovered in the agent-tools checkout."""
 
     name: str  # fully-qualified, unique within its category (e.g. "by-type/cli/no-npx")
-    category: str  # skills | subagents | agent_hooks | git_hooks | ci | mcp
+    category: str  # skills | agent_hooks | git_hooks | ci | mcp
     group: str  # sub-grouping for display (universal | by-type/<kind> | "")
     description: str  # one-line "what it gives you"
     path: Path  # the on-disk carrier (dir or file) the action copies/wires
@@ -147,7 +146,6 @@ class Catalog:
         source = resolve_source(configured_source)
         cat = cls(source=source)
         cat._scan_skills()
-        cat._scan_subagents()
         cat._scan_agent_hooks()
         cat._scan_ci()
         cat._scan_git_hooks()
@@ -194,29 +192,6 @@ class Catalog:
                             meta={"kind": kind, "skill": d.name},
                         )
                     )
-
-    def _scan_subagents(self) -> None:
-        # subagents/<name>.md — a harness SUB-AGENT definition (Claude Code .claude/agents/*.md
-        # format: YAML frontmatter with name/description/tools/model, body = system prompt).
-        # One flat .md per sub-agent; the file IS the deployable artifact. Named "subagents" (not
-        # "agents") to avoid colliding with the existing agents_md block (AGENTS.md/CLAUDE.md
-        # symlink invariant) — a different concept. Provisioned into the harness agent-discovery
-        # dir (claude-code: ~/.claude/agents global, or a project .claude/agents) by the apply
-        # layer; unlike skills the install dir IS the discovery dir, so no harness-link step.
-        ag = self.source / "subagents"
-        if not ag.is_dir():
-            return
-        for f in sorted(p for p in ag.iterdir() if p.is_file() and p.suffix == ".md"):
-            self.items.append(
-                Item(
-                    name=f.stem,
-                    category="subagents",
-                    group="",
-                    description=_read_skill_description(f),
-                    path=f,
-                    default_enabled=True,
-                )
-            )
 
     def _scan_agent_hooks(self) -> None:
         ah = self.source / "agent-hooks"
