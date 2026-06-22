@@ -32,22 +32,24 @@ def _write_yaml(p: Path, s: str) -> None:
 
 def test_unknown_mcp_item_raises_structured_with_suggestion(tmp_path, fake_agent_tools):
     catalog = Catalog.scan(str(fake_agent_tools))
-    # fake catalog has mcp slot "review"; "reviewr" is a typo
-    loaded = _loaded(tmp_path, {"mcp": {"items": {"reviewr": {"enabled": True}}}})
+    # fake catalog has mcp slot "fake-mcp"; "fake-mc" is a typo → did-you-mean fires
+    loaded = _loaded(tmp_path, {"mcp": {"items": {"fake-mc": {"enabled": True}}}})
     with pytest.raises(errors.UnknownItemError) as exc:
         build(loaded, catalog)
     e = exc.value
     assert e.exit_code == errors.EXIT_UNKNOWN_ITEM
-    assert "reviewr" in e.what
-    assert "review" in e.fix  # did-you-mean
+    assert "fake-mc" in e.what
+    assert "fake-mcp" in e.fix  # did-you-mean
     assert str(tmp_path / "rig.yaml") in e.fix  # the offending file path
 
 
 def test_removed_mcp_review_slot_names_pr_and_fix(tmp_path, fake_agent_tools):
-    # a catalog WITHOUT a review mcp slot (so 'review' is genuinely gone) → removed-slot path.
-    # Build a catalog then drop the review mcp item to simulate the post-#32 world.
+    # The fake catalog mirrors reality: it has NO `mcp/review` slot (it was removed in
+    # agent-tools #32 — review is a CLI+skill, not an MCP). So a config naming it hits the
+    # removed-slot path WITHOUT any catalog surgery — exactly as it would against the real
+    # catalog (issue #61). A positive control guards that `review` really is absent.
     catalog = Catalog.scan(str(fake_agent_tools))
-    catalog.items = [i for i in catalog.items if not (i.category == "mcp" and i.name == "review")]
+    assert "review" not in catalog.names("mcp")  # the fake catalog must not fabricate it
     loaded = _loaded(tmp_path, {"mcp": {"items": {"review": {"enabled": True}}}})
     with pytest.raises(errors.UnknownItemError) as exc:
         build(loaded, catalog)
@@ -118,19 +120,20 @@ def test_unknown_item_overridden_in_repo_names_repo_file(tmp_path, fake_agent_to
     (the repo overrides the global layer) — so the error names the repo file the user edits."""
     xdg = tmp_path / "xdg"
     gcfg = xdg / "rig" / "config.yaml"
+    # global declares a VALID mcp item; the repo layer (which wins provenance) declares a BAD one.
     _write_yaml(gcfg, f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
-             "mcp: {items: {review: {enabled: true}}}\n")
+             "mcp: {items: {fake-mcp: {enabled: true}}}\n")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     repo = tmp_path / "repo"
     rcfg = repo / "rig.yaml"
-    _write_yaml(rcfg, "version: 1\nmcp: {items: {reviewr: {enabled: true}}}\n")  # repo's own bad mcp key
+    _write_yaml(rcfg, "version: 1\nmcp: {items: {fake-mc: {enabled: true}}}\n")  # repo's own bad mcp key
 
     loaded = config.load(repo)
     catalog = Catalog.scan(str(fake_agent_tools))
     with pytest.raises(errors.UnknownItemError) as exc:
         build(loaded, catalog)
     e = exc.value
-    assert "reviewr" in e.what
+    assert "fake-mc" in e.what
     assert str(rcfg) in e.fix  # the repo set mcp → repo file is the source to edit
 
 
