@@ -25,6 +25,11 @@
           "description": "default skills install dir",
           "default": "~/.agents/skills"
         },
+        "subagents_target": {
+          "type": "string",
+          "description": "default sub-agent install dir (absolute/~ → global; relative → repo-local .claude/agents)",
+          "default": "~/.claude/agents"
+        },
         "hooks_target": {
           "type": "string",
           "description": "default agent-hooks dir",
@@ -134,6 +139,35 @@
             }
           },
           "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "subagents": {
+      "type": "object",
+      "description": "reusable sub-agent definitions (.claude/agents/*.md) installed into the harness agent dir.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "install the sub-agent library",
+          "default": true
+        },
+        "target": {
+          "type": "string",
+          "description": "agent dir (absolute/~ → global ~/.claude/agents; relative → repo-local .claude/agents)",
+          "default": "~/.claude/agents"
+        },
+        "all": {
+          "type": "boolean",
+          "description": "install all catalog sub-agents",
+          "default": true
+        },
+        "items": {
+          "type": "object",
+          "description": "per-sub-agent overrides (enabled) keyed by sub-agent name",
+          "additionalProperties": {
+            "type": "object"
+          }
         }
       },
       "additionalProperties": false
