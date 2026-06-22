@@ -1991,6 +1991,132 @@ def _tg_ctl_teardown_stale(plan, dry: bool) -> tuple[Path | None, str | None]:
     return bak, f"removed stale predecessor {stale.name} (booted out, backed up → {bak.name})"
 
 
+# How long a single tool's install.sh may run before we give up (clone + dep install can be slow,
+# but a hung script must never wedge `rig apply`). Default 300s; overridable via the env var.
+_TOOL_INSTALL_TIMEOUT_DEFAULT_S = 300
+
+
+def _tool_install_timeout_s() -> int:
+    """The per-tool install.sh timeout, read at CALL time with a safe fallback.
+
+    Read here, not at module top: a non-numeric ``RIG_TOOL_INSTALL_TIMEOUT_S`` must NOT crash the
+    import of ``runner`` (which would wedge the WHOLE CLI, not just tools). A junk/absent value
+    falls back to the 300s default; a positive int wins.
+    """
+    raw = os.environ.get("RIG_TOOL_INSTALL_TIMEOUT_S")
+    if not raw:
+        return _TOOL_INSTALL_TIMEOUT_DEFAULT_S
+    try:
+        val = int(raw)
+    except ValueError:
+        return _TOOL_INSTALL_TIMEOUT_DEFAULT_S
+    return val if val > 0 else _TOOL_INSTALL_TIMEOUT_DEFAULT_S
+
+
+def _do_provision_tools(action: Action, on_conflict: str) -> ActionResult:
+    """Provision the personal CLI ecosystem by running each declared tool's OWN install.sh.
+
+    For each :class:`ToolSpec` carried by the action: if the tool is already installed (bin resolves
+    AND the skill blurb is advertised — :func:`tools.tool_status`) it is a no-op (``skipped``); else
+    rig runs ``bash <repo>/install.sh``, which does the tool's own locate→symlink→install-skill
+    dance. SAFE: rig never deletes a user's existing symlink; an already-working bin (even a Homebrew
+    one) counts as resolved and is left alone — only an unadvertised tool is (re)installed to wire up
+    the skill. A missing repo (no install.sh on disk) is an ``error`` for that tool, not a crash.
+
+    Returns ``skipped`` when every tool was already current, ``created`` when at least one was
+    installed, ``error`` if any tool's install failed or its repo was absent. ``RIG_TOOLS_DRY_RUN``
+    reports what WOULD install without running any install.sh (used by the e2e suite).
+    """
+    from .. import tools as toolsmod
+
+    plan = toolsmod.plan_from_action_options(action.options)
+    if not plan.specs:
+        return ActionResult(action, "skipped", "tools: no tools declared")
+
+    dry = bool(os.environ.get("RIG_TOOLS_DRY_RUN"))
+    installed: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+    for spec in plan.specs:
+        status, detail = _provision_one_tool(spec, dry)
+        if status == "installed":
+            installed.append(detail)
+        elif status == "skipped":
+            skipped.append(detail)
+        else:
+            errors.append(detail)
+
+    return _tools_result(action, installed, skipped, errors)
+
+
+def _provision_one_tool(spec: object, dry: bool) -> tuple[str, str]:
+    """Install one tool if needed. Returns ``(status, detail)`` — status ∈ installed/skipped/error.
+
+    ``spec`` is a :class:`tools.ToolSpec`. Already-installed (bin resolves + advertised) → skipped.
+    Missing repo (no install.sh) → error. Otherwise run its install.sh (or, under dry-run, report).
+    """
+    from .. import tools as toolsmod
+
+    assert isinstance(spec, toolsmod.ToolSpec)
+    st = toolsmod.tool_status(spec)
+    if st.installed:
+        return "skipped", f"{spec.name} already installed ({spec.managed_bin})"
+    if not st.repo_present:
+        return "error", f"{spec.name}: no install.sh at {spec.install_script} (repo missing?)"
+    if dry:
+        return "installed", f"{spec.name} (dry-run — would run {spec.install_script})"
+    rc, out = _run_tool_install(spec)
+    if rc != 0:
+        tail = out.strip().splitlines()[-1] if out.strip() else "(no output)"
+        return "error", f"{spec.name}: install.sh exited {rc} — {tail}"
+    return "installed", f"{spec.name} installed via {spec.install_script.name}"
+
+
+def _run_tool_install(spec: object) -> tuple[int, str]:
+    """Run ``bash <repo>/install.sh`` for one tool. Returns ``(returncode, combined_output)``.
+
+    The tool's install.sh is self-locating (it sees its own BASH_SOURCE → uses the local clone) and
+    self-idempotent (re-symlink, re-run install-skill). We just invoke it with a timeout so a hung
+    script can't wedge apply; the bin dir + skill dir it writes are HOME-anchored by the script.
+    """
+    from .. import tools as toolsmod
+
+    assert isinstance(spec, toolsmod.ToolSpec)
+    timeout_s = _tool_install_timeout_s()
+    try:
+        proc = subprocess.run(
+            ["bash", str(spec.install_script)],
+            cwd=str(spec.repo),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired:
+        return 1, f"install.sh timed out after {timeout_s}s"
+    except OSError as exc:
+        return 1, f"could not run install.sh: {exc}"
+
+
+def _tools_result(
+    action: Action, installed: list[str], skipped: list[str], errors: list[str]
+) -> ActionResult:
+    """Fold per-tool outcomes into one ActionResult (error if any failed, else created/skipped)."""
+    parts: list[str] = []
+    if installed:
+        parts.append(f"installed: {', '.join(installed)}")
+    if skipped:
+        parts.append(f"already current: {', '.join(skipped)}")
+    if errors:
+        parts.append(f"FAILED: {'; '.join(errors)}")
+    detail = "tools: " + ("; ".join(parts) if parts else "nothing to do")
+    if errors:
+        return ActionResult(action, "error", detail)
+    if installed:
+        return ActionResult(action, "created", detail)
+    return ActionResult(action, "skipped", detail)
+
+
 def _do_provision_tg_ctl(action: Action, on_conflict: str) -> ActionResult:
     """Provision the tg-ctl inbound daemon as a macOS LaunchAgent (idempotent).
 
@@ -4018,5 +4144,6 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_github_browser": _do_provision_github_browser,
     "provision_tmux": _do_provision_tmux,
     "provision_global_excludes": _do_provision_global_excludes,
+    "provision_tools": _do_provision_tools,
     "provision_tg_ctl": _do_provision_tg_ctl,
 }

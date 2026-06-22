@@ -485,6 +485,30 @@ _LINTERS_BLOCK = Block(
     open_map_item_required=("tool", "path", "content"),
 )
 
+_TOOLS_ITEM_BLOCK = Block(
+    doc="one declared tool: the repo whose install.sh rig runs, plus optional overrides.",
+    leaves={
+        "enabled": Leaf("boolean", "install this tool (default true)", default=True),
+        "repo": Leaf("string", "the tool's checkout dir (holds install.sh); default ~/xp/<name>-cli"),
+        "bin_dir": Leaf("string", "override the managed PATH dir for this one tool"),
+    },
+)
+
+_TOOLS_BLOCK = Block(
+    doc=(
+        "the personal CLI tool ecosystem (tg/review/task/draw/…) rig installs + advertises at "
+        "apply, by running each tool's own install.sh. Default OFF (opt-in): list tools under "
+        "items. A per-MACHINE concern — belongs in the GLOBAL layer, not a committed rig.yaml."
+    ),
+    leaves={
+        "enabled": Leaf("boolean", "provision the listed tools (opt-in)", default=False),
+        "target": Leaf("string", "managed PATH dir each tool symlinks its bin into", default="~/.local/bin"),
+    },
+    open_map="items",
+    open_map_doc="per-tool spec keyed by command name (repo / bin_dir / enabled)",
+    open_map_item=_TOOLS_ITEM_BLOCK,
+)
+
 _TG_CTL_BLOCK = Block(
     doc="the tg-ctl inbound daemon auto-started as a per-machine boot LaunchAgent (macOS).",
     leaves={
@@ -518,6 +542,7 @@ BLOCKS: dict[str, Block] = {
     "github": _GITHUB_BLOCK,
     "tmux": _TMUX_BLOCK,
     "gitignore": _GITIGNORE_BLOCK,
+    "tools": _TOOLS_BLOCK,
     "tg_ctl": _TG_CTL_BLOCK,
     "ship_delegator": _SHIP_DELEGATOR_BLOCK,
     "linters": _LINTERS_BLOCK,

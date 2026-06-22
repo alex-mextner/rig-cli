@@ -154,6 +154,8 @@ def detect(
             _check_tmux(action, report)
         elif action.kind == "provision_global_excludes":
             _check_global_excludes(action, report)
+        elif action.kind == "provision_tools":
+            _check_tools(action, report)
         elif action.kind == "provision_tg_ctl":
             _check_tg_ctl(action, report)
 
@@ -1116,6 +1118,40 @@ def _check_tmux(action: Action, report: DriftReport) -> None:
                 DriftItem("missing", "tmux", action.item, dest,
                           f"tmux plugin {name} not installed (the @plugin decl won't resolve) "
                           "— apply clones it")
+            )
+
+
+def _check_tools(action: Action, report: DriftReport) -> None:
+    """Flag drift on the personal CLI ecosystem (a declared tool not installed/advertised).
+
+    missing — a declared tool whose bin does NOT resolve (no managed symlink, not on PATH): the
+              ecosystem install never ran or was removed. ``rig apply`` runs its install.sh.
+    modified — a tool whose bin resolves but whose skill is NOT advertised (no blurb marker):
+               it's reachable but agents can't auto-discover it; apply re-runs install.sh to wire
+               up ``install-skill``.
+    Shares the desired-spec computation (:func:`tools.tool_status`) with the install handler, so
+    apply and status can never disagree. Cross-platform (no launchd); pure on-disk reads.
+    """
+    from . import tools as toolsmod
+
+    plan = toolsmod.plan_from_action_options(action.options)
+    for spec in plan.specs:
+        st = toolsmod.tool_status(spec)
+        if not st.bin_resolves:
+            report.items.append(
+                DriftItem(
+                    "missing", "tools", spec.name, spec.managed_bin,
+                    f"tool '{spec.name}' declared but not installed "
+                    f"(no bin at {spec.managed_bin}, not on PATH) — apply runs its install.sh",
+                )
+            )
+        elif not st.advertised:
+            report.items.append(
+                DriftItem(
+                    "modified", "tools", spec.name, spec.blurb_file,
+                    f"tool '{spec.name}' installed but not advertised "
+                    f"(no skill blurb at {spec.blurb_file}) — apply re-runs install-skill",
+                )
             )
 
 

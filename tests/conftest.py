@@ -70,6 +70,11 @@ def _isolate_scheduler(monkeypatch):
 
         return ActionResult(action, "skipped", "tg_ctl/boot: daemon provisioner stubbed in tests")
 
+    def _noop_tools(action, on_conflict):
+        from riglib.actions.runner import ActionResult
+
+        return ActionResult(action, "skipped", "tools: ecosystem installer stubbed in tests")
+
     # Patch BOTH the module attr and the dispatch-table entry: `run_plan` resolves the handler
     # from `_HANDLERS` (a dict built at import with a direct function reference), so patching
     # only the module attr would leave the e2e `run_plan` path calling the real installer.
@@ -82,6 +87,13 @@ def _isolate_scheduler(monkeypatch):
     # tmp dirs + stubbed launchctl seams, which override this stub for those tests.
     monkeypatch.setattr(runner, "_do_provision_tg_ctl", _noop_tg_ctl)
     monkeypatch.setitem(runner._HANDLERS, "provision_tg_ctl", _noop_tg_ctl)
+    # tools: is DEFAULT-OFF (opt-in), so no default e2e plan emits a provision_tools action and
+    # nothing here is strictly required. But a test that DOES enable a tools: block would otherwise
+    # shell out to a real install.sh (clone/symlink/install-skill on the host). Neutralize it
+    # suite-wide, symmetric with schedule/tg_ctl; the dedicated test_tools.py restores the real
+    # handler with its own HOME-isolated temp repos + fake install.sh.
+    monkeypatch.setattr(runner, "_do_provision_tools", _noop_tools)
+    monkeypatch.setitem(runner._HANDLERS, "provision_tools", _noop_tools)
     # tg_ctl is default-on, so a provision_tg_ctl action exists in EVERY e2e plan. Its drift
     # check reads the REAL ``_on_darwin()`` (true on a macOS dev box) and would flag the missing
     # plist — but the provisioner above is stubbed, so apply never writes it, leaving a permanent

@@ -1132,6 +1132,56 @@ reconciles. Shown in the **global** section of status (not the repo section).
 
 ---
 
+## `tools`
+
+rig's **primary purpose**: install + advertise the **personal CLI ecosystem** — `tg`, `review`,
+`task`, `draw` (and more, declaratively) — at `rig apply`. For each declared tool, rig runs the
+tool's **own `install.sh`** (which locates the repo, installs deps, symlinks the entry into the
+managed PATH dir, and runs `<tool> install-skill` to advertise it into the agent harness). rig does
+**not** reimplement any of that — the tool stays the single source of truth for how it installs, so
+a tool changing its install is inherited for free.
+
+**Default OFF (opt-in).** Unlike `tg_ctl`/`models`, an absent / empty / `enabled: false` block
+provisions **nothing** — a machine opts in by listing tools under `items`. This is a **per-MACHINE**
+concern (the tool ecosystem on this dev box), so the block belongs in the **GLOBAL** layer
+(`~/.config/rig/config.yaml`), never a committed repo `rig.yaml`. Cross-platform (no launchd).
+
+```yaml
+tools:
+  enabled: true              # opt-in; absent/false provisions nothing
+  target: ~/.local/bin       # managed PATH dir each tool symlinks its bin into (default)
+  items:
+    tg:     { repo: ~/.files/repos/tg-cli }
+    review: { repo: ~/xp/review-cli }
+    task:   { repo: ~/xp/task-cli }
+    draw:   { repo: ~/xp/draw-cli }
+    # a bare entry defaults repo to ~/xp/<name>-cli:
+    # foo: {}
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `enabled` | bool | `false` | opt-in master switch; `false`/absent = rig provisions no tools at all |
+| `target` | str | `~/.local/bin` | managed PATH dir each tool's `install.sh` symlinks its entry into |
+| `items.<name>` | map | — | one tool, keyed by its command name (the skill-blurb stem) |
+| `items.<name>.enabled` | bool | `true` | `false` = skip this one tool |
+| `items.<name>.repo` | str | `~/xp/<name>-cli` | the tool's checkout dir (holds its `install.sh`) |
+| `items.<name>.bin_dir` | str | `target` | override the managed PATH dir for this one tool |
+
+**Idempotent + safe.** A tool already installed — its bin resolves (the managed symlink **or**
+anywhere on PATH, so a Homebrew `review` counts) **and** its skill blurb is advertised — is a
+**no-op** (`skipped`); rig does **not** re-run `install.sh`. rig never deletes a user's existing
+symlink. A tool that resolves but isn't advertised is (re-)installed only to wire up its skill.
+
+**Drift.** `rig status` flags (in the **GLOBAL** section) a declared tool whose bin doesn't resolve
+(**missing** — apply runs its `install.sh`) or that resolves but isn't advertised (**modified** —
+apply re-runs `install-skill`). `rig apply` reconciles.
+
+**Dry-run seam.** `RIG_TOOLS_DRY_RUN=1` reports what WOULD install without running any `install.sh`
+(used by the e2e suite so tests never shell out to a real tool installer).
+
+---
+
 ## `tg_ctl`
 
 rig provisions the **tg-ctl inbound control daemon** (tg-cli's long-poll / inject-into-tmux /
