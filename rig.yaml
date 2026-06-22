@@ -62,14 +62,15 @@ ci:
       install_to: ~/bin
       gh_alias: true
 
-# ── MCP — review is the recommended default for AI review-before-commit ───────────
+# ── MCP — adapters for systems the agent can't reach from a shell ─────────────────
+# No item is declared by default: the agent-tools MCP catalog ships no concrete server, and
+# `review` is a CLI + skill, NOT an MCP — its dead MCP slot was removed in agent-tools #32.
+# Add a real server under `items:` only when one exists in the catalog (e.g.
+# a code-search server like serena/sverklo — see docs/config-schema.md and mcp/README.md).
 mcp:
   enabled: true
   target: ~/.claude/mcp
-  items:
-    review:
-      enabled: true
-      command: "review --mcp"
+  items: {}
 
 # ── Permissions — pre-allow our CLIs + safe dev tools in the harness allowlist ─────
 # Default **ON**: an ABSENT `permissions:` block still provisions the allowlist with the default
