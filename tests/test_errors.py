@@ -225,6 +225,73 @@ def test_repo_rig_yaml_plans_clean_against_the_real_catalog():
     build(cfg, source, project_type="cli")
 
 
+def test_real_catalog_provisions_require_ticket_guard():
+    """The strict ticket guard MUST be provisioned by rig into every repo (agent-tools #92).
+
+    The CTO mandate: task-cli is strictly advertised AND ENFORCED everywhere. Enforcement
+    rides on the ``require-ticket-before-commit`` agent-hook, which rig installs from the
+    agent-tools catalog. This asserts BOTH halves end-to-end against the REAL catalog:
+
+    1. the hook EXISTS in the catalog scan (so a rename/move that drops it is caught), and
+    2. a plan built from rig's DEFAULT agent-hooks resolution emits an ``install_agent_hook``
+       action for it — i.e. ``rig apply`` would actually write its descriptor into
+       ``~/.claude/hooks``.
+
+    Half 2 deliberately passes a config with NO ``agent_hooks`` block at all, so it exercises
+    rig's own default: ``plan.build`` treats an absent/enabled agent_hooks block as on and
+    does ``setdefault("all", True)`` for it (see ``riglib/plan.py``), so every catalog hook —
+    require-ticket included — is planned. That is the regression that matters: if someone flips
+    the default to opt-in (or makes the absent block resolve to off, or drops the guard from
+    the default set), a hand-forced ``all: true`` config would mask it but this default-config
+    build catches it. A regression
+    that silently un-provisions the guard (the enforcement vanishing in every repo) fails HERE,
+    not only when a human notices ticketless commits sailing through. Skipped when no
+    agent-tools checkout is reachable (the catalog-less CI leg).
+    """
+    from riglib.catalog import Catalog, CatalogError
+    from riglib.config import LoadedConfig
+    from riglib.plan import build
+
+    hook_name = "require-ticket-before-commit"
+    try:
+        source = Catalog.scan(None)  # real agent-tools checkout; raises if absent
+    except CatalogError as exc:
+        pytest.skip(f"no real agent-tools catalog reachable: {exc}")
+
+    # Positive control: the scan must see a non-empty agent-hook catalog. An empty scan (a
+    # broken discovery walk) would make the membership assertion below fail for the wrong
+    # reason — "guard removed" — instead of surfacing that discovery itself is broken.
+    hook_names = source.names("agent_hooks")
+    assert hook_names, (
+        "agent-tools catalog scan found NO agent-hooks — discovery is broken; the "
+        "require-ticket assertion below would be meaningless"
+    )
+
+    # 1. the guard is in the catalog
+    assert hook_name in hook_names, (
+        f"{hook_name} missing from the real agent-tools catalog — the strict ticket "
+        f"enforcement would not be provisioned by rig in any repo"
+    )
+
+    # 2. rig's DEFAULT plan (no agent_hooks overrides → rig's own all-on default) installs it.
+    # Building from the default — not a hand-forced ``all: true`` — is what guards against the
+    # default itself regressing to opt-in or dropping the guard.
+    cfg = LoadedConfig(
+        data={"skills": {"enabled": False}},
+        repo_root=_REPO_ROOT,
+    )
+    plan = build(cfg, source, project_type="cli")
+    hook_actions = {
+        a.item
+        for a in plan.actions
+        if a.category == "agent_hooks" and a.kind == "install_agent_hook"
+    }
+    assert hook_name in hook_actions, (
+        f"rig's default plan does not install {hook_name} (got {sorted(hook_actions)}) — the "
+        f"strict ticket guard would not be wired by `rig apply`"
+    )
+
+
 # ── missing-target ────────────────────────────────────────────────────────────────
 def test_missing_target_error_names_file_and_regen():
     e = errors.missing_target_error(
