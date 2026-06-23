@@ -164,6 +164,68 @@ jobs:
           fi
           echo "agent-tools catalog at $SRC — running rig smoke --fast against the REAL catalog"
           RIG_AGENT_TOOLS_SOURCE="$SRC" bash tests/smoke.sh --fast
+      # The real-catalog PYTEST guards (the `test_real_catalog_*` family + the require-ticket
+      # provisioning test, agent-tools#92) self-SKIP without an agent-tools checkout — and the
+      # `test` job above has none, while `smoke.sh --fast` SKIPS the pytest leg entirely. So those
+      # regression guards ran in NO CI job: a regression (rig stops provisioning require-ticket,
+      # or the agent_hooks default flips to opt-in) was unit-GREEN and shipped unguarded. This step
+      # supplies the env both gates need — RIG_AGENT_TOOLS_SOURCE (resolves the catalog so the
+      # Catalog.scan / _agent_tools_source skips DON'T fire) AND RIG_SMOKE_FAST_E2E=1 (lifts the
+      # opt-in `skipif` on the two smoke-e2e legs) — so the guards actually RUN here and gate.
+      - name: Real-catalog pytest guards (must RUN, not skip — the regression gate)
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/agent-tools-catalog"
+          if [[ "${{ steps.catalog.outcome }}" != "success" \
+                || ! -d "$SRC/skills" || ! -d "$SRC/agent-hooks" || ! -d "$SRC/ci" ]]; then
+            echo "::warning title=real-catalog pytest guards skipped::could not fetch a complete agent-tools catalog (outcome=${{ steps.catalog.outcome }}); the real-catalog regression guards did NOT run"
+            echo "skip real-catalog pytest guards — agent-tools catalog unavailable/incomplete"
+            exit 0
+          fi
+          echo "running the real-catalog pytest guards against $SRC"
+          # Capture pytest's exit code SEPARATELY (set +e around it): a real regression makes a
+          # guard FAIL (exit 1) and an empty selection exits 5 — under `set -e` either would abort
+          # the step before the labeled guards below could explain WHY. `-v` prints each selected
+          # test's PASS/SKIP per line (so the log PROVES the guards RAN); `-rN` resets the summary
+          # reason list to keep that tail clean.
+          set +e
+          out="$(RIG_AGENT_TOOLS_SOURCE="$SRC" RIG_SMOKE_FAST_E2E=1 \
+                 python -m pytest tests/ -k real_catalog -rN -v 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          # ── guard order matters: diagnose a REAL failure first, vacuous-pass last ──
+          # 1) A real regression (a guard FAILED) → pytest exit 1. Check this BEFORE the skip/empty
+          #    branches so a mixed "1 failed, 1 skipped" run is reported as FAILED (the true cause),
+          #    not mislabeled "skipped/theater". `python -m pytest` not on PATH would also land here
+          #    (rc!=0,5) — but the job's `pip install -e '.[test]'` step pulls pytest in, so a
+          #    missing-pytest rc=1 means a genuinely broken job, which SHOULD fail loudly.
+          if [[ "$rc" -ne 0 && "$rc" -ne 5 ]]; then
+            echo "::error title=real-catalog guard FAILED::a real-catalog regression guard failed (pytest exit $rc) — that is the gate doing its job"
+            exit "$rc"
+          fi
+          # 2) Empty selection: pytest exits 5 ("no tests ran") and prints "N deselected" with no
+          #    "selected" — a renamed test the -k expression no longer matches lands here.
+          if [[ "$rc" -eq 5 ]] || grep -Eq "no tests ran" <<<"$out"; then
+            echo "::error title=real-catalog guards collected nothing::the -k real_catalog selector matched 0 tests (a rename broke the gate)"
+            exit 1
+          fi
+          # 3) Any SKIP with the catalog present means a gate that should have run didn't — env
+          #    wiring broke and the gate is theater again. (rc==0 here, so no real failure is hidden.)
+          if grep -Eq "[1-9][0-9]* skipped" <<<"$out"; then
+            echo "::error title=real-catalog guards SKIPPED::a real-catalog guard skipped despite the catalog being present — the env wiring is broken and the gate is theater"
+            exit 1
+          fi
+          # 4) Pin the #72 require-ticket provisioning guard EXPLICITLY by node-id: it's the most
+          #    important guard (rig must provision require-ticket into every repo, agent-tools#92).
+          #    If a future rename drops `real_catalog` from ITS name, the rest of the family would
+          #    still pass green and silently un-gate exactly this test — so assert it ran + passed
+          #    by name, not just "the family is green".
+          grep -Eq "test_real_catalog_provisions_require_ticket_guard (PASSED|::.*PASSED)" <<<"$out" \
+            || { echo "::error title=require-ticket guard not in the run::the #72 require-ticket provisioning test did not appear as PASSED — it was renamed out of the -k set or did not run"; exit 1; }
+          grep -Eq "[1-9][0-9]* passed" <<<"$out" \
+            || { echo "::error title=no real-catalog guard passed::expected >=1 passing real-catalog test"; exit 1; }
+          echo "real-catalog pytest guards RAN and passed (none skipped; require-ticket guard pinned)"
 
   secret-scan:
     # Mirrors the agent-tools secret-scan gate (gitleaks, pinned). Block tier: a
