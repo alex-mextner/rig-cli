@@ -57,7 +57,10 @@ silently discarded.
 
 **Invocation:** automatic (CC matches `description`), explicit (`@agent-<name>`), or
 whole-session (`claude --agent <name>`). The Agent/Task tool's `subagent_type` is the
-`name`; the SubagentStart hook receives it as `agent_type`. CC ships **no** built-in agents.
+`name`; the SubagentStart hook receives it as `agent_type`. CC **does** ship built-in
+subagents (`Explore`, `Plan`, `general-purpose`, plus `claude-code-guide` and
+`statusline-setup`); custom `.claude/agents/*.md` definitions **add** to that built-in set,
+they are not the only agents.
 
 **Implication for rig:** unlike skills, the install dir IS the discovery dir. There is no
 "install into `~/.agents/...` then symlink into the harness dir" split for CC. One
