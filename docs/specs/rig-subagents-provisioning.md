@@ -1,8 +1,14 @@
 # rig provisions sub-agents (`subagents` category)
 
-Status: spec (not yet implemented). Tracks ledger task #43.
+> **STATUS: SKIPPED — NOT planned work.** The CTO decided not to adopt custom
+> sub-agents (Claude Code + opencode only, not a cross-harness fit; the value is already
+> covered by the Task/Agent tool + workflow swarms). rig-cli #53 (agents provisioning) was
+> fully **reverted** by #55 — zero agent code remains. This document is retained **only** as
+> the design record of a skipped feature — **do not implement it.** See the agents-skip
+> decision (rig-cli #77).
+
+Status: SKIPPED (design record only). Tracks ledger task #43.
 Owner: rig-cli (`riglib/`). Source catalog: agent-tools.
-Full spec on disk: `/Users/ultra/xp/agent-tools/docs/specs/rig-agents-provisioning.md`
 
 ## Goal
 
