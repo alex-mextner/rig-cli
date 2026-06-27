@@ -54,13 +54,23 @@ fi
 
 # ── dependency: pyyaml (config parse/serialize) ───────────────────────────────
 if ! python3 -c 'import yaml' 2>/dev/null; then
-  # install via `python3 -m pip` so it lands in the SAME interpreter rig runs under
-  # (a bare `pip` may point at a different python).
-  echo "rig: pyyaml not found, attempting: python3 -m pip install --user pyyaml"
-  if ! python3 -m pip install --user pyyaml 2>/dev/null; then
+  # Install into the SAME interpreter rig runs under. Prefer `uv` (the toolchain rig users
+  # standardize on) over a bare `pip`; fall back to `python3 -m pip --user` only when uv is
+  # absent. NOTE: this is best-effort and non-fatal — on an externally-managed system Python
+  # (PEP-668) BOTH uv and pip refuse a system-wide install, so the warning below fires and
+  # `rig doctor` / a managed (uv-tool) install is the real fix. rig still works once yaml lands.
+  py3="$(command -v python3)"
+  if command -v uv >/dev/null 2>&1; then
+    echo "rig: pyyaml not found, attempting: uv pip install --python $py3 pyyaml"
+    uv pip install --python "$py3" pyyaml 2>/dev/null && pyyaml_ok=1
+  else
+    echo "rig: pyyaml not found, attempting: python3 -m pip install --user pyyaml"
+    python3 -m pip install --user pyyaml 2>/dev/null && pyyaml_ok=1
+  fi
+  if [[ "${pyyaml_ok:-0}" != "1" ]]; then
     echo ""
     echo "  WARNING: could not install pyyaml. Config parsing will fail until it is present."
-    echo "  Install manually: pip install --user pyyaml   (or run: rig doctor --yes)"
+    echo "  Install manually with uv: uv pip install pyyaml   (or run: rig doctor --yes)"
     echo ""
   fi
 fi

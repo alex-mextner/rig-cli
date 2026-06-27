@@ -252,7 +252,8 @@ def test_apply_dryrun_with_config(tmp_path, capsys, fake_agent_tools, monkeypatc
         "git_hooks: {dispatcher: {enabled: false}}\n",
         encoding="utf-8",
     )
-    rc = main(["apply", "-C", str(tmp_path), "--config", str(cfg), "--dry-run"])
+    # --plan forces the full per-action list (the default condenses a large plan to a summary).
+    rc = main(["apply", "-C", str(tmp_path), "--config", str(cfg), "--dry-run", "--plan"])
     out = capsys.readouterr().out
     assert "Plan:" in out
     assert "skills/shell-timeouts" in out
@@ -346,6 +347,108 @@ def test_setup_dryrun_never_launches_wizard(tmp_path, capsys, fake_agent_tools, 
     assert rc == 0
     assert not called["wizard"]
     assert "Plan:" in capsys.readouterr().out
+
+
+def test_textual_fallback_hint_is_uv_not_bare_pip(tmp_path, capsys, monkeypatch):
+    """When the wizard's textual import fails, the install hint must be uv-based — NOT a bare
+    `pip install 'rig-cli[tui]'`, which errors on a PEP-668 externally-managed Python."""
+
+    def _no_textual(_root):
+        raise ImportError("No module named 'textual'")
+
+    monkeypatch.setattr("riglib.tui.run_wizard", _no_textual)
+    # isolate the heavy headless fallback that runs AFTER the hint prints — we only assert the hint.
+    monkeypatch.setattr("riglib.cli._setup_headless", lambda *a, **k: 0)
+    rc = main(["init", "-C", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "textual not installed" in out
+    assert "uv" in out  # the suggestion routes through uv
+    # the old bare-pip hint is gone (it fails on externally-managed system Pythons).
+    assert "pip install 'rig-cli[tui]'" not in out
+
+
+def test_tui_install_hint_every_branch_matches_install_shape(monkeypatch):
+    """Each install-shape branch names the manager that actually adds the extra for that shape
+    (uv for uv-tool/source/unknown, pipx for a pipx install) and never emits a bare
+    `pip install 'rig-cli[tui]'` — the form that fails on a PEP-668 externally-managed Python."""
+    from riglib import cli
+
+    # branch → (substring the hint must contain, manager that must drive it)
+    expected = {
+        "uv-tool": ("uv tool install", "uv"),
+        "pipx": ("pipx inject", "pipx"),
+        "source": ("uv run --extra tui", "uv"),
+        "unknown": ("uv tool install", "uv"),
+    }
+    for method, (marker, manager) in expected.items():
+        monkeypatch.setattr(cli, "_rig_install_method", lambda m=method: m)
+        hint = cli._tui_install_hint()
+        assert marker in hint, f"{method}: expected {marker!r} in {hint!r}"
+        assert manager in hint
+        # never the bare-pip extra install that PEP-668 blocks
+        assert "pip install 'rig-cli[tui]'" not in hint
+
+
+def _mk_plan(n_skills: int, n_hooks: int = 0):
+    """Synthetic InstallPlan with N skill + M agent-hook actions (deterministic, no catalog)."""
+    from pathlib import Path
+
+    from riglib.plan import Action, InstallPlan
+
+    acts = [
+        Action(kind="copy_skill", category="skills", item=f"skill-{i}",
+               source=Path("/src"), target=Path(f"/dst/skill-{i}"))
+        for i in range(n_skills)
+    ] + [
+        Action(kind="install_agent_hook", category="agent_hooks", item=f"hook-{i}",
+               source=Path("/src"), target=Path(f"/dst/hook-{i}"))
+        for i in range(n_hooks)
+    ]
+    return InstallPlan(actions=acts, on_conflict="backup")
+
+
+def test_print_plan_summarizes_large_plan_by_default(capsys):
+    from riglib.cli import _print_plan
+
+    _print_plan(_mk_plan(20, 3))
+    out = capsys.readouterr().out
+    assert "Plan: 23 action(s)" in out
+    assert "20 skills" in out and "3 agent-hooks" in out  # per-carrier counts
+    assert "run with --plan to list all 23 actions" in out
+    # the full per-action wall is NOT dumped by default
+    assert "→ /dst/skill-0" not in out
+
+
+def test_print_plan_full_lists_every_action(capsys):
+    from riglib.cli import _print_plan
+
+    _print_plan(_mk_plan(20, 3), full=True)
+    out = capsys.readouterr().out
+    assert "skills/skill-0 → /dst/skill-0" in out
+    assert "skills/skill-19" in out
+    assert "agent_hooks/hook-2" in out
+    assert "run with --plan" not in out  # no summary hint when fully listed
+
+
+def test_print_plan_small_plan_stays_inline(capsys):
+    from riglib.cli import _print_plan
+
+    _print_plan(_mk_plan(2, 1))  # 3 actions ≤ inline max → full list, no summary
+    out = capsys.readouterr().out
+    assert "skills/skill-0 → /dst/skill-0" in out
+    assert "run with --plan" not in out
+
+
+def test_init_plan_flag_lists_full_actions(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`rig init --plan` threads through to a full per-action listing (not the summary)."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    rc = main(["init", "-C", str(tmp_path), "--yes", "--dry-run", "--plan"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "skills/shell-timeouts" in out  # a concrete action line, proving full output
 
 
 def test_setup_default_refuses_existing_config(tmp_path, capsys, fake_agent_tools, monkeypatch):

@@ -110,8 +110,8 @@ _VERB_HELP = {
 SERVE_VERB = "_serve"
 
 _INSTALL_HINT = (
-    "pip install -e <agent-tools>/lib/agenttools_daemon "
-    "<agent-tools>/lib/agenttools_service   "
+    "uv pip install -e <agent-tools>/lib/agenttools_daemon "
+    "-e <agent-tools>/lib/agenttools_service   "
     "(both are agent-tools nested libs, not on PyPI; daemon is service's dependency)"
 )
 

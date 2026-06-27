@@ -30,6 +30,7 @@ def test_diagnose_present(monkeypatch):
 
 def test_python_dep_no_syspkg_recommends_pip(monkeypatch):
     monkeypatch.setattr(doctor, "_python_present", lambda name: False)
+    # nothing on PATH (uv absent too) → pip --user fallback into THIS interpreter.
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
     # textual has no apt package → pip recommendation into THIS interpreter
     import sys
@@ -37,6 +38,24 @@ def test_python_dep_no_syspkg_recommends_pip(monkeypatch):
     report = doctor.diagnose(OsInfo("linux", "apt", "Ubuntu"))
     textual = next(s for s in report.statuses if s.dep.name == "textual")
     assert textual.install_cmd == [sys.executable, "-m", "pip", "install", "--user", "textual"]
+
+
+def test_python_dep_prefers_uv_when_available(monkeypatch):
+    """When `uv` is on PATH, a python dep with no system package installs via `uv pip install`
+    into THIS interpreter — never a bare `pip install` that fails on PEP-668 externally-managed
+    Pythons (the toolchain rig users standardize on)."""
+    import sys
+
+    monkeypatch.setattr(doctor, "_python_present", lambda name: False)
+    # uv present; everything else absent (so the python deps fall to the uv/pip branch).
+    monkeypatch.setattr(
+        doctor.shutil, "which", lambda name: "/opt/homebrew/bin/uv" if name == "uv" else None
+    )
+    report = doctor.diagnose(OsInfo("darwin", "brew", "macOS"))
+    textual = next(s for s in report.statuses if s.dep.name == "textual")
+    assert textual.install_cmd == ["uv", "pip", "install", "--python", sys.executable, "textual"]
+    # and it is NOT the bare `pip install`/`--user` form that PEP-668 blocks.
+    assert textual.install_cmd[:2] == ["uv", "pip"]
 
 
 def test_rich_dep_is_diagnosed_for_stats_tui(monkeypatch):
