@@ -156,7 +156,7 @@ def _build_fake_agent_tools(root: Path) -> None:
     # CI slots: the script-backed ones the explicit clean-room config enables (secret-scan,
     # leftover-grep, review-threads) PLUS the slots the DEFAULT scaffold (riglib/state.py)
     # references (codeql + variant, dependency-review, pr-checklist, ship) — so the no-config
-    # `rig init --yes` leg below is satisfiable. Mirrors conftest.fake_agent_tools.
+    # `rig init --yes --apply` leg below is satisfiable. Mirrors conftest.fake_agent_tools.
     _write(root / "ci" / "secret-scan" / "secret-scan.yml", "name: secret-scan\n")
     _write(root / "ci" / "secret-scan" / "gitleaks.toml", "# not a workflow\n")
     _write(root / "ci" / "secret-scan" / "README.md", "# secret-scan\ngitleaks\n")
@@ -383,29 +383,56 @@ _ASSERT_SCRIPT = textwrap.dedent(
       || { cat /opt/cleanroom/status.log; fail "rig status exited non-zero (drift) after apply"; }
     pass "rig status: clean (exit 0) after apply"
 
-    # ── (5) the TRUE no-config onboarding path: bare `rig init --yes` scaffolds the default ──
-    # The acceptance run above drives an explicit --config (an apply-this-config path). A real
-    # brand-new user runs `rig init --yes` with NO config and gets the DEFAULT scaffold. Prove that
-    # front door actually runs end to end and lands the core artifacts. It runs in its OWN repo +
-    # HOME so it can't pollute the acceptance run; the agent-tools source comes from the documented
-    # RIG_AGENT_TOOLS_SOURCE env fallback. The default scaffold turns ON daemon/network categories
-    # (models cron, tmux, github ruleset) that can't fully converge in an offline slim container, so
-    # this leg asserts the scaffold RUNS + writes rig.yaml + lands skills/dispatcher — it does NOT
-    # assert clean status (that is the config-driven leg's job). Dry-run flags keep it off the
-    # (absent) host daemons.
+    # ── (5) the TRUE no-config onboarding path: `rig init --yes --apply` from the default ──
+    # The acceptance run above drives an explicit --config. A real brand-new user runs
+    # `rig init` with NO config and gets the DEFAULT scaffold; `--yes --apply` is the explicit
+    # one-shot that scaffolds AND applies it (init SCAFFOLDS + previews by default — `--apply`
+    # applies). Prove that front door runs end to end and lands the core artifacts. It runs in its
+    # OWN repo + HOME so it can't pollute the acceptance run; the agent-tools source comes from the
+    # documented RIG_AGENT_TOOLS_SOURCE env fallback. The default scaffold turns ON daemon/network
+    # categories (models cron, tmux, github ruleset) that can't fully converge in an offline slim
+    # container, so this leg asserts the scaffold RUNS + writes rig.yaml + lands skills/dispatcher —
+    # it does NOT assert clean status (that is the config-driven leg's job). Dry-run flags keep it
+    # off the (absent) host daemons.
     SCAFFOLD_HOME="$HOME/scaffold-home"
     SCAFFOLD_REPO="$HOME/scaffold-repo"
     mkdir -p "$SCAFFOLD_HOME" "$SCAFFOLD_REPO"
     git -C "$SCAFFOLD_REPO" init -q
     HOME="$SCAFFOLD_HOME" RIG_AGENT_TOOLS_SOURCE="$SRC" RIG_SCHEDULE_DRY_RUN=1 RIG_TMUX_DRY_RUN=1 \\
-      rig init -C "$SCAFFOLD_REPO" --yes >/opt/cleanroom/scaffold.log 2>&1 \\
-      || { cat /opt/cleanroom/scaffold.log; fail "bare 'rig init --yes' (default scaffold) exited non-zero"; }
-    [ -f "$SCAFFOLD_REPO/rig.yaml" ] || fail "bare 'rig init --yes' did not scaffold a rig.yaml"
-    [ -d "$SCAFFOLD_HOME/.agents/skills" ] || fail "default scaffold did not install skills"
-    [ -d "$SCAFFOLD_HOME/.claude/skills" ] || fail "default scaffold did not harness-link skills"
+      rig init -C "$SCAFFOLD_REPO" --yes --apply >/opt/cleanroom/scaffold.log 2>&1 \\
+      || { cat /opt/cleanroom/scaffold.log; fail "'rig init --yes --apply' (default scaffold) exited non-zero"; }
+    [ -f "$SCAFFOLD_REPO/rig.yaml" ] || fail "'rig init --yes --apply' did not scaffold a rig.yaml"
+    [ -d "$SCAFFOLD_HOME/.agents/skills" ] || fail "default scaffold apply did not install skills"
+    [ -d "$SCAFFOLD_HOME/.claude/skills" ] || fail "default scaffold apply did not harness-link skills"
     [ -x "$SCAFFOLD_HOME/.config/git/run-global-hooks" ] \\
-      || fail "default scaffold did not install the git-hooks dispatcher runner"
-    pass "bare 'rig init --yes' scaffolds the default config + lands skills/dispatcher"
+      || fail "default scaffold apply did not install the git-hooks dispatcher runner"
+    pass "'rig init --yes --apply' scaffolds the default config + lands skills/dispatcher"
+
+    # ── (6) the CORE safety invariant: `rig init --yes` WITHOUT --apply must NOT apply ──
+    # This is the exact regression the redesign exists to prevent (the CTO complaint: init must
+    # not "do a bunch of things" with no apply signal). `--yes` writes rig.yaml but applies
+    # NOTHING — prove it end-to-end on a pristine HOME so a future accidental presumptuous-apply
+    # lights this up. Own repo + HOME so it can't pollute the legs above.
+    NOAPPLY_HOME="$HOME/noapply-home"
+    NOAPPLY_REPO="$HOME/noapply-repo"
+    mkdir -p "$NOAPPLY_HOME" "$NOAPPLY_REPO"
+    git -C "$NOAPPLY_REPO" init -q
+    HOME="$NOAPPLY_HOME" RIG_AGENT_TOOLS_SOURCE="$SRC" RIG_SCHEDULE_DRY_RUN=1 RIG_TMUX_DRY_RUN=1 \\
+      rig init -C "$NOAPPLY_REPO" --yes >/opt/cleanroom/noapply.log 2>&1 \\
+      || { cat /opt/cleanroom/noapply.log; fail "'rig init --yes' (scaffold only) exited non-zero"; }
+    [ -f "$NOAPPLY_REPO/rig.yaml" ] || fail "'rig init --yes' did not scaffold a rig.yaml"
+    [ ! -d "$NOAPPLY_HOME/.agents/skills" ] \\
+      || fail "'rig init --yes' (no --apply) APPLIED skills — presumptuous-apply regression!"
+    [ ! -d "$NOAPPLY_HOME/.claude/skills" ] \\
+      || fail "'rig init --yes' (no --apply) harness-linked skills — presumptuous-apply regression!"
+    # `-e` (existence), NOT `-x`: a presumptuous apply that wrote a NON-executable dispatcher must
+    # still trip this — the invariant is "nothing was created", not "nothing executable".
+    [ ! -e "$NOAPPLY_HOME/.config/git/run-global-hooks" ] \\
+      || fail "'rig init --yes' (no --apply) installed the dispatcher — presumptuous-apply regression!"
+    # case-insensitive + loose so a cosmetic reword of the summary ('Nothing applied') doesn't redden it
+    grep -qi "nothing.*applied" /opt/cleanroom/noapply.log \\
+      || fail "'rig init --yes' output did not state nothing was applied"
+    pass "'rig init --yes' (no --apply) scaffolds rig.yaml but applies NOTHING (core invariant)"
 
     printf 'CLEANROOM-ALL-GREEN\\n'
     """
