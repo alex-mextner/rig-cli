@@ -46,7 +46,7 @@ Or run straight from a checkout — `uv run bin/rig …` / `python3 bin/rig …`
 
 | Command | One-line |
 | --- | --- |
-| `rig init` | **First-run onboarding.** Scaffold `rig.yaml` and wire in the agent-tools catalog — walking you through what's available (with opt-out). The front door for a repo/machine that has no config yet. |
+| `rig init` | **First-run onboarding.** Scaffold `rig.yaml` and **preview** the agent-tools catalog it would wire in (with opt-out) — the front door for a repo/machine with no config yet. init never applies on its own: a bare `rig init` (no TUI/flags) writes **nothing** (pure preview); `rig init --yes` writes `rig.yaml` (config only); **`rig apply` is what applies it** (or `rig init --yes --apply` to scaffold + apply in one step). |
 | `rig apply` | **Declarative reconcile** (kubectl-style): read `rig.yaml`, compute the diff vs the repo's state, converge, idempotently. The steady-state command you re-run on every machine; hand-edits that drift from the config are surfaced by `rig status`. `--dry-run` previews; `--only skills,ci` scopes. |
 | `rig status` | Detect + report **drift in both directions**, grouped by GLOBAL/REPO layer and by every area rig reconciles (skills, hooks, CI, MCP, symlinks, repo settings, auto-mode, tmux, model cron). |
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
@@ -60,21 +60,30 @@ Or run straight from a checkout — `uv run bin/rig …` / `python3 bin/rig …`
 ### Quick start — `init` then `apply`
 
 There are two commands, and they are **not** the same thing: `rig init` is first-run
-onboarding (no config yet → scaffold one + wire the catalog in, walking you through it);
-`rig apply` is the steady-state reconcile (config exists → converge the disk to it). You run
-`init` once, `apply` forever after. `init` provisions **auto-mode** (the agent runs
-autonomously with minimum babysitting) — recommended on by default, *and safe because the
-agent-hook guards are installed alongside it.*
+onboarding (no config yet → scaffold one + **preview** the catalog it would wire in);
+`rig apply` is what actually applies — the steady-state reconcile (config exists → converge the
+disk to it). You run `init` once to scaffold + review the plan, then `apply` to apply (and
+`apply` forever after). The default rig.yaml `init` writes provisions **auto-mode** (the agent
+runs autonomously with minimum babysitting) — recommended on by default, *and safe because the
+agent-hook guards are applied alongside it.*
 
-**Interactivity is orthogonal to the command.** Both `init` and `apply` run fully
-interactive (TUI wizard), semi-interactive (some answers pre-supplied by config/flags, the
-rest prompted), or non-interactive (`--yes` / `--config … --yes`). The mode is decided by
-TTY + config + flags, *not* by which command you picked.
+**`init` does NOT apply by default — that is deliberate.** A bare `rig init` with no TUI and no
+flags writes **nothing** and applies **nothing**; it prints a non-destructive PREVIEW of the plan
+and how to proceed (it should never "do a bunch of things" with no instruction). `rig init --yes`
+scaffolds `rig.yaml` (config only — still nothing applied), then you run `rig apply`. To do both
+in one step, use `rig init --yes --apply` (the explicit one-shot).
+
+**How `init` decides its mode (TTY + flags).** A bare `rig init` runs the interactive TUI wizard
+(with Export-config-only vs Apply buttons) **only when there is a TTY and `textual` is installed**;
+with no TTY (piped / CI / agent) or no `textual`, it falls back to the non-destructive PREVIEW
+instead of hanging on a wizard nothing can drive. Any explicit signal (`--yes` / `--config …
+--yes` / `--apply`) is non-interactive. (`rig apply` is never interactive — it has no wizard.)
 
 ```bash
 rig doctor                                    # check deps; rig doctor --yes to install
-rig init                                       # first-run onboarding: scaffold rig.yaml + wire the catalog
-rig apply                                      # steady state: re-apply on every machine, identically
+rig init                                       # no config yet: scaffold rig.yaml + PREVIEW the plan
+rig apply                                      # apply it (and re-apply on every machine, identically)
+rig init --yes --apply                         # or do both in one step (the explicit one-shot)
 rig status                                     # later: has the repo drifted from rig.yaml?
 rig setup                                      # interactive wizard: see + change every area, then apply
 ```
@@ -93,8 +102,10 @@ config, `--no-apply` writes without converging).
 Headless / agent path (no TUI):
 
 ```bash
-rig init --yes                                 # first-run onboarding, non-interactive
-rig apply                                      # re-apply identically on every machine
+rig init --yes                                 # scaffold rig.yaml (config only; nothing applied)
+rig apply                                      # apply it; re-apply identically on every machine
+# or, the explicit one-shot:
+rig init --yes --apply                         # scaffold rig.yaml AND apply in one step
 ```
 
 ## `rig stats` — is the ecosystem actually being adopted?

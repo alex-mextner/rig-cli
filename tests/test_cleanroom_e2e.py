@@ -7,9 +7,11 @@ both run on the DEVELOPER'S machine: the dev's Python, the dev's ``$PATH``, and 
 throwaway ``$HOME`` — a host that already has rig installed, ``git`` configured, and whatever
 ``~/.claude`` / ``~/.agents`` history the dev accumulated. They prove the logic; they do NOT
 prove that a stranger who has NEVER run rig, on a machine that has NEVER seen agent-tools, gets a
-working setup from one ``rig init``. That clean-room proof is what the ROADMAP asks for
+working setup from one ``rig init --apply``. That clean-room proof is what the ROADMAP asks for
 (tg#3745, rig-cli#10): a fresh-environment e2e (Docker container / throwaway ``$HOME``) running
-``rig init`` as a brand-new user, asserting the four acceptance points below.
+``rig init --apply`` as a brand-new user, asserting the four acceptance points below. (``rig
+init`` SCAFFOLDS rig.yaml + previews the plan; ``--apply`` is the explicit one-shot that also
+applies — see riglib/cli.py::cmd_setup.)
 
 How it is reached
 -----------------
@@ -267,9 +269,12 @@ _ASSERT_SCRIPT = textwrap.dedent(
     sed "s#__SRC__#$SRC#" /opt/cleanroom/rig.yaml > "$REPO/rig.yaml"
 
     # ── the brand-new user runs `rig init` (the front door) ──────────────────────────
-    rig init -C "$REPO" --config "$REPO/rig.yaml" --yes >/opt/cleanroom/init.log 2>&1 \\
-      || { cat /opt/cleanroom/init.log; fail "rig init --yes exited non-zero"; }
-    pass "rig init --yes succeeded as a brand-new user"
+    # `--apply` is the explicit one-shot: init SCAFFOLDS rig.yaml + previews by default, and
+    # applies the plan only on --apply (or a separate `rig apply`). The clean-room proves a
+    # brand-new user gets a working setup from one `rig init --apply`.
+    rig init -C "$REPO" --config "$REPO/rig.yaml" --yes --apply >/opt/cleanroom/init.log 2>&1 \\
+      || { cat /opt/cleanroom/init.log; fail "rig init --yes --apply exited non-zero"; }
+    pass "rig init --yes --apply succeeded as a brand-new user"
 
     # the `gitignore` opt-out must actually suppress the global-excludes write: with it OFF, rig
     # must NOT set `core.excludesfile` globally (a silent write there would be a real bug class).

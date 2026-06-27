@@ -14,7 +14,7 @@
 # --fast  — the PRE-COMMIT subset. Runs only the seconds-cheap legs that exercise the REAL
 #   catalog (`--help`/`--version`/`doctor`/`setup`-usage and the `rig status` legs: a clean
 #   sample exits 0, a removed slot prints the 3-part error + exit 4, a non-git dir doesn't nag).
-#   It SKIPS the heavy `rig init --yes` apply (skill installs / harness symlinks / tmux / tg-ctl
+#   It SKIPS the heavy `rig init --yes --apply` apply (skill installs / harness symlinks / tmux / tg-ctl
 #   provisioning) and the full pytest run — those belong in CI, not a per-commit local gate.
 #   This is the subset wired into the repo-local pre-commit hook (see scripts/install-smoke-
 #   precommit.sh) so a commit that breaks the real `rig status` flow is blocked LOCALLY, not
@@ -233,8 +233,9 @@ YAML
   [[ -e "$HOME/.claude/skills" ]] && fail "dry-run wrote harness skill links"
   pass "rig init --dry-run wrote nothing"
 
-  # real apply
-  $RIG init -C "$TMP" --config "$TMP/rig.yaml" --yes >/dev/null || fail "init --yes"
+  # real apply — `--apply` is the explicit one-shot (init SCAFFOLDS + previews by default; the
+  # plan is applied only on --apply, or via a separate `rig apply`).
+  $RIG init -C "$TMP" --config "$TMP/rig.yaml" --yes --apply >/dev/null || fail "init --yes --apply"
   [[ -d "$HOME/.agents/skills" ]] || fail "skills not installed"
   [[ -f "$TMP/.github/workflows/secret-scan.yml" ]] || fail "secret-scan workflow not written"
   [[ -x "$HOME/.config/git/run-global-hooks" ]] || fail "dispatcher runner not installed"
@@ -243,7 +244,7 @@ YAML
   sk_name="$(basename "$one_skill")"
   [[ -L "$HOME/.claude/skills/$sk_name" ]] || fail "skill '$sk_name' not symlinked into harness dir"
   [[ -f "$HOME/.claude/skills/$sk_name/SKILL.md" ]] || fail "harness skill link does not resolve"
-  pass "rig init --yes installed skills + CI + dispatcher + harness skill links"
+  pass "rig init --yes --apply installed skills + CI + dispatcher + harness skill links"
 
   # permissions (default-ON): the command allowlist lands in the harness settings.json with our
   # ecosystem CLIs + safe dev tools pre-allowed (Bash(<tool>:*)). This is the security-sensitive

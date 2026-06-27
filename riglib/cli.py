@@ -177,14 +177,21 @@ def build_parser() -> argparse.ArgumentParser:
         # NOTE: there is intentionally NO --no-write-config flag. rig.yaml is the committed
         # source of truth and is NOT optional (AGENTS.md). Use --dry-run for a no-write preview.
         parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+        # init only SCAFFOLDS rig.yaml + PREVIEWS the plan; applying is a deliberate second step
+        # (`rig apply`). --apply opts into the one-shot "scaffold AND apply now".
+        parser.add_argument(
+            "--apply", action="store_true",
+            help="also apply the plan now (default: init only scaffolds rig.yaml; run `rig apply` to apply)",
+        )
         parser.add_argument(
             "--plan", action="store_true",
             help="list every planned action (default: a per-carrier summary for a large plan)",
         )
 
     # `init` is the canonical first-run onboarding command (the front door). init/apply are
-    # the two real commands; interactivity (TUI/semi/--yes) is orthogonal to both.
-    ip = sub.add_parser("init", help="first-run onboarding: scaffold rig.yaml + wire the catalog in (the front door)")
+    # the two real commands; interactivity (TUI/semi/--yes) is orthogonal to both. init
+    # SCAFFOLDS + PREVIEWS by default — `rig apply` (or `rig init --apply`) is what applies.
+    ip = sub.add_parser("init", help="first-run onboarding: scaffold rig.yaml + preview the plan (front door; `rig apply` applies)")
     _add_setup_args(ip)
 
     ap = sub.add_parser(
@@ -501,8 +508,11 @@ def _plan_summary_line(plan) -> str:
     return ", ".join(parts)
 
 
-def _print_plan(plan, *, full: bool = False) -> None:
-    print(_bold(f"\nPlan: {len(plan)} action(s)  [on_conflict={plan.on_conflict}]"))
+def _print_plan(plan, *, full: bool = False, preview: bool = False) -> None:
+    # `preview=True` marks the plan as NOT applied (the `rig init` scaffold/no-TUI paths): the
+    # plan is what `rig apply` WOULD do, so it must never read as completed work.
+    label = _dim("   — PREVIEW of `rig apply` (not applied)") if preview else ""
+    print(_bold(f"\nPlan: {len(plan)} action(s)  [on_conflict={plan.on_conflict}]") + label)
     if full or len(plan.actions) <= _PLAN_INLINE_MAX:
         for a in plan.actions:
             print(f"  {_dim('•')} {a.category}/{a.item} → {a.target}")
@@ -530,12 +540,22 @@ def _print_results(report) -> None:
 
 # ── commands ──────────────────────────────────────────────────────────────────────
 def cmd_setup(args: argparse.Namespace) -> int:
-    from .config import ConfigError
+    # `rig init` front door. The split:
+    #   • a bare `rig init` (no --config/--yes/--apply/--dry-run) is INTERACTIVE → the TUI
+    #     wizard, the user's control surface.
+    #   • any explicit signal (--config / --yes / --apply / --dry-run) is HEADLESS.
+    #   • a bare `rig init` with NO way to run the wizard (no TTY, or textual not installed) has
+    #     NO instructions AND no wizard, so it must NOT silently scaffold+apply — it shows a
+    #     non-destructive PREVIEW (writes nothing, applies nothing) and how to proceed.
+    from .setup_wizard import is_interactive
 
-    # --dry-run is a headless preview ("print the plan, write nothing") — it must never
-    # launch the interactive wizard, even when textual is installed.
-    interactive = not (args.config or args.yes or args.dry_run)
+    interactive = not (args.config or args.yes or args.dry_run or getattr(args, "apply", False))
     if interactive:
+        # the wizard needs a TTY on BOTH ends (stdin to read, stdout to draw). A piped / CI /
+        # agent run has no TTY, so a fullscreen TUI would hang — fall to the preview instead of
+        # doing anything surprising (mirrors `rig setup`'s non-interactive degradation).
+        if not is_interactive():
+            return _setup_preview_no_tui(args, reason="no-tty")
         # `.tui` re-exports run_wizard but imports textual ONLY inside the call, so this
         # import is cheap and stdlib-safe; the textual ImportError surfaces on invocation.
         from .tui import run_wizard
@@ -543,22 +563,27 @@ def cmd_setup(args: argparse.Namespace) -> int:
         try:
             return run_wizard(Path(args.cwd).resolve())
         except ImportError:
-            print(
-                _warn("textual not installed — falling back to a non-interactive default setup.\n")
-                + _dim(f"  Install the wizard with: {_tui_install_hint()}\n")
-                + _dim("  Or run headless: rig init --yes  /  rig init --config rig.yaml --yes")
-            )
-            return _setup_headless(args, use_default=True)
+            return _setup_preview_no_tui(args, reason="no-textual")
 
     return _setup_headless(args, use_default=args.config is None)
 
 
-def _setup_headless(args: argparse.Namespace, *, use_default: bool) -> int:
-    from .actions import run_plan
-    from .catalog import Catalog, CatalogError
-    from .config import ConfigError, LoadedConfig, load, validate
+def _resolve_init_plan(args: argparse.Namespace, *, use_default: bool):
+    """Resolve ``(plan, loaded, env, repo_yaml, pending_write)`` for `rig init`.
+
+    Pure resolver: it scans the catalog and builds the plan but writes NOTHING and applies
+    NOTHING. Raises ConfigError/CatalogError/PlanError on a bad config (the caller renders the
+    error + maps it to an exit code). ``pending_write`` records how rig.yaml WOULD be persisted
+    (``("generated", SetupState)`` | ``("copy", src_path)`` | ``None``), so the headless path can
+    persist it fail-closed only AFTER the plan is proven valid.
+
+    The tuple LEADS with ``plan`` to match :func:`_load_plan` (``(plan, loaded, env)``) — both
+    plan-resolvers share one convention so a caller can't mix them up.
+    """
+    from .catalog import Catalog
+    from .config import LoadedConfig, load, validate
     from .detect import detect_environment
-    from .plan import PlanError, build
+    from .plan import build
     from .state import SetupState
 
     # detect_environment resolves repo_root to the git top-level; use THAT consistently for
@@ -567,81 +592,197 @@ def _setup_headless(args: argparse.Namespace, *, use_default: bool) -> int:
     env = detect_environment(Path(args.cwd).resolve())
     repo_root = env.repo_root
     repo_yaml = repo_root / "rig.yaml"
+    pending_write = None
+    if use_default:
+        # honor a global-config-pinned agent_tools_source for the scan (the documented cascade
+        # has a valid global layer), but do NOT pin it into the committed rig.yaml — that would
+        # break the env/default fallback on other machines.
+        global_source = load(repo_root, include_global=True).agent_tools_source
+        Catalog.scan(global_source)  # verify an agent-tools checkout exists (fail early)
+        state = SetupState.default(agent_tools_source=None, project_type=env.project_type)
+        # Build the plan from the GENERATED state, not from disk: with --dry-run there may be no
+        # rig.yaml on disk yet, so loading from disk would preview an empty/stale plan instead of
+        # what setup decided. Carry the global source into the in-memory config so the catalog
+        # scan below resolves it.
+        validate(state.data)
+        data = dict(state.data)
+        if global_source:
+            data["agent_tools_source"] = global_source
+        loaded = LoadedConfig(data=data, repo_root=repo_root)
+        pending_write = ("generated", state)
+    else:
+        # a relative --config is relative to the -C repo root (mirrors `rig apply`).
+        cp = Path(args.config)
+        explicit = (cp if cp.is_absolute() else repo_root / cp).resolve()
+        loaded = load(repo_root, explicit_config=explicit)
+        # rig.yaml is committed-by-default: setting up from an external template must leave the
+        # repo with its own rig.yaml. Copy it in unless it already IS it.
+        if explicit != repo_yaml.resolve():
+            pending_write = ("copy", explicit)
+    catalog = Catalog.scan(loaded.agent_tools_source)
+    plan = build(loaded, catalog, project_type=env.project_type)
+    return plan, loaded, env, repo_yaml, pending_write
 
-    # describes how to persist rig.yaml AFTER the plan is proven valid (fail-closed: never
-    # leave a new/invalid committed config behind a failed setup).
-    pending_write = None  # ("generated", SetupState) | ("copy", src_path) | None
+
+def _persist_rig_yaml(pending_write, repo_yaml: Path) -> None:
+    """Write the committed rig.yaml from a resolved ``pending_write`` (generated | copy)."""
+    kind, payload = pending_write
+    if kind == "generated":
+        written = payload.write(repo_yaml)
+        print(_ok(f"wrote {written}"))
+        return
+    import shutil
+    import time
+
+    repo_yaml.parent.mkdir(parents=True, exist_ok=True)
+    # never silently discard an existing committed config — back it up first.
+    if repo_yaml.is_file():
+        bak = repo_yaml.with_name(f"rig.yaml.rig-bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        shutil.copy2(str(repo_yaml), str(bak))
+        print(_warn(f"  backed up existing rig.yaml → {bak}"))
+    shutil.copyfile(payload, repo_yaml)
+    print(_ok(f"wrote {repo_yaml}  (from {payload})"))
+
+
+def _print_init_next_steps(*, config_exists: bool, reason: str) -> None:
+    """The 'nothing was done — here is how to proceed' block for the no-TUI PREVIEW path.
+
+    The last line is ``reason``-aware: under ``no-textual`` the wizard is one install away; under
+    ``no-tty`` (piped / CI / agent) the wizard can't run at all regardless of textual, so we point
+    at a real terminal instead of telling the user to install the TUI for nothing.
+    """
+    print(_bold("\nNothing was written and nothing was applied — this is a PREVIEW."))
+    print("To proceed, pick one:")
+    if config_exists:
+        print(f"  {_dim('•')} rig.yaml already exists here  →  run `rig apply` to apply it")
+    else:
+        print(f"  {_dim('•')} rig init --yes           write rig.yaml (config only; then `rig apply` to apply)")
+        print(f"  {_dim('•')} rig init --yes --apply   write rig.yaml AND apply the plan in one step")
+    if reason == "no-textual":
+        print(f"  {_dim('•')} install the TUI (hint above), then re-run `rig init` to choose interactively")
+    else:  # no-tty: the wizard needs a real terminal; installing textual would not help here
+        print(f"  {_dim('•')} run `rig init` from an interactive terminal (TTY) to choose interactively")
+
+
+def _setup_preview_no_tui(args: argparse.Namespace, *, reason: str) -> int:
+    """`rig init` with no instructions and no way to run the wizard: a non-destructive PREVIEW.
+
+    A bare `rig init` carries no user signal, so it must not "do a bunch of things". When the
+    wizard can't run — ``reason="no-tty"`` (piped / CI / agent) or ``reason="no-textual"`` (the
+    ``[tui]`` extra isn't installed) — we WRITE NOTHING and APPLY NOTHING: we print what `rig
+    apply` WOULD do and exactly how to proceed.
+    """
+    from .catalog import CatalogError
+    from .config import ConfigError
+    from .detect import detect_environment
+    from .plan import PlanError
+
+    if reason == "no-textual":
+        print(
+            _warn("textual not installed — can't launch the interactive setup wizard.")
+            + _dim(f"\n  Install it to choose interactively:  {_tui_install_hint()}")
+        )
+    else:  # no-tty
+        print(_warn("no TTY — can't launch the interactive setup wizard (piped / non-interactive run)."))
+    config_exists = (detect_environment(Path(args.cwd).resolve()).repo_root / "rig.yaml").is_file()
     try:
-        if use_default:
-            # don't silently clobber an existing customized rig.yaml with the default one.
-            if repo_yaml.is_file() and not args.dry_run:
-                print(_err(f"error: {repo_yaml} already exists."))
-                print(_dim("  run `rig apply` to apply it, or delete it to regenerate a default."))
-                return 2
-            # honor a global-config-pinned agent_tools_source for the scan (the documented
-            # cascade has a valid global layer), but do NOT pin it into the committed
-            # rig.yaml — that would break the env/default fallback on other machines.
-            global_source = load(repo_root, include_global=True).agent_tools_source
-            try:
-                Catalog.scan(global_source)  # verify an agent-tools checkout exists (fail early)
-            except CatalogError as exc:
-                print(_err(f"error: {exc}"))
-                return 2
-            state = SetupState.default(
-                agent_tools_source=None, project_type=env.project_type
-            )
-            # Build the plan from the GENERATED state, not from disk: with --dry-run there
-            # may be no rig.yaml on disk yet, so loading from disk would preview an
-            # empty/stale plan instead of what setup actually decided. Carry the global
-            # source into the in-memory config so the catalog scan below resolves it.
-            validate(state.data)
-            data = dict(state.data)
-            if global_source:
-                data["agent_tools_source"] = global_source
-            loaded = LoadedConfig(data=data, repo_root=repo_root)
-            pending_write = ("generated", state)
+        if config_exists:
+            # a committed rig.yaml already exists: preview what `rig apply` WOULD do FROM it (the
+            # advice below is "run rig apply"), not a default scaffold — the preview must match
+            # the command we point the user at, or it misleads.
+            plan, _loaded, _env = _load_plan(args.cwd, None)
         else:
-            # a relative --config is relative to the -C repo root (mirrors `rig apply`).
-            cp = Path(args.config)
-            explicit = (cp if cp.is_absolute() else repo_root / cp).resolve()
-            loaded = load(repo_root, explicit_config=explicit)
-            # rig.yaml is committed-by-default: setting up from an external template must
-            # leave the repo with its own rig.yaml. Copy it in unless it already IS it.
-            if explicit != repo_yaml.resolve():
-                pending_write = ("copy", explicit)
-        catalog = Catalog.scan(loaded.agent_tools_source)
-        plan = build(loaded, catalog, project_type=env.project_type)
+            plan, _loaded, _env, _repo_yaml, _pending = _resolve_init_plan(args, use_default=True)
+    except (ConfigError, CatalogError, PlanError) as exc:
+        print(_err_block(exc))
+        return 2
+    _print_plan(plan, full=getattr(args, "plan", False), preview=True)
+    _print_init_next_steps(config_exists=config_exists, reason=reason)
+    return 0
+
+
+def _preview_existing_config(args: argparse.Namespace, repo_yaml: Path) -> int:
+    """Preview the plan of an ALREADY-committed rig.yaml (what `rig apply` would do), writing
+    nothing. Used by the dry-run and no-TUI paths when a config already exists, so the preview
+    matches the command the user is pointed at (`rig apply`) instead of a default scaffold."""
+    from .catalog import CatalogError
+    from .config import ConfigError
+    from .plan import PlanError
+
+    try:
+        plan, _loaded, _env = _load_plan(args.cwd, None)
+    except (ConfigError, CatalogError, PlanError) as exc:
+        print(_err_block(exc))
+        return 2
+    _print_plan(plan, full=getattr(args, "plan", False), preview=True)
+    print(_dim("\n(dry-run: nothing written, nothing applied)"))
+    print(_dim(f"rig.yaml already exists at {repo_yaml} — run `rig apply` to apply it."))
+    return 0
+
+
+def _setup_headless(args: argparse.Namespace, *, use_default: bool) -> int:
+    from .actions import run_plan
+    from .catalog import CatalogError
+    from .config import ConfigError
+    from .detect import detect_environment
+    from .plan import PlanError
+
+    # The default-scaffold path (no --config) must reckon with an ALREADY-committed rig.yaml.
+    if use_default:
+        repo_yaml = detect_environment(Path(args.cwd).resolve()).repo_root / "rig.yaml"
+        if repo_yaml.is_file():
+            if args.dry_run:
+                # `rig init --dry-run` on a configured repo: preview what `rig apply` WOULD do FROM
+                # the committed rig.yaml (consistent with the no-TUI preview), not the default
+                # scaffold the refusing `--yes` path would never write.
+                return _preview_existing_config(args, repo_yaml)
+            # clobber-guard, surfaced BEFORE the catalog scan: a generated default must never
+            # overwrite a customized rig.yaml, and surfacing it here keeps the clear "already
+            # exists → run rig apply" message even when the agent-tools catalog is unavailable
+            # (preserving the pre-refactor error precedence). The explicit --config path instead
+            # BACKS UP the old rig.yaml in _persist_rig_yaml — a template install is opt-in.
+            print(_err(f"error: {repo_yaml} already exists."))
+            print(_dim("  run `rig apply` to apply it, or delete it to regenerate a default."))
+            return 2
+
+    try:
+        plan, _loaded, _env, repo_yaml, pending_write = _resolve_init_plan(
+            args, use_default=use_default
+        )
     except (ConfigError, CatalogError, PlanError) as exc:
         print(_err_block(exc))
         return 2
 
-    # plan is valid → now persist rig.yaml (the committed source of truth, never optional)
-    if pending_write and not args.dry_run:
-        kind, payload = pending_write
-        if kind == "generated":
-            # (the generated path already refused an existing rig.yaml above)
-            written = payload.write(repo_yaml)
-            print(_ok(f"wrote {written}"))
-        else:
-            import shutil
-            import time
+    apply_now = getattr(args, "apply", False) and not args.dry_run
 
-            repo_yaml.parent.mkdir(parents=True, exist_ok=True)
-            # never silently discard an existing committed config — back it up first.
-            if repo_yaml.is_file():
-                bak = repo_yaml.with_name(f"rig.yaml.rig-bak-{time.strftime('%Y%m%d-%H%M%S')}")
-                shutil.copy2(str(repo_yaml), str(bak))
-                print(_warn(f"  backed up existing rig.yaml → {bak}"))
-            shutil.copyfile(payload, repo_yaml)
-            print(_ok(f"wrote {repo_yaml}  (from {payload})"))
+    # plan is valid → persist rig.yaml (the committed source of truth, never optional) unless dry-run.
+    # pending_write is None only when --config already points AT the repo's own rig.yaml (nothing to
+    # write) — track whether a write actually happened so the message below never claims a phantom one.
+    wrote_config = bool(pending_write) and not args.dry_run
+    if wrote_config:
+        _persist_rig_yaml(pending_write, repo_yaml)
 
-    _print_plan(plan, full=getattr(args, "plan", False))
+    # --apply: show the plan (NOT a preview — it IS being applied), then run it and report what
+    # was DONE. Printing the plan first mirrors `rig apply` and makes `--plan` meaningful here too.
+    if apply_now:
+        _print_plan(plan, full=getattr(args, "plan", False))
+        print(_bold(f"\nApplying {len(plan)} action(s)  [on_conflict={plan.on_conflict}]…"))
+        report = run_plan(plan)
+        _print_results(report)
+        return 1 if report.errors else 0
+
+    # default: the plan is a PREVIEW of `rig apply` — init only scaffolds the config.
+    _print_plan(plan, full=getattr(args, "plan", False), preview=True)
     if args.dry_run:
-        print(_dim("\n(dry-run: nothing written)"))
-        return 0
-    report = run_plan(plan)
-    _print_results(report)
-    return 1 if report.errors else 0
+        print(_dim("\n(dry-run: nothing written, nothing applied)"))
+    elif wrote_config:
+        print(_bold("\nDone — rig.yaml scaffolded (config only; NOTHING applied yet)."))
+        print(_dim("Next: run `rig apply` to apply the plan above (or re-run init with --apply)."))
+    else:
+        # --config pointed at the repo's existing rig.yaml: nothing was written, nothing applied.
+        print(_bold("\nNothing written (rig.yaml already in place) and NOTHING applied."))
+        print(_dim("Next: run `rig apply` to apply the plan above (or re-run init with --apply)."))
+    return 0
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
