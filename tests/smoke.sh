@@ -127,7 +127,10 @@ _real_catalog_full_coverage() {
   git -C "$repo" config user.name  rig-coverage
   _write_full_coverage_config "$cfg" "$src"
   set +e
-  out="$(HOME="$cov_home" RIG_TMUX_DRY_RUN=1 $RIG apply -C "$repo" --config "$cfg" --dry-run 2>&1)"
+  # --plan forces the FULL per-action listing: the default condenses a large plan to a per-carrier
+  # summary, but the coverage scan below greps each `• ci/<slot>` action line, so it needs the
+  # full list (this leg is a machine consumer of the plan, exactly what `--plan` is for).
+  out="$(HOME="$cov_home" RIG_TMUX_DRY_RUN=1 $RIG apply -C "$repo" --config "$cfg" --dry-run --plan 2>&1)"
   rc=$?
   set -e
   [[ "$rc" -eq 0 ]] || { echo "$out" | tail -8; fail "real-catalog coverage: dry-run exit $rc != 0 (rig can't plan the real catalog)"; }
