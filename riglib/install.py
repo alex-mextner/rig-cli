@@ -23,9 +23,10 @@ description: >-
   agent-tools content — skills, agent-hooks, git-hooks/dispatcher, CI gates, MCP. Use
   when the user wants to bootstrap a repo's guardrails, reconcile it to its config,
   check for config/disk drift, change a single setting, or install the toolchain
-  dependencies. Commands: `rig init` (wizard or --config/--yes), `rig apply` (idempotent
-  reconcile), `rig status` (two-way drift), `rig config get|set` (read/change one key, then
-  reconcile), `rig doctor` (dependency bootstrap).
+  dependencies. Commands: `rig init` (scaffold rig.yaml + PREVIEW the plan; wizard or
+  --config/--yes; add --apply to also apply now), `rig apply` (idempotent reconcile — what
+  actually applies), `rig status` (two-way drift), `rig config get|set` (read/change one key,
+  then reconcile), `rig doctor` (dependency bootstrap).
 metadata:
   author: alex-mextner
   repo: https://github.com/alex-mextner/rig-cli
@@ -38,9 +39,10 @@ reproducible source of truth) by applying content from the `agent-tools` umbrell
 
 ## Commands
 ```
-rig init                        # interactive wizard (or fallback default if no TUI)
-rig init --config rig.yaml --yes    # headless, non-interactive
-rig apply                       # reconcile the repo to rig.yaml (idempotent)
+rig init                        # interactive wizard (or, with no TUI, a non-destructive PREVIEW)
+rig init --yes                   # scaffold rig.yaml (config only; nothing applied) — then `rig apply`
+rig init --config rig.yaml --yes --apply   # headless one-shot: scaffold AND apply
+rig apply                       # reconcile the repo to rig.yaml (idempotent — what applies)
 rig apply --dry-run             # print the resolved plan, write nothing
 rig status                      # report drift BOTH ways (config↔disk)
 rig config get harness.auto_mode  # read one nested key (--global for ~/.config/rig/config.yaml)

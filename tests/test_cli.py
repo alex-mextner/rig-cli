@@ -349,23 +349,373 @@ def test_setup_dryrun_never_launches_wizard(tmp_path, capsys, fake_agent_tools, 
     assert "Plan:" in capsys.readouterr().out
 
 
-def test_textual_fallback_hint_is_uv_not_bare_pip(tmp_path, capsys, monkeypatch):
-    """When the wizard's textual import fails, the install hint must be uv-based — NOT a bare
-    `pip install 'rig-cli[tui]'`, which errors on a PEP-668 externally-managed Python."""
+def test_textual_fallback_previews_and_writes_nothing(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """A bare `rig init` with NO textual wizard must NOT silently scaffold+apply (the CTO
+    complaint: "why do anything when the user gave no instructions"). It shows a non-destructive
+    PREVIEW — writes nothing, applies nothing — plus a uv-based install hint and how-to-proceed."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    # force a TTY so we reach the wizard launch (and its textual ImportError) — the no-textual
+    # branch, distinct from the no-TTY branch covered by test_init_no_tty_previews_*.
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
 
     def _no_textual(_root):
         raise ImportError("No module named 'textual'")
 
     monkeypatch.setattr("riglib.tui.run_wizard", _no_textual)
-    # isolate the heavy headless fallback that runs AFTER the hint prints — we only assert the hint.
-    monkeypatch.setattr("riglib.cli._setup_headless", lambda *a, **k: 0)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # the uv-based install hint (NOT a bare pip install, which PEP-668 blocks)
+    assert "textual not installed" in out
+    assert "uv" in out
+    assert "pip install 'rig-cli[tui]'" not in out
+    # principle 1 — the plan is unambiguously a PREVIEW, never read as done work
+    assert "Plan:" in out
+    assert "PREVIEW" in out
+    assert "Nothing was written and nothing was applied" in out
+    # principle 3 — concrete ways to proceed
+    assert "rig init --yes" in out
+    assert "interactively" in out
+    # principle 2 — no-args mutates nothing
+    assert not (repo / "rig.yaml").exists()
+    assert not (tmp_path / "home" / ".agents" / "skills").exists()
+
+
+def test_init_no_tty_previews_without_launching_wizard(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """A bare `rig init` in a NON-TTY context (piped / CI / agent) must NOT launch the fullscreen
+    wizard (it would hang) — it falls to the non-destructive PREVIEW, writing nothing."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: False)
+    # even though textual would "import" fine here, the wizard must never be reached without a TTY.
+    monkeypatch.setattr(
+        "riglib.tui.run_wizard",
+        lambda _root: (_ for _ in ()).throw(AssertionError("wizard must not launch without a TTY")),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no TTY" in out
+    assert "PREVIEW" in out
+    assert "Nothing was written and nothing was applied" in out
+    assert not (repo / "rig.yaml").exists()
+    assert not (tmp_path / "home" / ".agents" / "skills").exists()
+
+
+def test_tui_install_hint_is_uv_not_bare_pip(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """The textual-not-installed path's install hint routes through uv, never a bare
+    `pip install 'rig-cli[tui]'` (the form PEP-668 externally-managed Pythons reject)."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr(
+        "riglib.tui.run_wizard",
+        lambda _root: (_ for _ in ()).throw(ImportError("No module named 'textual'")),
+    )
     rc = main(["init", "-C", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "textual not installed" in out
-    assert "uv" in out  # the suggestion routes through uv
-    # the old bare-pip hint is gone (it fails on externally-managed system Pythons).
+    assert "uv" in out
     assert "pip install 'rig-cli[tui]'" not in out
+
+
+def test_init_yes_scaffolds_without_applying(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`rig init --yes` writes rig.yaml (the committed config) but does NOT apply — the plan is
+    framed as a PREVIEW of `rig apply`, and nothing lands on disk under HOME."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo), "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # DONE: rig.yaml is scaffolded (config only)
+    assert (repo / "rig.yaml").is_file()
+    assert "wrote" in out
+    assert "NOTHING applied" in out
+    # PREVIEW: the plan is explicitly not applied, and points at `rig apply`
+    assert "PREVIEW of `rig apply`" in out
+    assert "run `rig apply`" in out
+    # not applied: no skills installed into the (isolated) HOME
+    assert not (tmp_path / "home" / ".agents" / "skills").exists()
+
+
+def test_init_apply_flag_applies(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`rig init --yes --apply` is the explicit one-shot: it writes rig.yaml AND applies the
+    plan (skills land under the isolated HOME), reporting what was DONE."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo), "--yes", "--apply"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert (repo / "rig.yaml").is_file()
+    # applied: the apply header + a real results Summary, and skills actually installed
+    assert "Applying" in out
+    assert "Summary:" in out
+    assert "PREVIEW" not in out  # an apply is DONE work, never labeled a preview
+    assert (tmp_path / "home" / ".agents" / "skills").exists()
+
+
+def test_init_apply_alone_is_headless_oneshot(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`rig init --apply` (no --yes, no --config) is an explicit instruction, so it stays
+    HEADLESS (never the wizard/preview) and bootstraps the default rig.yaml + applies it."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # a bare-init code path would try the TUI; --apply must NOT go there.
+    monkeypatch.setattr(
+        "riglib.tui.run_wizard",
+        lambda _root: (_ for _ in ()).throw(AssertionError("wizard must not launch under --apply")),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo), "--apply"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert (repo / "rig.yaml").is_file()  # default scaffold written
+    assert "Applying" in out
+    assert (tmp_path / "home" / ".agents" / "skills").exists()  # and applied
+
+
+def test_init_apply_over_existing_config_refuses(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`rig init --apply` on a repo that ALREADY has a customized rig.yaml hits the clobber-guard
+    (exit 2) — init never overwrites a committed config with the default; use `rig apply`."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    existing = "version: 1\n# customized\nskills: {enabled: false}\n"
+    (repo / "rig.yaml").write_text(existing, encoding="utf-8")
+    rc = main(["init", "-C", str(repo), "--apply"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "already exists" in out
+    assert (repo / "rig.yaml").read_text() == existing  # not clobbered
+    assert not (tmp_path / "home" / ".agents" / "skills").exists()  # nothing applied
+
+
+def test_init_apply_dryrun_suppresses_apply(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`--dry-run` outranks `--apply`: the plan is previewed, nothing is written, nothing applied."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo), "--yes", "--apply", "--dry-run"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Plan:" in out
+    assert "dry-run" in out
+    assert "Applying" not in out  # --apply is suppressed by --dry-run
+    assert not (repo / "rig.yaml").exists()
+    assert not (tmp_path / "home" / ".agents" / "skills").exists()
+
+
+def test_no_tui_preview_existing_config_matches_apply(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """A no-TUI `rig init` on a repo with an EXISTING rig.yaml previews THAT config's plan (what
+    `rig apply` would do), not the default scaffold — so the preview can't mislead. The fixture
+    config disables skills, so the previewed plan must carry NO skill action."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # force a TTY so we exercise the wizard→ImportError→preview branch (no-textual)
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr(
+        "riglib.tui.run_wizard",
+        lambda _root: (_ for _ in ()).throw(ImportError("No module named 'textual'")),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "rig.yaml").write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\n"
+        "ci: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\n",
+        encoding="utf-8",
+    )
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "PREVIEW" in out
+    # the existing config disables skills → previewing IT (not the default, which installs skills)
+    # must show NO skill action, and must advise `rig apply`.
+    assert "skills/" not in out
+    assert "rig apply" in out
+    # --plan so the per-action lines are listed (small plan would list anyway, but be explicit)
+    capsys.readouterr()
+    main(["init", "-C", str(repo), "--plan"])
+    assert "skills/" not in capsys.readouterr().out
+
+
+def test_no_tty_preview_existing_config(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """The no-TTY branch (`reason="no-tty"`) with an EXISTING rig.yaml previews THAT config via
+    `_load_plan` — same as the no-textual branch, but reached by the TTY gate, not an ImportError."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: False)  # no TTY
+    # textual would import fine here; the wizard must still never launch without a TTY.
+    monkeypatch.setattr(
+        "riglib.tui.run_wizard",
+        lambda _root: (_ for _ in ()).throw(AssertionError("wizard must not launch without a TTY")),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "rig.yaml").write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\nskills: {{enabled: false}}\n"
+        "agent_hooks: {enabled: false}\nci: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\n",
+        encoding="utf-8",
+    )
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no TTY" in out
+    assert "PREVIEW" in out
+    assert "skills/" not in out  # existing (skills-disabled) config, not the default scaffold
+    # no-tty next-steps advise a TTY, never "install the TUI (hint above)"
+    assert "interactive terminal (TTY)" in out
+    assert "rig apply" in out
+
+
+def test_init_external_config_apply_backs_up_then_applies(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """The sharpest branch of `_persist_rig_yaml`: an external `--config` over an EXISTING
+    committed rig.yaml, with `--apply`. The old config must be timestamp-backed-up (never
+    silently lost), the template committed, AND the plan applied (skills land in HOME)."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "rig.yaml").write_text(
+        "version: 1\n# OLD customized\nskills: {enabled: false}\n", encoding="utf-8"
+    )
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {universal: {all: true}, by_type: {enable: [cli]}}\n"
+        "agent_hooks: {enabled: false}\nci: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\n",
+        encoding="utf-8",
+    )
+    rc = main(["init", "-C", str(repo), "--config", str(template), "--yes", "--apply"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # the OLD config was backed up, not discarded
+    assert any(p.name.startswith("rig.yaml.rig-bak-") for p in repo.iterdir())
+    # the template is now committed AND applied
+    assert "skills" in (repo / "rig.yaml").read_text(encoding="utf-8")
+    assert "Applying" in out
+    assert (tmp_path / "home" / ".agents" / "skills").exists()
+
+
+def test_init_external_config_backs_up_without_apply(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """The copy+backup branch on the NON-apply path: external `--config` over an existing
+    rig.yaml, no `--apply`. The old config is backed up and the template committed, but the plan
+    is only PREVIEWED — nothing is applied."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "rig.yaml").write_text(
+        "version: 1\n# OLD customized\nskills: {enabled: false}\n", encoding="utf-8"
+    )
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {universal: {all: true}, by_type: {enable: [cli]}}\n"
+        "agent_hooks: {enabled: false}\nci: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\n",
+        encoding="utf-8",
+    )
+    rc = main(["init", "-C", str(repo), "--config", str(template), "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert any(p.name.startswith("rig.yaml.rig-bak-") for p in repo.iterdir())  # old backed up
+    assert "skills" in (repo / "rig.yaml").read_text(encoding="utf-8")  # template committed
+    assert "PREVIEW of `rig apply`" in out  # only previewed
+    assert "Applying" not in out
+    assert not (tmp_path / "home" / ".agents" / "skills").exists()  # NOT applied
+
+
+def test_init_clobber_guard_precedes_catalog_scan(tmp_path, capsys, monkeypatch):
+    """The clobber-guard runs BEFORE the catalog scan: an existing rig.yaml + a BROKEN agent-tools
+    source must still give the clear 'already exists → run rig apply' (exit 2), not a CatalogError
+    — the moved-up guard preserves the pre-refactor error precedence."""
+    # a non-existent source makes any Catalog.scan fail — but the guard must fire first.
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(tmp_path / "does-not-exist"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "rig.yaml").write_text("version: 1\n# customized\nskills: {enabled: false}\n", encoding="utf-8")
+    rc = main(["init", "-C", str(repo), "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "already exists" in out
+    assert "agent-tools" not in out  # the catalog error never surfaces — the guard won the race
+
+
+def test_init_dryrun_over_existing_config_previews_that_config(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`rig init --dry-run` on a repo that ALREADY has a (skills-disabled) rig.yaml previews THAT
+    config's plan — what `rig apply` would do — not the default scaffold (which installs skills).
+    Consistent with the no-TUI preview; nothing is written."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    original = (
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\nskills: {{enabled: false}}\n"
+        "agent_hooks: {enabled: false}\nci: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\n"
+    )
+    (repo / "rig.yaml").write_text(original, encoding="utf-8")
+    rc = main(["init", "-C", str(repo), "--dry-run"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "PREVIEW of `rig apply`" in out
+    assert "skills/" not in out  # existing config disables skills → not the default scaffold
+    assert "already exists" in out
+    assert "run `rig apply`" in out
+    assert (repo / "rig.yaml").read_text() == original  # untouched
+
+
+def test_init_config_is_repo_yaml_reports_no_write(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`rig init --config <the repo's OWN rig.yaml> --yes` writes nothing (the config is already
+    in place), so the message must NOT claim a phantom 'scaffolded' write."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "rig.yaml").write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\nskills: {{enabled: false}}\n"
+        "agent_hooks: {enabled: false}\nci: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\n",
+        encoding="utf-8",
+    )
+    rc = main(["init", "-C", str(repo), "--config", "rig.yaml", "--yes"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Nothing written (rig.yaml already in place)" in out
+    assert "scaffolded" not in out  # never claim a write that didn't happen
+    assert "run `rig apply`" in out
 
 
 def test_tui_install_hint_every_branch_matches_install_shape(monkeypatch):
