@@ -59,6 +59,7 @@ config-web carries NO copy of the autostart machinery — sharing the lib is the
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -109,9 +110,14 @@ _VERB_HELP = {
 # of LIFECYCLE_VERBS — it is the implementation `run`/`start`/`enable` exec, not a user verb.
 SERVE_VERB = "_serve"
 
+# `--python <rig interpreter>` targets the interpreter rig actually runs under, so the libs land
+# where config-web will import them — NOT a bare `uv pip install`, which outside a venv exits
+# "No virtual environment found" and inside an unrelated venv mutates the wrong one. shlex.quote
+# keeps the printed command paste-safe when the interpreter path contains spaces.
 _INSTALL_HINT = (
-    "pip install -e <agent-tools>/lib/agenttools_daemon "
-    "<agent-tools>/lib/agenttools_service   "
+    f"uv pip install --python {shlex.quote(sys.executable)} "
+    "-e <agent-tools>/lib/agenttools_daemon "
+    "-e <agent-tools>/lib/agenttools_service   "
     "(both are agent-tools nested libs, not on PyPI; daemon is service's dependency)"
 )
 

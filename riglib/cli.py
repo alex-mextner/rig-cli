@@ -76,6 +76,48 @@ def _err_block(exc: Exception) -> str:
     return _err(f"error: {exc}")
 
 
+def _rig_install_method() -> str:
+    """Best-effort classification of how THIS rig process was installed.
+
+    Returns ``uv-tool`` | ``pipx`` | ``source`` | ``unknown`` so the wizard's ``[tui]``-extra
+    hint can name the way that actually works for the caller. Pure path inspection (sys.prefix /
+    sys.executable / the package's own location) — no subprocess, no network.
+    """
+    blob = f"{sys.prefix or ''}\n{sys.executable or ''}".replace("\\", "/")
+    if "/uv/tools/" in blob:
+        return "uv-tool"
+    if "/pipx/venvs/" in blob or "/pipx/" in blob:
+        return "pipx"
+    # symlink / checkout install: the bin/rig shim inserts the repo root onto sys.path, so this
+    # package lives next to a pyproject.toml + bin/rig in a writable checkout.
+    root = Path(__file__).resolve().parent.parent
+    if (root / "pyproject.toml").is_file() and (root / "bin" / "rig").exists():
+        return "source"
+    return "unknown"
+
+
+def _tui_install_hint() -> str:
+    """How to install the wizard's ``[tui]`` extra, matched to how rig itself is installed.
+
+    NEVER a bare ``pip install`` — on a PEP-668 externally-managed Python (Homebrew/Debian
+    system interpreters) that errors out, and the toolchain rig standardizes on is ``uv``. Each
+    branch names the command that actually adds ``textual``+``rich`` for that install shape.
+    """
+    method = _rig_install_method()
+    if method == "uv-tool":
+        return "uv tool install --reinstall 'rig-cli[tui]'   (re-adds rig with the wizard extra)"
+    if method == "pipx":
+        return "pipx inject rig-cli 'textual>=0.50' 'rich>=13'   (or: pipx install --force 'rig-cli[tui]')"
+    if method == "source":
+        root = Path(__file__).resolve().parent.parent
+        return (
+            f"cd '{root}' && uv run --extra tui rig init; "
+            f"or `uv tool install --from '{root}' 'rig-cli[tui]'` to make plain `rig` launch it"
+        )
+    # unknown install shape: prefer uv, never a bare `pip install` (PEP-668 externally-managed).
+    return "uv tool install 'rig-cli[tui]'   (or, into rig's env: uv pip install 'textual>=0.50' 'rich>=13')"
+
+
 def _fmt_scalar(value: object) -> str:
     """Render a coerced scalar in YAML/CLI casing (true/false/null), not Python's repr.
 
@@ -135,6 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
         # NOTE: there is intentionally NO --no-write-config flag. rig.yaml is the committed
         # source of truth and is NOT optional (AGENTS.md). Use --dry-run for a no-write preview.
         parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+        parser.add_argument(
+            "--plan", action="store_true",
+            help="list every planned action (default: a per-carrier summary for a large plan)",
+        )
 
     # `init` is the canonical first-run onboarding command (the front door). init/apply are
     # the two real commands; interactivity (TUI/semi/--yes) is orthogonal to both.
@@ -153,6 +199,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--config", help="config file to apply (default: ./rig.yaml + global)")
     ap.add_argument("--dry-run", action="store_true", help="print the resolved plan, write nothing")
     ap.add_argument("--only", help="comma-separated categories to scope (e.g. skills,ci)")
+    ap.add_argument(
+        "--plan", action="store_true",
+        help="list every planned action (default: a per-carrier summary for a large plan)",
+    )
 
     st = sub.add_parser(
         "status",
@@ -258,6 +308,10 @@ def _add_config_parser(sub: "argparse._SubParsersAction") -> None:
     _add_config_target_args(cs)
     cs.add_argument("--no-apply", action="store_true",
                     help="write the key but skip the reconcile (print the resulting plan only)")
+    cs.add_argument(
+        "--plan", action="store_true",
+        help="list every planned action (default: a per-carrier summary for a large plan)",
+    )
 
 
 def _add_stats_parser(sub: "argparse._SubParsersAction") -> None:
@@ -405,10 +459,56 @@ def _validate_layer_in_isolation(layer_path: Path) -> None:
     build(loaded, catalog)
 
 
-def _print_plan(plan) -> None:
+# Above this many planned actions, `_print_plan` prints a per-carrier SUMMARY rather than the
+# full wall of "category/item → target" lines (a fresh `rig init`/`apply` is ~120 actions, and
+# a `config set` reconcile runs the SAME full engine). `--plan` always forces the full list; a
+# genuinely small plan (a scoped `--only`, a near-empty config) stays fully inline — it is not a
+# wall and the per-line detail is more useful than a count.
+_PLAN_INLINE_MAX = 12
+
+# Human labels for the plan summary, keyed by Action.category. An unlisted category falls back to
+# its raw name (underscores hyphenated), so a newly added carrier can't silently break the summary.
+_CATEGORY_LABELS = {
+    "skills": "skills",
+    "agent_hooks": "agent-hooks",
+    "git_hooks": "git-hooks",
+    "ci": "CI gates",
+    "mcp": "MCP",
+    "harness": "harness",
+    "permissions": "permissions",
+    "agents_md": "agents.md",
+    "ship_delegator": "ship gate",
+    "github": "GitHub",
+    "models": "models",
+    "tmux": "tmux",
+    "linters": "linters",
+    "gitignore": "gitignore",
+    "tools": "tools",
+    "tg_ctl": "tg-ctl",
+}
+
+
+def _plan_summary_line(plan) -> str:
+    """One-line "<n> <carrier>, …" count of the plan, most-numerous carrier first."""
+    from collections import Counter
+
+    counts = Counter(a.category for a in plan.actions)
+    parts = [
+        f"{n} {_CATEGORY_LABELS.get(cat, cat.replace('_', '-'))}"
+        # most-numerous first, ties broken alphabetically for a stable, reproducible read.
+        for cat, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return ", ".join(parts)
+
+
+def _print_plan(plan, *, full: bool = False) -> None:
     print(_bold(f"\nPlan: {len(plan)} action(s)  [on_conflict={plan.on_conflict}]"))
-    for a in plan.actions:
-        print(f"  {_dim('•')} {a.category}/{a.item} → {a.target}")
+    if full or len(plan.actions) <= _PLAN_INLINE_MAX:
+        for a in plan.actions:
+            print(f"  {_dim('•')} {a.category}/{a.item} → {a.target}")
+    else:
+        print(f"  {_plan_summary_line(plan)}")
+        print(_dim(f"  (run with --plan to list all {len(plan.actions)} actions)"))
     for note in plan.notes:
         print(f"  {_warn('note')}: {note}")
 
@@ -445,7 +545,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         except ImportError:
             print(
                 _warn("textual not installed — falling back to a non-interactive default setup.\n")
-                + _dim("  Install the wizard with: pip install 'rig-cli[tui]'\n")
+                + _dim(f"  Install the wizard with: {_tui_install_hint()}\n")
                 + _dim("  Or run headless: rig init --yes  /  rig init --config rig.yaml --yes")
             )
             return _setup_headless(args, use_default=True)
@@ -535,7 +635,7 @@ def _setup_headless(args: argparse.Namespace, *, use_default: bool) -> int:
             shutil.copyfile(payload, repo_yaml)
             print(_ok(f"wrote {repo_yaml}  (from {payload})"))
 
-    _print_plan(plan)
+    _print_plan(plan, full=getattr(args, "plan", False))
     if args.dry_run:
         print(_dim("\n(dry-run: nothing written)"))
         return 0
@@ -568,7 +668,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         wanted = {s.strip() for s in args.only.split(",")}
         plan.actions = [a for a in plan.actions if a.category in wanted]
 
-    _print_plan(plan)
+    _print_plan(plan, full=getattr(args, "plan", False))
     if args.dry_run:
         print(_dim("\n(dry-run: nothing written)"))
         return 0
@@ -1444,7 +1544,7 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
     # RECONCILE: a config change only matters once the disk reflects it. Run the SAME apply
     # engine `rig apply` uses (scoped to the repo in front of you — a --global edit still has
     # to converge this repo). --no-apply writes the key and prints the plan only.
-    _print_plan(plan)
+    _print_plan(plan, full=getattr(args, "plan", False))
     if args.no_apply:
         print(_dim("\n(--no-apply: config written, nothing reconciled)"))
         return 0

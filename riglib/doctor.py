@@ -130,16 +130,33 @@ def diagnose(os_info: OsInfo | None = None) -> DoctorReport:
     return report
 
 
+def _python_install_command(package: str) -> list[str]:
+    """Install ``package`` into rig's OWN interpreter (``sys.executable``).
+
+    Prefers ``uv pip install`` — the toolchain rig users standardize on — targeting the exact
+    interpreter rig runs under so the wizard's ``textual`` lands where rig will import it. This
+    installs cleanly when that interpreter is a uv-/pipx-managed venv (the recommended install
+    shape). It does NOT magically bypass PEP-668: on an externally-managed *system* Python both
+    uv and a bare pip refuse — there the real fix is to install rig itself into a managed env
+    (see ``riglib.cli._tui_install_hint``), not to force a system-wide install. Falls back to
+    ``python -m pip install --user`` only when ``uv`` is absent — no worse than before.
+    """
+    if shutil.which("uv"):
+        return ["uv", "pip", "install", "--python", sys.executable, package]
+    return [sys.executable, "-m", "pip", "install", "--user", package]
+
+
 def _install_cmd_for(dep: Dependency, os_info: OsInfo) -> list[str] | None:
     mgr = os_info.package_manager
     if not mgr:
         return None
-    # python deps that have no system package → pip into THIS interpreter (sys.executable),
-    # not a bare `python3` that may be a different runtime than the one rig runs under.
+    # python deps that have no system package → install into THIS interpreter (sys.executable),
+    # not a bare `python3` that may be a different runtime than the one rig runs under. Prefer uv
+    # (the user's toolchain) over a bare `pip` — see _python_install_command for the PEP-668 caveat.
     if dep.kind == "python":
         pkg = dep.pkg.get(mgr)
-        if not pkg:  # empty string means "no system package, use pip"
-            return [sys.executable, "-m", "pip", "install", "--user", dep.name]
+        if not pkg:  # empty string means "no system package, use uv/pip into this interpreter"
+            return _python_install_command(dep.name)
         return install_command(mgr, pkg)
     pkg = dep.pkg.get(mgr, dep.name)
     if not pkg:

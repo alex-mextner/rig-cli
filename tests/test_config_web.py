@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -876,9 +877,26 @@ def test_config_web_verb_without_lib_is_missing_dep(capsys):
     out = capsys.readouterr().out
     assert rc == errors.EXIT_MISSING_DEP
     assert "agenttools-service" in out
+    # the install hint that reaches the user must target rig's interpreter (end-to-end wiring of
+    # _INSTALL_HINT through MissingDepError's `fix:` line), not a bare untargeted `uv pip install`.
+    assert "uv pip install --python" in out
+    assert shlex.quote(sys.executable) in out  # quote-safe: matches the printed (shlex-quoted) path
 
 
 @pytest.mark.skipif(_HAVE_SERVICE_LIB, reason="agenttools-service IS installed locally")
 def test_load_service_module_raises_missing_dep_when_absent():
     with pytest.raises(errors.MissingDepError, match="agenttools-service"):
         cws._load_service_module()
+
+
+def test_install_hint_targets_rig_interpreter_via_uv():
+    """The config-web missing-dep hint must direct uv at rig's OWN interpreter (`--python
+    <sys.executable>`), not a bare `uv pip install` that fails outside a venv / mutates the wrong
+    one. Guards against a regression back to the un-targeted form."""
+    hint = cws._INSTALL_HINT
+    assert hint.startswith("uv pip install --python ")
+    assert shlex.quote(sys.executable) in hint  # the exact interpreter rig runs under (quote-safe)
+    # editable installs of BOTH nested libs, never a bare untargeted `uv pip install -e`.
+    assert "-e <agent-tools>/lib/agenttools_daemon" in hint
+    assert "-e <agent-tools>/lib/agenttools_service" in hint
+    assert "uv pip install -e" not in hint
