@@ -350,21 +350,20 @@ def test_setup_dryrun_never_launches_wizard(tmp_path, capsys, fake_agent_tools, 
 
 
 def test_textual_fallback_previews_and_writes_nothing(tmp_path, capsys, fake_agent_tools, monkeypatch):
-    """A bare `rig init` with NO textual wizard must NOT silently scaffold+apply (the CTO
-    complaint: "why do anything when the user gave no instructions"). It shows a non-destructive
-    PREVIEW — writes nothing, applies nothing — plus a uv-based install hint and how-to-proceed."""
+    """When the [tui] extra is missing AND the auto-install genuinely fails, `rig init` must NOT
+    silently scaffold+apply (the CTO complaint: "why do anything when the user gave no
+    instructions"). It shows a non-destructive PREVIEW — writes nothing, applies nothing — plus a
+    uv-based manual install hint and how-to-proceed."""
     monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
 
-    # force a TTY so we reach the wizard launch (and its textual ImportError) — the no-textual
-    # branch, distinct from the no-TTY branch covered by test_init_no_tty_previews_*.
+    # force a TTY + a missing-and-unfixable [tui] extra: the no-textual fallback branch, distinct
+    # from the no-TTY branch covered by test_init_no_tty_previews_*.
     monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
-
-    def _no_textual(_root):
-        raise ImportError("No module named 'textual'")
-
-    monkeypatch.setattr("riglib.tui.run_wizard", _no_textual)
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: False)
+    monkeypatch.setattr("riglib.cli._auto_install_tui", lambda: False)
     repo = tmp_path / "repo"
     repo.mkdir()
     rc = main(["init", "-C", str(repo)])
@@ -411,21 +410,307 @@ def test_init_no_tty_previews_without_launching_wizard(tmp_path, capsys, fake_ag
 
 
 def test_tui_install_hint_is_uv_not_bare_pip(tmp_path, capsys, fake_agent_tools, monkeypatch):
-    """The textual-not-installed path's install hint routes through uv, never a bare
+    """The fallback (auto-install failed) hint routes through uv, never a bare
     `pip install 'rig-cli[tui]'` (the form PEP-668 externally-managed Pythons reject)."""
     monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
     monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
-    monkeypatch.setattr(
-        "riglib.tui.run_wizard",
-        lambda _root: (_ for _ in ()).throw(ImportError("No module named 'textual'")),
-    )
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: False)
+    monkeypatch.setattr("riglib.cli._auto_install_tui", lambda: False)
     rc = main(["init", "-C", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "uv" in out
     assert "pip install 'rig-cli[tui]'" not in out
+
+
+def test_init_auto_installs_tui_then_launches(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """TTY + the [tui] extra missing: `rig init` AUTO-INSTALLS textual+rich (the CTO directive —
+    no "go install it yourself" hint) and then launches the wizard."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    # missing before the install, present after it (the install made it importable in-process).
+    importable = {"v": False}
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: importable["v"])
+    install_cmd = ["uv", "pip", "install", "textual>=0.50", "rich>=13"]
+    monkeypatch.setattr("riglib.cli._tui_install_command", lambda: list(install_cmd))
+
+    calls = {"install": None, "wizard": False}
+    import subprocess as _sp
+
+    _real_run = _sp.run
+
+    def _fake_run(cmd, **kwargs):
+        if cmd == install_cmd:
+            import types
+
+            calls["install"] = cmd
+            importable["v"] = True  # the install "succeeded" → now importable
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return _real_run(cmd, **kwargs)  # let unrelated subprocess (git, etc.) run for real
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    def _wizard(_root):
+        calls["wizard"] = True
+        return 0
+
+    monkeypatch.setattr("riglib.tui.run_wizard", _wizard)
+    rc = main(["init", "-C", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # the installer subprocess ran with the matched command, and the wizard then launched
+    assert calls["install"] == ["uv", "pip", "install", "textual>=0.50", "rich>=13"]
+    assert calls["wizard"] is True
+    assert "installing the setup UI" in out
+    # NOT the do-it-yourself hint / non-destructive preview — it actually worked
+    assert "Nothing was written" not in out
+    assert "textual not installed" not in out
+
+
+def test_init_auto_install_failure_falls_back_to_preview(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """A GENUINE auto-install failure (non-zero exit) degrades to the non-destructive preview +
+    manual hint — no crash, nothing written, the wizard never launched, #82 behavior intact."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: False)
+    install_cmd = ["uv", "pip", "install", "textual>=0.50"]
+    monkeypatch.setattr("riglib.cli._tui_install_command", lambda: list(install_cmd))
+    import subprocess as _sp
+
+    _real_run = _sp.run
+
+    def _fail_run(cmd, **kwargs):
+        if cmd == install_cmd:
+            import types
+
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="network is unreachable")
+        return _real_run(cmd, **kwargs)  # let the preview's git probe run for real
+
+    monkeypatch.setattr("subprocess.run", _fail_run)
+    monkeypatch.setattr(
+        "riglib.tui.run_wizard",
+        lambda _root: (_ for _ in ()).throw(AssertionError("wizard must not launch after a failed install")),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "setup-UI install failed" in out
+    assert "network is unreachable" in out
+    assert "PREVIEW" in out
+    assert "Nothing was written and nothing was applied" in out
+    assert "textual not installed" in out  # the manual hint is still offered
+    assert not (repo / "rig.yaml").exists()
+    assert not (tmp_path / "home" / ".agents" / "skills").exists()
+
+
+def test_init_no_tui_flag_skips_autoinstall(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`rig init --no-tui` never touches the network: no auto-install, no wizard — just a preview."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+
+    def _no_install():
+        raise AssertionError("must NOT auto-install under --no-tui")
+
+    monkeypatch.setattr("riglib.cli._auto_install_tui", _no_install)
+    monkeypatch.setattr(
+        "riglib.tui.run_wizard",
+        lambda _root: (_ for _ in ()).throw(AssertionError("wizard must not launch under --no-tui")),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo), "--no-tui"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "TUI disabled" in out
+    assert "PREVIEW" in out
+    assert "Nothing was written and nothing was applied" in out
+    assert not (repo / "rig.yaml").exists()
+
+
+def test_init_rig_no_tui_env_skips_autoinstall(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`RIG_NO_TUI=1` is the env half of --no-tui: no auto-install, no wizard, just a preview."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("RIG_NO_TUI", "1")
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+
+    def _no_install():
+        raise AssertionError("must NOT auto-install when RIG_NO_TUI is set")
+
+    monkeypatch.setattr("riglib.cli._auto_install_tui", _no_install)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "TUI disabled" in out
+    assert "Nothing was written and nothing was applied" in out
+    assert not (repo / "rig.yaml").exists()
+
+
+def test_init_textual_present_launches_without_installing(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """When the [tui] extra is already importable, `rig init` launches the wizard directly — no
+    install subprocess at all."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: True)
+
+    def _no_install(*args, **kwargs):
+        raise AssertionError("must NOT auto-install when textual is already present")
+
+    monkeypatch.setattr("subprocess.run", _no_install)
+    monkeypatch.setattr("riglib.cli._auto_install_tui", _no_install)
+
+    launched = {"v": False}
+
+    def _wizard(_root):
+        launched["v"] = True
+        return 0
+
+    monkeypatch.setattr("riglib.tui.run_wizard", _wizard)
+    rc = main(["init", "-C", str(tmp_path)])
+    assert rc == 0
+    assert launched["v"] is True
+    assert "installing the setup UI" not in capsys.readouterr().out
+
+
+def test_tui_install_command_matches_install_method(monkeypatch):
+    """The auto-install argv is matched to how rig itself is installed (the runnable twin of
+    _tui_install_hint), and degrades to None when no matching installer is on PATH."""
+    import riglib.cli as cli
+
+    present: set[str] = set()
+
+    def _which(prog):
+        return f"/usr/bin/{prog}" if prog in present else None
+
+    monkeypatch.setattr("shutil.which", _which)
+
+    # uv-tool → reinstall rig-cli WITH the extra
+    present = {"uv"}
+    monkeypatch.setattr(cli, "_rig_install_method", lambda: "uv-tool")
+    assert cli._tui_install_command() == ["uv", "tool", "install", "--reinstall", "rig-cli[tui]"]
+    # uv-tool but uv missing → None (degrade to the manual hint, don't guess)
+    present = set()
+    assert cli._tui_install_command() is None
+
+    # pipx → inject the two reqs
+    present = {"pipx"}
+    monkeypatch.setattr(cli, "_rig_install_method", lambda: "pipx")
+    assert cli._tui_install_command() == ["pipx", "inject", "rig-cli", "textual>=0.50", "rich>=13"]
+    present = set()
+    assert cli._tui_install_command() is None
+
+    # source + uv → uv pip install into THIS interpreter
+    present = {"uv"}
+    monkeypatch.setattr(cli, "_rig_install_method", lambda: "source")
+    cmd = cli._tui_install_command()
+    assert cmd[:4] == ["uv", "pip", "install", "--python"]
+    assert cmd[-2:] == ["textual>=0.50", "rich>=13"]
+    # source + no uv, INSIDE a venv → plain pip into the venv (NO --user; pip rejects it there)
+    present = set()
+    monkeypatch.setattr("sys.prefix", "/tmp/venv")
+    monkeypatch.setattr("sys.base_prefix", "/usr")
+    cmd = cli._tui_install_command()
+    assert cmd[1:] == ["-m", "pip", "install", "textual>=0.50", "rich>=13"]
+    # source + no uv, on a base/system interpreter → pip --user (non-root target)
+    monkeypatch.setattr("sys.base_prefix", "/tmp/venv")  # prefix == base_prefix → not a venv
+    cmd = cli._tui_install_command()
+    assert cmd[1:] == ["-m", "pip", "install", "--user", "textual>=0.50", "rich>=13"]
+
+
+def test_auto_install_tui_failure_modes_never_raise(monkeypatch, capsys):
+    """`_auto_install_tui` documents "never raises, never hangs" — exercise every failure branch
+    and assert each returns False (no exception) with a diagnostic line."""
+    import subprocess
+    import types
+
+    import riglib.cli as cli
+
+    # 1) no installer on PATH → None command → False
+    monkeypatch.setattr(cli, "_tui_install_command", lambda: None)
+    assert cli._auto_install_tui() is False
+    assert "no uv/pipx/pip installer" in capsys.readouterr().out
+
+    monkeypatch.setattr(cli, "_tui_install_command", lambda: ["installer", "x"])
+
+    # 2) timeout → False
+    def _timeout(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    monkeypatch.setattr("subprocess.run", _timeout)
+    assert cli._auto_install_tui() is False
+    assert "timed out" in capsys.readouterr().out
+
+    # 3) installer binary missing / OSError → False
+    def _oserror(cmd, **kwargs):
+        raise OSError("No such file or directory")
+
+    monkeypatch.setattr("subprocess.run", _oserror)
+    assert cli._auto_install_tui() is False
+    assert "could not start" in capsys.readouterr().out
+
+    # 4) non-zero exit → False, with the last stderr line as the reason
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda cmd, **kwargs: types.SimpleNamespace(returncode=1, stdout="", stderr="boom\npermission denied"),
+    )
+    assert cli._auto_install_tui() is False
+    out = capsys.readouterr().out
+    assert "install failed" in out and "permission denied" in out
+
+    # 5) install succeeds but the extra is STILL not importable → False (re-run hint), not a crash
+    monkeypatch.setattr(
+        "subprocess.run", lambda cmd, **kwargs: types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    )
+    monkeypatch.setattr(cli, "_tui_importable", lambda: False)
+    assert cli._auto_install_tui() is False
+    assert "re-run `rig init`" in capsys.readouterr().out
+
+
+def test_tui_opted_out_env_parsing(monkeypatch):
+    """RIG_NO_TUI is truthy for anything except empty / 0 / false / no / off (case-insensitive)."""
+    import riglib.cli as cli
+
+    for falsy in ("", "0", "false", "FALSE", "no", "off", "  "):
+        monkeypatch.setenv("RIG_NO_TUI", falsy)
+        assert cli._tui_opted_out() is False
+    for truthy in ("1", "true", "yes", "on", "2", "anything"):
+        monkeypatch.setenv("RIG_NO_TUI", truthy)
+        assert cli._tui_opted_out() is True
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+    assert cli._tui_opted_out() is False
+
+
+def test_tui_install_timeout_parsing(monkeypatch):
+    """The auto-install timeout defaults to a finite ceiling and accepts a positive-int override."""
+    import riglib.cli as cli
+
+    monkeypatch.delenv("RIG_TUI_INSTALL_TIMEOUT", raising=False)
+    assert cli._tui_install_timeout() == 180  # finite default
+    monkeypatch.setenv("RIG_TUI_INSTALL_TIMEOUT", "45")
+    assert cli._tui_install_timeout() == 45
+    for bad in ("0", "-5", "abc", ""):  # non-positive / non-numeric → default
+        monkeypatch.setenv("RIG_TUI_INSTALL_TIMEOUT", bad)
+        assert cli._tui_install_timeout() == 180
 
 
 def test_init_yes_scaffolds_without_applying(tmp_path, capsys, fake_agent_tools, monkeypatch):
