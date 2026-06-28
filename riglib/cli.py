@@ -118,6 +118,130 @@ def _tui_install_hint() -> str:
     return "uv tool install 'rig-cli[tui]'   (or, into rig's env: uv pip install 'textual>=0.50' 'rich>=13')"
 
 
+# The wizard's optional dependency — the `[tui]` extra. Kept in sync with pyproject's
+# `tui = ["textual>=0.50", "rich>=13"]`; reused by the auto-install command builder below.
+_TUI_REQS = ("textual>=0.50", "rich>=13")
+
+
+def _tui_importable() -> bool:
+    """True when the optional ``[tui]`` extra (textual + rich) is already importable.
+
+    Pure spec lookup (no import side effects), so the cheap pre-check that decides whether an
+    auto-install is even needed never drags textual into the process when it is absent.
+    ``find_spec`` itself can raise (``ModuleNotFoundError`` on a missing parent package, ``ValueError``
+    on a half-written ``__spec__`` — both plausible right after a botched install), so it is caught:
+    this predicate must never throw, since the whole point is to keep `rig init` from crashing.
+    """
+    import importlib.util
+
+    try:
+        return all(importlib.util.find_spec(m) is not None for m in ("textual", "rich"))
+    except (ImportError, ValueError):
+        return False
+
+
+def _tui_opted_out() -> bool:
+    """The interactive TUI is suppressed via the ``RIG_NO_TUI`` env (any truthy value).
+
+    The ``--no-tui`` flag is checked separately at the call site (it lives on ``args``); this is
+    the env half, so automation can disable the auto-install + wizard without passing a flag.
+    """
+    val = _os.environ.get("RIG_NO_TUI", "").strip().lower()
+    return val not in ("", "0", "false", "no", "off")
+
+
+def _tui_install_timeout() -> int:
+    """Bounded timeout (seconds) for the one-shot TUI auto-install. Override: ``RIG_TUI_INSTALL_TIMEOUT``.
+
+    A real ceiling so a wedged installer can never hang an interactive `rig init` forever; the
+    default is generous enough for a cold `pip` but still finite.
+    """
+    raw = _os.environ.get("RIG_TUI_INSTALL_TIMEOUT", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return 180
+
+
+def _last_line(text: str | None) -> str:
+    """The last non-blank line of captured output — a compact reason for a failed subprocess."""
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def _tui_install_command() -> list[str] | None:
+    """The argv that ADDS the ``[tui]`` extra, matched to how rig itself is installed.
+
+    The runnable twin of :func:`_tui_install_hint` — same branches, but an argv to exec instead of
+    advice to print:
+      * ``uv-tool`` → ``uv tool install --reinstall 'rig-cli[tui]'`` (re-adds rig WITH the extra)
+      * ``pipx``    → ``pipx inject rig-cli textual… rich…``
+      * ``source`` / ``unknown`` → drop textual+rich straight into the interpreter rig imports from
+        (``uv pip install --python <sys.executable>`` or, without uv, ``pip install --user``), so the
+        running process can import them without a re-exec.
+    Returns ``None`` when the matching installer is not on PATH, so the caller degrades to the
+    manual hint instead of guessing at a command that can't run.
+    """
+    import shutil
+
+    method = _rig_install_method()
+    if method == "uv-tool":
+        return ["uv", "tool", "install", "--reinstall", "rig-cli[tui]"] if shutil.which("uv") else None
+    if method == "pipx":
+        return ["pipx", "inject", "rig-cli", *_TUI_REQS] if shutil.which("pipx") else None
+    # source / unknown: land the extra in THIS interpreter's environment.
+    if shutil.which("uv"):
+        return ["uv", "pip", "install", "--python", sys.executable, *_TUI_REQS]
+    # no uv: fall back to pip. Inside a venv, install INTO the venv — `pip install --user` is
+    # rejected there ("User site-packages are not visible in this virtualenv"); `--user` is only
+    # the right (non-root) target on a base/system interpreter.
+    in_venv = sys.prefix != sys.base_prefix
+    user_flag = [] if in_venv else ["--user"]
+    return [sys.executable, "-m", "pip", "install", *user_flag, *_TUI_REQS]
+
+
+def _auto_install_tui() -> bool:
+    """Self-bootstrap the optional ``[tui]`` extra so an interactive `rig init` "just works".
+
+    The CTO directive: when the wizard's dependency is missing, `rig init` must INSTALL it and
+    launch — not print a "go install it yourself" hint. Runs the install command matched to rig's
+    install shape (:func:`_tui_install_command`) with a bounded timeout, then re-checks
+    importability. Returns ``True`` only when textual+rich are importable in THIS process
+    afterward. Every failure mode — no installer on PATH, offline, permission denied, non-zero
+    exit, timeout, or installed-but-still-unimportable — returns ``False`` so the caller degrades
+    to the manual hint + non-destructive preview. Never raises, never hangs.
+    """
+    import subprocess
+
+    cmd = _tui_install_command()
+    if cmd is None:
+        print(_warn("can't auto-install the setup UI: no uv/pipx/pip installer found on PATH."))
+        return False
+    timeout_s = _tui_install_timeout()
+    print(_dim(f"installing the setup UI ({cmd[0]} {cmd[1]}) — one-time, this can take a minute…"))
+    try:
+        res = subprocess.run(cmd, timeout=timeout_s, capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        print(_warn(f"setup-UI install timed out after {timeout_s}s — showing a preview instead."))
+        return False
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(_warn(f"setup-UI install could not start ({exc}) — showing a preview instead."))
+        return False
+    if res.returncode != 0:
+        detail = _last_line(res.stderr) or _last_line(res.stdout) or f"exit {res.returncode}"
+        print(_warn(f"setup-UI install failed ({detail}) — showing a preview instead."))
+        return False
+    import importlib
+
+    importlib.invalidate_caches()
+    if not _tui_importable():
+        print(_warn("setup UI installed, but it isn't importable in this run — re-run `rig init` to launch it."))
+        return False
+    print(_ok("setup UI installed."))
+    return True
+
+
 def _fmt_scalar(value: object) -> str:
     """Render a coerced scalar in YAML/CLI casing (true/false/null), not Python's repr.
 
@@ -186,6 +310,12 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument(
             "--plan", action="store_true",
             help="list every planned action (default: a per-carrier summary for a large plan)",
+        )
+        # interactive `rig init` self-bootstraps the [tui] extra when missing; --no-tui (or
+        # RIG_NO_TUI=1) opts out of BOTH the auto-install and the wizard, keeping the preview path.
+        parser.add_argument(
+            "--no-tui", action="store_true",
+            help="don't launch or auto-install the interactive TUI; show a preview only",
         )
 
     # `init` is the canonical first-run onboarding command (the front door). init/apply are
@@ -556,6 +686,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
         # doing anything surprising (mirrors `rig setup`'s non-interactive degradation).
         if not is_interactive():
             return _setup_preview_no_tui(args, reason="no-tty")
+        # explicit opt-out (`--no-tui` / RIG_NO_TUI): never auto-install, never launch the wizard —
+        # just the non-destructive preview, so automation that sets it gets no surprise install.
+        if getattr(args, "no_tui", False) or _tui_opted_out():
+            return _setup_preview_no_tui(args, reason="no-tui")
+        # the wizard's optional [tui] extra may be absent. The CTO directive: `rig init` JUST WORKS —
+        # self-bootstrap textual+rich and launch, not print a do-it-yourself hint. Only a genuine
+        # install failure (offline / no installer / permission) degrades to the preview + hint.
+        if not _tui_importable() and not _auto_install_tui():
+            return _setup_preview_no_tui(args, reason="no-textual")
         # `.tui` re-exports run_wizard but imports textual ONLY inside the call, so this
         # import is cheap and stdlib-safe; the textual ImportError surfaces on invocation.
         from .tui import run_wizard
@@ -647,9 +786,10 @@ def _persist_rig_yaml(pending_write, repo_yaml: Path) -> None:
 def _print_init_next_steps(*, config_exists: bool, reason: str) -> None:
     """The 'nothing was done — here is how to proceed' block for the no-TUI PREVIEW path.
 
-    The last line is ``reason``-aware: under ``no-textual`` the wizard is one install away; under
-    ``no-tty`` (piped / CI / agent) the wizard can't run at all regardless of textual, so we point
-    at a real terminal instead of telling the user to install the TUI for nothing.
+    The last line is ``reason``-aware: under ``no-textual`` the wizard is one install away (the
+    auto-install was attempted and failed); under ``no-tui`` the user opted out (``--no-tui`` /
+    ``RIG_NO_TUI``) so we point at dropping the flag; under ``no-tty`` (piped / CI / agent) the
+    wizard can't run at all regardless of textual, so we point at a real terminal instead.
     """
     print(_bold("\nNothing was written and nothing was applied — this is a PREVIEW."))
     print("To proceed, pick one:")
@@ -660,6 +800,8 @@ def _print_init_next_steps(*, config_exists: bool, reason: str) -> None:
         print(f"  {_dim('•')} rig init --yes --apply   write rig.yaml AND apply the plan in one step")
     if reason == "no-textual":
         print(f"  {_dim('•')} install the TUI (hint above), then re-run `rig init` to choose interactively")
+    elif reason == "no-tui":
+        print(f"  {_dim('•')} drop --no-tui (and unset RIG_NO_TUI), then re-run `rig init` to choose interactively")
     else:  # no-tty: the wizard needs a real terminal; installing textual would not help here
         print(f"  {_dim('•')} run `rig init` from an interactive terminal (TTY) to choose interactively")
 
@@ -668,8 +810,9 @@ def _setup_preview_no_tui(args: argparse.Namespace, *, reason: str) -> int:
     """`rig init` with no instructions and no way to run the wizard: a non-destructive PREVIEW.
 
     A bare `rig init` carries no user signal, so it must not "do a bunch of things". When the
-    wizard can't run — ``reason="no-tty"`` (piped / CI / agent) or ``reason="no-textual"`` (the
-    ``[tui]`` extra isn't installed) — we WRITE NOTHING and APPLY NOTHING: we print what `rig
+    wizard can't run — ``reason="no-tty"`` (piped / CI / agent), ``reason="no-textual"`` (the
+    ``[tui]`` extra is absent and the auto-install failed), or ``reason="no-tui"`` (the user opted
+    out via ``--no-tui`` / ``RIG_NO_TUI``) — we WRITE NOTHING and APPLY NOTHING: we print what `rig
     apply` WOULD do and exactly how to proceed.
     """
     from .catalog import CatalogError
@@ -682,6 +825,8 @@ def _setup_preview_no_tui(args: argparse.Namespace, *, reason: str) -> int:
             _warn("textual not installed — can't launch the interactive setup wizard.")
             + _dim(f"\n  Install it to choose interactively:  {_tui_install_hint()}")
         )
+    elif reason == "no-tui":
+        print(_warn("interactive TUI disabled (--no-tui / RIG_NO_TUI) — showing a preview only."))
     else:  # no-tty
         print(_warn("no TTY — can't launch the interactive setup wizard (piped / non-interactive run)."))
     config_exists = (detect_environment(Path(args.cwd).resolve()).repo_root / "rig.yaml").is_file()
