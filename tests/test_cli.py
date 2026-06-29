@@ -392,7 +392,11 @@ def test_textual_and_rich_are_core_dependencies():
     """The TUI ships WITH rig: textual + rich are CORE runtime deps in pyproject's
     `[project].dependencies`, so `pipx install rig-cli` / `uv tool install rig-cli` / `pip install
     rig-cli` all bring the wizard — never an optional `[tui]` extra the user must add separately."""
-    import tomllib
+    # tomllib is stdlib on Python 3.11+; use the backport on 3.10.
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib  # type: ignore[no-redef]
     from pathlib import Path
 
     pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
