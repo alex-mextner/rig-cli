@@ -4,23 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rig-cli"
-version = "0.4.0"
+version = "0.5.0"
 description = "rig — the dev-environment umbrella driver: set up a repo from a committed rig.yaml by applying agent-tools content (skills, hooks, CI gates, MCP)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Alex Mextner" }]
-# pyyaml is the only hard runtime dep (config parse/serialize). It is imported lazily so
-# `rig --help` and `rig doctor` still run if it is missing; doctor flags it as a gap.
-dependencies = ["pyyaml"]
+# Hard runtime deps. All imported lazily inside the handlers that need them, so `rig --help`
+# and `rig doctor` stay fast and still run even on a partially-broken env (doctor flags a gap).
+#   • pyyaml   — config parse/serialize (the rig.yaml cascade).
+#   • textual  — the interactive `rig init` setup wizard. It is a CORE dep (not an optional
+#     `[tui]` extra) so EVERY canonical install — `pipx install rig-cli`, `uv tool install
+#     rig-cli`, `pip install rig-cli` — brings the wizard. `rig init` from a terminal launches
+#     it with NO extra install step and NO "go install textual yourself" hint.
+#   • rich     — the `rig stats show --format tui` report (degrades to plain text when absent).
+dependencies = ["pyyaml", "textual>=0.50", "rich>=13"]
 
 [project.optional-dependencies]
-# The interactive wizard + the `rig stats show --format tui` rich report. Headless
-# `rig init --config ... --yes`, `rig apply`, `rig status`, `rig doctor`, and the
-# json/web stats outputs all work WITHOUT these; the stats TUI degrades to plain text
-# when rich is absent (it is lazy-imported), so this stays purely optional.
-tui = ["textual>=0.50", "rich>=13"]
-test = ["pytest"]
+test = ["pytest", "tomli; python_version < '3.11'"]
 # NOTE — `rig config-web`'s lifecycle (run/start/stop/status/enable/disable + launchd/systemd
 # autostart) is delegated to the SHARED `agenttools-service` manager (an agent-tools nested lib,
 # which in turn needs `agenttools-daemon`). It is deliberately NOT declared as a dependency here:

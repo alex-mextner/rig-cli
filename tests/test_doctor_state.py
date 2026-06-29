@@ -59,22 +59,24 @@ def test_python_dep_prefers_uv_when_available(monkeypatch):
 
 
 def test_rich_dep_is_diagnosed_for_stats_tui(monkeypatch):
-    """`rig stats show --format tui` needs `rich` (pyproject's [tui] extra ships it), so
+    """`rig stats show --format tui` needs `rich` (a core dep in pyproject, shipped with rig), so
     doctor must diagnose/provision it — not just `textual`. (review finding)"""
     monkeypatch.setattr(doctor, "_python_present", lambda name: False)
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
     report = doctor.diagnose(OsInfo("darwin", "brew", "macOS"))
     rich = next(s for s in report.statuses if s.dep.name == "rich")
     assert not rich.present
-    assert not rich.dep.required  # optional, like textual (TUI degrades to plain text)
+    assert rich.dep.required  # CORE dep — ships with rig, required like textual
     # brew has no `rich` formula → pip into THIS interpreter, like textual.
     import sys
 
     assert rich.install_cmd == [sys.executable, "-m", "pip", "install", "--user", "rich"]
-    # and on a manager that DOES package it, the system package is used.
+    # ALSO on apt: rich has no system-package entry (empty pkg map) so it ALWAYS installs via
+    # pip into rig's own interpreter, not via apt-get — that would install into system Python
+    # and leave rig's venv without rich.
     apt_report = doctor.diagnose(OsInfo("linux", "apt", "Ubuntu"))
     apt_rich = next(s for s in apt_report.statuses if s.dep.name == "rich")
-    assert apt_rich.install_cmd == ["sudo", "apt-get", "install", "-y", "python3-rich"]
+    assert apt_rich.install_cmd == [sys.executable, "-m", "pip", "install", "--user", "rich"]
 
 
 def test_bootstrap_not_run_without_yes(monkeypatch):

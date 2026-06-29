@@ -59,15 +59,20 @@ DEPENDENCIES: list[Dependency] = [
     ),
     Dependency(
         "textual",
-        "the interactive setup wizard (rig init TUI)",
+        "the interactive setup wizard (rig init TUI) — a CORE dep, ships with rig",
         kind="python",
+        required=True,
         pkg={"brew": "", "apt": "", "dnf": "", "pacman": "python-textual"},
     ),
     Dependency(
         "rich",
-        "the `rig stats show --format tui` report (degrades to plain text when absent)",
+        "the `rig stats show --format tui` report — a CORE dep, ships with rig",
         kind="python",
-        pkg={"brew": "", "apt": "python3-rich", "dnf": "python3-rich", "pacman": "python-rich"},
+        required=True,
+        # All entries empty: always install via pip/uv into rig's own interpreter (sys.executable),
+        # not via the distro package manager. A distro `python3-rich` installs into the system
+        # Python, which is WRONG when rig runs inside a pipx/uv-tool venv.
+        pkg={"brew": "", "apt": "", "dnf": "", "pacman": ""},
     ),
     # The daily model-freshness schedule (models:) is provisioned via the platform-native
     # scheduler: launchd (launchctl) on macOS, crontab on Linux. Both ship with the OS; this
@@ -138,8 +143,8 @@ def _python_install_command(package: str) -> list[str]:
     installs cleanly when that interpreter is a uv-/pipx-managed venv (the recommended install
     shape). It does NOT magically bypass PEP-668: on an externally-managed *system* Python both
     uv and a bare pip refuse — there the real fix is to install rig itself into a managed env
-    (see ``riglib.cli._tui_install_hint``), not to force a system-wide install. Falls back to
-    ``python -m pip install --user`` only when ``uv`` is absent — no worse than before.
+    (`pipx install rig-cli` / `uv tool install rig-cli`), not to force a system-wide install.
+    Falls back to ``python -m pip install --user`` only when ``uv`` is absent — no worse than before.
     """
     if shutil.which("uv"):
         return ["uv", "pip", "install", "--python", sys.executable, package]
