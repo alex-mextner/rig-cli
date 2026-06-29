@@ -69,7 +69,10 @@ DEPENDENCIES: list[Dependency] = [
         "the `rig stats show --format tui` report — a CORE dep, ships with rig",
         kind="python",
         required=True,
-        pkg={"brew": "", "apt": "python3-rich", "dnf": "python3-rich", "pacman": "python-rich"},
+        # All entries empty: always install via pip/uv into rig's own interpreter (sys.executable),
+        # not via the distro package manager. A distro `python3-rich` installs into the system
+        # Python, which is WRONG when rig runs inside a pipx/uv-tool venv.
+        pkg={"brew": "", "apt": "", "dnf": "", "pacman": ""},
     ),
     # The daily model-freshness schedule (models:) is provisioned via the platform-native
     # scheduler: launchd (launchctl) on macOS, crontab on Linux. Both ship with the OS; this

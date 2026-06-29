@@ -71,10 +71,12 @@ def test_rich_dep_is_diagnosed_for_stats_tui(monkeypatch):
     import sys
 
     assert rich.install_cmd == [sys.executable, "-m", "pip", "install", "--user", "rich"]
-    # and on a manager that DOES package it, the system package is used.
+    # ALSO on apt: rich has no system-package entry (empty pkg map) so it ALWAYS installs via
+    # pip into rig's own interpreter, not via apt-get — that would install into system Python
+    # and leave rig's venv without rich.
     apt_report = doctor.diagnose(OsInfo("linux", "apt", "Ubuntu"))
     apt_rich = next(s for s in apt_report.statuses if s.dep.name == "rich")
-    assert apt_rich.install_cmd == ["sudo", "apt-get", "install", "-y", "python3-rich"]
+    assert apt_rich.install_cmd == [sys.executable, "-m", "pip", "install", "--user", "rich"]
 
 
 def test_bootstrap_not_run_without_yes(monkeypatch):
