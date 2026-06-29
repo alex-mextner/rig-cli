@@ -453,6 +453,16 @@
               "default": 0,
               "minimum": 0
             },
+            "required_conversation_resolution": {
+              "type": "boolean",
+              "description": "require every review thread resolved before merge (required_review_thread_resolution)",
+              "default": true
+            },
+            "dismiss_stale_reviews": {
+              "type": "boolean",
+              "description": "dismiss stale approvals on a new push (dismiss_stale_reviews_on_push)",
+              "default": true
+            },
             "block_force_push": {
               "type": "boolean",
               "description": "emit the non_fast_forward rule",

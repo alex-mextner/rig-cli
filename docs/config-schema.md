@@ -677,6 +677,8 @@ github:
     name: rig-managed             # rig owns rulesets with this name
     require_pull_request: true    # pull_request rule
     required_reviews: 0           # required_approving_review_count
+    required_conversation_resolution: true  # block merge while a review thread is open
+    dismiss_stale_reviews: true   # drop a stale approval on a new push
     block_force_push: true        # non_fast_forward rule
     restrict_deletion: true       # deletion rule
     require_linear_history: false # required_linear_history rule
@@ -692,6 +694,8 @@ github:
 | `name` | str | `rig-managed` | the ruleset rig owns/reconciles (rig only ever touches a ruleset with this name) |
 | `require_pull_request` | bool | `true` | emit the `pull_request` rule (require a PR to merge to the default branch) |
 | `required_reviews` | int ≥ 0 | `0` | `required_approving_review_count` on the `pull_request` rule |
+| `required_conversation_resolution` | bool | `true` | `required_review_thread_resolution` on the `pull_request` rule — the SERVER blocks any merge while any review thread is unresolved (the open-thread durable fix). Does not require a reviewer or an approval, but does block the merge until all threads are resolved. **Inert if `require_pull_request: false`** (the whole `pull_request` rule is then not emitted) |
+| `dismiss_stale_reviews` | bool | `true` | `dismiss_stale_reviews_on_push` on the `pull_request` rule — dismisses any approval (including voluntary ones) when a new commit is pushed. **Inert if `require_pull_request: false`** |
 | `block_force_push` | bool | `true` | emit the `non_fast_forward` rule (block force-push) |
 | `restrict_deletion` | bool | `true` | emit the `deletion` rule (block deleting the branch) |
 | `require_linear_history` | bool | `false` | emit the `required_linear_history` rule |

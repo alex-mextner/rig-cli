@@ -61,19 +61,40 @@ Only `github.com` is managed. A non-github or GitHub-Enterprise-host remote is a
 Modern rulesets API. Body: `{name, target:"branch", enforcement:"active",
 conditions.ref_name.include:["~DEFAULT_BRANCH"], bypass_actors:[…], rules:[…]}`. Targets the
 default branch via `~DEFAULT_BRANCH` so it follows a branch rename. Rules emitted per knob:
-`pull_request` (+ `required_approving_review_count`), `non_fast_forward`, `deletion`,
-`required_linear_history`, `required_signatures`, `required_status_checks` (emitted ONLY when
-the context list is non-empty).
+`pull_request` (+ `required_approving_review_count`, `required_review_thread_resolution`,
+`dismiss_stale_reviews_on_push`), `non_fast_forward`, `deletion`, `required_linear_history`,
+`required_signatures`, `required_status_checks` (emitted ONLY when the context list is non-empty).
 
+- **Conversation-resolution (secure default ON — the open-thread durable fix).** The
+  `pull_request` rule sets `required_review_thread_resolution: true` by default
+  (`github.ruleset.required_conversation_resolution`), so the SERVER blocks a merge while any
+  review thread is unresolved — the thing a client-side `gh ship` preflight can be bypassed on
+  (raw `gh pr merge` / the web UI). It does NOT require a reviewer (works with `required_reviews:
+  0`), but it does block any merge until all threads are resolved. `dismiss_stale_reviews`
+  (default ON) maps to `dismiss_stale_reviews_on_push`. Both are real config knobs and are
+  normalized/compared, so a UI flip of either reads as drift and apply reconciles it back.
 - **Footgun guard (structural).** The rule assembly is INCAPABLE of emitting the `update`
   ("Restrict updates") rule or an empty-environment `required_deployments` rule — both lock out
   every merge (`Cannot update this protected ref`). There is no knob and no code path. With
   `admin_bypass` on (default), `actor_id:5 / RepositoryRole / always` keeps admins able to merge.
+  NOTE: `admin_bypass: true` also means an admin can bypass EVERY rule above (required checks,
+  conversation resolution). For a solo-admin repo where the ruleset must actually bite the admin,
+  set `admin_bypass: false` (= `enforce_admins`) — the `update`-rule footgun is still structurally
+  impossible, so no lockout, but the admin loses the `gh pr merge --admin` / `gh ship --skip-ci`
+  escape and must satisfy green checks + resolved threads like everyone else.
 - **Required-checks auto-default.** When `required_status_checks` is omitted, rig sets it to the
   merge-gating CI gates this repo ACTUALLY provisions (`PR Checklist`, `review-threads`), but
   only for gates that are enabled and written. A required check whose workflow is absent would
   wedge every PR (lockout guard). An explicit list (incl. `[]`) wins verbatim; an empty result
   emits no rule.
+- **Plan-limit fail-loud (free private repo).** A free private repo can't enforce rulesets — the
+  `POST/PUT .../rulesets` 403s with plan/upgrade wording. rig does NOT silently no-op: a wording
+  match (`_looks_like_ruleset_plan_limited`, the same heuristic shape as GHAS — plan wording only,
+  a bare 403/422 stays a generic error) yields a LOUD `error` stating that ZERO server-side
+  enforcement is active (a merge is then gated ONLY by the bypassable client-side `gh ship`
+  preflight) and the fix (upgrade to Team/Pro, or make the repo public). `rig status` shows the
+  ruleset as missing/would-create; `rig apply` is where the plan limit surfaces (the read GET
+  succeeds with an empty list; only the write 403s).
 - **Inheritance guard.** List uses `includes_parents=false` + `--paginate`, and the managed
   ruleset is found by `name` + `target=="branch"` + `source_type=="Repository"` — an inherited
   ORG ruleset is never mistaken for the repo's.
@@ -191,6 +212,10 @@ github:
     name: rig-managed               # rig only ever touches a ruleset with this name
     require_pull_request: true      # require a PR to merge to the default branch
     required_reviews: 0             # require-PR but 0 approvals (solo merges keep working)
+    required_conversation_resolution: true  # SERVER blocks merge while any review thread is open
+                                    # (the open-thread durable fix; needs no reviewer, never
+                                    # blocks a solo self-merge — only forces threads resolved)
+    dismiss_stale_reviews: true     # drop a stale approval when a new commit is pushed
     block_force_push: true          # non_fast_forward rule
     restrict_deletion: true         # deletion rule
     require_linear_history: false

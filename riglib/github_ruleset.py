@@ -55,10 +55,20 @@ _URL_REMOTE_RE = re.compile(
 # `required_deployments` knob exists — the footgun rules are not expressible (see the module
 # docstring + build_ruleset_rules). `enabled` is a plan-gating meta-key, not a body knob, so it
 # is NOT here.
+#
+# SECURE-DEFAULT — `required_conversation_resolution` is ON by default: a PR can't merge while any
+# review thread is unresolved. This is the durable fix for a PR that landed through an OPEN review
+# thread (the server enforces what `gh ship`'s client-side preflight could be bypassed on). It is a
+# `pull_request`-rule sub-param (`required_review_thread_resolution`), NOT the legacy branch-
+# protection `required_conversation_resolution` field — modern rulesets carry it on the PR rule.
+# It needs NO required reviewer (works with `required_reviews: 0`), so it never blocks a solo merge —
+# it only forces threads to be resolved, which a careful author does anyway.
 GITHUB_RULESET_DEFAULTS: dict[str, Any] = {
     "name": DEFAULT_RULESET_NAME,
     "require_pull_request": True,
     "required_reviews": 0,
+    "required_conversation_resolution": True,
+    "dismiss_stale_reviews": True,
     "block_force_push": True,
     "restrict_deletion": True,
     "require_linear_history": False,
@@ -123,10 +133,15 @@ def build_ruleset_rules(opts: dict) -> list[dict]:
                 "type": "pull_request",
                 "parameters": {
                     "required_approving_review_count": int(opts.get("required_reviews", 0)),
-                    "dismiss_stale_reviews_on_push": False,
+                    # SECURE DEFAULTS (both ON): a stale approval is dismissed on a new push, and
+                    # every review thread must be resolved before merge. The latter is the durable
+                    # server-side fix for an open-thread bypass — see GITHUB_RULESET_DEFAULTS.
+                    "dismiss_stale_reviews_on_push": bool(opts.get("dismiss_stale_reviews", True)),
                     "require_code_owner_review": False,
                     "require_last_push_approval": False,
-                    "required_review_thread_resolution": False,
+                    "required_review_thread_resolution": bool(
+                        opts.get("required_conversation_resolution", True)
+                    ),
                 },
             }
         )
@@ -208,10 +223,13 @@ def normalize_ruleset(body: dict) -> dict:
                 }
             )
         elif rtype == "pull_request":
-            # rig MANAGES these four PR sub-params (it always writes them False — see
-            # build_ruleset_rules), so they ARE part of the desired state: a hand-flip in the UI
-            # is real drift apply should reconcile back, not silently tolerate. They are
-            # compared, not configurable — intentional, not an oversight.
+            # rig MANAGES these five PR sub-params, so they ARE part of the desired state: a hand-
+            # flip in the UI is real drift apply should reconcile back, not silently tolerate. Three
+            # are config-driven (`required_approving_review_count`, `dismiss_stale_reviews_on_push`,
+            # `required_review_thread_resolution` — the last two secure-default ON, see
+            # build_ruleset_rules); the other two rig always writes False.
+            # Every one is compared here so a live flip of ANY of them reads as drift, never a false
+            # in-sync.
             norm_rules.append(
                 {
                     "type": rtype,

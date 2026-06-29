@@ -1266,6 +1266,8 @@ _GITHUB_ACTIONS_ENUMS = {
 _GITHUB_RULESET_BOOL_KNOBS = (
     "enabled",
     "require_pull_request",
+    "required_conversation_resolution",
+    "dismiss_stale_reviews",
     "block_force_push",
     "restrict_deletion",
     "require_linear_history",

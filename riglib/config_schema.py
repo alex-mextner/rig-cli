@@ -333,6 +333,14 @@ _GITHUB_RULESET_BLOCK = Block(
         "name": Leaf("string", "the ruleset rig owns/reconciles", default="rig-managed"),
         "require_pull_request": Leaf("boolean", "require a PR to merge", default=True),
         "required_reviews": Leaf("integer", "required_approving_review_count", default=0, minimum=0),
+        "required_conversation_resolution": Leaf(
+            "boolean",
+            "require every review thread resolved before merge (required_review_thread_resolution)",
+            default=True,
+        ),
+        "dismiss_stale_reviews": Leaf(
+            "boolean", "dismiss stale approvals on a new push (dismiss_stale_reviews_on_push)", default=True
+        ),
         "block_force_push": Leaf("boolean", "emit the non_fast_forward rule", default=True),
         "restrict_deletion": Leaf("boolean", "emit the deletion rule", default=True),
         "require_linear_history": Leaf("boolean", "emit the required_linear_history rule", default=False),
