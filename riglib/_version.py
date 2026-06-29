@@ -46,29 +46,37 @@ _PROJECT_TABLE_RE = re.compile(r"^\[project\]\s*$", re.MULTILINE)
 # line happens to start with `[` (e.g. an array-of-arrays element).
 _NEXT_TABLE_RE = re.compile(r"^\[[A-Za-z]", re.MULTILINE)
 _VERSION_RE = re.compile(r"""^version\s*=\s*['"]([^'"]+)['"]""", re.MULTILINE)
+# Guard: only trust a pyproject.toml whose `[project] name` matches the dist name, so an
+# adjacent host-project pyproject (e.g. `pip install --target ./vendor`) is never mistaken
+# for rig's own.
+_NAME_RE = re.compile(r"""^name\s*=\s*['"]([^'"]+)['"]""", re.MULTILINE)
 
 
 def _version_from_pyproject() -> str | None:
     """Parse `[project] version` from the repo's pyproject.toml, or None if unreadable.
 
-    Searches `pyproject.toml` at the repo root (parent of this `riglib/` package). Scopes
-    the `version =` match to the `[project]` table so it cannot pick up a `version` key
-    belonging to a different table.
+    Searches `pyproject.toml` at the repo root (parent of this `riglib/` package). Verifies
+    that the file's `[project] name` is ``"rig-cli"`` before trusting its version, so an
+    adjacent host-project pyproject (e.g. from ``pip install --target ./vendor``) is ignored
+    and the resolver falls through to ``importlib.metadata`` instead.
     """
     pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
     try:
         text = pyproject.read_text(encoding="utf-8")
     except OSError:
         return None
-    return _parse_project_version(text)
+    return _parse_project_version(text, require_name=_DIST_NAME)
 
 
-def _parse_project_version(text: str) -> str | None:
-    """Extract `[project] version` from pyproject TOML text, or None if absent.
+def _parse_project_version(text: str, *, require_name: str | None = None) -> str | None:
+    """Extract `[project] version` from pyproject TOML text, or None if absent/mismatched.
 
     Pure string parse (split from the file read so it is directly unit-testable). Scopes the
-    `version =` match to the `[project]` table body — from its header to the next REAL table
-    header — so a `version` key in another table can never be picked up.
+    `version =` and `name =` matches to the `[project]` table body — from its header to the
+    next REAL table header — so keys in other tables can never be picked up.
+
+    If ``require_name`` is given, returns None when the `[project] name` does not match it.
+    This guards against reading an adjacent host-project pyproject.toml as if it were rig's.
     """
     start = _PROJECT_TABLE_RE.search(text)
     if start is None:
@@ -78,6 +86,11 @@ def _parse_project_version(text: str) -> str | None:
     body_start = start.end()
     next_table = _NEXT_TABLE_RE.search(text, body_start)
     body = text[body_start : next_table.start() if next_table else len(text)]
+
+    if require_name is not None:
+        name_match = _NAME_RE.search(body)
+        if name_match is None or name_match.group(1) != require_name:
+            return None
 
     match = _VERSION_RE.search(body)
     return match.group(1) if match else None

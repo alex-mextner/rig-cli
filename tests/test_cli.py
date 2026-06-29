@@ -1188,3 +1188,28 @@ def test_parse_project_version_scoped_and_array_robust():
     assert _version._parse_project_version(toml) == "0.2.0"
     # No `[project]` table at all → None (resolver then falls to the sentinel).
     assert _version._parse_project_version("[tool.x]\nversion = '1.0.0'\n") is None
+
+
+def test_version_ignores_adjacent_host_pyproject(monkeypatch):
+    """pyproject.toml with a different `[project] name` is not trusted.
+
+    Covers the ``pip install --target ./vendor`` layout where the adjacent pyproject belongs
+    to the host project, not to rig-cli. ``_parse_project_version`` with ``require_name``
+    must return None for it, causing the resolver to fall through to ``importlib.metadata``.
+    """
+    from riglib import _version
+
+    host_toml = "[project]\nname = \"some-host-app\"\nversion = \"9.9.9\"\n"
+    rig_toml = "[project]\nname = \"rig-cli\"\nversion = \"1.2.3\"\n"
+
+    # Host pyproject → None (name mismatch).
+    assert _version._parse_project_version(host_toml, require_name="rig-cli") is None
+    # Rig's own pyproject → version (name matches).
+    assert _version._parse_project_version(rig_toml, require_name="rig-cli") == "1.2.3"
+    # No require_name → still returns version (backward compat for callers that don't guard).
+    assert _version._parse_project_version(host_toml) == "9.9.9"
+
+    # End-to-end: when the adjacent file is a host project's, resolve_version falls to dist.
+    monkeypatch.setattr(_version, "_version_from_pyproject", lambda: None)
+    monkeypatch.setattr(_version, "_dist_version", lambda _name: "0.5.0")
+    assert _version.resolve_version() == "0.5.0"
