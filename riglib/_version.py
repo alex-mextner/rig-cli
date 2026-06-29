@@ -6,13 +6,17 @@ the packaged metadata (rig-cli#70): a stale ``--version`` is a useless freshness
 
 Two resolution paths, in order, so it works both installed and from a live checkout:
 
-1. **Installed dist** — ``importlib.metadata.version("rig-cli")`` reads the version baked
-   into the wheel/sdist at build time. This is the truth for a ``pip``/``pipx`` install.
-2. **Live checkout** — rig usually runs from its repo via the ``bin/rig`` ``sys.path``
-   shim (the checkout IS the binary; no install metadata exists), so importlib.metadata
-   raises ``PackageNotFoundError``. We then parse ``[project] version`` straight out of the
-   repo's ``pyproject.toml``, which is the SAME source the wheel build reads — so both
-   paths converge on one value and cannot disagree.
+1. **Live checkout** — when ``pyproject.toml`` is readable at the repo root (parent of this
+   ``riglib/`` package), parse ``[project] version`` directly from it. This is the ALWAYS-
+   FRESH path for any source checkout, including editable installs (``pip install -e .``).
+   A ``pip install -e .`` creates an in-tree ``rig_cli.egg-info/`` whose version can lag
+   behind after a ``pyproject.toml`` bump; ``importlib.metadata`` reads THAT stale egg-info
+   rather than the live file. Preferring pyproject first eliminates the stale-shadow
+   problem entirely (rig-cli#67).
+2. **Installed dist** — when no readable ``pyproject.toml`` is found (a ``pip``/``pipx``
+   wheel/sdist install outside any checkout), fall back to
+   ``importlib.metadata.version("rig-cli")``, which reads the version baked into the
+   wheel at build time.
 
 Stdlib-only at import time (the package-wide rule): ``importlib.metadata`` + ``re`` +
 ``pathlib``. We deliberately do NOT use ``tomllib`` — it is absent on Python 3.10, which is
@@ -42,29 +46,37 @@ _PROJECT_TABLE_RE = re.compile(r"^\[project\]\s*$", re.MULTILINE)
 # line happens to start with `[` (e.g. an array-of-arrays element).
 _NEXT_TABLE_RE = re.compile(r"^\[[A-Za-z]", re.MULTILINE)
 _VERSION_RE = re.compile(r"""^version\s*=\s*['"]([^'"]+)['"]""", re.MULTILINE)
+# Guard: only trust a pyproject.toml whose `[project] name` matches the dist name, so an
+# adjacent host-project pyproject (e.g. `pip install --target ./vendor`) is never mistaken
+# for rig's own.
+_NAME_RE = re.compile(r"""^name\s*=\s*['"]([^'"]+)['"]""", re.MULTILINE)
 
 
 def _version_from_pyproject() -> str | None:
     """Parse `[project] version` from the repo's pyproject.toml, or None if unreadable.
 
-    Searches `pyproject.toml` at the repo root (parent of this `riglib/` package). Scopes
-    the `version =` match to the `[project]` table so it cannot pick up a `version` key
-    belonging to a different table.
+    Searches `pyproject.toml` at the repo root (parent of this `riglib/` package). Verifies
+    that the file's `[project] name` is ``"rig-cli"`` before trusting its version, so an
+    adjacent host-project pyproject (e.g. from ``pip install --target ./vendor``) is ignored
+    and the resolver falls through to ``importlib.metadata`` instead.
     """
     pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
     try:
         text = pyproject.read_text(encoding="utf-8")
     except OSError:
         return None
-    return _parse_project_version(text)
+    return _parse_project_version(text, require_name=_DIST_NAME)
 
 
-def _parse_project_version(text: str) -> str | None:
-    """Extract `[project] version` from pyproject TOML text, or None if absent.
+def _parse_project_version(text: str, *, require_name: str | None = None) -> str | None:
+    """Extract `[project] version` from pyproject TOML text, or None if absent/mismatched.
 
     Pure string parse (split from the file read so it is directly unit-testable). Scopes the
-    `version =` match to the `[project]` table body — from its header to the next REAL table
-    header — so a `version` key in another table can never be picked up.
+    `version =` and `name =` matches to the `[project]` table body — from its header to the
+    next REAL table header — so keys in other tables can never be picked up.
+
+    If ``require_name`` is given, returns None when the `[project] name` does not match it.
+    This guards against reading an adjacent host-project pyproject.toml as if it were rig's.
     """
     start = _PROJECT_TABLE_RE.search(text)
     if start is None:
@@ -75,18 +87,29 @@ def _parse_project_version(text: str) -> str | None:
     next_table = _NEXT_TABLE_RE.search(text, body_start)
     body = text[body_start : next_table.start() if next_table else len(text)]
 
+    if require_name is not None:
+        name_match = _NAME_RE.search(body)
+        if name_match is None or name_match.group(1) != require_name:
+            return None
+
     match = _VERSION_RE.search(body)
     return match.group(1) if match else None
 
 
 def resolve_version() -> str:
-    """Return rig's version: installed dist metadata first, then the checkout's pyproject.
+    """Return rig's version: live checkout pyproject first, then installed dist metadata.
 
-    Never raises; falls back to a `0.0.0+unknown` sentinel only when neither source is
-    available (a broken deployment), so `rig --version` always prints something.
+    Checking pyproject.toml first ensures that a ``pip install -e .`` editable install
+    never shadows the live version with a stale in-tree egg-info (rig-cli#67). For a
+    wheel/sdist install where no pyproject.toml is reachable, we fall back to
+    ``importlib.metadata``. Never raises; returns the ``0.0.0+unknown`` sentinel only on a
+    genuinely broken deployment (neither source readable).
     """
+    pyproject_ver = _version_from_pyproject()
+    if pyproject_ver is not None:
+        return pyproject_ver
     try:
         return _dist_version(_DIST_NAME)
     except PackageNotFoundError:
         pass
-    return _version_from_pyproject() or _UNKNOWN
+    return _UNKNOWN
