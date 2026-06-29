@@ -59,14 +59,14 @@ def test_python_dep_prefers_uv_when_available(monkeypatch):
 
 
 def test_rich_dep_is_diagnosed_for_stats_tui(monkeypatch):
-    """`rig stats show --format tui` needs `rich` (pyproject's [tui] extra ships it), so
+    """`rig stats show --format tui` needs `rich` (a core dep in pyproject, shipped with rig), so
     doctor must diagnose/provision it — not just `textual`. (review finding)"""
     monkeypatch.setattr(doctor, "_python_present", lambda name: False)
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
     report = doctor.diagnose(OsInfo("darwin", "brew", "macOS"))
     rich = next(s for s in report.statuses if s.dep.name == "rich")
     assert not rich.present
-    assert not rich.dep.required  # optional, like textual (TUI degrades to plain text)
+    assert rich.dep.required  # CORE dep — ships with rig, required like textual
     # brew has no `rich` formula → pip into THIS interpreter, like textual.
     import sys
 

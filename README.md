@@ -33,14 +33,26 @@ machine to it (idempotently, with backups), and surfaces drift in both direction
 curl -fsSL https://raw.githubusercontent.com/alex-mextner/rig-cli/main/install.sh | bash
 ```
 
-**Isolated env via pipx:**
+**Isolated env via pipx or uv tool** (the canonical way — an isolated venv with the
+interactive setup wizard bundled, no extra step):
 
 ```bash
-pipx install git+https://github.com/alex-mextner/rig-cli              # adds the `rig` command
-pipx install 'rig-cli[tui] @ git+https://github.com/alex-mextner/rig-cli'   # + interactive wizard
+pipx install rig-cli            # adds the `rig` command + the TUI wizard
+uv tool install rig-cli         # same, via uv (also keeps it on PATH)
+
+# from git instead of a published release:
+pipx install git+https://github.com/alex-mextner/rig-cli
+uv tool install git+https://github.com/alex-mextner/rig-cli
+
+# straight from a local checkout (editable; `git pull` updates the live tool):
+uv tool install --editable .    # or: pipx install -e .
 ```
 
-Or run straight from a checkout — `uv run bin/rig …` / `python3 bin/rig …`.
+`textual` (the `rig init` setup wizard) and `rich` (the `rig stats` report) are **core
+dependencies** — every install above brings them, so `rig init` from a terminal launches the
+wizard with **no extra install step and no "go install textual" prompt**.
+
+Or run straight from a checkout without installing — `uv run bin/rig …` / `python3 bin/rig …`.
 
 ## Commands
 
@@ -74,10 +86,11 @@ scaffolds `rig.yaml` (config only — still nothing applied), then you run `rig 
 in one step, use `rig init --yes --apply` (the explicit one-shot).
 
 **How `init` decides its mode (TTY + flags).** A bare `rig init` runs the interactive TUI wizard
-(with Export-config-only vs Apply buttons) **only when there is a TTY and `textual` is installed**;
-with no TTY (piped / CI / agent) or no `textual`, it falls back to the non-destructive PREVIEW
-instead of hanging on a wizard nothing can drive. Any explicit signal (`--yes` / `--config …
---yes` / `--apply`) is non-interactive. (`rig apply` is never interactive — it has no wizard.)
+(with Export-config-only vs Apply buttons) **whenever there is a TTY** — `textual` ships WITH rig
+as a core dependency, so the wizard is always available; no install step. With no TTY (piped / CI
+/ agent), or with `--no-tui` / `RIG_NO_TUI=1`, it falls back to the non-destructive PREVIEW instead
+of hanging on a wizard nothing can drive. Any explicit signal (`--yes` / `--config … --yes` /
+`--apply`) is non-interactive. (`rig apply` is never interactive — it has no wizard.)
 
 ```bash
 rig doctor                                    # check deps; rig doctor --yes to install
@@ -306,7 +319,7 @@ from `apply`.
 
 ```bash
 uv venv && . .venv/bin/activate
-uv pip install pytest pyyaml 'textual>=0.50'
+uv pip install -e '.[test]'             # core deps (pyyaml, textual, rich) + pytest
 python -m pytest -q                     # unit suite
 bash tests/smoke.sh                     # end-to-end smoke (needs an agent-tools checkout)
 bash tests/smoke.sh --fast              # the seconds-cheap pre-commit subset

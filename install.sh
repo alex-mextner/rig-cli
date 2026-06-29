@@ -52,25 +52,32 @@ if [[ ":$PATH:" != *":$BIN:"* ]]; then
   echo ""
 fi
 
-# ── dependency: pyyaml (config parse/serialize) ───────────────────────────────
-if ! python3 -c 'import yaml' 2>/dev/null; then
-  # Install into the SAME interpreter rig runs under. Prefer `uv` (the toolchain rig users
-  # standardize on) over a bare `pip`; fall back to `python3 -m pip --user` only when uv is
-  # absent. NOTE: this is best-effort and non-fatal — on an externally-managed system Python
-  # (PEP-668) BOTH uv and pip refuse a system-wide install, so the warning below fires and
-  # `rig doctor` / a managed (uv-tool) install is the real fix. rig still works once yaml lands.
+# ── core runtime dependencies ─────────────────────────────────────────────────
+# pyyaml, textual, and rich are all CORE deps (not optional extras). Install them
+# into the SAME interpreter rig runs under. Prefer `uv` (the toolchain rig users
+# standardize on) over a bare `pip`; fall back to `python3 -m pip --user` only when uv is
+# absent. NOTE: this is best-effort and non-fatal — on an externally-managed system Python
+# (PEP-668) BOTH uv and pip refuse a system-wide install, so the warning below fires and
+# `rig doctor` / a managed (uv-tool) install is the real fix.
+_missing_core=()
+python3 -c 'import yaml' 2>/dev/null     || _missing_core+=("pyyaml")
+python3 -c 'import textual' 2>/dev/null  || _missing_core+=("textual>=0.50")
+python3 -c 'import rich' 2>/dev/null     || _missing_core+=("rich>=13")
+if [[ "${#_missing_core[@]}" -gt 0 ]]; then
   py3="$(command -v python3)"
+  pkgs="${_missing_core[*]}"
   if command -v uv >/dev/null 2>&1; then
-    echo "rig: pyyaml not found, attempting: uv pip install --python $py3 pyyaml"
-    uv pip install --python "$py3" pyyaml 2>/dev/null && pyyaml_ok=1
+    echo "rig: core deps missing, attempting: uv pip install --python $py3 $pkgs"
+    uv pip install --python "$py3" "${_missing_core[@]}" 2>/dev/null && _core_ok=1
   else
-    echo "rig: pyyaml not found, attempting: python3 -m pip install --user pyyaml"
-    python3 -m pip install --user pyyaml 2>/dev/null && pyyaml_ok=1
+    echo "rig: core deps missing, attempting: python3 -m pip install --user $pkgs"
+    python3 -m pip install --user "${_missing_core[@]}" 2>/dev/null && _core_ok=1
   fi
-  if [[ "${pyyaml_ok:-0}" != "1" ]]; then
+  if [[ "${_core_ok:-0}" != "1" ]]; then
     echo ""
-    echo "  WARNING: could not install pyyaml. Config parsing will fail until it is present."
-    echo "  Install manually with uv: uv pip install pyyaml   (or run: rig doctor --yes)"
+    echo "  WARNING: could not install core deps ($pkgs)."
+    echo "  rig init TUI wizard and config parsing will fail until they are present."
+    echo "  Install manually: uv pip install $pkgs   (or run: rig doctor --yes)"
     echo ""
   fi
 fi
