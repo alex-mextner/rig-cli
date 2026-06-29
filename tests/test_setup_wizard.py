@@ -92,6 +92,21 @@ def test_effective_value_absent_block_presence_gated_block_shows_off():
         assert schema.effective_value(o, {}) is True, key
 
 
+def test_github_ruleset_secure_defaults_in_schema():
+    """required_conversation_resolution and dismiss_stale_reviews must be in the schema registry.
+
+    Codex P2 finding: these keys were being applied by `rig apply` but were invisible in `rig setup`
+    / `rig config-web` because they were missing from schema.py's Option registry. Regression guard.
+    """
+    conv = schema.option_for_key("github.ruleset.required_conversation_resolution")
+    dismiss = schema.option_for_key("github.ruleset.dismiss_stale_reviews")
+    assert conv is not None, "required_conversation_resolution missing from schema registry"
+    assert dismiss is not None, "dismiss_stale_reviews missing from schema registry"
+    # Both should default to True (secure-default-on policy)
+    assert conv.default is True
+    assert dismiss.default is True
+
+
 # ── non-interactive `rig setup` → USAGE, never a half-wizard ─────────────────────────────
 def test_setup_non_interactive_prints_usage(monkeypatch, capsys):
     # force the no-TTY branch regardless of how the test runner is wired.

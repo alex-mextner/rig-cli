@@ -3206,7 +3206,7 @@ def _do_provision_github_ruleset(action: Action, on_conflict: str) -> ActionResu
             input_text=body,
         )
         if rc != 0:
-            return ActionResult(action, "error", f"github-ruleset: create failed: {err.strip() or out.strip()}")
+            return _ruleset_write_error(action, "create", owner, repo, err, out)
         return ActionResult(action, "created", f"github-ruleset: created '{name}' on {owner}/{repo}")
 
     # state == "update"
@@ -3218,8 +3218,75 @@ def _do_provision_github_ruleset(action: Action, on_conflict: str) -> ActionResu
         input_text=body,
     )
     if rc != 0:
-        return ActionResult(action, "error", f"github-ruleset: update failed: {err.strip() or out.strip()}")
+        return _ruleset_write_error(action, "update", owner, repo, err, out)
     return ActionResult(action, "updated", f"github-ruleset: updated '{name}' (id={rs_id}) on {owner}/{repo}")
+
+
+def _looks_like_ruleset_plan_limited(detail: str) -> bool:
+    """Heuristic: does this gh error mean the repo's PLAN can't enforce a ruleset (vs. a real bug)?
+
+    A FREE private repo can't use branch protection / rulesets — the ``POST/PUT .../rulesets``
+    call returns 403 with a body that names the plan limit ("Upgrade to GitHub Team", "upgrade
+    your plan", "not available for private repositories", "make this repository public"). On THAT
+    we want a specific, loud "ZERO server-side enforcement" message (it is a capability limit, not
+    a rig bug). But a BARE 403/422 is NOT enough — that could equally be a no-admin token or a real
+    payload bug we must surface as-is. So, like :func:`_looks_like_ghas_unlicensed`, match the
+    PLAN/UPGRADE WORDING only; a transient/service or auth error stays a generic error.
+
+    The phrase list is a white-list of GitHub's KNOWN plan-limit wording and must be kept current as
+    GitHub rephrases (the same maintenance burden as :func:`_looks_like_ghas_unlicensed`). A MISS is
+    SAFE: an unmatched plan-limit body falls through to a generic loud ``error`` (never a silent
+    no-op), so a stale list degrades gracefully rather than masking the failure.
+    """
+    low = detail.lower()
+    plan_phrases = (
+        "upgrade to github",
+        "upgrade your plan",
+        "upgrade this repository",
+        "not available for private",
+        "make this repository public",
+        "make the repository public",
+        "rulesets are not available",
+        "branch protection is not available",
+        "not available on your plan",
+    )
+    return any(p in low for p in plan_phrases)
+
+
+def _ruleset_write_error(
+    action: Action, verb: str, owner: str, repo: str, err: str, out: str
+) -> ActionResult:
+    """Build the LOUD error result for a failed ruleset create/update — never a silent no-op.
+
+    When the failure wording says the repo's plan can't enforce a ruleset (free private repo, 403),
+    the message is SPECIFIC and actionable. The wording differs by verb:
+    - ``create``: ZERO server-side enforcement is active (no ruleset was created at all).
+    - ``update``: the existing ruleset was NOT reconciled (old config still active on GitHub).
+    Any other failure surfaces the raw gh detail. Either way the result is an ``error`` rig status
+    reports — never a swallowed success.
+    """
+    detail = err.strip() or out.strip() or "gh api reported a non-zero exit with no output"
+    if _looks_like_ruleset_plan_limited(detail):
+        if verb == "create":
+            enforcement_note = (
+                "ZERO server-side enforcement is active: a merge is gated ONLY by the "
+                "client-side `gh ship` preflight, which can be bypassed (raw `gh pr merge`, "
+                "the web UI, --skip-ci)."
+            )
+        else:
+            enforcement_note = (
+                "the existing ruleset on GitHub was NOT reconciled to the desired state "
+                "(old config remains active — check `rig status` for the current drift)."
+            )
+        return ActionResult(
+            action,
+            "error",
+            f"github-ruleset: branch protection unavailable on {owner}/{repo}'s plan — GitHub "
+            f"rejected the ruleset {verb} (free private repos cannot enforce rulesets). "
+            f"{enforcement_note} Fix: upgrade to GitHub Team/Pro, or make the repo public. "
+            f"(gh said: {detail})",
+        )
+    return ActionResult(action, "error", f"github-ruleset: {verb} failed: {detail}")
 
 
 # ── the #4136.1 auth gate — shared by every github.* gh-api mutation ─────────────────────

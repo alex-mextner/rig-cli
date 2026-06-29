@@ -172,6 +172,71 @@ def test_required_reviews_flows_into_pull_request_rule():
     assert pr["parameters"]["required_approving_review_count"] == 2
 
 
+def test_conversation_resolution_and_dismiss_stale_are_secure_default_on():
+    # The durable fix for an open-thread bypass: by default the pull_request rule REQUIRES every
+    # review thread resolved before merge, and dismisses stale approvals on a new push.
+    assert GITHUB_RULESET_DEFAULTS["required_conversation_resolution"] is True
+    assert GITHUB_RULESET_DEFAULTS["dismiss_stale_reviews"] is True
+    pr = next(r for r in build_ruleset_rules(_DEFAULT_OPTS) if r["type"] == "pull_request")
+    assert pr["parameters"]["required_review_thread_resolution"] is True
+    assert pr["parameters"]["dismiss_stale_reviews_on_push"] is True
+
+
+def test_conversation_resolution_and_dismiss_stale_can_be_disabled():
+    pr = next(
+        r
+        for r in build_ruleset_rules(
+            {
+                **_DEFAULT_OPTS,
+                "required_conversation_resolution": False,
+                "dismiss_stale_reviews": False,
+            }
+        )
+        if r["type"] == "pull_request"
+    )
+    assert pr["parameters"]["required_review_thread_resolution"] is False
+    assert pr["parameters"]["dismiss_stale_reviews_on_push"] is False
+
+
+def test_conversation_resolution_works_without_a_required_reviewer():
+    # required_review_thread_resolution must NOT depend on required_reviews>0 — a solo repo with
+    # zero required reviewers still gets the open-thread guard (blocks any merge until threads are
+    # resolved, but does not require an external reviewer), so the secure default doesn't add a
+    # reviewer requirement on top of a solo `gh ship`.
+    opts = {**_DEFAULT_OPTS, "required_reviews": 0, "required_conversation_resolution": True}
+    pr = next(r for r in build_ruleset_rules(opts) if r["type"] == "pull_request")
+    assert pr["parameters"]["required_approving_review_count"] == 0
+    assert pr["parameters"]["required_review_thread_resolution"] is True
+
+
+def test_dismiss_stale_reviews_active_without_a_required_reviewer():
+    # dismiss_stale_reviews_on_push is NOT inert when required_reviews is 0 — voluntary approvals
+    # (given when no approval is required) are still dismissed on a new push, so a stale "LGTM"
+    # from a helpful collaborator can't silently survive a new commit.
+    opts = {**_DEFAULT_OPTS, "required_reviews": 0, "dismiss_stale_reviews": True}
+    pr = next(r for r in build_ruleset_rules(opts) if r["type"] == "pull_request")
+    assert pr["parameters"]["required_approving_review_count"] == 0
+    assert pr["parameters"]["dismiss_stale_reviews_on_push"] is True
+
+
+@pytest.mark.parametrize("flipped_param", ["required_review_thread_resolution", "dismiss_stale_reviews_on_push"])
+def test_pr_secure_default_live_flip_reads_as_drift(monkeypatch, tmp_path, gh_repo, flipped_param):
+    # a live ruleset whose secure-default PR sub-param was turned OFF in the UI must read as drift —
+    # NEITHER security-critical config-driven sub-param can silently regress to a false in-sync.
+    # Both new knobs are covered, so a normalize_ruleset that ever stops reading one is caught.
+    drifted = json.loads(json.dumps(build_ruleset_body(_DEFAULT_OPTS)))
+    for rule in drifted["rules"]:
+        if rule["type"] == "pull_request":
+            rule["parameters"][flipped_param] = False
+    rec = _GhRecorder(
+        rulesets=[{"id": 8, "name": "rig-managed", "target": "branch", "source_type": "Repository"}],
+        ruleset_by_id={8: {"id": 8, "name": "rig-managed", **drifted}},
+    )
+    _install_gh(monkeypatch, rec)
+    state, _ = github_ruleset_state(_action(tmp_path))
+    assert state == "update"
+
+
 # ── remote URL parsing (owner/repo resolution) ──────────────────────────────────────
 _REMOTE_CASES = [
     ("git@github.com:acme/widget.git", ("acme", "widget")),
@@ -428,6 +493,83 @@ def test_update_put_failure_is_error(monkeypatch, tmp_path, gh_repo):
     _install_gh(monkeypatch, _put_fails)
     res = runner._do_provision_github_ruleset(_action(tmp_path), "backup")
     assert res.status == "error" and "update failed" in res.detail and "500" in res.detail
+
+
+# ── 403 plan-limit fail-loud (free private repo can't enforce a ruleset) ─────────────
+def test_plan_limited_403_fails_loud_with_zero_enforcement_message(monkeypatch, tmp_path, gh_repo):
+    # A FREE private repo (like hyper-saas) can't use rulesets — the POST 403s with plan wording.
+    # rig must NOT silently no-op: it surfaces a LOUD, specific error that ZERO server-side
+    # enforcement is active and how to fix it (upgrade / make public) — never a swallowed success.
+    msg = "HTTP 403: Upgrade to GitHub Team or make this repository public to enable this feature."
+
+    def _list_ok_post_403(args, *, input_text=None):
+        if "--method" in args:
+            return 1, "", msg
+        return 0, json.dumps([]), ""
+
+    _install_gh(monkeypatch, _list_ok_post_403)
+    res = runner._do_provision_github_ruleset(_action(tmp_path), "backup")
+    assert res.status == "error"
+    low = res.detail.lower()
+    assert "zero" in low and "server-side enforcement" in low
+    assert "upgrade" in low or "make the repo public" in low
+    assert "gh ship" in low  # names the bypassable client-side gate that's now the only guard
+
+
+def test_plan_limited_403_on_update_also_fails_loud(monkeypatch, tmp_path, gh_repo):
+    existing = {"id": 21, "name": "rig-managed", "enforcement": "active",
+                "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+                "bypass_actors": [], "rules": [{"type": "deletion"}]}
+
+    def _put_403(args, *, input_text=None):
+        if "--method" in args and args[args.index("--method") + 1] == "PUT":
+            return 1, "", "403: rulesets are not available for this repository on your plan"
+        path = args[0].split("?", 1)[0]
+        if path.endswith("/rulesets"):
+            return 0, json.dumps([{"id": 21, "name": "rig-managed", "target": "branch", "source_type": "Repository"}]), ""
+        return 0, json.dumps(existing), ""
+
+    _install_gh(monkeypatch, _put_403)
+    res = runner._do_provision_github_ruleset(_action(tmp_path), "backup")
+    # On UPDATE failure the existing ruleset is still active — message must NOT say "ZERO enforcement"
+    # (that's misleading); instead it describes that the existing ruleset was not reconciled.
+    assert res.status == "error"
+    low = res.detail.lower()
+    assert "not reconciled" in low or "existing ruleset" in low
+    assert "zero server-side enforcement" not in low  # NOT the create-path message
+
+
+def test_generic_403_is_not_misread_as_a_plan_limit(monkeypatch, tmp_path, gh_repo):
+    # A bare 403 with NO plan/upgrade wording (e.g. a token lacking admin scope) must surface as a
+    # generic error, NOT the plan-limit message — the heuristic matches plan wording only, so a
+    # real permission bug is never swallowed as "your plan can't do this".
+    def _list_ok_post_403_no_plan(args, *, input_text=None):
+        if "--method" in args:
+            return 1, "", "HTTP 403: Resource not accessible by personal access token"
+        return 0, json.dumps([]), ""
+
+    _install_gh(monkeypatch, _list_ok_post_403_no_plan)
+    res = runner._do_provision_github_ruleset(_action(tmp_path), "backup")
+    assert res.status == "error"
+    assert "create failed" in res.detail and "not accessible" in res.detail
+    assert "server-side enforcement" not in res.detail.lower()  # NOT the plan-limit message
+
+
+@pytest.mark.parametrize("phrase,expected", [
+    ("HTTP 403: Upgrade to GitHub Team or make this repository public.", True),
+    ("upgrade your plan to use branch protection", True),
+    ("Not available for private repositories on your current plan.", True),
+    ("rulesets are not available on the free tier", True),
+    ("Upgrade This Repository to enable advanced security", True),
+    ("HTTP 403: Resource not accessible by personal access token", False),
+    ("Internal Server Error", False),
+    ("", False),
+])
+def test_plan_limited_heuristic_matches_known_phrases(phrase, expected):
+    # _looks_like_ruleset_plan_limited must match GitHub's plan-limit wording (case-insensitive)
+    # and must NOT match unrelated 403s or empty strings — a miss degrades to a loud generic error,
+    # never a silent no-op, so false negatives are safe but false positives would hide auth bugs.
+    assert runner._looks_like_ruleset_plan_limited(phrase) is expected
 
 
 def test_second_get_failure_is_gh_error(monkeypatch, tmp_path, gh_repo):
