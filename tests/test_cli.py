@@ -1061,13 +1061,13 @@ def _pyproject_project_version() -> str:
 
 
 def _force_checkout_resolution(monkeypatch) -> None:
-    """Force the live-checkout code path: make `importlib.metadata` report rig-cli absent.
+    """Force the dist-absent code path: make `importlib.metadata` report rig-cli absent.
 
-    rig actually runs from its repo via the `bin/rig` sys.path shim (no installed dist
-    metadata), so the pyproject fallback is the production path. CI, however, often has
-    rig-cli pip/uv-installed, where `_dist_version` would short-circuit on possibly-stale
-    editable metadata — making the drift guard pass/fail for an install-state reason rather
-    than real drift. Forcing PackageNotFoundError pins the test to the path rig truly uses.
+    Since pyproject.toml is now checked FIRST (rig-cli#67), this helper is no longer
+    required for the primary production path; ``resolve_version()`` already prefers
+    pyproject in a checkout. It is kept to test that the pyproject-only path (zero
+    installed dist metadata) still returns the correct version — useful for verifying the
+    resolver works on a pristine clone where ``pip install -e .`` was never run.
     """
     from importlib.metadata import PackageNotFoundError
 
@@ -1141,6 +1141,25 @@ def test_resolve_version_falls_back_to_pyproject_in_checkout(monkeypatch):
     assert _version.resolve_version() != _version._UNKNOWN
     # The independent parser also matches (covers a resolver-vs-parser disagreement).
     assert _version._version_from_pyproject() == _pyproject_project_version()
+
+
+def test_version_prefers_pyproject_over_stale_dist_metadata(monkeypatch):
+    """pyproject.toml wins over stale egg-info left by a previous ``pip install -e .``.
+
+    Reproduces rig-cli#67: after bumping ``pyproject.toml`` the in-tree egg-info still
+    reports the OLD version.  ``importlib.metadata`` reads that egg-info and returned the
+    stale value; the fix makes ``resolve_version()`` check pyproject first.
+    """
+    from riglib import _version
+
+    # Simulate stale editable-install egg-info reporting an old version.
+    monkeypatch.setattr(_version, "_dist_version", lambda _name: "0.0.0+stale")
+
+    result = _version.resolve_version()
+    assert result == _pyproject_project_version(), (
+        f"Expected pyproject version, got {result!r} — stale egg-info shadowed pyproject"
+    )
+    assert result != "0.0.0+stale"
 
 
 def test_parse_project_version_scoped_and_array_robust():

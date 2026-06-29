@@ -6,13 +6,17 @@ the packaged metadata (rig-cli#70): a stale ``--version`` is a useless freshness
 
 Two resolution paths, in order, so it works both installed and from a live checkout:
 
-1. **Installed dist** — ``importlib.metadata.version("rig-cli")`` reads the version baked
-   into the wheel/sdist at build time. This is the truth for a ``pip``/``pipx`` install.
-2. **Live checkout** — rig usually runs from its repo via the ``bin/rig`` ``sys.path``
-   shim (the checkout IS the binary; no install metadata exists), so importlib.metadata
-   raises ``PackageNotFoundError``. We then parse ``[project] version`` straight out of the
-   repo's ``pyproject.toml``, which is the SAME source the wheel build reads — so both
-   paths converge on one value and cannot disagree.
+1. **Live checkout** — when ``pyproject.toml`` is readable at the repo root (parent of this
+   ``riglib/`` package), parse ``[project] version`` directly from it. This is the ALWAYS-
+   FRESH path for any source checkout, including editable installs (``pip install -e .``).
+   A ``pip install -e .`` creates an in-tree ``rig_cli.egg-info/`` whose version can lag
+   behind after a ``pyproject.toml`` bump; ``importlib.metadata`` reads THAT stale egg-info
+   rather than the live file. Preferring pyproject first eliminates the stale-shadow
+   problem entirely (rig-cli#67).
+2. **Installed dist** — when no readable ``pyproject.toml`` is found (a ``pip``/``pipx``
+   wheel/sdist install outside any checkout), fall back to
+   ``importlib.metadata.version("rig-cli")``, which reads the version baked into the
+   wheel at build time.
 
 Stdlib-only at import time (the package-wide rule): ``importlib.metadata`` + ``re`` +
 ``pathlib``. We deliberately do NOT use ``tomllib`` — it is absent on Python 3.10, which is
@@ -80,13 +84,19 @@ def _parse_project_version(text: str) -> str | None:
 
 
 def resolve_version() -> str:
-    """Return rig's version: installed dist metadata first, then the checkout's pyproject.
+    """Return rig's version: live checkout pyproject first, then installed dist metadata.
 
-    Never raises; falls back to a `0.0.0+unknown` sentinel only when neither source is
-    available (a broken deployment), so `rig --version` always prints something.
+    Checking pyproject.toml first ensures that a ``pip install -e .`` editable install
+    never shadows the live version with a stale in-tree egg-info (rig-cli#67). For a
+    wheel/sdist install where no pyproject.toml is reachable, we fall back to
+    ``importlib.metadata``. Never raises; returns the ``0.0.0+unknown`` sentinel only on a
+    genuinely broken deployment (neither source readable).
     """
+    pyproject_ver = _version_from_pyproject()
+    if pyproject_ver is not None:
+        return pyproject_ver
     try:
         return _dist_version(_DIST_NAME)
     except PackageNotFoundError:
         pass
-    return _version_from_pyproject() or _UNKNOWN
+    return _UNKNOWN
