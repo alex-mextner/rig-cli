@@ -528,6 +528,8 @@ def test_render_page_exposes_health_bucket_controls_and_treemap_probe_hooks(hist
     assert "SYMBOL_ZOOM_THRESHOLD" in page
     assert "function renderSymbolOverlay" in page
     assert "rect.w * zoom" in page
+    assert "baseFont / zoom" in page
+    assert "r.w * zoom - 8" in page
     assert "selectedSymbolError" in page
     assert "Symbol provider error:" in page
     assert "rel.message" in page

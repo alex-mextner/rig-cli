@@ -713,11 +713,16 @@ function pointerDistance(a, b) {{ return Math.hypot(a.x - b.x, a.y - b.y); }}
 function pointerCenter(a, b) {{ return {{x:(a.x + b.x)/2, y:(a.y + b.y)/2}}; }}
 
 function addWrappedLabel(svg, r, text, klass, maxLines) {{
-  const label = el('text', {{x:r.x + 4, y:r.y + 11, class:klass}});
-  const chars = Math.max(2, Math.floor((r.w - 8) / (klass === 'symbolLabel' ? 4.4 : 5.2)));
+  const zoom = currentZoom();
+  // ViewBox zoom scales SVG text; convert fixed screen-pixel label metrics back to world units.
+  const pad = 4 / zoom;
+  const baseFont = klass === 'symbolLabel' ? 8 : (klass === 'frameLabel' ? 10 : 9);
+  const lineHeight = 10 / zoom;
+  const label = el('text', {{x:r.x + pad, y:r.y + 11 / zoom, class:klass, 'font-size':Math.max(3, baseFont / zoom)}});
+  const chars = Math.max(2, Math.floor((r.w * zoom - 8) / (klass === 'symbolLabel' ? 4.4 : 5.2)));
   const lines = wrapByChars(String(text || ''), chars, maxLines);
   lines.forEach((line, i) => {{
-    const tspan = el('tspan', {{x:r.x + 4, dy:i ? 10 : 0}}, line);
+    const tspan = el('tspan', {{x:r.x + pad, dy:i ? lineHeight : 0}}, line);
     label.appendChild(tspan);
   }});
   svg.appendChild(label);
