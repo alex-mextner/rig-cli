@@ -719,7 +719,8 @@ function addWrappedLabel(svg, r, text, klass, maxLines) {{
   const labelRect = visibleLabelRect(r);
   if (!labelRect) return;
   const zoom = currentZoom();
-  const minScreenW = klass === 'frameLabel' ? 68 : (klass === 'symbolLabel' ? 46 : 88);
+  if (klass !== 'symbolLabel' && (labelRect.w < r.w * 0.92 || labelRect.h < r.h * 0.92)) return;
+  const minScreenW = klass === 'frameLabel' ? 78 : (klass === 'symbolLabel' ? 52 : 112);
   const minScreenH = klass === 'frameLabel' ? 18 : (klass === 'symbolLabel' ? 14 : 24);
   if (labelRect.w * zoom < minScreenW || labelRect.h * zoom < minScreenH) return;
   // ViewBox zoom scales SVG text; convert fixed screen-pixel label metrics back to world units.
@@ -729,7 +730,7 @@ function addWrappedLabel(svg, r, text, klass, maxLines) {{
   const maxVisibleLines = Math.max(1, Math.floor((labelRect.h * zoom - 4) / 10));
   const maxLineCount = Math.min(maxLines, maxVisibleLines, 2);
   const label = el('text', {{x:labelRect.x + pad, y:labelRect.y + 11 / zoom, class:klass, 'font-size':Math.max(3, baseFont / zoom)}});
-  const chars = Math.max(2, Math.floor((labelRect.w * zoom - 8) / (klass === 'symbolLabel' ? 4.4 : 5.2)));
+  const chars = Math.max(2, Math.floor((labelRect.w * zoom - 8) / (klass === 'symbolLabel' ? 5.4 : 7.2)));
   const clean = String(text || '').replace(/\\s+/g, ' ').trim();
   if (klass === 'label' && clean.length > chars * maxLineCount) return;
   const lines = wrapByChars(clean, chars, maxLineCount);
