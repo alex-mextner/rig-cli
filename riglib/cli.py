@@ -15,6 +15,7 @@ Subcommands:
     rig doctor   detect + (offer to) install required/optional dependencies
     rig export   serialize default/current config to rig.yaml without a TUI
     rig stats    tool-adoption analytics over agent-harness session logs (sub: `show`)
+    rig evolve   local project evolution portal (git histogram + code treemap)
 """
 
 from __future__ import annotations
@@ -269,6 +270,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     config_web_service.register(sub)
 
+    # `evolve` — local project evolution portal. Lifecycle is the same shared
+    # agenttools-service manager pattern as config-web; registration stays lazy so `rig --help`
+    # does not import optional service machinery.
+    from .evolve import service as evolve_service
+
+    evolve_service.register(sub)
+
     _add_stats_parser(sub)
 
     return p
@@ -371,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         "install-skill": cmd_install_skill,
         "setup": cmd_setup_wizard,  # setup = the interactive config wizard (distinct from init)
         "config-web": cmd_config_web,  # web UI over the config engine; lifecycle via agenttools-service
+        "evolve": cmd_evolve,  # project evolution portal; lifecycle via agenttools-service
         "stats": cmd_stats,
     }
     # The single top-level error handler (error-system v2): any structured RigError a command
@@ -1748,6 +1757,13 @@ def cmd_config_web(args: argparse.Namespace) -> int:
     from . import config_web_service
 
     return config_web_service.dispatch_cli(args)
+
+
+def cmd_evolve(args: argparse.Namespace) -> int:
+    """Dispatch `rig evolve` lifecycle/internal serve verbs."""
+    from .evolve import service as evolve_service
+
+    return evolve_service.dispatch_cli(args)
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
