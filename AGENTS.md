@@ -57,6 +57,19 @@ when a lifecycle verb actually needs it). The server binds `127.0.0.1` only and 
   when loaded. Heavy/optional deps — `yaml`, `textual` — are imported lazily inside the
   function that needs them. `rig --help` and `rig doctor` must run with zero third-party
   imports. Do not add a top-level `import yaml`/`import textual`.
+- **Long-running work needs factual status, not vibes.** When reporting progress on a large or
+  delegated task, include the verified completed scope, the known gaps, the command/test evidence,
+  the next concrete action already started, and a dated ETA. Evidence means repeatable command
+  lines plus the relevant exit code, log path, screenshot path, commit id, task id, or review id.
+  If you report a blocker, also record the remediation path and start the first remediation step
+  or create/update the relevant task in the same turn.
+- **Track long-running subprocesses as process trees, not just shell sessions.** For review,
+  model, browser, server, and smoke runs that stay silent beyond their expected cadence, record the
+  exec session id, inspect the live process tree (`ps`/`pgrep` with elapsed time), check the tool's
+  log directory for fresh output, and report the real child-state before saying it is merely
+  "still running". If children finished or timed out while the wrapper remains alive, resolve that
+  wrapper state immediately: collect the final logs, stop the stale wrapper when safe, capture the
+  failure mode, and start or record the next remediation step.
 - **One engine, two front-ends.** `rig init` (wizard) and `rig apply` must share the same
   `plan.build` + `actions.run_plan`. Never fork the executor for the TUI. If you add a
   capability, add it to the headless engine first and let the wizard call it.
