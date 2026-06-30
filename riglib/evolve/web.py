@@ -624,10 +624,13 @@ function setView(next) {{
 
 function updateZoomHud() {{
   const hud = qs('#zoomHud');
-  if (!hud) return;
   const zoom = currentZoom();
-  hud.textContent = Math.round(zoom * 100) + '%';
-  hud.title = zoom >= SYMBOL_ZOOM_THRESHOLD ? 'Symbol overlay enabled' : 'Zoom in to show symbol rectangles';
+  const zoomText = Math.round(zoom * 100) + '%';
+  if (hud) {{
+    hud.textContent = zoomText;
+    hud.title = zoom >= SYMBOL_ZOOM_THRESHOLD ? 'Symbol overlay enabled' : 'Zoom in to show symbol rectangles';
+  }}
+  document.querySelectorAll('.zoomPill').forEach(node => {{ node.textContent = zoomText + ' zoom'; }});
 }}
 
 function bindPanZoom(root, svg) {{
@@ -919,7 +922,7 @@ function renderDetail(n) {{
       <span class="muted">Kind</span><span>${{escapeHtml(n.kind)}}</span>
       <span class="muted">Size</span><span>${{formatBytes(n.size || 0)}}</span>
       <span class="muted">Path</span><code>${{escapeHtml(n.path||'')}}</code>
-      <span class="muted">Symbols</span><span>${{escapeHtml(symbolNote)}} <span class="pill">${{Math.round(currentZoom()*100)}}% zoom</span></span>
+      <span class="muted">Symbols</span><span>${{escapeHtml(symbolNote)}} <span class="pill zoomPill">${{Math.round(currentZoom()*100)}}% zoom</span></span>
       <span class="muted">Links</span><span><span class="pill">${{escapeHtml(rel.quality || 'loading')}}</span> <span class="muted">${{escapeHtml(rel.message || '')}}</span></span>
     </div>
     <h2>Uses</h2>

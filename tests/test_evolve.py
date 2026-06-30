@@ -520,6 +520,8 @@ def test_render_page_exposes_health_bucket_controls_and_treemap_probe_hooks(hist
     assert "onwheel" in page
     assert "root.onkeydown" in page
     assert "ArrowLeft" in page
+    assert "zoomPill" in page
+    assert "node.textContent = zoomText + ' zoom'" in page
     assert "onpointerdown" in page
     assert "previousWorld" in page
     assert "PAN_CLICK_SUPPRESS_MS" in page
