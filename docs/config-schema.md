@@ -678,6 +678,80 @@ detection would need a managed manifest (a tracked follow-up).
 
 ---
 
+## `project_tools`
+
+Provisions repo-local carriers for the project-intelligence tools used by the agent ecosystem:
+Haft, Serena, and Sverklo. This is a **repo** block, distinct from the global `tools:` block:
+`tools:` installs personal CLIs into a machine PATH, while `project_tools:` writes committed
+project files and safe live registrations so this repository is usable by those CLIs.
+
+```yaml
+project_tools:
+  enabled: true
+  haft:
+    enabled: true
+    codex_mcp: true
+    # project_name defaults to the repo directory name.
+    # project_id defaults to a stable qnt_<hash> derived from project_name.
+    workflow:
+      mode: standard
+      require_decision: true
+      require_verify: true
+      allow_autonomy: false
+  serena:
+    enabled: true
+    # languages auto-detects from repo files when omitted.
+    read_only: false
+    ignored_paths: []
+  sverklo:
+    enabled: true
+    register: true
+    reindex: false
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | provision project-tool integrations (set `false` to skip the whole area) |
+| `haft.enabled` | bool | `true` | write the `.haft/` project/spec/workflow carriers |
+| `haft.project_name` | string | repo dir name | Haft project name |
+| `haft.project_id` | string | `qnt_<hash>` | stable Haft project id |
+| `haft.codex_mcp` | bool | `true` | merge the Haft MCP server into `.codex/config.toml` |
+| `haft.workflow.mode` | enum | `standard` | `standard` or `tactical` |
+| `haft.workflow.require_decision` | bool | `true` | require explicit decisions for high-impact work |
+| `haft.workflow.require_verify` | bool | `true` | require verification evidence before completion |
+| `haft.workflow.allow_autonomy` | bool | `false` | allow autonomous Haft execution by default |
+| `serena.enabled` | bool | `true` | write `.serena/project.yml` and `.serena/.gitignore` |
+| `serena.project_name` | string | repo dir name | Serena project name |
+| `serena.languages` | list[str] | auto | Serena language ids; auto-detected from repo files when omitted |
+| `serena.read_only` | bool | `false` | disable Serena editing tools for this project |
+| `serena.ignored_paths` | list[str] | `[]` | extra Serena ignore patterns |
+| `sverklo.enabled` | bool | `true` | provision Sverklo integration |
+| `sverklo.register` | bool | `true` | register the repo in the global Sverklo registry during `rig apply` |
+| `sverklo.reindex` | bool | `false` | run `sverklo reindex` during `rig apply` |
+
+**Haft.** rig writes `.haft/project.yaml`, `.haft/workflow.md`, parseable placeholder spec
+carriers under `.haft/specs/`, and empty tool-owned state directories via `.gitkeep` files. It
+does not scan or delete tool-owned data such as `.haft/evidence` contents. When `codex_mcp` is
+enabled, rig merges a managed Haft MCP section into `.codex/config.toml`; unrelated Codex config is
+preserved, and an existing unmarked `[mcp_servers.haft]` table is replaced by the managed block.
+
+**Serena.** rig writes `.serena/project.yml` plus `.serena/.gitignore` for Serena-local cache and
+machine-local overrides. `languages` is optional; when omitted, rig infers common language ids from
+repo files such as `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, and `Package.swift`.
+Serena memories remain tool-owned and are not enumerated as drift.
+
+**Sverklo.** `register` is idempotent: apply checks `sverklo list` first and skips if the repo is
+already registered. `reindex` is off by default because indexing can be slow and the registry uses
+a shared database. Live Sverklo commands are gated in tests/CI by `RIG_PROJECT_TOOLS_DRY_RUN=1` or
+`RIG_SVERKLO_DRY_RUN=1`.
+
+**Drift.** `rig status` flags a declared Haft/Serena/Codex carrier as missing or modified when the
+file is absent or differs from the rendered config. Sverklo registration drift is reported when
+`sverklo list` does not include this repo (or the CLI is unavailable). `sverklo reindex` is
+apply-only maintenance and has no cheap drift read-back.
+
+---
+
 ## `github`
 
 Provisions a **GitHub repository branch ruleset** — the modern replacement for branch
@@ -1280,8 +1354,8 @@ there is one emitter and the schema is never maintained in parallel (see "The JS
 **Which file a change is written to.** Each option is routed to its **owning layer**:
 
 - **REPO** options (`skills`, `agent_hooks`, `git_hooks`, `ci`, `mcp`, `harness`, `models`,
-  `github`, `agents_md`) are written to the repo's `./rig.yaml` — the values the default scaffold
-  commits.
+  `github`, `agents_md`, `linters`, `project_tools`) are written to the repo's `./rig.yaml` — the
+  values the default scaffold commits.
 - **GLOBAL-only** options (`gitignore`, `tg_ctl`, `tmux`) are machine-wide blocks the scaffold
   never writes into a committed repo file; the wizard writes them to `~/.config/rig/config.yaml`
   only — it never lands a global-only block in a committed repo `rig.yaml`.
@@ -1338,7 +1412,7 @@ rig config set harness.auto_mode false --no-apply        # write only, print the
 strict**: an unknown FIXED key in *any* block — `defaults`, `skills`, `agent_hooks`, `git_hooks`
 (+ `dispatcher`), `ci`, `mcp`, `harness` (+ `hook_bridge`), `permissions`, `models` (+ `schedule`),
 `agents_md`, `github` (+ `ruleset` / `merge` / `ghas` / `actions` / `browser`), `tmux` (+ every
-sub-block), `gitignore`, `tg_ctl` — is
+sub-block), `gitignore`, `tg_ctl`, `project_tools` (+ `haft` / `workflow` / `serena` / `sverklo`) — is
 rejected with the schema path of the offender, not silently ignored. (The only open maps are the
 catalog-keyed `items:` / `fragments:` — see "Strict by default" above.) Bad-value rejections
 include: unsupported `version`, invalid `on_conflict` / ci `tier` / agent-hook `on_error`, an
@@ -1351,8 +1425,10 @@ that is not a list of strings, a bad `tmux.apply` enum, a `tmux.resurrect.proces
 list of strings, a `tmux.continuum.save_interval` that is not an int ≥ 1, a non-bool `tmux` bool
 knob, a non-string `gitignore.excludesfile` / a `gitignore.entries` that is not a list of strings
 or that contains a rig-managed marker line, a non-bool `tg_ctl.enabled`/`boot`, a non-string
-`tg_ctl.label`/`bun_path`/`tg_ctl_path`/`config_dir`, and an `agent_tools_source` that is not an
-agent-tools checkout. Every rejection is the **3-part error** (what / why + schema path / fix) and
+`tg_ctl.label`/`bun_path`/`tg_ctl_path`/`config_dir`, a bad
+`project_tools.haft.workflow.mode`, a non-list/string item in `project_tools.serena.languages` or
+`project_tools.serena.ignored_paths`, and an `agent_tools_source` that is not an agent-tools
+checkout. Every rejection is the **3-part error** (what / why + schema path / fix) and
 exits `2`. `--dry-run` prints the resolved plan and exits 0 without writing.
 
 `rig config set` is **fail-closed** with full rollback: a malformed/non-mapping existing target

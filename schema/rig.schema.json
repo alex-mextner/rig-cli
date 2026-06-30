@@ -988,6 +988,131 @@
       },
       "additionalProperties": false
     },
+    "project_tools": {
+      "type": "object",
+      "description": "repo-local integration carriers for Haft, Serena, and Sverklo.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision repo-local project tool integrations",
+          "default": true
+        },
+        "haft": {
+          "type": "object",
+          "description": "Haft FPF/spec carriers plus optional Codex MCP registration.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "provision Haft project carriers",
+              "default": true
+            },
+            "project_name": {
+              "type": "string",
+              "description": "Haft project name; defaults to the repo directory name"
+            },
+            "project_id": {
+              "type": "string",
+              "description": "stable Haft project id; generated from project_name when omitted"
+            },
+            "codex_mcp": {
+              "type": "boolean",
+              "description": "merge the Haft MCP server into .codex/config.toml",
+              "default": true
+            },
+            "workflow": {
+              "type": "object",
+              "description": "Haft workflow defaults written to .haft/workflow.md.",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "description": "Haft workflow mode",
+                  "enum": [
+                    "standard",
+                    "tactical"
+                  ],
+                  "default": "standard"
+                },
+                "require_decision": {
+                  "type": "boolean",
+                  "description": "require explicit decisions for high-impact work",
+                  "default": true
+                },
+                "require_verify": {
+                  "type": "boolean",
+                  "description": "require verification evidence before completion",
+                  "default": true
+                },
+                "allow_autonomy": {
+                  "type": "boolean",
+                  "description": "allow autonomous Haft execution by default",
+                  "default": false
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "serena": {
+          "type": "object",
+          "description": "Serena project configuration under .serena/.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "provision Serena project config",
+              "default": true
+            },
+            "project_name": {
+              "type": "string",
+              "description": "Serena project name; defaults to the repo directory name"
+            },
+            "languages": {
+              "type": "array",
+              "description": "Serena language ids; auto-detected when omitted",
+              "items": {
+                "type": "string"
+              }
+            },
+            "read_only": {
+              "type": "boolean",
+              "description": "disable Serena editing tools for this project",
+              "default": false
+            },
+            "ignored_paths": {
+              "type": "array",
+              "description": "extra Serena ignore patterns",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "sverklo": {
+          "type": "object",
+          "description": "Sverklo global registry/index integration for this repo.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "provision Sverklo integration",
+              "default": true
+            },
+            "register": {
+              "type": "boolean",
+              "description": "register this repo in the global Sverklo registry",
+              "default": true
+            },
+            "reindex": {
+              "type": "boolean",
+              "description": "run sverklo reindex during apply (off by default)",
+              "default": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "scope": {
       "type": "string",
       "description": "removed legacy key (tolerated, ignored)",

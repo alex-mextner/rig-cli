@@ -75,6 +75,15 @@ def _isolate_scheduler(monkeypatch):
 
         return ActionResult(action, "skipped", "tools: ecosystem installer stubbed in tests")
 
+    real_project_tool = runner._do_provision_project_tool
+
+    def _safe_project_tool(action, on_conflict):
+        from riglib.actions.runner import ActionResult
+
+        if action.options.get("tool") == "sverklo":
+            return ActionResult(action, "skipped", "project_tools/sverklo: live registry stubbed in tests")
+        return real_project_tool(action, on_conflict)
+
     # Patch BOTH the module attr and the dispatch-table entry: `run_plan` resolves the handler
     # from `_HANDLERS` (a dict built at import with a direct function reference), so patching
     # only the module attr would leave the e2e `run_plan` path calling the real installer.
@@ -94,6 +103,9 @@ def _isolate_scheduler(monkeypatch):
     # handler with its own HOME-isolated temp repos + fake install.sh.
     monkeypatch.setattr(runner, "_do_provision_tools", _noop_tools)
     monkeypatch.setitem(runner._HANDLERS, "provision_tools", _noop_tools)
+    monkeypatch.setenv("RIG_PROJECT_TOOLS_DRY_RUN", "1")
+    monkeypatch.setattr(runner, "_do_provision_project_tool", _safe_project_tool)
+    monkeypatch.setitem(runner._HANDLERS, "provision_project_tool", _safe_project_tool)
     # tg_ctl is default-on, so a provision_tg_ctl action exists in EVERY e2e plan. Its drift
     # check reads the REAL ``_on_darwin()`` (true on a macOS dev box) and would flag the missing
     # plist — but the provisioner above is stubbed, so apply never writes it, leaving a permanent

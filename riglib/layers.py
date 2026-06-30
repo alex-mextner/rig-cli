@@ -43,6 +43,7 @@ _CATEGORY_LAYER = {
     "ci": REPO,
     "ship_delegator": REPO,
     "linters": REPO,
+    "project_tools": REPO,
     "agents_md": REPO,
     "github": REPO,
 }

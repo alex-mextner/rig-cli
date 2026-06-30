@@ -25,6 +25,14 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .harness_skills import KNOWN_HARNESS_KINDS as _KNOWN_HARNESS_KINDS
+from .project_tools import (
+    HAFT_KEYS,
+    HAFT_WORKFLOW_KEYS,
+    HAFT_WORKFLOW_MODES,
+    PROJECT_TOOLS_KEYS,
+    SERENA_KEYS,
+    SVERKLO_KEYS,
+)
 
 CONFIG_FILENAME = "rig.yaml"
 
@@ -48,6 +56,7 @@ _VALID_TOP_KEYS = {
     "tg_ctl",
     "ship_delegator",
     "linters",
+    "project_tools",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
@@ -540,6 +549,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_tg_ctl(data.get("tg_ctl", {}))
     _validate_ship_delegator(data.get("ship_delegator", {}))
     _validate_linters(data.get("linters", {}))
+    _validate_project_tools(data.get("project_tools", {}))
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -1225,6 +1235,91 @@ def _validate_string_list(value: Any, path: str) -> None:
     """Fail-closed unless ``value`` is a list of strings."""
     if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
         raise ConfigError(f"{path} must be a list of strings", schema_path=path)
+
+
+def _validate_project_tools(pt: dict[str, Any]) -> None:
+    """Validate repo-local project-tool provisioning (Haft, Serena, Sverklo).
+
+    This is distinct from the GLOBAL ``tools`` block: ``tools`` installs personal command-line
+    programs, while ``project_tools`` writes committed repo carriers and safe live registrations so
+    the project is usable by those tools. The block is default-off unless present in a scaffolded
+    ``rig.yaml``. Fail closed on unknown keys and bad scalar/list types.
+    """
+    if not isinstance(pt, dict):
+        raise ConfigError("project_tools must be a mapping", schema_path="project_tools")
+    if not pt:
+        return
+    _reject_unknown_keys(pt, "project_tools")
+    _check_bool(pt, "enabled", "project_tools.enabled")
+
+    haft = pt.get("haft", {})
+    if haft is not None:
+        if not isinstance(haft, dict):
+            raise ConfigError("project_tools.haft must be a mapping", schema_path="project_tools.haft")
+        for key in haft:
+            if key not in HAFT_KEYS:
+                raise ConfigError(
+                    f"unknown project_tools.haft key {key!r} (expected one of: {', '.join(sorted(HAFT_KEYS))})",
+                    schema_path="project_tools.haft",
+                )
+        _check_bool(haft, "enabled", "project_tools.haft.enabled")
+        _check_bool(haft, "codex_mcp", "project_tools.haft.codex_mcp")
+        _check_str(haft, "project_name", "project_tools.haft.project_name")
+        _check_str(haft, "project_id", "project_tools.haft.project_id")
+        workflow = haft.get("workflow", {})
+        if workflow is not None:
+            if not isinstance(workflow, dict):
+                raise ConfigError(
+                    "project_tools.haft.workflow must be a mapping",
+                    schema_path="project_tools.haft.workflow",
+                )
+            for key in workflow:
+                if key not in HAFT_WORKFLOW_KEYS:
+                    raise ConfigError(
+                        f"unknown project_tools.haft.workflow key {key!r} "
+                        f"(expected one of: {', '.join(sorted(HAFT_WORKFLOW_KEYS))})",
+                        schema_path="project_tools.haft.workflow",
+                    )
+            mode = workflow.get("mode")
+            if mode is not None and mode not in HAFT_WORKFLOW_MODES:
+                raise ConfigError(
+                    f"project_tools.haft.workflow.mode must be one of {list(HAFT_WORKFLOW_MODES)}, got {mode!r}",
+                    fix=f"use one of: {', '.join(HAFT_WORKFLOW_MODES)}",
+                    schema_path="project_tools.haft.workflow.mode",
+                )
+            for key in ("require_decision", "require_verify", "allow_autonomy"):
+                _check_bool(workflow, key, f"project_tools.haft.workflow.{key}")
+
+    serena = pt.get("serena", {})
+    if serena is not None:
+        if not isinstance(serena, dict):
+            raise ConfigError("project_tools.serena must be a mapping", schema_path="project_tools.serena")
+        for key in serena:
+            if key not in SERENA_KEYS:
+                raise ConfigError(
+                    f"unknown project_tools.serena key {key!r} (expected one of: {', '.join(sorted(SERENA_KEYS))})",
+                    schema_path="project_tools.serena",
+                )
+        _check_bool(serena, "enabled", "project_tools.serena.enabled")
+        _check_bool(serena, "read_only", "project_tools.serena.read_only")
+        _check_str(serena, "project_name", "project_tools.serena.project_name")
+        if "languages" in serena:
+            _validate_string_list(serena["languages"], "project_tools.serena.languages")
+        if "ignored_paths" in serena:
+            _validate_string_list(serena["ignored_paths"], "project_tools.serena.ignored_paths")
+
+    sverklo = pt.get("sverklo", {})
+    if sverklo is not None:
+        if not isinstance(sverklo, dict):
+            raise ConfigError("project_tools.sverklo must be a mapping", schema_path="project_tools.sverklo")
+        for key in sverklo:
+            if key not in SVERKLO_KEYS:
+                raise ConfigError(
+                    f"unknown project_tools.sverklo key {key!r} (expected one of: {', '.join(sorted(SVERKLO_KEYS))})",
+                    schema_path="project_tools.sverklo",
+                )
+        for key in ("enabled", "register", "reindex"):
+            _check_bool(sverklo, key, f"project_tools.sverklo.{key}")
 
 
 def _validate_gitignore(gi: dict[str, Any]) -> None:

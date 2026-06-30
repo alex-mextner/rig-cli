@@ -57,6 +57,7 @@ from ..github_ruleset import (
 )
 from ..logging import log_event
 from ..plan import Action, InstallPlan
+from .. import project_tools
 from . import fsutil
 
 
@@ -3061,6 +3062,33 @@ def _do_provision_linter_config(action: Action, on_conflict: str) -> ActionResul
     return ActionResult(action, out.status, f"linter-config ({label}): {out.detail}", out.backup)
 
 
+def _do_provision_project_tool(action: Action, on_conflict: str) -> ActionResult:
+    """Provision one repo-local project-tool carrier or live operation.
+
+    File entries are ordinary repo files with the same conflict policy as every other rig-managed
+    config. The Haft Codex MCP entry is a managed TOML section, so an existing ``.codex/config.toml``
+    keeps unrelated user config. Sverklo live operations are idempotent and dry-run gated.
+    """
+    tool = str(action.options.get("tool") or "project-tool")
+    operation = str(action.options.get("operation") or "file")
+    if operation in {"register", "reindex"} and tool == "sverklo":
+        status, detail = project_tools.run_sverklo(action.target, operation)
+        return ActionResult(action, status, detail)
+
+    rel_path = str(action.options.get("rel_path") or "")
+    content = action.options.get("content")
+    label = f"{tool}/{action.item}"
+    if not rel_path or not isinstance(content, str):
+        return ActionResult(action, "error", f"project-tool ({label}): malformed action (missing rel_path/content)")
+    r = project_tools.resolve_entry(action.target, rel_path, content, operation)
+    if r.state == "io_error":
+        return ActionResult(action, "error", f"project-tool ({label}): {r.detail}")
+    if r.state == "ok":
+        return ActionResult(action, "skipped", f"project-tool ({label}): {rel_path} already correct")
+    out = fsutil.write_file(r.target_path, r.content, on_conflict)
+    return ActionResult(action, out.status, f"project-tool ({label}): {out.detail}", out.backup)
+
+
 # ── GitHub repository ruleset (gh api) ─────────────────────────────────────────────
 # rig reconciles a branch ruleset on the repo's DEFAULT branch — the modern replacement for
 # branch protection — declaratively, the same way every other category is reconciled. The
@@ -4223,6 +4251,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_agents_symlink": _do_provision_agents_symlink,
     "provision_ship_delegator": _do_provision_ship_delegator,
     "provision_linter_config": _do_provision_linter_config,
+    "provision_project_tool": _do_provision_project_tool,
     "provision_github_ruleset": _do_provision_github_ruleset,
     "provision_github_merge": _do_provision_github_merge,
     "provision_github_ghas": _do_provision_github_ghas,

@@ -278,6 +278,27 @@ AREAS: tuple[Area, ...] = (
                  "Never clobbers a hand-written config — a conflict is backed up before overwrite."),
         ),
     ),
+    Area(
+        "project_tools", "project tools (Haft / Serena / Sverklo)",
+        "Repo-local carriers and registrations for code-intelligence/governance tools.",
+        (
+            _opt("project_tools.enabled", KIND_BOOL, True,
+                 "Provision repo-local project-tool integrations. Off = leave .haft/.serena/.codex "
+                 "and live Sverklo registration untouched."),
+            _opt("project_tools.haft.enabled", KIND_BOOL, True,
+                 "Provision Haft FPF/spec carriers and workflow defaults under .haft/."),
+            _opt("project_tools.haft.codex_mcp", KIND_BOOL, True,
+                 "Merge the Haft MCP server into .codex/config.toml for Codex."),
+            _opt("project_tools.serena.enabled", KIND_BOOL, True,
+                 "Provision .serena/project.yml and the Serena local gitignore."),
+            _opt("project_tools.sverklo.enabled", KIND_BOOL, True,
+                 "Provision Sverklo integration for this repo."),
+            _opt("project_tools.sverklo.register", KIND_BOOL, True,
+                 "Register this repo in the global Sverklo registry during apply (idempotent)."),
+            _opt("project_tools.sverklo.reindex", KIND_BOOL, False,
+                 "Run `sverklo reindex` during apply. Off by default because indexing can be slow."),
+        ),
+    ),
 )
 
 

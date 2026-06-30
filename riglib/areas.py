@@ -71,6 +71,7 @@ AREAS: tuple[Area, ...] = (
     Area("ship", "ship / `gh ship` merge gate", REPO, ("ci",), ship_slot=True),
     Area("ship_delegator", "`gh ship` delegator (.claude/scripts/pr-ship.sh)", REPO, ("ship_delegator",)),
     Area("linters", "linter / formatter config files", REPO, ("linters",)),
+    Area("project_tools", "project tools (Haft / Serena / Sverklo)", REPO, ("project_tools",)),
     Area("agents_md", "AGENTS.md / CLAUDE.md symlinks", REPO, ("agents_md",)),
     Area("github", "repo settings (branch protection / GHAS / merge / actions, gh api + agent-browser)", REPO, ("github",)),
 )

@@ -37,6 +37,7 @@ from .harness_skills import (
     HARNESS_NATIVE_SKILLS,
     HARNESS_SKILL_DIRS,
 )
+from .project_tools import HAFT_WORKFLOW_MODES
 
 # Every harness kind rig provisions skill/instruction discovery for, listed skills-dir kinds first
 # (claude-code, codex) then native-discovery (opencode) then instruction-file kinds (gemini, pi,
@@ -63,8 +64,9 @@ class Leaf:
 
     ``type`` is a JSON-Schema type name (``boolean``/``string``/``integer``/``array``/``object``).
     ``enum`` pins the allowed string values; ``minimum`` an integer floor; ``items_type`` the
-    element type of an ``array``. ``default`` is shown in the schema (editors surface it); ``None``
-    means "no default advertised" (omitted from the emitted node).
+    element type of an ``array``; ``additional_properties_type`` models a string-keyed object map.
+    ``default`` is shown in the schema (editors surface it); ``None`` means "no default
+    advertised" (omitted from the emitted node).
     """
 
     type: str
@@ -73,6 +75,7 @@ class Leaf:
     default: Any = None
     minimum: int | None = None
     items_type: str | None = None
+    additional_properties_type: str | None = None
 
     def to_node(self) -> dict[str, Any]:
         node: dict[str, Any] = {"type": self.type, "description": self.doc}
@@ -84,6 +87,8 @@ class Leaf:
             node["minimum"] = self.minimum
         if self.type == "array" and self.items_type:
             node["items"] = {"type": self.items_type}
+        if self.type == "object" and self.additional_properties_type:
+            node["additionalProperties"] = {"type": self.additional_properties_type}
         return node
 
 
@@ -509,6 +514,53 @@ _LINTERS_BLOCK = Block(
     open_map_item_required=("tool", "path", "content"),
 )
 
+_PROJECT_TOOLS_BLOCK = Block(
+    doc="repo-local integration carriers for Haft, Serena, and Sverklo.",
+    leaves={
+        "enabled": Leaf("boolean", "provision repo-local project tool integrations", default=True),
+    },
+    nested={
+        "haft": Block(
+            doc="Haft FPF/spec carriers plus optional Codex MCP registration.",
+            leaves={
+                "enabled": Leaf("boolean", "provision Haft project carriers", default=True),
+                "project_name": Leaf("string", "Haft project name; defaults to the repo directory name"),
+                "project_id": Leaf("string", "stable Haft project id; generated from project_name when omitted"),
+                "codex_mcp": Leaf("boolean", "merge the Haft MCP server into .codex/config.toml", default=True),
+            },
+            nested={
+                "workflow": Block(
+                    doc="Haft workflow defaults written to .haft/workflow.md.",
+                    leaves={
+                        "mode": Leaf("string", "Haft workflow mode", enum=HAFT_WORKFLOW_MODES, default="standard"),
+                        "require_decision": Leaf("boolean", "require explicit decisions for high-impact work", default=True),
+                        "require_verify": Leaf("boolean", "require verification evidence before completion", default=True),
+                        "allow_autonomy": Leaf("boolean", "allow autonomous Haft execution by default", default=False),
+                    },
+                ),
+            },
+        ),
+        "serena": Block(
+            doc="Serena project configuration under .serena/.",
+            leaves={
+                "enabled": Leaf("boolean", "provision Serena project config", default=True),
+                "project_name": Leaf("string", "Serena project name; defaults to the repo directory name"),
+                "languages": Leaf("array", "Serena language ids; auto-detected when omitted", items_type="string"),
+                "read_only": Leaf("boolean", "disable Serena editing tools for this project", default=False),
+                "ignored_paths": Leaf("array", "extra Serena ignore patterns", items_type="string"),
+            },
+        ),
+        "sverklo": Block(
+            doc="Sverklo global registry/index integration for this repo.",
+            leaves={
+                "enabled": Leaf("boolean", "provision Sverklo integration", default=True),
+                "register": Leaf("boolean", "register this repo in the global Sverklo registry", default=True),
+                "reindex": Leaf("boolean", "run sverklo reindex during apply (off by default)", default=False),
+            },
+        ),
+    },
+)
+
 _TOOLS_ITEM_BLOCK = Block(
     doc="one declared tool: the repo whose install.sh rig runs, plus optional overrides.",
     leaves={
@@ -570,6 +622,7 @@ BLOCKS: dict[str, Block] = {
     "tg_ctl": _TG_CTL_BLOCK,
     "ship_delegator": _SHIP_DELEGATOR_BLOCK,
     "linters": _LINTERS_BLOCK,
+    "project_tools": _PROJECT_TOOLS_BLOCK,
 }
 
 # Every valid TOP-LEVEL key (scalars + blocks). Mirrors config._VALID_TOP_KEYS; the sync test

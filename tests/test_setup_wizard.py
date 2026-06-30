@@ -33,6 +33,7 @@ def test_registry_covers_every_status_area():
     expected = {
         "skills", "agent_hooks", "git_hooks", "ci", "mcp", "harness", "permissions",
         "models", "agents_md", "github", "tmux", "gitignore", "tg_ctl", "linters",
+        "project_tools",
     }
     assert cats == expected
 
@@ -513,5 +514,4 @@ def test_load_layer_config_empty_file_is_empty_layer(tmp_path):
     p.write_text("", encoding="utf-8")
     assert setup_wizard.load_layer_config(p) == {}
     assert setup_wizard.load_layer_config(tmp_path / "absent.yaml") == {}  # absent → {}
-
 

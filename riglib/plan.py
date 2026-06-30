@@ -34,6 +34,7 @@ from .github_ruleset import CI_GATE_CHECK_CONTEXTS, GITHUB_RULESET_DEFAULTS
 from .harness_skills import HARNESS_SKILL_DIRS as _HARNESS_SKILL_DIRS
 from .harness_skills import instruction_file_for as _instruction_file_for
 from .harness_skills import native_skills_dir_for as _native_skills_dir_for
+from . import project_tools
 
 
 class PlanError(ValueError):
@@ -76,7 +77,7 @@ _DEFAULT_HARNESS_KIND = "claude-code"
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_project_tool | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -577,6 +578,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
 
     # ── linters (per-repo linter/formatter config files) ──────────────────────────
     _build_linters(config, plan)
+
+    # ── project_tools (Haft / Serena / Sverklo repo integrations) ─────────────────
+    _build_project_tools(config, plan)
 
     # ── github (repository settings via gh api + agent-browser) ───────────────────
     # ORDER MATTERS — actions run in this build order (runner.run_plan iterates plan.actions
@@ -1353,7 +1357,26 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
                 "login_shell": login_shell,
             },
         )
-    )
+        )
+
+
+def _build_project_tools(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan repo-local integrations for Haft, Serena, and Sverklo.
+
+    The pure renderer in :mod:`riglib.project_tools` owns the desired carriers. The plan emits one
+    action per file/operation so dry-run/status can name the exact drifting integration.
+    """
+    for entry in project_tools.desired_entries(config.repo_root, config.data.get("project_tools")):
+        plan.actions.append(
+            Action(
+                kind="provision_project_tool",
+                category="project_tools",
+                item=entry.item,
+                source=config.repo_root,
+                target=config.repo_root,
+                options=entry.to_options(),
+            )
+        )
 
 
 def _build_tools(config: LoadedConfig, plan: InstallPlan) -> None:

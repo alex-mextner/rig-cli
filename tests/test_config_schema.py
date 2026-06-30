@@ -45,7 +45,7 @@ def test_schema_top_level_is_strict_and_complete():
 def test_blocks_without_open_map_are_closed():
     # a fixed-knob block (harness, defaults, github.ruleset, …) must reject an unknown key.
     doc = config_schema.json_schema()
-    for name in ("defaults", "skills", "harness", "permissions", "models", "agents_md", "tmux", "tg_ctl"):
+    for name in ("defaults", "skills", "harness", "permissions", "models", "agents_md", "tmux", "tg_ctl", "project_tools"):
         assert doc["properties"][name]["additionalProperties"] is False, f"{name} must be closed"
 
 
@@ -99,6 +99,11 @@ def test_linters_items_schema_enforces_item_shape():
         ("agents_md", {"enabled", "symlink"}),
         ("gitignore", {"enabled", "entries", "excludesfile"}),
         ("linters", {"enabled", "items"}),
+        ("project_tools", config.PROJECT_TOOLS_KEYS),
+        ("project_tools.haft", config.HAFT_KEYS),
+        ("project_tools.haft.workflow", config.HAFT_WORKFLOW_KEYS),
+        ("project_tools.serena", config.SERENA_KEYS),
+        ("project_tools.sverklo", config.SVERKLO_KEYS),
     ],
 )
 def test_registry_block_keys_match_validator(block_path, config_keys):

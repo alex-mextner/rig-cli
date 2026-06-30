@@ -58,6 +58,7 @@ from .actions.runner import (
 from .config import GITIGNORE_BEGIN_MARKER, linter_path_escapes_repo
 from .github_ruleset import DEFAULT_RULESET_NAME
 from .plan import Action, InstallPlan
+from . import project_tools
 from .tg_ctl import STALE_PREDECESSOR_LABEL
 
 
@@ -140,6 +141,8 @@ def detect(
             _check_ship_delegator(action, report)
         elif action.kind == "provision_linter_config":
             _check_linter_config(action, report)
+        elif action.kind == "provision_project_tool":
+            _check_project_tool(action, report)
         elif action.kind == "provision_github_ruleset":
             _check_github_ruleset(action, report)
         elif action.kind == "provision_github_merge":
@@ -419,6 +422,49 @@ def _check_linter_config(action: Action, report: DriftReport) -> None:
         report.items.append(
             DriftItem("modified", "linters", label, r.target_path,
                       f"provisioned {rel_path} differs from the rig-managed config")
+        )
+
+
+def _check_project_tool(action: Action, report: DriftReport) -> None:
+    """Flag drift for one repo-local project-tool carrier or registration."""
+    tool = str(action.options.get("tool") or "project-tool")
+    operation = str(action.options.get("operation") or "file")
+    label = f"{tool}/{action.item}"
+    if operation == "register" and tool == "sverklo":
+        registered, detail = project_tools.sverklo_registered(action.target)
+        if not registered:
+            report.items.append(
+                DriftItem(
+                    "missing", "project_tools", label, action.target,
+                    f"sverklo registry missing this repo ({detail}) — apply runs sverklo register",
+                )
+            )
+        return
+    if operation == "reindex" and tool == "sverklo":
+        return  # apply-only maintenance; no cheap read-back beyond registration.
+
+    rel_path = str(action.options.get("rel_path") or "")
+    content = action.options.get("content")
+    if not rel_path or not isinstance(content, str):
+        report.items.append(
+            DriftItem("modified", "project_tools", label, action.target,
+                      "project_tools action is missing rel_path/content (malformed plan)")
+        )
+        return
+    r = project_tools.resolve_entry(action.target, rel_path, content, operation)
+    if r.state == "ok":
+        return
+    if r.state == "create":
+        report.items.append(
+            DriftItem("missing", "project_tools", label, r.target_path,
+                      f"{rel_path} not provisioned (apply writes it from project_tools)")
+        )
+    elif r.state == "io_error":
+        report.items.append(DriftItem("modified", "project_tools", label, r.target_path, r.detail))
+    elif r.state == "update":
+        report.items.append(
+            DriftItem("modified", "project_tools", label, r.target_path,
+                      f"provisioned {rel_path} differs from project_tools config")
         )
 
 

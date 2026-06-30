@@ -164,6 +164,29 @@ def default_state(
             "actions": github_actions,
             "browser": github_browser,
         },
+        "project_tools": {
+            "enabled": True,
+            "haft": {
+                "enabled": True,
+                "codex_mcp": True,
+                "workflow": {
+                    "mode": "standard",
+                    "require_decision": True,
+                    "require_verify": True,
+                    "allow_autonomy": False,
+                },
+            },
+            "serena": {
+                "enabled": True,
+                "read_only": False,
+                "ignored_paths": [],
+            },
+            "sverklo": {
+                "enabled": True,
+                "register": True,
+                "reindex": False,
+            },
+        },
         # NB: `gitignore` (the GLOBAL git-excludes block) is deliberately NOT scaffolded into this
         # generated, COMMITTED repo `rig.yaml`. It is GLOBAL (machine-wide) config — it belongs in
         # the global rig layer (~/.config/rig/config.yaml), with zero per-repo commits — and it is
