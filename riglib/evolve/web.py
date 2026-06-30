@@ -716,19 +716,34 @@ function pointerDistance(a, b) {{ return Math.hypot(a.x - b.x, a.y - b.y); }}
 function pointerCenter(a, b) {{ return {{x:(a.x + b.x)/2, y:(a.y + b.y)/2}}; }}
 
 function addWrappedLabel(svg, r, text, klass, maxLines) {{
+  const labelRect = visibleLabelRect(r);
+  if (!labelRect) return;
   const zoom = currentZoom();
+  if (labelRect.w * zoom < 46 || labelRect.h * zoom < 14) return;
   // ViewBox zoom scales SVG text; convert fixed screen-pixel label metrics back to world units.
   const pad = 4 / zoom;
   const baseFont = klass === 'symbolLabel' ? 8 : (klass === 'frameLabel' ? 10 : 9);
   const lineHeight = 10 / zoom;
-  const label = el('text', {{x:r.x + pad, y:r.y + 11 / zoom, class:klass, 'font-size':Math.max(3, baseFont / zoom)}});
-  const chars = Math.max(2, Math.floor((r.w * zoom - 8) / (klass === 'symbolLabel' ? 4.4 : 5.2)));
-  const lines = wrapByChars(String(text || ''), chars, maxLines);
+  const maxVisibleLines = Math.max(1, Math.floor((labelRect.h * zoom - 4) / 10));
+  const label = el('text', {{x:labelRect.x + pad, y:labelRect.y + 11 / zoom, class:klass, 'font-size':Math.max(3, baseFont / zoom)}});
+  const chars = Math.max(2, Math.floor((labelRect.w * zoom - 8) / (klass === 'symbolLabel' ? 4.4 : 5.2)));
+  const lines = wrapByChars(String(text || ''), chars, Math.min(maxLines, maxVisibleLines));
   lines.forEach((line, i) => {{
-    const tspan = el('tspan', {{x:r.x + pad, dy:i ? lineHeight : 0}}, line);
+    const tspan = el('tspan', {{x:labelRect.x + pad, dy:i ? lineHeight : 0}}, line);
     label.appendChild(tspan);
   }});
   svg.appendChild(label);
+}}
+
+function visibleLabelRect(r) {{
+  if (!view) return r;
+  const x1 = Math.max(r.x, view.x);
+  const y1 = Math.max(r.y, view.y);
+  const x2 = Math.min(r.x + r.w, view.x + view.w);
+  const y2 = Math.min(r.y + r.h, view.y + view.h);
+  const w = x2 - x1;
+  const h = y2 - y1;
+  return w > 0 && h > 0 ? {{...r, x:x1, y:y1, w, h}} : null;
 }}
 
 function wrapByChars(text, chars, maxLines) {{
