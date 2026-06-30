@@ -13,13 +13,14 @@ import posixpath
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .git_index import build_histogram, build_path_touches, git_health
-from .structure import build_file_tree
+from .history import build_historical_snapshot
 from .model import PROVIDER_SCHEMA
+from .structure import build_file_tree
 from .symbols import extract_symbols
 
 HOST = "127.0.0.1"
@@ -50,24 +51,42 @@ def is_allowed_host(headers: Any) -> bool:
 @dataclass
 class EvolveApp:
     repo_root: Path
+    _allowed_project_cache: set[Path] = field(default_factory=set, init=False, repr=False)
 
     def projects_payload(self) -> dict[str, Any]:
         from .projects import discover_projects
 
         projects = discover_projects(self.repo_root)
+        self._remember_allowed_projects(projects)
         return {
             "projects": projects,
             "health": {"projects": {"status": "ok", "message": f"{len(projects)} project(s) discovered"}},
         }
 
-    def snapshot_payload(self, *, project_path: str | None = None, bucket: str = "month") -> dict[str, Any]:
-        project = Path(project_path).expanduser().resolve() if project_path else self.repo_root.resolve()
+    def snapshot_payload(
+        self,
+        *,
+        project_path: str | None = None,
+        bucket: str = "month",
+        period: str | None = None,
+        selected_path: str | None = None,
+    ) -> dict[str, Any]:
+        project = self._allowed_project(project_path)
+        if project is None:
+            raise PermissionError("project not allowed")
         head = _git_head(project)
+        if period:
+            payload = build_historical_snapshot(project, period, bucket=bucket, selected_path=selected_path)
+            payload["project"] = {"name": project.name, "path": str(project), "head": head}
+            payload["histogram"] = build_histogram(project, bucket=bucket, include_paths=False)
+            payload["cache"] = {"status": "historical", "ttl_s": 0}
+            return payload
         key = (str(project), bucket, head)
         now = time.monotonic()
         cached = _SNAPSHOT_CACHE.get(key)
         if cached and now - cached[0] < _SNAPSHOT_TTL_S:
             payload = dict(cached[1])
+            payload["selection"] = _current_selection_metadata(project, selected_path)
             payload["cache"] = {"status": "hit", "ttl_s": int(_SNAPSHOT_TTL_S)}
             return payload
         with ThreadPoolExecutor(max_workers=3) as pool:
@@ -81,18 +100,21 @@ class EvolveApp:
                 "health": {"git": git_f.result()},
                 "cache": {"status": "miss", "ttl_s": int(_SNAPSHOT_TTL_S)},
             }
-        _SNAPSHOT_CACHE[key] = (now, payload)
+        _SNAPSHOT_CACHE[key] = (now, dict(payload))
+        payload["selection"] = _current_selection_metadata(project, selected_path)
         _trim_snapshot_cache()
         return payload
 
     def touches_payload(self, *, project_path: str | None = None, path: str = "", bucket: str = "month") -> dict[str, Any]:
-        project = Path(project_path).expanduser().resolve() if project_path else self.repo_root.resolve()
+        project = self._allowed_project(project_path)
+        if project is None:
+            raise PermissionError("project not allowed")
         return {"path": path, "bucket_ids": build_path_touches(project, path, bucket=bucket)}
 
     def symbols_payload(self, *, project_path: str | None = None, path: str = "") -> dict[str, Any]:
         project = self._allowed_project(project_path)
         if project is None:
-            return {"path": path, "symbols": [], "health": {"status": "error", "message": "project not allowed"}}
+            raise PermissionError("project not allowed")
         rel = _safe_rel(path)
         target = _safe_project_file(project, rel)
         if not rel or rel not in _snapshot_file_paths(project) or target is None:
@@ -107,10 +129,7 @@ class EvolveApp:
     def relationships_payload(self, *, project_path: str | None = None, path: str = "") -> dict[str, Any]:
         project = self._allowed_project(project_path)
         if project is None:
-            return {
-                "path": path,
-                "relationships": {"uses": [], "used_by": [], "quality": "error", "message": "project not allowed"},
-            }
+            raise PermissionError("project not allowed")
         rel = _safe_rel(path)
         if not rel or rel not in _snapshot_file_paths(project) or _safe_project_file(project, rel) is None:
             return {
@@ -130,15 +149,26 @@ class EvolveApp:
         try:
             discovered = self.projects_payload()["projects"]
         except Exception:  # noqa: BLE001
-            return None
+            return project if project in self._allowed_project_cache else None
         allowed = {Path(str(item.get("path") or "")).expanduser().resolve() for item in discovered}
+        self._allowed_project_cache = {self.repo_root.resolve(), *allowed}
         return project if project in allowed else None
+
+    def _remember_allowed_projects(self, projects: list[dict[str, Any]]) -> None:
+        allowed = {self.repo_root.resolve()}
+        for item in projects:
+            raw = item.get("path")
+            if raw:
+                allowed.add(Path(str(raw)).expanduser().resolve())
+        self._allowed_project_cache = allowed
 
     def providers_payload(self, *, project_path: str | None = None, refresh: bool = False) -> dict[str, Any]:
         from .cache import ProviderCache, ProviderCacheKey
         from .providers import collect_default, default_providers
 
-        project = Path(project_path).expanduser().resolve() if project_path else self.repo_root.resolve()
+        project = self._allowed_project(project_path)
+        if project is None:
+            raise PermissionError("project not allowed")
         version = _git_head(project)
         cache = ProviderCache()
         provider_names = [provider.name for provider in default_providers()]
@@ -221,8 +251,20 @@ class EvolveApp:
                     qs = parse_qs(parsed.query)
                     project = qs.get("path", [None])[0]
                     bucket = qs.get("bucket", ["month"])[0]
+                    period = qs.get("period", [None])[0]
+                    selected_path = qs.get("selected_path", [None])[0]
                     try:
-                        self._send_json(200, app.snapshot_payload(project_path=project, bucket=bucket))
+                        self._send_json(
+                            200,
+                            app.snapshot_payload(
+                                project_path=project,
+                                bucket=bucket,
+                                period=period,
+                                selected_path=selected_path,
+                            ),
+                        )
+                    except PermissionError as exc:
+                        self._send_json(403, {"error": str(exc)})
                     except Exception as exc:  # noqa: BLE001
                         self._send_json(500, {"error": str(exc)})
                     return
@@ -233,6 +275,8 @@ class EvolveApp:
                     bucket = qs.get("bucket", ["month"])[0]
                     try:
                         self._send_json(200, app.touches_payload(project_path=project, path=target_path, bucket=bucket))
+                    except PermissionError as exc:
+                        self._send_json(403, {"error": str(exc)})
                     except Exception as exc:  # noqa: BLE001
                         self._send_json(500, {"error": str(exc)})
                     return
@@ -242,6 +286,8 @@ class EvolveApp:
                     target_path = qs.get("file", qs.get("path", [""]))[0]
                     try:
                         self._send_json(200, app.symbols_payload(project_path=project, path=target_path))
+                    except PermissionError as exc:
+                        self._send_json(403, {"error": str(exc)})
                     except Exception as exc:  # noqa: BLE001
                         self._send_json(500, {"error": str(exc)})
                     return
@@ -251,6 +297,8 @@ class EvolveApp:
                     target_path = qs.get("file", qs.get("path", [""]))[0]
                     try:
                         self._send_json(200, app.relationships_payload(project_path=project, path=target_path))
+                    except PermissionError as exc:
+                        self._send_json(403, {"error": str(exc)})
                     except Exception as exc:  # noqa: BLE001
                         self._send_json(500, {"error": str(exc)})
                     return
@@ -260,6 +308,8 @@ class EvolveApp:
                     refresh = (qs.get("refresh", [""])[0] or "").lower() in {"1", "true", "yes"}
                     try:
                         self._send_json(200, app.providers_payload(project_path=project, refresh=refresh))
+                    except PermissionError as exc:
+                        self._send_json(403, {"error": str(exc)})
                     except Exception as exc:  # noqa: BLE001
                         self._send_json(500, {"error": str(exc)})
                     return
@@ -314,10 +364,20 @@ def _build_html(repo_root: Path) -> str:
   .skip-link:focus-visible {{ transform:translateY(0); }}
   header {{ height:48px; min-width:0; display:flex; align-items:center; gap:12px; padding:0 16px; border-bottom:1px solid var(--border); background:var(--surface); }}
   h1 {{ font-size:15px; margin:0; font-weight:650; }}
-  select,button {{ background:#202632; color:var(--fg); border:1px solid #3a4352; border-radius:6px; padding:5px 8px; touch-action:manipulation; }}
-  select:focus-visible,button:focus-visible,.skip-link:focus-visible {{ outline:2px solid var(--focus); outline-offset:2px; }}
+  button {{ background:#202632; color:var(--fg); border:1px solid #3a4352; border-radius:6px; padding:5px 8px; touch-action:manipulation; }}
+  button:focus-visible,.skip-link:focus-visible {{ outline:2px solid var(--focus); outline-offset:2px; }}
   button.active,button[aria-pressed="true"] {{ border-color:var(--accent); color:#fff7ed; }}
-  #projects {{ min-width:180px; max-width:min(360px, 32vw); }}
+  .projectSelect {{ position:relative; min-width:180px; max-width:min(360px, 32vw); }}
+  .projectTrigger {{ width:100%; height:31px; display:flex; align-items:center; justify-content:space-between; gap:8px; text-align:left; }}
+  .projectTriggerLabel {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  .projectChevron {{ flex:0 0 auto; width:8px; height:8px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:translateY(-2px) rotate(45deg); opacity:.72; }}
+  .projectList {{ position:absolute; top:calc(100% + 6px); left:0; z-index:20; width:min(420px, calc(100vw - 32px)); max-height:min(320px, calc(100vh - 96px)); overflow:auto; padding:4px; border:1px solid var(--border); border-radius:8px; background:#151922; box-shadow:0 18px 42px rgba(0,0,0,.38); }}
+  .projectSelect[data-open="false"] .projectList {{ display:none; }}
+  .projectOption {{ width:100%; display:block; border:0; border-radius:6px; background:transparent; padding:7px 8px; text-align:left; }}
+  .projectOption:hover,.projectOption[aria-selected="true"] {{ background:#202632; color:#fff; }}
+  .projectOptionName,.projectOptionAliases {{ display:block; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  .projectOptionName {{ font-size:12px; font-weight:600; }}
+  .projectOptionAliases {{ margin-top:2px; color:var(--muted); font-size:11px; }}
   #bucket-controls {{ flex:0 0 auto; display:flex; gap:4px; align-items:center; }}
   .projectPath {{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
   main {{ display:grid; grid-template-rows:170px 1fr; height:calc(100vh - 48px); }}
@@ -336,8 +396,9 @@ def _build_html(repo_root: Path) -> str:
   .health-error {{ color:var(--bad); }}
   .health-warning,.health-pending,.health-unknown,.health-hit,.health-miss,.health-refresh,.health-write-error {{ color:var(--warn); }}
   svg {{ width:100%; height:100%; display:block; }}
-  .bar {{ fill:#526071; cursor:pointer; transition:fill .12s; }}
-  .bar:hover,.bar.active {{ fill:var(--accent); }}
+  .bar {{ fill:#526071; cursor:pointer; transition:fill .12s,opacity .12s; }}
+  .bar:hover,.bar.touched {{ fill:#7b8a9d; }}
+  .bar.selectedPeriod {{ fill:var(--accent); }}
   .tile {{ stroke:#10141b; stroke-width:1; cursor:pointer; transition:opacity .12s,stroke .12s; }}
   .tile:hover {{ stroke:var(--fg); stroke-width:2; }}
   .tile.selected {{ stroke:var(--accent); stroke-width:3; }}
@@ -349,6 +410,12 @@ def _build_html(repo_root: Path) -> str:
   .frameLabel {{ fill:#cbd5e1; font-size:10px; font-weight:650; pointer-events:none; }}
   .symbolTile {{ fill:rgba(125,211,252,.24); stroke:rgba(125,211,252,.8); stroke-width:1; pointer-events:none; }}
   .symbolLabel {{ fill:#dff6ff; font-size:8px; pointer-events:none; }}
+  .relationshipArcShadow,.relationshipArc,.relationshipArcGlow {{ fill:none; stroke-linecap:round; pointer-events:none; }}
+  .relationshipArcShadow {{ stroke:rgba(0,0,0,.46); stroke-width:5; }}
+  .relationshipArcGlow {{ stroke-width:7; opacity:.18; }}
+  .relationshipArc {{ stroke-width:2; opacity:.92; filter:drop-shadow(0 2px 2px rgba(0,0,0,.35)); }}
+  .relationshipArc.uses,.relationshipArcGlow.uses {{ stroke:#f59e0b; }}
+  .relationshipArc.usedBy,.relationshipArcGlow.usedBy {{ stroke:#7dd3fc; }}
   .loadingOverlay {{ position:fixed; inset:48px 0 0; z-index:5; display:none; align-items:center; justify-content:center; background:rgba(10,14,20,.54); backdrop-filter:blur(2px); }}
   .loadingOverlay.visible {{ display:flex; }}
   .loadingCard {{ width:min(420px, calc(100vw - 32px)); border:1px solid var(--border); border-radius:8px; background:#161b24; padding:14px; box-shadow:0 18px 48px rgba(0,0,0,.34); }}
@@ -356,6 +423,8 @@ def _build_html(repo_root: Path) -> str:
   .loadingBar span {{ display:block; width:42%; height:100%; background:var(--accent); animation:loadbar 1.1s ease-in-out infinite alternate; }}
   @keyframes loadbar {{ from {{ transform:translateX(-40%); }} to {{ transform:translateX(180%); }} }}
   .detailGrid {{ display:grid; grid-template-columns:88px minmax(0,1fr); gap:5px 9px; margin:8px 0 12px; }}
+  .ghostSelection {{ display:inline-block; border:1px dashed #667085; border-radius:6px; padding:2px 6px; color:#cbd5e1; background:rgba(148,163,184,.08); }}
+  .snapshotError {{ height:100%; display:grid; place-items:center; padding:24px; color:var(--bad); text-align:center; }}
   .detailGrid code,.relList code,.symbolList code {{ overflow-wrap:anywhere; word-break:break-word; }}
   .relList,.symbolList {{ margin:6px 0 12px; padding:0; list-style:none; }}
   .relList li,.symbolList li {{ padding:3px 0; border-top:1px solid rgba(148,163,184,.12); overflow-wrap:anywhere; word-break:break-word; }}
@@ -364,21 +433,25 @@ def _build_html(repo_root: Path) -> str:
   .muted {{ color:var(--muted); }}
   code {{ color:#bfdbfe; }}
   @media (prefers-reduced-motion: reduce) {{ *,*::before,*::after {{ animation-duration:.001ms !important; animation-iteration-count:1 !important; scroll-behavior:auto !important; transition-duration:.001ms !important; }} }}
-  @media (max-width: 760px) {{ header {{ gap:8px; padding:0 10px; }} #projects {{ min-width:130px; max-width:36vw; }} #work {{ grid-template-columns:1fr; }} #detail {{ display:none; }} main {{ grid-template-rows:140px 1fr; }} }}
+  @media (max-width: 760px) {{ header {{ gap:8px; padding:0 10px; }} .projectSelect {{ min-width:130px; max-width:36vw; }} #work {{ grid-template-columns:1fr; }} #detail {{ display:none; }} main {{ grid-template-rows:140px 1fr; }} }}
 </style></head><body>
 <a class="skip-link" href="#main">Skip to Project Surface</a>
-<header><h1 translate="no">rig evolve</h1><span class="muted projectLabel">project</span><select id="projects" name="project" aria-label="Project"><option value="{repo}">{repo_name}</option></select><div id="bucket-controls" data-testid="bucket-controls" role="group" aria-label="Timeline Bucket"><button type="button" data-bucket="day" aria-label="Show Day Buckets">Day</button><button type="button" data-bucket="week" aria-label="Show Week Buckets">Week</button><button type="button" data-bucket="month" aria-label="Show Month Buckets" class="active" aria-pressed="true">Month</button></div><button id="reload" aria-label="Reload Snapshot">Reload</button><span class="muted projectPath" title="{repo}">{repo}</span></header>
+<header><h1 translate="no">rig evolve</h1><span class="muted projectLabel">project</span><div id="projectSelect" class="projectSelect" data-open="false"><button id="projectTrigger" class="projectTrigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-testid="project-trigger"><span id="projectTriggerLabel" class="projectTriggerLabel">{repo_name}</span><span class="projectChevron" aria-hidden="true"></span></button><div id="projectList" class="projectList" role="listbox" aria-label="Project" data-testid="project-listbox"></div><input id="projects" name="project" type="hidden" value="{repo}"></div><div id="bucket-controls" data-testid="bucket-controls" role="group" aria-label="Timeline Bucket"><button type="button" data-bucket="day" aria-label="Show Day Buckets">Day</button><button type="button" data-bucket="week" aria-label="Show Week Buckets">Week</button><button type="button" data-bucket="month" aria-label="Show Month Buckets" class="active" aria-pressed="true">Month</button></div><button id="currentSnapshot" aria-label="Show Current Snapshot" aria-pressed="true">Current</button><button id="reload" aria-label="Reload Snapshot">Reload</button><span class="muted projectPath" title="{repo}">{repo}</span></header>
 <main id="main" tabindex="-1"><section id="hist" aria-label="Project activity histogram"></section><section id="work"><div id="map" aria-label="Project code surface" tabindex="0"><div class="zoomHud" id="zoomHud" aria-hidden="true">100%</div></div><aside id="detail" aria-label="Selection details"><section id="provider-health" data-testid="provider-health" aria-live="polite"><h2>Providers</h2><div class="healthRow" data-provider="git"><span>git</span><span class="healthStatus health-pending">pending</span><span class="muted">cache</span><span class="muted">errors</span><span class="muted">Snapshot not loaded.</span></div></section><section id="selection-detail" aria-live="polite"><div class="muted">Loading snapshot…</div></section></aside></section></main>
 <div id="loading" class="loadingOverlay visible" role="status" aria-live="polite"><div class="loadingCard"><strong id="loading-title">Loading project surface…</strong><div class="muted" id="loading-message">Reading git history and file sizes.</div><div class="loadingBar"><span></span></div></div></div>
 <script>
 let snapshot = null;
 let selected = null;
+let ghostSelection = null;
 let selectedSymbols = null;
 let selectedSymbolError = null;
 let selectedRelationships = null;
+let selectionRequestSeq = 0;
+let snapshotRequestSeq = 0;
 let projectHealth = {{}};
 let providerSnapshot = null;
 let bucket = 'month';
+let selectedPeriodId = null;
 let resizeFrame = 0;
 let symbolFrame = 0;
 let view = null;
@@ -392,6 +465,8 @@ const SYMBOL_ZOOM_THRESHOLD = 2.15;
 const PAN_CLICK_SUPPRESS_MS = 250;
 const BASE = location.pathname.startsWith('/evolve') ? '/evolve' : '';
 const qs = (s) => document.querySelector(s);
+let projectOptions = [{{name:{repo_name!r}, path:{repo!r}, aliases:[], sources:[]}}];
+let projectOptionIndex = -1;
 
 function showLoading(title, message) {{
   const overlay = qs('#loading');
@@ -402,60 +477,261 @@ function showLoading(title, message) {{
 }}
 function hideLoading() {{ const overlay = qs('#loading'); if (overlay) overlay.classList.remove('visible'); }}
 
-async function loadProjects() {{
-  const data = await fetch(BASE + '/api/projects').then(r => r.json());
-  projectHealth = data.health || {{}};
-  const sel = qs('#projects');
-  const current = sel.value || (snapshot && snapshot.project && snapshot.project.path) || {repo!r};
-  sel.innerHTML = '';
-  data.projects.forEach(p => {{
-    const opt = document.createElement('option');
-    const aliases = (p.aliases || []).length ? ' aliases: ' + p.aliases.join(',') : '';
-    const sources = (p.sources || []).join(',');
-    opt.value = p.path; opt.textContent = p.name + aliases;
-    opt.title = p.path;
-    opt.dataset.sources = sources;
-    sel.appendChild(opt);
+function projectValue() {{
+  const input = qs('#projects');
+  return (input && input.value) || {repo!r};
+}}
+
+function basenameProject(path) {{
+  const parts = String(path || '').split(/[\\\\/]+/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : 'project';
+}}
+
+function normalizeProjectOption(project) {{
+  const path = String((project && project.path) || '');
+  const aliases = Array.isArray(project && project.aliases) ? project.aliases.filter(Boolean) : [];
+  const sources = Array.isArray(project && project.sources) ? project.sources.filter(Boolean) : [];
+  return {{
+    name: String((project && project.name) || basenameProject(path)),
+    path,
+    aliases,
+    sources,
+    kind: String((project && project.kind) || '')
+  }};
+}}
+
+function isWorktreeOption(project) {{
+  // Keep worktree entries API-visible, but keep the selector at repository level.
+  return project.kind === 'worktree' || (project.sources || []).includes('worktree');
+}}
+
+function renderProjectDropdown(projects, current) {{
+  const list = qs('#projectList');
+  if (!list) return;
+  const normalized = (projects || []).map(normalizeProjectOption).filter(p => p.path && !isWorktreeOption(p));
+  projectOptions = normalized.length ? normalized : projectOptions;
+  if (!projectOptions.some(p => p.path === current)) {{
+    projectOptions = [normalizeProjectOption({{name:basenameProject(current), path:current}})].concat(projectOptions);
+  }}
+  list.innerHTML = '';
+  projectOptions.forEach((project, index) => {{
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'projectOption';
+    item.setAttribute('role', 'option');
+    item.setAttribute('data-testid', 'project-option');
+    item.setAttribute('aria-selected', project.path === current ? 'true' : 'false');
+    item.dataset.projectPath = project.path;
+    item.dataset.index = String(index);
+
+    const name = document.createElement('span');
+    name.className = 'projectOptionName';
+    name.textContent = project.name;
+    item.appendChild(name);
+
+    if (project.aliases.length) {{
+      const aliases = document.createElement('span');
+      aliases.className = 'projectOptionAliases';
+      aliases.setAttribute('data-testid', 'project-option-aliases');
+      aliases.textContent = project.aliases.join(', ');
+      item.appendChild(aliases);
+    }}
+
+    item.addEventListener('click', () => setProjectValue(project.path, {{load:true}}));
+    list.appendChild(item);
   }});
-  if (Array.from(sel.options).some(opt => opt.value === current)) sel.value = current;
+  syncProjectTrigger(current);
+}}
+
+function syncProjectTrigger(path) {{
+  const input = qs('#projects');
+  const trigger = qs('#projectTrigger');
+  const label = qs('#projectTriggerLabel');
+  const pathLabel = qs('.projectPath');
+  const project = projectOptions.find(p => p.path === path) || normalizeProjectOption({{path}});
+  if (input) input.value = project.path;
+  if (label) label.textContent = project.name;
+  if (trigger) trigger.title = project.path;
+  if (pathLabel) {{
+    pathLabel.textContent = project.path;
+    pathLabel.title = project.path;
+  }}
+  document.querySelectorAll('.projectOption').forEach(option => {{
+    option.setAttribute('aria-selected', option.dataset.projectPath === project.path ? 'true' : 'false');
+  }});
+}}
+
+function setProjectDropdownOpen(open) {{
+  const select = qs('#projectSelect');
+  const trigger = qs('#projectTrigger');
+  if (!select || !trigger) return;
+  select.dataset.open = open ? 'true' : 'false';
+  trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+}}
+
+function focusProjectOption(index) {{
+  const options = Array.from(document.querySelectorAll('.projectOption'));
+  if (!options.length) return;
+  projectOptionIndex = Math.max(0, Math.min(options.length - 1, index));
+  options[projectOptionIndex].focus();
+}}
+
+function bindProjectDropdown() {{
+  const select = qs('#projectSelect');
+  const trigger = qs('#projectTrigger');
+  const list = qs('#projectList');
+  if (!select || !trigger || !list) return;
+  trigger.addEventListener('click', () => setProjectDropdownOpen(select.dataset.open !== 'true'));
+  trigger.addEventListener('keydown', ev => {{
+    if (ev.key === 'ArrowDown' || ev.key === 'Enter' || ev.key === ' ') {{
+      ev.preventDefault();
+      setProjectDropdownOpen(true);
+      const selectedIndex = projectOptions.findIndex(p => p.path === projectValue());
+      focusProjectOption(selectedIndex >= 0 ? selectedIndex : 0);
+    }} else if (ev.key === 'ArrowUp') {{
+      ev.preventDefault();
+      setProjectDropdownOpen(true);
+      focusProjectOption(Math.max(0, projectOptions.findIndex(p => p.path === projectValue())));
+    }} else if (ev.key === 'Escape') {{
+      setProjectDropdownOpen(false);
+    }}
+  }});
+  list.addEventListener('keydown', ev => {{
+    const options = Array.from(document.querySelectorAll('.projectOption'));
+    if (!options.length) return;
+    const current = Math.max(0, options.indexOf(document.activeElement));
+    if (ev.key === 'ArrowDown') {{
+      ev.preventDefault();
+      focusProjectOption(Math.min(options.length - 1, current + 1));
+    }} else if (ev.key === 'ArrowUp') {{
+      ev.preventDefault();
+      focusProjectOption(Math.max(0, current - 1));
+    }} else if (ev.key === 'Enter' || ev.key === ' ') {{
+      ev.preventDefault();
+      document.activeElement.click();
+    }} else if (ev.key === 'Escape') {{
+      ev.preventDefault();
+      setProjectDropdownOpen(false);
+      trigger.focus();
+    }}
+  }});
+  document.addEventListener('click', ev => {{
+    if (!select.contains(ev.target)) setProjectDropdownOpen(false);
+  }});
+}}
+
+function setProjectValue(path, options) {{
+  const previous = projectValue();
+  syncProjectTrigger(path);
+  setProjectDropdownOpen(false);
+  if (options && options.load && path !== previous) {{
+    selectionRequestSeq++;
+    selected = null;
+    ghostSelection = null;
+    selectedSymbols = null;
+    selectedSymbolError = null;
+    selectedRelationships = null;
+    selectedPeriodId = null;
+    updateCurrentButton();
+    renderDetail(null);
+    loadSnapshot();
+  }}
+}}
+
+async function fetchJson(url, label) {{
+  const response = await fetch(url);
+  let data = null;
+  try {{
+    data = await response.json();
+  }} catch (err) {{
+    data = {{error:String(err)}};
+  }}
+  if (!response.ok) {{
+    const message = data && data.error ? data.error : response.statusText;
+    throw new Error(`${{label}} ${{response.status}}: ${{message}}`);
+  }}
+  return data;
+}}
+
+async function loadProjects() {{
+  const data = await fetchJson(BASE + '/api/projects', 'Projects');
+  projectHealth = data.health || {{}};
+  const current = projectValue() || (snapshot && snapshot.project && snapshot.project.path) || {repo!r};
+  renderProjectDropdown(data.projects || [], current);
   renderHealth();
 }}
 async function loadSnapshot() {{
+  const requestSeq = ++snapshotRequestSeq;
   showLoading('Loading project surface…', 'Reading git activity and file sizes.');
-  const requestedProject = qs('#projects').value || {repo!r};
+  const requestedProject = projectValue();
+  const requestedPeriod = selectedPeriodId;
+  const requestedBucket = bucket;
   const path = encodeURIComponent(requestedProject);
   const previousPath = selected && selected.path;
   const previousProject = snapshot && snapshot.project && snapshot.project.path;
+  const selectedPath = selected && selected.path ? selected.path : (ghostSelection && ghostSelection.path ? ghostSelection.path : '');
   updateBucketControls();
   try {{
-    snapshot = await fetch(BASE + '/api/snapshot?path=' + path + '&bucket=' + encodeURIComponent(bucket)).then(r => r.json());
-    const sameProject = previousProject && snapshot.project && snapshot.project.path === previousProject;
-    selected = sameProject && previousPath ? findNodeByPath(snapshot.tree, previousPath) : null;
+    let url = BASE + '/api/snapshot?path=' + path + '&bucket=' + encodeURIComponent(bucket);
+    if (selectedPeriodId) url += '&period=' + encodeURIComponent(selectedPeriodId);
+    if (selectedPath) url += '&selected_path=' + encodeURIComponent(selectedPath);
+    const nextSnapshot = await fetchJson(url, 'Snapshot');
+    if (
+      requestSeq !== snapshotRequestSeq ||
+      requestedProject !== projectValue() ||
+      requestedPeriod !== selectedPeriodId ||
+      requestedBucket !== bucket
+    ) return;
+    snapshot = nextSnapshot;
+    const sameProject = !previousProject || (snapshot.project && snapshot.project.path === previousProject);
+    selected = sameProject && selectedPath ? findNodeByPath(snapshot.tree, selectedPath) : null;
+    ghostSelection = selected ? null : ghostSelectionFromSnapshot(snapshot, previousPath || selectedPath);
     selectedSymbols = null;
     selectedSymbolError = null;
     selectedRelationships = null;
     resetView();
     render();
-    if (selected) fetchSelectionDetails(selected);
-    loadProviders().catch(err => {{
+    if (selected && !selectedPeriodId) fetchSelectionDetails(selected);
+    loadProviders(requestSeq).catch(err => {{
+      if (requestSeq !== snapshotRequestSeq) return;
       providerSnapshot = {{providers:[{{source:'providers', status:'error', message:String(err), errors:[{{message:String(err)}}], cache:{{status:'error'}}}}]}};
       renderHealth();
     }});
+  }} catch (err) {{
+    if (requestSeq !== snapshotRequestSeq) return;
+    renderSnapshotError(err);
   }} finally {{
-    hideLoading();
+    if (requestSeq === snapshotRequestSeq) hideLoading();
   }}
 }}
-async function loadProviders() {{
-  const project = encodeURIComponent(qs('#projects').value || {repo!r});
-  providerSnapshot = await fetch(BASE + '/api/providers?project=' + project).then(r => r.json());
+async function loadProviders(requestSeq) {{
+  const project = encodeURIComponent(projectValue());
+  const nextProviders = await fetchJson(BASE + '/api/providers?project=' + project, 'Providers');
+  if (requestSeq !== snapshotRequestSeq) return;
+  providerSnapshot = nextProviders;
+  renderHealth();
+}}
+function renderSnapshotError(err) {{
+  const message = String(err && err.message ? err.message : err);
+  snapshot = null;
+  selected = null;
+  ghostSelection = null;
+  selectedSymbols = null;
+  selectedSymbolError = null;
+  selectedRelationships = null;
+  providerSnapshot = {{providers:[{{source:'snapshot', status:'error', message, errors:[{{message}}], cache:{{status:'error'}}}}]}};
+  selectionRequestSeq++;
+  qs('#hist').innerHTML = '';
+  qs('#map').innerHTML = `<div class="snapshotError">${{escapeHtml(message)}}</div>`;
+  qs('#selection-detail').innerHTML = `<div class="muted">Snapshot unavailable.</div><p class="snapshotError">${{escapeHtml(message)}}</p>`;
   renderHealth();
 }}
 function render() {{
   renderHistogram();
   renderTreemap();
   renderHealth();
-  renderDetail(selected);
-  if (selected) highlightBars(selected.path || '');
+  renderDetail(selected || ghostSelection);
+  if (selected || ghostSelection) highlightBars((selected || ghostSelection).path || '').catch(() => {{}});
 }}
 function renderHistogram() {{
   const root = qs('#hist'); const data = snapshot.histogram || [];
@@ -471,12 +747,16 @@ function renderHistogram() {{
     const r = el('rect', {{
       x, y, width:bw, height:bh, rx:2, class:'bar', tabindex:'0', role:'button',
       'aria-label':`Show snapshot bucket ${{b.id}} with ${{b.commits}} commits and ${{b.changed_files}} changed files`,
+      'aria-pressed': selectedPeriodId === b.id ? 'true' : 'false',
+      'data-testid':'histogram-column',
       'data-bucket-id':b.id,
+      'data-period-id':b.id,
       'data-commits':b.commits,
       'data-changed-files':b.changed_files
     }});
-    r.addEventListener('click', () => activateBar(r));
-    r.addEventListener('keydown', (ev) => handleBarKey(ev, r));
+    if (selectedPeriodId === b.id) r.classList.add('selectedPeriod');
+    r.addEventListener('click', () => selectHistogramPeriod(b.id));
+    r.addEventListener('keydown', (ev) => handleHistogramKey(ev, r));
     svg.appendChild(r);
     if (i % Math.ceil(data.length / 8 || 1) === 0) svg.appendChild(el('text', {{x, y:h-6, class:'label'}}, b.id));
   }});
@@ -527,6 +807,7 @@ function renderTreemap() {{
     if (r.node.path) rectByPath.set(r.node.path, r);
     if (isFrame && r.w > 40 && r.h > 16) addWrappedLabel(svg, r, r.node.name, 'frameLabel', 2);
   }});
+  renderRelationshipArcs(svg, rectByPath);
   if (selected && selected.path && selectedSymbols && currentZoom() >= SYMBOL_ZOOM_THRESHOLD) {{
     const targetRect = rectByPath.get(selected.path);
     if (targetRect) renderSymbolOverlay(svg, targetRect, selectedSymbols);
@@ -535,13 +816,80 @@ function renderTreemap() {{
   updateZoomHud();
 }}
 
-function activateBar(bar) {{
-  document.querySelectorAll('.bar').forEach(n => n.classList.remove('active'));
-  bar.classList.add('active');
+function renderRelationshipArcs(svg, rectByPath) {{
+  if (!selected || !selected.path || !selectedRelationships) return;
+  const source = rectByPath.get(selected.path);
+  if (!source || !isRectVisible(source)) return;
+  const arcs = [];
+  (selectedRelationships.uses || []).forEach(path => {{
+    const target = rectByPath.get(path);
+    if (target && isRectVisible(target)) arcs.push({{from:source, to:target, relation:'uses', fromPath:selected.path, toPath:path}});
+  }});
+  (selectedRelationships.used_by || []).forEach(path => {{
+    const target = rectByPath.get(path);
+    if (target && isRectVisible(target)) arcs.push({{from:target, to:source, relation:'usedBy', fromPath:path, toPath:selected.path}});
+  }});
+  if (!arcs.length) return;
+  addRelationshipDefs(svg);
+  arcs.slice(0, 36).forEach(arc => appendRelationshipArc(svg, arc));
+}}
+
+function addRelationshipDefs(svg) {{
+  const defs = el('defs', {{}});
+  const markerUses = el('marker', {{id:'evolveArrowUses', markerWidth:9, markerHeight:9, refX:8, refY:4.5, orient:'auto', markerUnits:'strokeWidth'}});
+  markerUses.appendChild(el('path', {{d:'M 0 0 L 8 4.5 L 0 9 z', fill:'#f59e0b'}}));
+  const markerUsedBy = el('marker', {{id:'evolveArrowUsedBy', markerWidth:9, markerHeight:9, refX:8, refY:4.5, orient:'auto', markerUnits:'strokeWidth'}});
+  markerUsedBy.appendChild(el('path', {{d:'M 0 0 L 8 4.5 L 0 9 z', fill:'#7dd3fc'}}));
+  defs.appendChild(markerUses);
+  defs.appendChild(markerUsedBy);
+  svg.appendChild(defs);
+}}
+
+function appendRelationshipArc(svg, arc) {{
+  const d = relationshipCurve(arc.from, arc.to);
+  const relationClass = arc.relation === 'usedBy' ? 'usedBy' : 'uses';
+  const marker = arc.relation === 'usedBy' ? 'url(#evolveArrowUsedBy)' : 'url(#evolveArrowUses)';
+  svg.appendChild(el('path', {{d, class:'relationshipArcGlow ' + relationClass, 'vector-effect':'non-scaling-stroke'}}));
+  svg.appendChild(el('path', {{d, class:'relationshipArcShadow', 'vector-effect':'non-scaling-stroke'}}));
+  svg.appendChild(el('path', {{
+    d,
+    class:'relationshipArc ' + relationClass,
+    'data-testid':'relationship-arc',
+    'data-relation':arc.relation === 'usedBy' ? 'used-by' : 'uses',
+    'data-from':arc.fromPath,
+    'data-to':arc.toPath,
+    'marker-end':marker,
+    'vector-effect':'non-scaling-stroke'
+  }}));
+}}
+
+function relationshipCurve(from, to) {{
+  const a = rectCenter(from);
+  const b = rectCenter(to);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const dist = Math.max(1, Math.hypot(dx, dy));
+  const zoom = currentZoom();
+  const lift = Math.min(120 / zoom, Math.max(16 / zoom, dist * 0.24));
+  const nx = -dy / dist;
+  const ny = dx / dist;
+  const c1 = {{x:a.x + dx * 0.34 + nx * lift, y:a.y + dy * 0.34 + ny * lift}};
+  const c2 = {{x:a.x + dx * 0.66 + nx * lift, y:a.y + dy * 0.66 + ny * lift}};
+  return `M ${{a.x}} ${{a.y}} C ${{c1.x}} ${{c1.y}}, ${{c2.x}} ${{c2.y}}, ${{b.x}} ${{b.y}}`;
+}}
+
+function rectCenter(rect) {{
+  return {{x:rect.x + rect.w / 2, y:rect.y + rect.h / 2}};
+}}
+
+function isRectVisible(rect) {{
+  if (!view) return true;
+  return rect.x + rect.w >= view.x && rect.x <= view.x + view.w && rect.y + rect.h >= view.y && rect.y <= view.y + view.h;
 }}
 
 function selectNode(node, tile) {{
   selected = node;
+  ghostSelection = null;
   selectedSymbols = null;
   selectedSymbolError = null;
   selectedRelationships = null;
@@ -549,13 +897,46 @@ function selectNode(node, tile) {{
   document.querySelectorAll('.tile,.frame').forEach(n => n.classList.remove('selected'));
   tile.classList.add('selected');
   highlightBars(node.path || '');
-  fetchSelectionDetails(node);
+  if (!selectedPeriodId) fetchSelectionDetails(node);
 }}
 
-function handleBarKey(ev, bar) {{
-  if (ev.key !== 'Enter' && ev.key !== ' ') return;
-  ev.preventDefault();
-  activateBar(bar);
+function selectHistogramPeriod(periodId) {{
+  if (!periodId || periodId === selectedPeriodId) return;
+  selectedPeriodId = periodId;
+  selectionRequestSeq++;
+  updateCurrentButton();
+  loadSnapshot();
+}}
+
+function showCurrentSnapshot() {{
+  if (!selectedPeriodId) return;
+  selectedPeriodId = null;
+  selectionRequestSeq++;
+  updateCurrentButton();
+  loadSnapshot();
+}}
+
+function focusHistogramPeriod(bar, delta) {{
+  const bars = Array.from(document.querySelectorAll('.bar'));
+  const index = bars.indexOf(bar);
+  if (index < 0 || !bars.length) return;
+  const next = bars[Math.max(0, Math.min(bars.length - 1, index + delta))];
+  if (!next) return;
+  next.focus();
+  selectHistogramPeriod(next.dataset.periodId || next.dataset.bucketId);
+}}
+
+function handleHistogramKey(ev, bar) {{
+  if (ev.key === 'Enter' || ev.key === ' ') {{
+    ev.preventDefault();
+    selectHistogramPeriod(bar.dataset.periodId || bar.dataset.bucketId);
+  }} else if (ev.key === 'ArrowLeft') {{
+    ev.preventDefault();
+    focusHistogramPeriod(bar, -1);
+  }} else if (ev.key === 'ArrowRight') {{
+    ev.preventDefault();
+    focusHistogramPeriod(bar, 1);
+  }}
 }}
 
 function handleTileKey(ev, node, tile) {{
@@ -567,20 +948,37 @@ function handleTileKey(ev, node, tile) {{
 async function fetchSelectionDetails(node) {{
   if (!node || !node.path || node.kind !== 'file') return;
   const projectPath = snapshot.project.path;
+  const periodAtStart = selectedPeriodId;
+  const requestSeq = ++selectionRequestSeq;
   const project = encodeURIComponent(projectPath);
   const file = encodeURIComponent(node.path);
   try {{
     const [symbols, relationships] = await Promise.all([
-      fetch(BASE + '/api/symbols?project=' + project + '&file=' + file).then(r => r.json()),
-      fetch(BASE + '/api/relationships?project=' + project + '&file=' + file).then(r => r.json())
+      fetchJson(BASE + '/api/symbols?project=' + project + '&file=' + file, 'Symbols'),
+      fetchJson(BASE + '/api/relationships?project=' + project + '&file=' + file, 'Relationships')
     ]);
-    if (!selected || selected.path !== node.path || !snapshot || snapshot.project.path !== projectPath) return;
+    if (
+      requestSeq !== selectionRequestSeq ||
+      selectedPeriodId !== periodAtStart ||
+      !selected ||
+      selected.path !== node.path ||
+      !snapshot ||
+      snapshot.project.path !== projectPath
+    ) return;
     selectedSymbols = symbols.symbols || [];
     selectedSymbolError = symbols.health && symbols.health.status === 'error' ? symbols.health.message || 'Symbol provider error.' : null;
     selectedRelationships = relationships.relationships || {{}};
     renderDetail(selected);
     renderTreemap();
   }} catch (err) {{
+    if (
+      requestSeq !== selectionRequestSeq ||
+      selectedPeriodId !== periodAtStart ||
+      !selected ||
+      selected.path !== node.path ||
+      !snapshot ||
+      snapshot.project.path !== projectPath
+    ) return;
     selectedSymbols = [];
     selectedSymbolError = String(err);
     selectedRelationships = {{quality:'error', uses:[], used_by:[], message:String(err)}};
@@ -627,21 +1025,36 @@ function updateZoomHud() {{
   const zoomText = Math.round(zoom * 100) + '%';
   if (hud) {{
     hud.textContent = zoomText;
-    hud.title = zoom >= SYMBOL_ZOOM_THRESHOLD ? 'Symbol overlay enabled' : 'Zoom in to show symbol rectangles';
+    hud.title = 'Project surface zoom';
   }}
-  document.querySelectorAll('.zoomPill').forEach(node => {{ node.textContent = zoomText + ' zoom'; }});
 }}
 
 function bindPanZoom(root, svg) {{
   root.onwheel = (ev) => {{
+    if (!view) return;
     ev.preventDefault();
-    const box = svg.getBoundingClientRect();
-    const px = (ev.clientX - box.left) / Math.max(1, box.width);
-    const py = (ev.clientY - box.top) / Math.max(1, box.height);
-    const factor = ev.deltaY < 0 ? 0.84 : 1.19;
-    const nw = view.w * factor;
-    const nh = view.h * factor;
-    setView({{x:view.x + view.w * px - nw * px, y:view.y + view.h * py - nh * py, w:nw, h:nh}});
+    const unit = ev.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : (ev.deltaMode === WheelEvent.DOM_DELTA_PAGE ? Math.max(1, svg.clientHeight) : 1);
+    const rawX = ev.deltaX * unit;
+    const rawY = ev.deltaY * unit;
+    if (ev.ctrlKey) {{
+      const box = svg.getBoundingClientRect();
+      const px = (ev.clientX - box.left) / Math.max(1, box.width);
+      const py = (ev.clientY - box.top) / Math.max(1, box.height);
+      const clamped = Math.max(-120, Math.min(120, rawY));
+      const factor = Math.exp(clamped * 0.0025);
+      const nw = view.w * factor;
+      const nh = view.h * factor;
+      setView({{x:view.x + view.w * px - nw * px, y:view.y + view.h * py - nh * py, w:nw, h:nh}});
+      return;
+    }}
+    const panX = ev.shiftKey && !rawX ? rawY : rawX;
+    const panY = ev.shiftKey && !rawX ? 0 : rawY;
+    if (Math.abs(panX) + Math.abs(panY) > 2) lastPanAt = performance.now();
+    setView({{
+      ...view,
+      x:view.x + panX * view.w / Math.max(1, svg.clientWidth),
+      y:view.y + panY * view.h / Math.max(1, svg.clientHeight)
+    }});
   }};
   root.onkeydown = (ev) => {{
     if (!view) return;
@@ -679,6 +1092,7 @@ function bindPanZoom(root, svg) {{
     if (activePointers.size === 2) {{
       const pts = Array.from(activePointers.values());
       pinchStart = {{distance:pointerDistance(pts[0], pts[1]), view:{{...view}}, center:pointerCenter(pts[0], pts[1]), box:svg.getBoundingClientRect()}};
+      panStart = null;
     }}
   }};
   root.onpointermove = (ev) => {{
@@ -690,11 +1104,13 @@ function bindPanZoom(root, svg) {{
       const dist = pointerDistance(pts[0], pts[1]);
       const center = pointerCenter(pts[0], pts[1]);
       const scale = pinchStart.distance / Math.max(1, dist);
-      const px = (center.x - pinchStart.box.left) / Math.max(1, pinchStart.box.width);
-      const py = (center.y - pinchStart.box.top) / Math.max(1, pinchStart.box.height);
+      const startPx = (pinchStart.center.x - pinchStart.box.left) / Math.max(1, pinchStart.box.width);
+      const startPy = (pinchStart.center.y - pinchStart.box.top) / Math.max(1, pinchStart.box.height);
+      const currentPx = (center.x - pinchStart.box.left) / Math.max(1, pinchStart.box.width);
+      const currentPy = (center.y - pinchStart.box.top) / Math.max(1, pinchStart.box.height);
       const nw = pinchStart.view.w * scale;
       const nh = pinchStart.view.h * scale;
-      setView({{x:pinchStart.view.x + pinchStart.view.w * px - nw * px, y:pinchStart.view.y + pinchStart.view.h * py - nh * py, w:nw, h:nh}});
+      setView({{x:pinchStart.view.x + pinchStart.view.w * startPx - nw * currentPx, y:pinchStart.view.y + pinchStart.view.h * startPy - nh * currentPy, w:nw, h:nh}});
       return;
     }}
     if (!panStart) return;
@@ -705,6 +1121,12 @@ function bindPanZoom(root, svg) {{
   }};
   const end = (ev) => {{
     activePointers.delete(ev.pointerId);
+    if (activePointers.size === 1) {{
+      const p = Array.from(activePointers.values())[0];
+      panStart = {{x:p.x, y:p.y, view:{{...view}}}};
+      pinchStart = null;
+      return;
+    }}
     if (!activePointers.size) {{ root.classList.remove('is-panning'); panStart = null; pinchStart = null; }}
   }};
   root.onpointerup = end;
@@ -929,34 +1351,68 @@ function renderDetail(n) {{
     detail.innerHTML = '<div class="muted">Select a rectangle.</div>';
     return;
   }}
+  if (n.missing) {{
+    const missingState = selectedPeriodId ? 'Not present in selected period' : 'Not present in current snapshot';
+    detail.innerHTML = `
+      <h2><span class="ghostSelection">${{escapeHtml(n.name || 'missing selection')}}</span></h2>
+      <div class="detailGrid">
+        <span class="muted">State</span><span>${{missingState}}</span>
+        <span class="muted">Path</span><code>${{escapeHtml(n.path||'')}}</code>
+        <span class="muted">Current</span><span>${{n.current ? 'Exists in current snapshot' : 'Not found in current snapshot'}}</span>
+      </div>
+    `;
+    return;
+  }}
   const symbols = flattenSymbols(selectedSymbols || []);
   const rel = selectedRelationships || {{}};
   const uses = rel.uses || [];
   const usedBy = rel.used_by || [];
-  const symbolNote = n.kind === 'file'
+  const historicalMode = Boolean(selectedPeriodId);
+  const symbolNote = historicalMode
+    ? 'Open Current to inspect live symbols.'
+    : n.kind === 'file'
     ? (selectedSymbolError ? 'Symbol provider error' : (selectedSymbols ? `${{symbols.length}} symbol(s)` : 'Loading symbols…'))
-    : 'Zoom or select a file to load symbols.';
+    : 'Select a file to inspect symbols.';
+  const relationshipNote = historicalMode
+    ? 'Open Current to inspect live relationships.'
+    : selectedRelationships
+    ? `${{uses.length}} outgoing · ${{usedBy.length}} incoming`
+    : (n.kind === 'file' ? 'Loading relationships…' : 'Select a file to inspect relationships.');
+  const historicalDetailNote = '<p class="muted">Open Current to inspect live details for this file.</p>';
   detail.innerHTML = `
     <h2>${{escapeHtml(n.name)}}</h2>
     <div class="detailGrid">
-      <span class="muted">Kind</span><span>${{escapeHtml(n.kind)}}</span>
       <span class="muted">Size</span><span>${{formatBytes(n.size || 0)}}</span>
       <span class="muted">Path</span><code>${{escapeHtml(n.path||'')}}</code>
-      <span class="muted">Symbols</span><span>${{escapeHtml(symbolNote)}} <span class="pill zoomPill">${{Math.round(currentZoom()*100)}}% zoom</span></span>
-      <span class="muted">Links</span><span><span class="pill">${{escapeHtml(rel.quality || 'loading')}}</span> <span class="muted">${{escapeHtml(rel.message || '')}}</span></span>
+      <span class="muted">Symbols</span><span>${{escapeHtml(symbolNote)}}</span>
+      <span class="muted">Relationships</span><span>${{escapeHtml(relationshipNote)}}</span>
     </div>
     <h2>Uses</h2>
-    ${{renderRelList(uses)}}
+    ${{historicalMode ? historicalDetailNote : renderRelList(uses)}}
     <h2>Used By</h2>
-    ${{renderRelList(usedBy)}}
+    ${{historicalMode ? historicalDetailNote : renderRelList(usedBy)}}
     <h2>Symbols</h2>
-    ${{renderSymbolList(symbols, selectedSymbolError)}}
+    ${{historicalMode ? historicalDetailNote : renderSymbolList(symbols, selectedSymbolError)}}
   `;
 }}
 
 function renderRelList(items) {{
   if (!items || !items.length) return '<p class="muted">No relationships found by current provider.</p>';
   return '<ul class="relList">' + items.slice(0, 32).map(item => `<li><code>${{escapeHtml(item)}}</code></li>`).join('') + '</ul>';
+}}
+
+function ghostSelectionFromSnapshot(data, fallbackPath) {{
+  const meta = data && data.selection;
+  const path = (meta && meta.path) || fallbackPath || '';
+  if (!path || !(meta && meta.missing)) return null;
+  return {{
+    name: basenameProject(path),
+    path,
+    kind:'file',
+    size:0,
+    missing:true,
+    current: Boolean(meta.current)
+  }};
 }}
 
 function renderSymbolList(items, error) {{
@@ -979,15 +1435,28 @@ function findNodeByPath(node, path) {{
   return null;
 }}
 async function highlightBars(path) {{
-  document.querySelectorAll('.bar').forEach(bar => bar.classList.remove('active'));
-  if (!path) return;
-  const project = encodeURIComponent(snapshot.project.path);
-  const target = encodeURIComponent(path);
-  const data = await fetch(BASE + '/api/touches?project=' + project + '&path=' + target + '&bucket=' + encodeURIComponent(bucket)).then(r => r.json());
+  const requestSeq = snapshotRequestSeq;
+  const projectPath = snapshot && snapshot.project && snapshot.project.path;
+  const requestedBucket = bucket;
+  const requestedPath = path || '';
+  document.querySelectorAll('.bar').forEach(bar => bar.classList.remove('touched'));
+  if (!requestedPath || !projectPath) return;
+  const project = encodeURIComponent(projectPath);
+  const target = encodeURIComponent(requestedPath);
+  const data = await fetchJson(BASE + '/api/touches?project=' + project + '&path=' + target + '&bucket=' + encodeURIComponent(requestedBucket), 'Touches');
+  const activePath = (selected && selected.path) || (ghostSelection && ghostSelection.path) || '';
+  if (
+    requestSeq !== snapshotRequestSeq ||
+    !snapshot ||
+    !snapshot.project ||
+    snapshot.project.path !== projectPath ||
+    requestedBucket !== bucket ||
+    requestedPath !== activePath
+  ) return;
   const touched = new Set(data.bucket_ids || []);
   document.querySelectorAll('.bar').forEach((bar, i) => {{
     const b = snapshot.histogram[i];
-    bar.classList.toggle('active', touched.has(b.id));
+    bar.classList.toggle('touched', touched.has(b.id));
   }});
 }}
 function updateBucketControls() {{
@@ -996,15 +1465,25 @@ function updateBucketControls() {{
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   }});
+  updateCurrentButton();
 }}
 function setBucket(next) {{
   if (!['day', 'week', 'month'].includes(next) || next === bucket) return;
   bucket = next;
+  selectedPeriodId = null;
+  ghostSelection = null;
   updateBucketControls();
   const url = new URL(location.href);
   url.searchParams.set('bucket', bucket);
   history.replaceState(null, '', url);
   loadSnapshot();
+}}
+function updateCurrentButton() {{
+  const btn = qs('#currentSnapshot');
+  if (!btn) return;
+  const current = !selectedPeriodId;
+  btn.classList.toggle('active', current);
+  btn.setAttribute('aria-pressed', current ? 'true' : 'false');
 }}
 function aspectRatio(w, h) {{
   const small = Math.max(1, Math.min(Math.abs(w), Math.abs(h)));
@@ -1050,7 +1529,9 @@ window.rigEvolveTreemapProbe = function rigEvolveTreemapProbe() {{
 function fileColor(path) {{ let h=0; for (const c of path) h=(h*31+c.charCodeAt(0))>>>0; return `hsl(${{h%360}} 48% 42%)`; }}
 function el(name, attrs, text) {{ const n=document.createElementNS('http://www.w3.org/2000/svg',name); for (const [k,v] of Object.entries(attrs)) n.setAttribute(k,v); if (text) n.textContent=text; return n; }}
 function escapeHtml(s) {{ return String(s).replace(/[&<>"]/g, c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c])); }}
-qs('#reload').onclick = loadSnapshot; qs('#projects').onchange = loadSnapshot;
+bindProjectDropdown();
+qs('#reload').onclick = loadSnapshot;
+qs('#currentSnapshot').onclick = showCurrentSnapshot;
 document.querySelectorAll('#bucket-controls [data-bucket]').forEach(btn => btn.addEventListener('click', () => setBucket(btn.dataset.bucket)));
 const initialBucket = new URL(location.href).searchParams.get('bucket');
 if (['day', 'week', 'month'].includes(initialBucket)) bucket = initialBucket;
@@ -1074,9 +1555,21 @@ window.addEventListener('resize', () => {{
 
 
 def _safe_rel(path: str) -> str:
-    rel = str(path or "").replace("\\", "/").strip("/")
+    raw = str(path or "")
+    if any(ord(char) < 32 for char in raw):
+        return ""
+    rel = raw.replace("\\", "/").strip("/")
     parts = [part for part in rel.split("/") if part and part not in {".", ".."}]
     return "/".join(parts)
+
+
+def _current_selection_metadata(project: Path, selected_path: str | None) -> dict[str, Any]:
+    selected = _safe_rel(selected_path or "")
+    if not selected:
+        return {"path": None, "exists": None, "missing": None, "current": None}
+    target = _safe_project_file(project, selected)
+    exists = target is not None and selected in _snapshot_file_paths(project)
+    return {"path": selected, "exists": exists, "missing": not exists, "current": exists}
 
 
 def _snapshot_file_paths(project: Path) -> set[str]:

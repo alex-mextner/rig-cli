@@ -122,8 +122,11 @@ def _path_exists_at(repo_root: Path, commit: str, selected_path: str | None) -> 
 def _normalize_path(selected_path: str | None) -> str | None:
     if not selected_path:
         return None
-    path = selected_path.replace("\\", "/").lstrip("/")
-    return path or None
+    if any(ord(char) < 32 for char in selected_path):
+        return None
+    path = selected_path.replace("\\", "/").strip("/")
+    parts = [part for part in path.split("/") if part and part not in {".", ".."}]
+    return "/".join(parts) or None
 
 
 def _empty_tree(repo_root: Path) -> dict[str, Any]:
