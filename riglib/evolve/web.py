@@ -526,7 +526,6 @@ function renderTreemap() {{
     svg.appendChild(tile);
     if (r.node.path) rectByPath.set(r.node.path, r);
     if (isFrame && r.w > 40 && r.h > 16) addWrappedLabel(svg, r, r.node.name, 'frameLabel', 2);
-    else if (!isFrame && r.w > 24 && r.h > 12) addWrappedLabel(svg, r, r.node.name, 'label', 2);
   }});
   if (selected && selected.path && selectedSymbols && currentZoom() >= SYMBOL_ZOOM_THRESHOLD) {{
     const targetRect = rectByPath.get(selected.path);
