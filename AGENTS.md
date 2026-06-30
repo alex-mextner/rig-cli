@@ -93,6 +93,12 @@ when a lifecycle verb actually needs it). The server binds `127.0.0.1` only and 
   per-repo `rig.yaml` overrides it; scope is by location, never a flag.
 - **Drift is surfaced both ways, never silently reconciled.** `rig apply` converges
   config→disk only. `disk→config` extras are reported, never auto-deleted.
+- **User-visible UI work needs acceptance proof before it is reported as done.** For
+  every portal/app change, keep a request-derived interaction checklist, verify the
+  running app with browser automation plus at least one screenshot for visual changes,
+  and report any unfinished checklist item as unfinished. A scaffold is not a result.
+  If the request mentions loading or performance, ship a visible loading/progress state
+  and record a concrete timing or browser proof before reporting.
 - **Actions are idempotent and backup-noted.** A re-apply with the same config changes
   nothing (copies skip-if-identical, `core.hooksPath` checks current value, MCP merges are
   keyed). Anything replaced is backed up per `on_conflict` (skip|overwrite|backup) and the
