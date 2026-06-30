@@ -727,9 +727,12 @@ function addWrappedLabel(svg, r, text, klass, maxLines) {{
   const baseFont = klass === 'symbolLabel' ? 8 : (klass === 'frameLabel' ? 10 : 9);
   const lineHeight = 10 / zoom;
   const maxVisibleLines = Math.max(1, Math.floor((labelRect.h * zoom - 4) / 10));
+  const maxLineCount = Math.min(maxLines, maxVisibleLines, 2);
   const label = el('text', {{x:labelRect.x + pad, y:labelRect.y + 11 / zoom, class:klass, 'font-size':Math.max(3, baseFont / zoom)}});
   const chars = Math.max(2, Math.floor((labelRect.w * zoom - 8) / (klass === 'symbolLabel' ? 4.4 : 5.2)));
-  const lines = wrapByChars(String(text || ''), chars, Math.min(maxLines, maxVisibleLines, 2));
+  const clean = String(text || '').replace(/\\s+/g, ' ').trim();
+  if (klass === 'label' && clean.length > chars * maxLineCount) return;
+  const lines = wrapByChars(clean, chars, maxLineCount);
   lines.forEach((line, i) => {{
     const tspan = el('tspan', {{x:labelRect.x + pad, dy:i ? lineHeight : 0}}, line);
     label.appendChild(tspan);

@@ -535,6 +535,7 @@ def test_render_page_exposes_health_bucket_controls_and_treemap_probe_hooks(hist
     assert "labelRect.w * zoom" in page
     assert "minScreenW" in page
     assert "maxVisibleLines" in page
+    assert "clean.length > chars * maxLineCount" in page
     assert "selectedSymbolError" in page
     assert "Symbol provider error:" in page
     assert "rel.message" in page
