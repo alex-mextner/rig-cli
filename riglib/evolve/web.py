@@ -526,7 +526,7 @@ function renderTreemap() {{
     svg.appendChild(tile);
     if (r.node.path) rectByPath.set(r.node.path, r);
     if (isFrame && r.w > 40 && r.h > 16) addWrappedLabel(svg, r, r.node.name, 'frameLabel', 2);
-    else if (!isFrame && r.w > 24 && r.h > 12) addWrappedLabel(svg, r, r.node.name, 'label', currentZoom() > 1.8 ? 5 : 3);
+    else if (!isFrame && r.w > 24 && r.h > 12) addWrappedLabel(svg, r, r.node.name, 'label', 2);
   }});
   if (selected && selected.path && selectedSymbols && currentZoom() >= SYMBOL_ZOOM_THRESHOLD) {{
     const targetRect = rectByPath.get(selected.path);
@@ -719,7 +719,9 @@ function addWrappedLabel(svg, r, text, klass, maxLines) {{
   const labelRect = visibleLabelRect(r);
   if (!labelRect) return;
   const zoom = currentZoom();
-  if (labelRect.w * zoom < 46 || labelRect.h * zoom < 14) return;
+  const minScreenW = klass === 'frameLabel' ? 68 : (klass === 'symbolLabel' ? 46 : 88);
+  const minScreenH = klass === 'frameLabel' ? 18 : (klass === 'symbolLabel' ? 14 : 24);
+  if (labelRect.w * zoom < minScreenW || labelRect.h * zoom < minScreenH) return;
   // ViewBox zoom scales SVG text; convert fixed screen-pixel label metrics back to world units.
   const pad = 4 / zoom;
   const baseFont = klass === 'symbolLabel' ? 8 : (klass === 'frameLabel' ? 10 : 9);
@@ -727,7 +729,7 @@ function addWrappedLabel(svg, r, text, klass, maxLines) {{
   const maxVisibleLines = Math.max(1, Math.floor((labelRect.h * zoom - 4) / 10));
   const label = el('text', {{x:labelRect.x + pad, y:labelRect.y + 11 / zoom, class:klass, 'font-size':Math.max(3, baseFont / zoom)}});
   const chars = Math.max(2, Math.floor((labelRect.w * zoom - 8) / (klass === 'symbolLabel' ? 4.4 : 5.2)));
-  const lines = wrapByChars(String(text || ''), chars, Math.min(maxLines, maxVisibleLines));
+  const lines = wrapByChars(String(text || ''), chars, Math.min(maxLines, maxVisibleLines, 2));
   lines.forEach((line, i) => {{
     const tspan = el('tspan', {{x:labelRect.x + pad, dy:i ? lineHeight : 0}}, line);
     label.appendChild(tspan);
