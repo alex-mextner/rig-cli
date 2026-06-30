@@ -266,9 +266,40 @@
         },
         "items": {
           "type": "object",
-          "description": "per-server overrides (command / server / enabled) keyed by server name",
+          "description": "per-server overrides (command / args / env / server / enabled) keyed by server name",
           "additionalProperties": {
-            "type": "object"
+            "type": "object",
+            "description": "one MCP server registration override.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "register this MCP server",
+                "default": true
+              },
+              "server": {
+                "type": "string",
+                "description": "server name written under mcpServers"
+              },
+              "command": {
+                "type": "string",
+                "description": "server executable, or legacy command string when args is omitted"
+              },
+              "args": {
+                "type": "array",
+                "description": "argv passed to command exactly",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "env": {
+                "type": "object",
+                "description": "environment variables for this server",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
           }
         }
       },

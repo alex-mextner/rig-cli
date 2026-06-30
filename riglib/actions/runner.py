@@ -289,6 +289,25 @@ def parse_mcp_command(command: str) -> dict:
     return {"command": parts[0], "args": parts[1:]}
 
 
+def desired_mcp_server_entry(options: dict) -> dict:
+    """Build the desired ``mcpServers.<name>`` entry from an action's options.
+
+    Back-compat: without an explicit ``args`` key, ``command`` is parsed as the legacy shell-like
+    command string. With ``args`` present, ``command`` is the executable value exactly and ``args``
+    is the argv list exactly.
+    """
+    command = str(options.get("command", ""))
+    if "args" in options:
+        args = options.get("args", [])
+        entry = {"command": command, "args": list(args) if isinstance(args, list) else []}
+    else:
+        entry = parse_mcp_command(command)
+    env = options.get("env")
+    if isinstance(env, dict) and env:
+        entry["env"] = dict(env)
+    return entry
+
+
 def _do_install_agent_hook(action: Action, on_conflict: str) -> ActionResult:
     """Copy the hook dir + write an absolute-path descriptor into the harness hook dir.
 
@@ -616,7 +635,7 @@ def _do_register_mcp(action: Action, on_conflict: str) -> ActionResult:
     servers = data.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         return ActionResult(action, "error", f"mcp/{action.item}: mcpServers is not an object in {config_file}")
-    entry = parse_mcp_command(command)
+    entry = desired_mcp_server_entry(action.options)
 
     status = "created"
     if server_key in servers:

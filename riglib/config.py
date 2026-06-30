@@ -53,6 +53,7 @@ _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
 _VALID_TIERS = {"block", "warn"}
 _VALID_ON_ERROR = {"open", "closed"}
+_MCP_ITEM_KEYS = {"enabled", "server", "command", "args", "env"}
 _VALID_TMUX_APPLY = {"import", "block"}
 # Harness kinds rig knows a skill/instruction discovery convention for — the union of the
 # skills-DIRECTORY harnesses (claude-code, opencode) and the INSTRUCTION-FILE harnesses
@@ -617,6 +618,36 @@ def _validate_mcp(mcp: dict[str, Any]) -> None:
     items = mcp.get("items", {})
     if not isinstance(items, dict):
         raise ConfigError("mcp.items must be a mapping", schema_path="mcp.items")
+    for name, spec in items.items():
+        path = f"mcp.items.{name}"
+        if not isinstance(spec, dict):
+            raise ConfigError(f"{path} must be a mapping", schema_path=path)
+        unknown = sorted(set(spec) - _MCP_ITEM_KEYS)
+        if unknown:
+            bad = unknown[0]
+            raise ConfigError(
+                f"unknown {path} key: {bad}",
+                why=f"{bad} is not a known MCP item key",
+                fix=f"use one of: {', '.join(sorted(_MCP_ITEM_KEYS))}",
+                schema_path=f"{path}.{bad}",
+            )
+        _check_bool(spec, "enabled", f"{path}.enabled")
+        _check_str(spec, "server", f"{path}.server")
+        _check_str(spec, "command", f"{path}.command")
+        if "args" in spec:
+            _validate_string_list(spec["args"], f"{path}.args")
+        env = spec.get("env")
+        if env is not None:
+            if not isinstance(env, dict):
+                raise ConfigError(f"{path}.env must be a mapping", schema_path=f"{path}.env")
+            for env_key, env_value in env.items():
+                if not isinstance(env_key, str):
+                    raise ConfigError(f"{path}.env keys must be strings", schema_path=f"{path}.env")
+                if not isinstance(env_value, str):
+                    raise ConfigError(
+                        f"{path}.env.{env_key} must be a string, got {env_value!r}",
+                        schema_path=f"{path}.env.{env_key}",
+                    )
 
 
 def _validate_git_hooks(gh: dict[str, Any]) -> None:
@@ -1188,6 +1219,12 @@ def _validate_linters(li: dict[str, Any]) -> None:
                     schema_path=f"{path}.path",
                 )
             seen_paths[norm] = name
+
+
+def _validate_string_list(value: Any, path: str) -> None:
+    """Fail-closed unless ``value`` is a list of strings."""
+    if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+        raise ConfigError(f"{path} must be a list of strings", schema_path=path)
 
 
 def _validate_gitignore(gi: dict[str, Any]) -> None:

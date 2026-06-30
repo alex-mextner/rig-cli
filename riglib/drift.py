@@ -41,7 +41,7 @@ from .actions.runner import (
     github_ruleset_state,
     harness_settings_file,
     hook_bridge_entries,
-    parse_mcp_command,
+    desired_mcp_server_entry,
     permissions_settings_file,
     _is_rig_import_line,
     resolve_agents_md,
@@ -1244,7 +1244,7 @@ def _check_mcp(action: Action, report: DriftReport) -> None:
         return
     server_key = str(action.options.get("server") or action.item)
     config_file = _mcp_config_file(action)
-    desired = parse_mcp_command(command)
+    desired = desired_mcp_server_entry(action.options)
     existing = None
     if config_file.is_file():
         try:
@@ -1259,5 +1259,5 @@ def _check_mcp(action: Action, report: DriftReport) -> None:
         )
     elif existing != desired:
         report.items.append(
-            DriftItem("modified", "mcp", server_key, config_file, "MCP entry differs from config (command/args)")
+            DriftItem("modified", "mcp", server_key, config_file, "MCP entry differs from config (command/args/env)")
         )

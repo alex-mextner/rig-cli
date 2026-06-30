@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from riglib.actions import run_plan
+from riglib.actions.runner import desired_mcp_server_entry
 from riglib.catalog import Catalog
 from riglib.config import LoadedConfig
 from riglib.drift import detect
@@ -988,6 +989,174 @@ def test_mcp_command_shell_quoting(fake_agent_tools, tmp_path):
     assert entry["args"] == ["--flag", "a b"]  # quotes consumed, inner spaces preserved
 
 
+def test_desired_mcp_server_entry_legacy_explicit_args_and_env():
+    assert desired_mcp_server_entry({"command": 'node "server path.js" --flag'}) == {
+        "command": "node",
+        "args": ["server path.js", "--flag"],
+    }
+    assert desired_mcp_server_entry({"command": '"/opt/my tools/run" --flag "a b"'}) == {
+        "command": "/opt/my tools/run",
+        "args": ["--flag", "a b"],
+    }
+    assert desired_mcp_server_entry({"command": ""}) == {"command": "", "args": []}
+    assert desired_mcp_server_entry({
+        "command": "/opt/my tools/run",
+        "args": ["server.js"],
+        "env": {"NODE_ENV": "test"},
+    }) == {
+        "command": "/opt/my tools/run",
+        "args": ["server.js"],
+        "env": {"NODE_ENV": "test"},
+    }
+    assert desired_mcp_server_entry({"command": "mycmd --implicit-arg", "args": ["explicit-arg"]}) == {
+        "command": "mycmd --implicit-arg",
+        "args": ["explicit-arg"],
+    }
+    assert desired_mcp_server_entry({"command": "node", "args": [], "env": {}}) == {
+        "command": "node",
+        "args": [],
+    }
+    assert desired_mcp_server_entry({"command": "mycmd", "env": None}) == {
+        "command": "mycmd",
+        "args": [],
+    }
+
+
+def test_mcp_explicit_args_keep_command_exact_and_add_env(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
+            "mcp": {
+                "target": str(repo / "mcp-out"),
+                "items": {
+                    "fake-mcp": {
+                        "enabled": True,
+                        "command": "/opt/my tools/run",
+                        "args": ["server.js", "--flag", "a b"],
+                        "env": {"NODE_ENV": "test", "TOKEN": "abc"},
+                    }
+                },
+            },
+        },
+        repo_root=repo,
+    )
+    run_plan(build(cfg, cat, project_type="unknown"))
+    data = json.loads((repo / "mcp-out" / "mcp.json").read_text())
+    assert data["mcpServers"]["fake-mcp"] == {
+        "command": "/opt/my tools/run",
+        "args": ["server.js", "--flag", "a b"],
+        "env": {"NODE_ENV": "test", "TOKEN": "abc"},
+    }
+
+
+def test_mcp_explicit_args_do_not_shell_split_command(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
+            "mcp": {
+                "target": str(repo / "mcp-out"),
+                "items": {
+                    "fake-mcp": {
+                        "enabled": True,
+                        "command": "node server.js",
+                        "args": ["--verbose"],
+                    }
+                },
+            },
+        },
+        repo_root=repo,
+    )
+    run_plan(build(cfg, cat, project_type="unknown"))
+    data = json.loads((repo / "mcp-out" / "mcp.json").read_text())
+    assert data["mcpServers"]["fake-mcp"] == {
+        "command": "node server.js",
+        "args": ["--verbose"],
+    }
+
+
+def test_mcp_empty_env_is_not_written(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
+            "mcp": {
+                "target": str(repo / "mcp-out"),
+                "items": {"fake-mcp": {"enabled": True, "command": "node", "args": [], "env": {}}},
+            },
+        },
+        repo_root=repo,
+    )
+    run_plan(build(cfg, cat, project_type="unknown"))
+    data = json.loads((repo / "mcp-out" / "mcp.json").read_text())
+    assert data["mcpServers"]["fake-mcp"] == {"command": "node", "args": []}
+    assert [i for i in detect(build(cfg, cat, project_type="unknown")).items if i.category == "mcp"] == []
+
+
+def test_drift_mcp_existing_without_env_matches_when_env_is_omitted(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
+            "mcp": {
+                "target": str(repo / "mcp-out"),
+                "items": {"fake-mcp": {"enabled": True, "command": "node", "args": ["server.js"]}},
+            },
+        },
+        repo_root=repo,
+    )
+    mcp_dir = repo / "mcp-out"
+    mcp_dir.mkdir()
+    (mcp_dir / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"fake-mcp": {"command": "node", "args": ["server.js"]}}}),
+        encoding="utf-8",
+    )
+    report = detect(build(cfg, cat, project_type="unknown"))
+    assert [i for i in report.items if i.category == "mcp"] == []
+
+
+def test_mcp_empty_command_skips_even_with_args_and_env(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
+            "mcp": {
+                "target": str(repo / "mcp-out"),
+                "items": {
+                    "fake-mcp": {
+                        "enabled": True,
+                        "command": "",
+                        "args": ["server.js"],
+                        "env": {"NODE_ENV": "test"},
+                    }
+                },
+            },
+        },
+        repo_root=repo,
+    )
+    report = run_plan(build(cfg, cat, project_type="unknown"))
+    result = next(r for r in report.results if r.action.kind == "register_mcp")
+    assert result.status == "skipped"
+    assert "no command set" in result.detail
+    assert not (repo / "mcp-out" / "mcp.json").exists()
+
+
 # ── harness (auto-mode / permission provisioning) ─────────────────────────────────
 def _harness_cfg(repo: Path, source: Path, **harness) -> LoadedConfig:
     return LoadedConfig(
@@ -1165,6 +1334,63 @@ def test_drift_mcp_command_modified(fake_agent_tools, tmp_path):
     mcp_json = repo / "mcp-out" / "mcp.json"
     data = json.loads(mcp_json.read_text())
     data["mcpServers"]["fake-mcp"] = {"command": "different", "args": []}
+    mcp_json.write_text(json.dumps(data), encoding="utf-8")
+    report = detect(plan)
+    assert any(i.direction == "modified" and i.category == "mcp" and i.item == "fake-mcp" for i in report.items)
+
+
+def test_drift_mcp_env_modified(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
+            "mcp": {
+                "target": str(repo / "mcp-out"),
+                "items": {
+                    "fake-mcp": {
+                        "enabled": True,
+                        "command": "node",
+                        "args": ["server.js"],
+                        "env": {"NODE_ENV": "test"},
+                    }
+                },
+            },
+        },
+        repo_root=repo,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    run_plan(plan)
+    mcp_json = repo / "mcp-out" / "mcp.json"
+    data = json.loads(mcp_json.read_text())
+    data["mcpServers"]["fake-mcp"]["env"]["NODE_ENV"] = "prod"
+    mcp_json.write_text(json.dumps(data), encoding="utf-8")
+    report = detect(plan)
+    assert any(i.direction == "modified" and i.category == "mcp" and i.item == "fake-mcp" for i in report.items)
+
+
+def test_drift_mcp_args_modified(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False}, "ci": {"enabled": False},
+            "mcp": {
+                "target": str(repo / "mcp-out"),
+                "items": {"fake-mcp": {"enabled": True, "command": "node", "args": ["server.js"]}},
+            },
+        },
+        repo_root=repo,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    run_plan(plan)
+    mcp_json = repo / "mcp-out" / "mcp.json"
+    data = json.loads(mcp_json.read_text())
+    data["mcpServers"]["fake-mcp"]["args"] = ["other.js"]
     mcp_json.write_text(json.dumps(data), encoding="utf-8")
     report = detect(plan)
     assert any(i.direction == "modified" and i.category == "mcp" and i.item == "fake-mcp" for i in report.items)

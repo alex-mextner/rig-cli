@@ -248,6 +248,21 @@ _CI_BLOCK = Block(
     open_map_doc="per-gate overrides (enabled / tier / variant / …) keyed by gate name",
 )
 
+_MCP_ITEM_BLOCK = Block(
+    doc="one MCP server registration override.",
+    leaves={
+        "enabled": Leaf("boolean", "register this MCP server", default=True),
+        "server": Leaf("string", "server name written under mcpServers"),
+        "command": Leaf("string", "server executable, or legacy command string when args is omitted"),
+        "args": Leaf("array", "argv passed to command exactly", items_type="string"),
+        "env": Leaf(
+            "object",
+            "environment variables for this server",
+            additional_properties_type="string",
+        ),
+    },
+)
+
 _MCP_BLOCK = Block(
     doc="MCP registrations (review, code-search) — callable from any agent.",
     leaves={
@@ -255,7 +270,8 @@ _MCP_BLOCK = Block(
         "target": Leaf("string", "MCP config dir, file, or `export-only`", default="~/.claude/mcp"),
     },
     open_map="items",
-    open_map_doc="per-server overrides (command / server / enabled) keyed by server name",
+    open_map_doc="per-server overrides (command / args / env / server / enabled) keyed by server name",
+    open_map_item=_MCP_ITEM_BLOCK,
 )
 
 _HARNESS_BLOCK = Block(

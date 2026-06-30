@@ -57,9 +57,21 @@ def test_blocks_with_open_map_whitelist_only_that_map():
         block = doc["properties"][name]
         assert block["additionalProperties"] is False
         assert mapkey in block["properties"]
-    # ci/mcp/agent_hooks model each item as a permissive object (catalog-defined, open by design)
-    for name in ("ci", "mcp", "agent_hooks"):
+    # ci/agent_hooks model each item as a permissive object (catalog-defined, open by design)
+    for name in ("ci", "agent_hooks"):
         assert doc["properties"][name]["properties"]["items"]["additionalProperties"] == {"type": "object"}
+
+
+def test_mcp_items_schema_enforces_structured_item_shape():
+    doc = config_schema.json_schema()
+    item = doc["properties"]["mcp"]["properties"]["items"]["additionalProperties"]
+    assert item["additionalProperties"] is False
+    assert set(item["properties"]) == {"enabled", "server", "command", "args", "env"}
+    assert item["properties"]["enabled"]["type"] == "boolean"
+    assert item["properties"]["server"]["type"] == "string"
+    assert item["properties"]["command"]["type"] == "string"
+    assert item["properties"]["args"]["items"] == {"type": "string"}
+    assert item["properties"]["env"]["additionalProperties"] == {"type": "string"}
 
 
 def test_linters_items_schema_enforces_item_shape():

@@ -281,6 +281,8 @@ mcp:
       enabled: true
       server: serena               # a code-search server (serena/sverklo) — see mcp/README.md
       command: ""                  # no command → nothing to register (reported, not an error)
+      args: []                     # optional: when present, command is not shell-split
+      env: {}                      # optional environment variables for this server
 ```
 
 > `review` is **not** an MCP item — it is a CLI + skill, and its MCP slot was removed in
@@ -290,6 +292,22 @@ mcp:
 The install action merges an MCP entry **idempotently by server name** into
 `<target>/mcp.json` (or the target file if it ends in `.json`) and never overwrites an
 existing differing entry unless `defaults.on_conflict: overwrite`.
+
+| Per-item key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | per-item | register this server |
+| `server` | str | item name | key written under `mcpServers` |
+| `command` | str | `""` | executable/launch command; empty skips registration even when `args`/`env` are set |
+| `args` | list[str] | shell-split from `command` | when present, use `command` exactly and this argv exactly |
+| `env` | map[str,str] | omitted | non-empty environment map written into the MCP server entry |
+
+Compatibility: if `args` is omitted, rig keeps the legacy behavior and parses `command` as a
+shell-like string, so `node server.js --foo` becomes `{"command":"node","args":["server.js","--foo"]}`.
+If `args` is present, `command` is the executable value exactly, allowing paths such as
+`/opt/my tools/run` without quoting.
+Do not put arguments or shell syntax into `command` when `args` is present:
+use `command: "node"` with `args: ["server.js", "--foo"]`, not
+`command: "node server.js"` with `args: ["--foo"]`.
 
 ---
 

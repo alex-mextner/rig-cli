@@ -538,6 +538,14 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
                 # the registration KEY is the configured server name if set, else the item
                 # name — so `server: serena` registers under "serena", not the catalog key.
                 server_name = str(spec.get("server") or item.name)
+                options = {
+                    "command": spec.get("command", ""),
+                    "server": server_name,
+                }
+                if "args" in spec:
+                    options["args"] = spec.get("args", [])
+                if "env" in spec:
+                    options["env"] = spec.get("env", {})
                 plan.actions.append(
                     Action(
                         kind="register_mcp",
@@ -545,10 +553,7 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
                         item=item.name,
                         source=item.path,
                         target=mcp_target,
-                        options={
-                            "command": spec.get("command", ""),
-                            "server": server_name,
-                        },
+                        options=options,
                     )
                 )
 

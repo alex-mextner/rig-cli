@@ -125,7 +125,18 @@ def test_git_hooks_dispatcher_now_validated():
 def test_open_item_maps_still_accept_arbitrary_names():
     # the strictness must NOT break the open `items`/`fragments` maps (catalog item names).
     config.validate({"version": 1, "ci": {"items": {"secret-scan": {"tier": "block"}, "my-gate": {}}}})
-    config.validate({"version": 1, "mcp": {"items": {"review": {"command": "review"}}}})
+    config.validate({
+        "version": 1,
+        "mcp": {
+            "items": {
+                "review": {
+                    "command": "review",
+                    "args": ["--serve"],
+                    "env": {"NODE_ENV": "test"},
+                }
+            }
+        },
+    })
     config.validate({"version": 1, "agent_hooks": {"items": {"block-no-verify": {"on_error": "closed"}}}})
     config.validate({"version": 1, "git_hooks": {"dispatcher": {"fragments": {"secret-scan": {"enabled": True}}}}})
 
@@ -173,6 +184,26 @@ def test_mcp_non_dict_block_rejected_cleanly():
     # and the dedicated validator's own guard is clean when called directly (belt-and-suspenders)
     with pytest.raises(config.ConfigError, match="mcp must be a mapping"):
         config._validate_mcp("nope")
+
+
+@pytest.mark.parametrize(
+    "doc, schema_path",
+    [
+        ({"version": 1, "mcp": {"items": {"fake-mcp": {"argz": []}}}}, "mcp.items.fake-mcp.argz"),
+        ({"version": 1, "mcp": {"items": {"fake-mcp": "nope"}}}, "mcp.items.fake-mcp"),
+        ({"version": 1, "mcp": {"items": {"fake-mcp": {"enabled": "yes"}}}}, "mcp.items.fake-mcp.enabled"),
+        ({"version": 1, "mcp": {"items": {"fake-mcp": {"server": 3}}}}, "mcp.items.fake-mcp.server"),
+        ({"version": 1, "mcp": {"items": {"fake-mcp": {"command": ["node"]}}}}, "mcp.items.fake-mcp.command"),
+        ({"version": 1, "mcp": {"items": {"fake-mcp": {"args": "--serve"}}}}, "mcp.items.fake-mcp.args"),
+        ({"version": 1, "mcp": {"items": {"fake-mcp": {"args": ["ok", 1]}}}}, "mcp.items.fake-mcp.args"),
+        ({"version": 1, "mcp": {"items": {"fake-mcp": {"env": []}}}}, "mcp.items.fake-mcp.env"),
+        ({"version": 1, "mcp": {"items": {"fake-mcp": {"env": {"PORT": 3000}}}}}, "mcp.items.fake-mcp.env.PORT"),
+    ],
+)
+def test_mcp_item_specs_are_validated_fail_closed(doc, schema_path):
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate(doc)
+    assert ei.value.schema_path == schema_path
 
 
 def test_validate_ignores_legacy_scope():
