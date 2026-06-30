@@ -16,18 +16,40 @@ def discover_projects(current_root: Path) -> list[dict[str, Any]]:
     projects: dict[Path, dict[str, Any]] = {}
     remote_cache: dict[Path, str] = {}
     current_path = _resolved(current_root)
+    current_common_dir = _git_common_dir(current_path)
     _add_project(projects, current_path, "current")
 
     sverklo_status, sverklo_entries, sverklo_message = _sverklo_projects()
     if sverklo_status == "ok":
+        resolved_entries: list[tuple[Path, str, Path | None]] = []
         for entry in sverklo_entries:
             path = entry["path"]
             name = entry.get("name") or path.name
             if not path.exists():
                 _attach_missing_alias(projects, current_path, name, path)
                 continue
+            worktree_common_dir = _linked_worktree_common_dir(path)
+            resolved_entries.append((path, name, worktree_common_dir))
+        for path, name, worktree_common_dir in resolved_entries:
+            if worktree_common_dir is not None:
+                continue
             target = _merge_target(projects, path, remote_cache)
             _add_project(projects, target or path, "sverklo", alias=name)
+        for path, _name, worktree_common_dir in resolved_entries:
+            if worktree_common_dir is None:
+                continue
+            if (
+                current_common_dir is not None
+                and worktree_common_dir == current_common_dir
+                and _resolved(path) != current_path
+            ):
+                projects[current_path]["notes"].append("sverklo linked worktree skipped")
+                continue
+            target = _merge_target(projects, path, remote_cache)
+            if target is not None:
+                projects[target]["notes"].append("sverklo linked worktree skipped")
+                continue
+            _add_project(projects, path, "worktree")
     else:
         current = projects[current_path]
         current["health"]["sverklo"] = {
@@ -226,6 +248,42 @@ def _git_remote(path: Path) -> str:
     if res.returncode != 0:
         return ""
     return _normalize_remote(res.stdout.strip())
+
+
+def _linked_worktree_common_dir(path: Path) -> Path | None:
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    git_dir = Path(lines[0])
+    common_dir = Path(lines[1])
+    return common_dir if git_dir != common_dir else None
+
+
+def _git_common_dir(path: Path) -> Path | None:
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    value = res.stdout.strip()
+    return Path(value) if value else None
 
 
 def _normalize_remote(remote: str) -> str:
