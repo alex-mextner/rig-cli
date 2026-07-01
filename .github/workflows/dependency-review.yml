@@ -34,13 +34,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # Set up the toolchain(s) dep-audit.sh needs for YOUR repo's ecosystems. Pin each
-      # action to a commit SHA. ubuntu-latest already ships node+npm, so npm-only repos
-      # need nothing extra. Examples:
-      #   - uses: oven-sh/setup-bun@<pinned-sha>      # bun.lock     -> bun audit
-      #   - uses: actions/setup-node@<pinned-sha>     # package-lock -> npm/pnpm/yarn audit
-      #   - uses: actions/setup-python@<pinned-sha>   # pyproject    -> pip-audit (pipx install pip-audit)
-      #   - run: rustup default stable                # Cargo.lock   -> cargo audit (cargo install cargo-audit)
+      # rig-cli is a Python project — dep-audit.sh needs pip-audit to scan pyproject.toml.
+      - name: Install pip-audit
+        run: pipx install pip-audit==2.10.1
 
       - name: Dependency audit (OSS — whole-tree vulns, fail on high+)
         # dep-audit.sh fails CLOSED if it finds a manifest whose auditor isn't installed
