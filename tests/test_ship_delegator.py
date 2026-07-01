@@ -86,10 +86,13 @@ def test_content_is_executable_bash_that_delegates(tmp_path):
     canonical = _canonical_ship(tmp_path)
     text = ship_delegator_content(canonical)
     assert text.startswith("#!/usr/bin/env bash\n")
-    # it must reference BOTH the repo-local ci/ship/ship.sh (agent-tools self-host) AND the
-    # rig-baked canonical path (every other repo on a clean machine).
+    # must reference ci/ship/ship.sh (both the repo-local branch and the AGENT_TOOLS_ROOT fallback)
     assert "ci/ship/ship.sh" in text
-    assert str(canonical) in text
+    # must export AGENT_TOOLS_ROOT with the baked root as default (not the full path to ship.sh)
+    agent_tools_root = str(canonical.parent.parent.parent)
+    assert "AGENT_TOOLS_ROOT" in text
+    assert agent_tools_root in text
+    assert str(canonical) not in text  # full path to ship.sh must NOT be baked — root only
     assert 'exec' in text
 
 
@@ -99,15 +102,17 @@ def test_content_is_deterministic_for_a_canonical_path(tmp_path):
 
 
 def test_content_shell_quotes_a_dangerous_canonical_path():
-    # the canonical path derives from user-controlled agent_tools_source; a path with $(...) /
-    # backticks / quotes must be INERT in the generated script, never executed when `gh ship` runs.
+    # agent_tools_source derives from user-controlled config; a path with $(...) / backticks /
+    # quotes must be INERT in the generated script, never executed when `gh ship` runs.
     evil = Path('/tmp/$(touch /tmp/pwned)/`id`/ci/ship/ship.sh')
     text = ship_delegator_content(evil)
-    # the raw injection must NOT appear unquoted as an assignment that the shell would expand
-    assert "canonical=$(touch" not in text
-    assert "canonical=/tmp/$(touch" not in text
-    # the path must be present, but single-quoted (shlex.quote) so the shell treats it literally
-    assert "'/tmp/$(touch /tmp/pwned)/`id`/ci/ship/ship.sh'" in text
+    # the raw injection must NOT appear unquoted — neither as an assignment nor as a bare path
+    assert "AGENT_TOOLS_ROOT=$(touch" not in text
+    assert "AGENT_TOOLS_ROOT=/tmp/$(touch" not in text
+    # the agent-tools ROOT (parent.parent.parent of ship.sh) must be present, single-quoted
+    assert "'/tmp/$(touch /tmp/pwned)/`id`'" in text
+    # the full ship.sh path must NOT be baked (only the root is)
+    assert "'/tmp/$(touch /tmp/pwned)/`id`/ci/ship/ship.sh'" not in text
     # the resulting script is valid bash (parses without executing the injection)
     import subprocess as _sp
 
