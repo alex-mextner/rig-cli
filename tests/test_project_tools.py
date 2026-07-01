@@ -328,14 +328,22 @@ def test_sverklo_registered_matches_paths_with_delimiters(tmp_path, monkeypatch)
     assert str(repo) in detail
 
 
-def test_sverklo_missing_cli_errors(monkeypatch, tmp_path):
+def test_sverklo_missing_cli_skips(monkeypatch, tmp_path):
+    """run_sverklo returns 'skipped' (not 'error') when sverklo is not on PATH.
+
+    sverklo is optional — a cleanroom/CI environment without it installed must
+    not cause `rig apply` to exit non-zero.  Only ``sverklo_registered`` (the
+    drift check) returns a ``False`` / detail pair; the runner skips gracefully.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setattr(project_tools.shutil, "which", lambda name: None)
     registered, detail = project_tools.sverklo_registered(repo)
     assert registered is False
     assert detail == "sverklo CLI not found on PATH"
-    assert project_tools.run_sverklo(repo, "register") == ("error", "sverklo CLI not found on PATH")
+    status, msg = project_tools.run_sverklo(repo, "register")
+    assert status == "skipped"
+    assert "sverklo CLI not found on PATH" in msg
 
 
 def test_sverklo_register_and_reindex_errors_are_reported(monkeypatch, tmp_path):
