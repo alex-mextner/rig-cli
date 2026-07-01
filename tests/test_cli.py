@@ -595,6 +595,8 @@ def test_init_textual_present_launches_without_installing(tmp_path, capsys, fake
 def test_tui_install_command_matches_install_method(monkeypatch):
     """The auto-install argv is matched to how rig itself is installed (the runnable twin of
     _tui_install_hint), and degrades to None when no matching installer is on PATH."""
+    import sys
+
     import riglib.cli as cli
 
     present: set[str] = set()
@@ -619,22 +621,32 @@ def test_tui_install_command_matches_install_method(monkeypatch):
     present = set()
     assert cli._tui_install_command() is None
 
-    # source + uv → uv pip install into THIS interpreter
+    # source + uv → uv pip install into rig's OWN overlay dir (--target), never the bare
+    # interpreter: that is the PEP-668-proof branch (no venv needed, immune to externally-managed).
+    monkeypatch.setenv("RIG_TUI_LIB_DIR", "/tmp/rig-overlay")
     present = {"uv"}
     monkeypatch.setattr(cli, "_rig_install_method", lambda: "source")
     cmd = cli._tui_install_command()
     assert cmd[:4] == ["uv", "pip", "install", "--python"]
+    assert "--target" in cmd and cmd[cmd.index("--target") + 1] == "/tmp/rig-overlay"
     assert cmd[-2:] == ["textual>=0.50", "rich>=13"]
-    # source + no uv, INSIDE a venv → plain pip into the venv (NO --user; pip rejects it there)
+    # source + no uv → pip --target into the SAME overlay dir + --ignore-installed (force the full
+    # closure into the overlay so it is self-contained). NO --break-system-packages: pip --target
+    # writes only into the target dir, so PEP-668 never fires, and the flag breaks pip <23.0.1.
     present = set()
+    cmd = cli._tui_install_command()
+    assert cmd[:3] == [sys.executable, "-m", "pip"]
+    assert cmd[3:6] == ["install", "--target", "/tmp/rig-overlay"]
+    assert "--ignore-installed" in cmd
+    assert "--break-system-packages" not in cmd
+    assert cmd[-2:] == ["textual>=0.50", "rich>=13"]
+    # the --target shape is identical whether or not a venv is active — no fragile venv/--user branch.
     monkeypatch.setattr("sys.prefix", "/tmp/venv")
     monkeypatch.setattr("sys.base_prefix", "/usr")
-    cmd = cli._tui_install_command()
-    assert cmd[1:] == ["-m", "pip", "install", "textual>=0.50", "rich>=13"]
-    # source + no uv, on a base/system interpreter → pip --user (non-root target)
-    monkeypatch.setattr("sys.base_prefix", "/tmp/venv")  # prefix == base_prefix → not a venv
-    cmd = cli._tui_install_command()
-    assert cmd[1:] == ["-m", "pip", "install", "--user", "textual>=0.50", "rich>=13"]
+    assert cli._tui_install_command() == cmd
+    # unknown shape behaves like source (no rig-owned env either) — same overlay --target command.
+    monkeypatch.setattr(cli, "_rig_install_method", lambda: "unknown")
+    assert cli._tui_install_command() == cmd
 
 
 def test_auto_install_tui_failure_modes_never_raise(monkeypatch, capsys):
@@ -644,6 +656,10 @@ def test_auto_install_tui_failure_modes_never_raise(monkeypatch, capsys):
     import types
 
     import riglib.cli as cli
+
+    # point the overlay dir at a guaranteed-absent path so _inject_tui_lib_dir is a hermetic no-op
+    # (never prepends the real ~/.local/share overlay onto this process's sys.path mid-suite).
+    monkeypatch.setenv("RIG_TUI_LIB_DIR", "/nonexistent/rig-tui-overlay-xyz")
 
     # 1) no installer on PATH → None command → False
     monkeypatch.setattr(cli, "_tui_install_command", lambda: None)
@@ -684,6 +700,170 @@ def test_auto_install_tui_failure_modes_never_raise(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_tui_importable", lambda: False)
     assert cli._auto_install_tui() is False
     assert "re-run `rig init`" in capsys.readouterr().out
+
+
+def _write_stub_pkg(target: Path, name: str, version: str = "9.9.9") -> None:
+    """Drop a minimal importable package into `target` (stands in for a real `--target` install)."""
+    pkg = target / name
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text(f"__version__ = {version!r}\n", encoding="utf-8")
+
+
+def test_tui_lib_dir_resolution(monkeypatch, tmp_path):
+    """The overlay dir honors RIG_TUI_LIB_DIR, then XDG_DATA_HOME, then ~/.local/share/rig/tui-libs."""
+    import riglib.cli as cli
+
+    monkeypatch.setenv("RIG_TUI_LIB_DIR", str(tmp_path / "explicit"))
+    assert cli._tui_lib_dir() == tmp_path / "explicit"
+
+    monkeypatch.delenv("RIG_TUI_LIB_DIR", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert cli._tui_lib_dir() == tmp_path / "xdg" / "rig" / "tui-libs"
+
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert cli._tui_lib_dir() == tmp_path / "home" / ".local" / "share" / "rig" / "tui-libs"
+
+
+def test_inject_tui_lib_dir_makes_overlay_importable(monkeypatch, tmp_path):
+    """_inject_tui_lib_dir puts a populated overlay on sys.path (idempotently); a no-op when absent."""
+    import sys
+
+    import riglib.cli as cli
+
+    monkeypatch.setattr(sys, "path", list(sys.path))  # isolate: reverted to the original list after
+    overlay = tmp_path / "overlay"
+    monkeypatch.setenv("RIG_TUI_LIB_DIR", str(overlay))
+
+    # absent → no-op (nothing added)
+    before = list(sys.path)
+    cli._inject_tui_lib_dir()
+    assert sys.path == before
+
+    # populated → prepended once, and importable; a second call does NOT double-insert
+    _write_stub_pkg(overlay, "rig_overlay_probe")
+    cli._inject_tui_lib_dir()
+    cli._inject_tui_lib_dir()
+    assert sys.path.count(str(overlay)) == 1
+    import importlib.util
+
+    assert importlib.util.find_spec("rig_overlay_probe") is not None
+
+
+def test_auto_install_tui_source_overlay_succeeds(monkeypatch, tmp_path, capsys):
+    """The CTO's exact broken case — a source-checkout symlink on a bare PEP-668 interpreter with NO
+    venv — now SUCCEEDS: the installer targets rig's overlay dir, the dir is injected, and textual+rich
+    become importable IN THIS process so the wizard can launch (no re-exec, no venv)."""
+    import subprocess
+    import sys
+    import types
+
+    import riglib.cli as cli
+
+    monkeypatch.setattr(sys, "path", list(sys.path))  # isolate sys.path mutation
+    for mod in ("textual", "rich"):
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    overlay = tmp_path / "overlay"
+    monkeypatch.setenv("RIG_TUI_LIB_DIR", str(overlay))
+    monkeypatch.setattr(cli, "_rig_install_method", lambda: "source")
+    monkeypatch.setattr("shutil.which", lambda prog: "/usr/bin/uv" if prog == "uv" else None)
+
+    # the command rig CHOSE must be the PEP-668-proof overlay --target install (not `--python <base>`
+    # alone, which is what failed for the CTO with "create a virtual environment with uv venv").
+    cmd = cli._tui_install_command()
+    assert cmd[:3] == ["uv", "pip", "install"]
+    assert cmd[cmd.index("--target") + 1] == str(overlay)
+
+    def _fake_run(run_cmd, **kwargs):
+        # stand in for the real `uv pip install --target`: populate the overlay so it's importable
+        assert "--target" in run_cmd and run_cmd[run_cmd.index("--target") + 1] == str(overlay)
+        _write_stub_pkg(overlay, "textual")
+        _write_stub_pkg(overlay, "rich")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    assert cli._auto_install_tui() is True
+    # proof it is importable in THIS process after the install (what the wizard needs)
+    import importlib.util
+
+    assert importlib.util.find_spec("textual") is not None
+    assert importlib.util.find_spec("rich") is not None
+    assert "setup UI installed." in capsys.readouterr().out
+
+
+def test_init_source_overlay_install_launches_wizard(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """End-to-end `rig init` on the source/no-venv shape: textual is absent, the overlay install
+    populates it, injection makes it importable, and the wizard launches — no preview, no hint."""
+    import subprocess
+    import sys
+    import types
+
+    import riglib.cli as cli
+
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    overlay = tmp_path / "overlay"
+    monkeypatch.setenv("RIG_TUI_LIB_DIR", str(overlay))
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr(cli, "_rig_install_method", lambda: "source")
+    monkeypatch.setattr("shutil.which", lambda prog: "/usr/bin/uv" if prog == "uv" else None)
+    # textual genuinely missing at first; the install makes find_spec succeed via the overlay.
+    for mod in ("textual", "rich"):
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+
+    def _fake_run(run_cmd, **kwargs):
+        _write_stub_pkg(overlay, "textual")
+        _write_stub_pkg(overlay, "rich")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    launched = {"v": False}
+    monkeypatch.setattr("riglib.tui.run_wizard", lambda _root: launched.__setitem__("v", True) or 0)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert launched["v"] is True
+    assert "installing the setup UI" in out
+    assert "Nothing was written" not in out and "textual not installed" not in out
+
+
+def test_auto_install_tui_real_uv_target_is_self_contained(monkeypatch, tmp_path):
+    """OPT-IN (RIG_TUI_REAL_INSTALL=1) + uv on PATH: a REAL `uv pip install --target` of the actual
+    [tui] reqs lands a SELF-CONTAINED, importable closure in the overlay — not a mock. Proves the
+    load-bearing assumption (the overlay is importable after the install, incl. transitive deps) that
+    the hermetic stub tests cannot. Opt-in (the flag is unset by default in CI/local runs) so the
+    default suite stays hermetic and never reaches out to PyPI."""
+    import importlib.util
+    import os
+    import shutil
+    import sys
+
+    import pytest
+
+    import riglib.cli as cli
+
+    if os.environ.get("RIG_TUI_REAL_INSTALL", "").strip() not in ("1", "true", "yes", "on"):
+        pytest.skip("real network install — set RIG_TUI_REAL_INSTALL=1 to run")
+    if not shutil.which("uv"):
+        pytest.skip("uv not on PATH")
+
+    monkeypatch.setattr(sys, "path", list(sys.path))  # revert any injection after the test
+    for mod in ("textual", "rich", "markdown_it"):
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    monkeypatch.setenv("RIG_TUI_LIB_DIR", str(tmp_path / "real-overlay"))
+    monkeypatch.setattr(cli, "_rig_install_method", lambda: "source")
+
+    assert cli._auto_install_tui() is True
+    # textual + rich AND a transitive dep (markdown-it-py, pulled only as rich's dependency) all
+    # resolve from the overlay → the --target set is genuinely self-contained.
+    for mod in ("textual", "rich", "markdown_it"):
+        assert importlib.util.find_spec(mod) is not None, f"{mod} not importable from overlay"
 
 
 def test_tui_opted_out_env_parsing(monkeypatch):
@@ -1009,12 +1189,16 @@ def test_tui_install_hint_every_branch_matches_install_shape(monkeypatch):
     `pip install 'rig-cli[tui]'` — the form that fails on a PEP-668 externally-managed Python."""
     from riglib import cli
 
+    import sys
+
+    # uv present (the standard toolchain): source/unknown route through the overlay --target install.
+    monkeypatch.setattr("shutil.which", lambda prog: f"/usr/bin/{prog}" if prog == "uv" else None)
     # branch → (substring the hint must contain, manager that must drive it)
     expected = {
         "uv-tool": ("uv tool install", "uv"),
         "pipx": ("pipx inject", "pipx"),
-        "source": ("uv run --extra tui", "uv"),
-        "unknown": ("uv tool install", "uv"),
+        "source": ("uv pip install --python", "uv"),
+        "unknown": ("uv pip install --python", "uv"),
     }
     for method, (marker, manager) in expected.items():
         monkeypatch.setattr(cli, "_rig_install_method", lambda m=method: m)
@@ -1023,6 +1207,25 @@ def test_tui_install_hint_every_branch_matches_install_shape(monkeypatch):
         assert manager in hint
         # never the bare-pip extra install that PEP-668 blocks
         assert "pip install 'rig-cli[tui]'" not in hint
+        # uv-branch must pin --python to the running interpreter so uv uses the right Python
+        if method in ("source", "unknown"):
+            assert "--python" in hint and sys.executable in hint, (
+                f"{method}: hint must contain --python <sys.executable>; got: {hint!r}"
+            )
+
+    # uv absent on source/unknown → the manual hint still routes through a self-contained pip --target
+    # (--ignore-installed forces the full closure into rig's overlay dir; no PEP-668-tripping flag).
+    # Uses sys.executable, not a bare "python3", so the right interpreter is targeted.
+    monkeypatch.setattr("shutil.which", lambda prog: None)
+    for method in ("source", "unknown"):
+        monkeypatch.setattr(cli, "_rig_install_method", lambda m=method: m)
+        hint = cli._tui_install_hint()
+        assert "--target" in hint and "--ignore-installed" in hint
+        assert "--break-system-packages" not in hint
+        assert "pip install 'rig-cli[tui]'" not in hint
+        assert sys.executable in hint, (
+            f"{method} (no uv): hint must use sys.executable, not a bare 'python3'; got: {hint!r}"
+        )
 
 
 def _mk_plan(n_skills: int, n_hooks: int = 0):

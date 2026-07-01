@@ -36,6 +36,21 @@ def _isolate_home(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_tui_lib_dir(monkeypatch, tmp_path):
+    """Never let a test prepend the REAL TUI overlay dir onto this process's ``sys.path``.
+
+    ``cmd_setup`` and ``_auto_install_tui`` call ``_inject_tui_lib_dir()``, which ``sys.path.insert``s
+    the rig-owned overlay (``~/.local/share/rig/tui-libs``) when it exists — a PROCESS-GLOBAL mutation
+    that monkeypatch does not revert. On a dev box / CI where that overlay already holds textual+rich
+    (after a real ``rig init``), any ``init`` test would leak it into ``sys.path`` for the rest of the
+    pytest session, making textual spuriously importable in later tests that assert it absent. Point the
+    overlay at a per-test throwaway path (which does not exist → the injection is a guaranteed no-op).
+    Tests exercising the overlay set ``RIG_TUI_LIB_DIR`` (and isolate ``sys.path``) inline, which wins.
+    """
+    monkeypatch.setenv("RIG_TUI_LIB_DIR", str(tmp_path / "tui-overlay-absent"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_scheduler(monkeypatch):
     """Never let a test touch the REAL launchd / crontab — or write a real plist file.
 

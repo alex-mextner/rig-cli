@@ -103,24 +103,81 @@ def _tui_install_hint() -> str:
     system interpreters) that errors out, and the toolchain rig standardizes on is ``uv``. Each
     branch names the command that actually adds ``textual``+``rich`` for that install shape.
     """
+    import shlex
+    import shutil
+
     method = _rig_install_method()
     if method == "uv-tool":
         return "uv tool install --reinstall 'rig-cli[tui]'   (re-adds rig with the wizard extra)"
     if method == "pipx":
         return "pipx inject rig-cli 'textual>=0.50' 'rich>=13'   (or: pipx install --force 'rig-cli[tui]')"
-    if method == "source":
-        root = Path(__file__).resolve().parent.parent
+    # source-checkout symlink / unknown shape: rig has no env of its OWN to install into (the
+    # interpreter is a bare, often PEP-668 externally-managed one), so the wizard's deps live in a
+    # rig-owned overlay dir that gets injected onto sys.path. The robust manual command installs
+    # textual+rich straight into THAT dir — works regardless of PEP-668, no venv required.
+    lib = shlex.quote(str(_tui_lib_dir()))
+    py = shlex.quote(sys.executable)
+    if shutil.which("uv"):
+        # Include --python to target the exact interpreter rig runs under, not uv's active default.
         return (
-            f"cd '{root}' && uv run --extra tui rig init; "
-            f"or `uv tool install --from '{root}' 'rig-cli[tui]'` to make plain `rig` launch it"
+            f"uv pip install --python {py} --target {lib} 'textual>=0.50' 'rich>=13'"
+            f"   (then re-run `rig init`)"
         )
-    # unknown install shape: prefer uv, never a bare `pip install` (PEP-668 externally-managed).
-    return "uv tool install 'rig-cli[tui]'   (or, into rig's env: uv pip install 'textual>=0.50' 'rich>=13')"
+    return (
+        f"install uv (https://docs.astral.sh/uv/) then re-run `rig init`; or manually: "
+        f"{py} -m pip install --target {lib} --ignore-installed 'textual>=0.50' 'rich>=13'"
+    )
 
 
 # The wizard's optional dependency — the `[tui]` extra. Kept in sync with pyproject's
 # `tui = ["textual>=0.50", "rich>=13"]`; reused by the auto-install command builder below.
 _TUI_REQS = ("textual>=0.50", "rich>=13")
+
+
+def _tui_lib_dir() -> Path:
+    """The rig-owned overlay directory the wizard's deps are installed into for SOURCE/UNKNOWN shapes.
+
+    When rig runs from a source-checkout symlink (the ``bin/rig`` shim → repo on ``sys.path``)
+    under a bare, often PEP-668 externally-managed interpreter (Homebrew/Debian system Python),
+    rig has **no environment of its own** to ``pip install`` into: ``uv pip install`` refuses
+    without a venv and the system site-packages is write-protected. So instead of fighting the
+    interpreter we install textual+rich into THIS dir with ``--target`` (no venv needed, immune to
+    PEP-668) and inject it onto ``sys.path`` (:func:`_inject_tui_lib_dir`). Persistent, so the
+    second ``rig init`` finds the deps with zero subprocess. Override: ``RIG_TUI_LIB_DIR``; else
+    ``$XDG_DATA_HOME/rig/tui-libs`` → ``~/.local/share/rig/tui-libs``.
+    """
+    override = _os.environ.get("RIG_TUI_LIB_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    data_home = _os.environ.get("XDG_DATA_HOME", "").strip()
+    base = Path(data_home).expanduser() if data_home else Path.home() / ".local" / "share"
+    return base / "rig" / "tui-libs"
+
+
+def _inject_tui_lib_dir() -> None:
+    """Prepend the rig-owned overlay dir onto ``sys.path`` so its textual+rich become importable.
+
+    Idempotent and side-effect-safe: a no-op when the dir does not exist (the common case for the
+    uv-tool / pipx shapes, which install into their own managed venv, not this overlay) or is
+    already on ``sys.path``. Prepends so the freshly-resolved, internally-consistent ``--target``
+    set wins over any older copy the host interpreter might carry; this is a short-lived wizard
+    process, so shadowing host packages is not a concern. Invalidates the import caches so a dir
+    that was just populated is seen. Never raises — the whole point is to keep ``rig init`` alive.
+    """
+    import importlib
+
+    try:
+        lib = _tui_lib_dir()
+        if not lib.is_dir():
+            return
+        entry = str(lib)
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+            importlib.invalidate_caches()
+    except (OSError, RuntimeError):
+        # OSError: is_dir() / stat failure; RuntimeError: Path.home() fails in containers with no
+        # HOME env and no /etc/passwd entry for the current UID (Docker/OpenShift arbitrary UIDs).
+        return
 
 
 def _tui_importable() -> bool:
@@ -175,11 +232,16 @@ def _tui_install_command() -> list[str] | None:
 
     The runnable twin of :func:`_tui_install_hint` — same branches, but an argv to exec instead of
     advice to print:
-      * ``uv-tool`` → ``uv tool install --reinstall 'rig-cli[tui]'`` (re-adds rig WITH the extra)
-      * ``pipx``    → ``pipx inject rig-cli textual… rich…``
-      * ``source`` / ``unknown`` → drop textual+rich straight into the interpreter rig imports from
-        (``uv pip install --python <sys.executable>`` or, without uv, ``pip install --user``), so the
-        running process can import them without a re-exec.
+      * ``uv-tool`` → ``uv tool install --reinstall 'rig-cli[tui]'`` (re-adds rig WITH the extra,
+        landing textual+rich in rig's own managed venv — already on this process's ``sys.path``)
+      * ``pipx``    → ``pipx inject rig-cli textual… rich…`` (same: into rig's pipx venv)
+      * ``source`` / ``unknown`` → install into a rig-owned OVERLAY dir with ``--target`` and let
+        :func:`_inject_tui_lib_dir` put it on ``sys.path``. This is the failure-proof branch for the
+        common case the older ``uv pip install --python <base interp>`` / ``pip install --user``
+        could not serve: a source-checkout symlink run by a bare, PEP-668 externally-managed
+        interpreter has no venv to install into, so ``uv pip install`` refuses ("create a virtual
+        environment with uv venv") and ``pip --user`` is blocked. ``--target`` writes into a plain
+        directory rig owns — no venv, immune to PEP-668 — and works whether or not a venv is active.
     Returns ``None`` when the matching installer is not on PATH, so the caller degrades to the
     manual hint instead of guessing at a command that can't run.
     """
@@ -190,15 +252,18 @@ def _tui_install_command() -> list[str] | None:
         return ["uv", "tool", "install", "--reinstall", "rig-cli[tui]"] if shutil.which("uv") else None
     if method == "pipx":
         return ["pipx", "inject", "rig-cli", *_TUI_REQS] if shutil.which("pipx") else None
-    # source / unknown: land the extra in THIS interpreter's environment.
+    # source / unknown: install into rig's own overlay dir (no venv → PEP-668-proof), then inject.
+    # `--target` writes only into `lib`, NOT the managed environment, so PEP-668 never fires (verified:
+    # modern pip 26 with `--target` installs cleanly into an arbitrary dir on a Homebrew externally-
+    # managed interpreter, no `--break-system-packages` needed — and that flag would BREAK old pip
+    # <23.0.1, which predates it). `--ignore-installed` (pip) / uv's default `--target` behavior force
+    # the FULL dependency closure into the overlay so it is self-contained regardless of what the host
+    # interpreter already has importable — otherwise a host-satisfied transitive dep could be skipped
+    # and the overlay would be unimportable.
+    lib = str(_tui_lib_dir())
     if shutil.which("uv"):
-        return ["uv", "pip", "install", "--python", sys.executable, *_TUI_REQS]
-    # no uv: fall back to pip. Inside a venv, install INTO the venv — `pip install --user` is
-    # rejected there ("User site-packages are not visible in this virtualenv"); `--user` is only
-    # the right (non-root) target on a base/system interpreter.
-    in_venv = sys.prefix != sys.base_prefix
-    user_flag = [] if in_venv else ["--user"]
-    return [sys.executable, "-m", "pip", "install", *user_flag, *_TUI_REQS]
+        return ["uv", "pip", "install", "--python", sys.executable, "--target", lib, *_TUI_REQS]
+    return [sys.executable, "-m", "pip", "install", "--target", lib, "--ignore-installed", *_TUI_REQS]
 
 
 def _auto_install_tui() -> bool:
@@ -234,6 +299,10 @@ def _auto_install_tui() -> bool:
         return False
     import importlib
 
+    # SOURCE/UNKNOWN shapes install into the rig-owned overlay dir, which is NOT yet on sys.path —
+    # put it there so the just-installed textual+rich import in THIS process. A no-op for the
+    # uv-tool/pipx shapes (no overlay dir; their deps already sit in rig's own venv on sys.path).
+    _inject_tui_lib_dir()
     importlib.invalidate_caches()
     if not _tui_importable():
         print(_warn("setup UI installed, but it isn't importable in this run — re-run `rig init` to launch it."))
@@ -690,6 +759,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
         # just the non-destructive preview, so automation that sets it gets no surprise install.
         if getattr(args, "no_tui", False) or _tui_opted_out():
             return _setup_preview_no_tui(args, reason="no-tui")
+        # a PRIOR run may already have installed the [tui] extra into rig's overlay dir (source/
+        # unknown shapes). Put it on sys.path FIRST so a second `rig init` finds textual with zero
+        # subprocess; a no-op when the overlay is absent (uv-tool/pipx or never-installed).
+        _inject_tui_lib_dir()
         # the wizard's optional [tui] extra may be absent. The CTO directive: `rig init` JUST WORKS —
         # self-bootstrap textual+rich and launch, not print a do-it-yourself hint. Only a genuine
         # install failure (offline / no installer / permission) degrades to the preview + hint.
