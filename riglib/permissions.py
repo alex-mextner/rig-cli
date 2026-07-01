@@ -140,6 +140,108 @@ def harness_supported(kind: str) -> bool:
     return kind in HARNESS_ALLOWLISTS
 
 
+# ── deny / ask baselines — the OUTER enforcement belt (rig-cli#100) ──────────────────────────
+# CTO decision 2026-07-01: the harness permissions layer — deny, ask, AND allow — must be
+# provisioned/reconciled by rig, not hand-edited. Claude Code evaluates permission rules
+# deny → ask → allow (first match wins) BEFORE PreToolUse hooks and independently of the model,
+# and a user-scope deny cannot be overridden by a project-level allow — that makes these lists
+# the OUTER belt; the argv-parsing agent-hooks (block-no-verify, block-raw-pr-merge, …) stay the
+# deep layer underneath (they parse flags anywhere in argv, which prefix patterns cannot).
+#
+# The baseline is deliberately CONSERVATIVE and word-boundary precise: a deny rule that
+# false-positives on legitimate commands teaches agents to route around the belt — worse than no
+# rule. Verified matcher semantics (code.claude.com/docs/en/permissions, fetched 2026-07-01):
+#   - ``Bash(x:*)`` — ``:*`` is the trailing word-boundary wildcard, equal to ``Bash(x *)``:
+#     matches ``x`` and ``x <args>`` but never ``x2`` (boundary = space or end-of-string).
+#   - a mid-pattern ``*`` matches ANY char sequence including spaces; literal `` --flag `` around
+#     it keeps the boundary (``git push * --force *`` matches ``git push origin main --force``
+#     but NOT ``git push --force-with-lease …`` — ``-with-lease`` breaks the boundary).
+#   - compound commands are matched per subcommand (``a && b`` evaluates both independently).
+#
+# WHAT STAYS HOOK-ONLY (and why): ``git commit --no-verify`` with the flag in a LATER position
+# (``git commit -m "…" --no-verify``, the common shape) cannot be pattern-matched safely — the
+# only pattern that would catch it (``Bash(git commit *--no-verify*)``) also matches a commit
+# MESSAGE that merely mentions the flag (this ecosystem writes such messages), a guaranteed
+# false positive. The flag-first prefix rule below is the safe subset; the ``block-no-verify``
+# agent-hook (argv-level) remains the authoritative guard. The same applies to wrapper bypasses
+# in general (``sh -c '…'``, env-runner wrappers): prefix rules anchor at the command start, so
+# the hooks stay the deep layer — permissions and hooks are complementary, not redundant.
+CLAUDE_CODE_DENY_RULES: tuple[str, ...] = (
+    # raw PR merges are banned machine-wide — merges go through `gh ship` (the gated delegator)
+    "Bash(gh pr merge:*)",
+    # force pushes: flag-first, mid-position AND end-anchored forms; `--force-with-lease` (the
+    # safe force) is deliberately NOT matched — the word boundary after `--force` / `-f` excludes
+    # it. The end-anchored forms (`… * --force`) are listed EXPLICITLY even though the docs say a
+    # trailing ` *` also matches end-of-string — the common `git push origin main --force` must
+    # not hinge on that one reading of the matcher (review finding, rig-cli#100).
+    "Bash(git push --force:*)",
+    "Bash(git push * --force *)",
+    "Bash(git push * --force)",
+    "Bash(git push -f:*)",
+    "Bash(git push * -f *)",
+    "Bash(git push * -f)",
+    # hook-bypass commits — flag-first prefix only (see the module note above for the gap)
+    "Bash(git commit --no-verify:*)",
+    # no legitimate agent flow removes files as root
+    "Bash(sudo rm:*)",
+    # screenshots go through Playwright/CDP; `screencapture` black-frames windows on other
+    # Spaces and trips macOS Screen Recording grants (the documented hard rule)
+    "Bash(screencapture:*)",
+)
+
+# ask = sometimes-legit: force a prompt (tg-ctl relays it to the operator's phone), don't block.
+CLAUDE_CODE_ASK_RULES: tuple[str, ...] = (
+    # broad pattern-kills have nuked OTHER sessions' work before (never-broad-pkill doctrine);
+    # reaping one's OWN strays is legit — hence ask, not deny
+    "Bash(pkill:*)",
+    "Bash(killall:*)",
+    # `git reset --hard` has destroyed uncommitted work before; flag-first, mid + end-anchored
+    "Bash(git reset --hard:*)",
+    "Bash(git reset * --hard *)",
+    "Bash(git reset * --hard)",
+)
+
+# The baked rule baseline per harness kind. Only claude-code: its rule syntax above is the one
+# whose matcher semantics we verified against the vendor docs; other kinds are absent (empty).
+DEFAULT_RULES: dict[str, dict[str, tuple[str, ...]]] = {
+    "claude-code": {"deny": CLAUDE_CODE_DENY_RULES, "ask": CLAUDE_CODE_ASK_RULES},
+}
+
+# Where each rule list lives in the harness settings file. claude-code only: opencode's
+# ``permission.bash`` object DOES accept "deny"/"ask" values, but its glob dialect for
+# multi-word / mid-wildcard rules is UNVERIFIED — a deny you believe in but that never matches
+# is worse than a reported gap, so it is recorded N/A (mirroring HARNESS_ALLOWLIST_NA) until
+# someone verifies the dialect and adds a renderer.
+HARNESS_RULE_CONTAINERS: dict[str, dict[str, tuple[str, ...]]] = {
+    "claude-code": {"deny": ("permissions", "deny"), "ask": ("permissions", "ask")},
+}
+HARNESS_RULES_NA: dict[str, str] = {
+    "opencode": (
+        "permission.bash accepts deny/ask values, but its glob dialect for multi-word rules "
+        "is unverified — not provisioned until proven"
+    ),
+}
+
+
+def resolve_rules(kind: str, role: str, override: list[str] | None) -> list[str]:
+    """The effective ``role`` (``deny``/``ask``) rule list for harness ``kind``.
+
+    ``override`` (the config's ``permissions.deny``/``permissions.ask``) REPLACES the baked
+    default wholesale — lists are atomic decisions, mirroring ``permissions.tools`` — so an
+    explicit ``[]`` disables the baseline. ``None`` (absent key) selects the default. Deduped,
+    first-seen order, so the merged container stays stable across re-applies. A kind without
+    rule containers has no defaults (and the plan drops a configured override with a note).
+    """
+    base = list(override) if override is not None else list(DEFAULT_RULES.get(kind, {}).get(role, ()))
+    out: list[str] = []
+    seen: set[str] = set()
+    for rule in base:
+        if rule not in seen:
+            seen.add(rule)
+            out.append(rule)
+    return out
+
+
 def resolve_tools(
     tools: list[str] | None,
     extra: list[str] | None,

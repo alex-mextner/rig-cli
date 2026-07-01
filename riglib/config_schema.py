@@ -307,17 +307,32 @@ _HARNESS_BLOCK = Block(
 )
 
 _PERMISSIONS_BLOCK = Block(
-    doc="pre-allow our ecosystem CLIs + safe external dev tools in the harness allowlist.",
+    doc="reconcile the harness permissions layer: the command allowlist + the deny/ask rule baselines.",
     leaves={
-        "enabled": Leaf("boolean", "provision the command allowlist", default=True),
+        "enabled": Leaf("boolean", "provision the harness permissions layer", default=True),
         "kind": Leaf(
             "string",
-            "which harness's allowlist to provision",
+            "which harness's permissions to provision",
             enum=("claude-code", "opencode"),
         ),
         "tools": Leaf("array", "command names to pre-allow (replaces the default set)", items_type="string"),
         "extra": Leaf("array", "command names to ADD on top of the set", items_type="string"),
         "disable": Leaf("array", "command names to drop from rig's desired set", items_type="string"),
+        "allow": Leaf(
+            "array",
+            "raw permission-rule entries asserted present in the allow list, on TOP of the tool-derived ones",
+            items_type="string",
+        ),
+        "deny": Leaf(
+            "array",
+            "permission-rule entries asserted present in the deny list (REPLACES the baked baseline)",
+            items_type="string",
+        ),
+        "ask": Leaf(
+            "array",
+            "permission-rule entries asserted present in the ask list (REPLACES the baked baseline)",
+            items_type="string",
+        ),
         "settings_path": Leaf("string", "override the settings file (.json)"),
     },
 )

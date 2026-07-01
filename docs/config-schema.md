@@ -60,7 +60,7 @@ git_hooks: { ... }
 ci: { ... }
 mcp: { ... }
 harness: { ... }              # agent harness auto/permission provisioning (auto-mode)
-permissions: { ... }          # per-harness command allowlist (pre-allow our CLIs + safe dev tools), default ON
+permissions: { ... }          # per-harness permissions layer (allowlist + deny/ask baselines), default ON
 models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
 agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
 github: { ... }               # repo settings: ruleset/merge/ghas/actions via gh api + browser via agent-browser, default ON
@@ -380,14 +380,19 @@ no-op; a drifted managed command (e.g. the checkout path moved) is rewritten in 
 
 ## `permissions`
 
-Provisions the **per-harness command ALLOWLIST** so our ecosystem CLIs and the safe-to-allow
-external dev tools are **pre-allowed** — the agent never stops to ask permission for a
-known-safe command. **Default ON**: an absent/empty `permissions:` block still provisions the
-default tool set, so `rig init`/`rig apply` on a clean machine pre-allows everything below with
-no config at all. The list is **config-driven** — `tools` REPLACES the default set, `extra`
-adds, `disable` removes. The merge is **additive** — every existing allowlist entry (auto-mode,
-your accumulated list) is preserved, the desired entries are merged in, deduped; a re-apply is a
-no-op.
+Reconciles the **per-harness permissions layer** (rig-cli#100): the command **ALLOWLIST** — our
+ecosystem CLIs and the safe-to-allow external dev tools **pre-allowed**, so the agent never
+stops to ask permission for a known-safe command — plus, for claude-code, the conservative
+**deny/ask rule baselines** (the outer enforcement belt: the harness evaluates
+deny → ask → allow *before* PreToolUse hooks and independently of the model; the argv-parsing
+agent-hook guards stay the deep layer underneath). **Default ON**: an absent/empty
+`permissions:` block still provisions the default tool set AND the deny/ask baselines, so
+`rig init`/`rig apply` on a clean machine gets both with no config at all. Everything is
+**config-driven** — `tools` REPLACES the default set, `extra` adds, `disable` removes; `allow`
+adds RAW rule entries on top of the tool-derived allowlist; `deny`/`ask` REPLACE the baked rule
+baselines (an explicit `[]` disables one). The merge is **additive** — every existing entry in
+every list (auto-mode, your accumulated allowlist, your own deny/ask rules) is preserved, the
+desired entries are merged in, deduped; a re-apply is a no-op.
 
 **Scope of the default set, honestly.** rig pre-allows the *tools* in the list at the
 command-prefix level — for claude-code that is `Bash(<tool>:*)`, which DOES cover every subcommand
@@ -404,25 +409,52 @@ override the tool list.
 
 ```yaml
 permissions:
-  enabled: true                # provision the allowlist (false → leave the harness config alone)
+  enabled: true                # provision the permissions layer (false → leave the harness config alone)
   # kind: opencode             # target opencode's allowlist (default: follow harness.kind / claude-code)
   # tools: [tg, review, draw, 3d, rig, task, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES the default set
   # extra: [kubectl]           # ADD to the (default or explicit) set
   # disable: [gitleaks]        # drop from rig's desired set (won't ADD it; never removes a live entry)
+  # allow:                     # RAW rule entries asserted present in the allow list (on TOP of tools)
+  #   - WebFetch
+  #   - "Read(//private/tmp/reports/**)"
+  # deny: []                   # REPLACES the baked deny baseline ([] disables it; absent → baseline)
+  # ask: []                    # REPLACES the baked ask baseline ([] disables it; absent → baseline)
   # settings_path: ~/.claude/settings.json   # override the per-harness settings file (rare; .json)
 ```
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | provision the allowlist (set `false` to leave the harness config untouched) |
-| `kind` | `claude-code` \| `opencode` | follows `harness.kind`, else `claude-code` | which harness's allowlist to provision. `opencode` is supported here independently of `harness.kind` (whose auto-mode write reserves it); `codex`/`gemini`/`pi` are rejected (N/A) |
+| `enabled` | bool | `true` | provision the permissions layer (set `false` to leave the harness config untouched) |
+| `kind` | `claude-code` \| `opencode` | follows `harness.kind`, else `claude-code` | which harness's permissions to provision. `opencode` is supported here independently of `harness.kind` (whose auto-mode write reserves it); `codex`/`gemini`/`pi` are rejected (N/A) |
 | `tools` | str[] | the default set | the command names to pre-allow; **replaces** the default set wholesale |
 | `extra` | str[] | `[]` | command names to ADD on top of the (default or explicit) set |
 | `disable` | str[] | `[]` | command names to drop from rig's **desired** set, so rig won't ADD them. NB: this is additive-only — it does NOT delete an entry already in your allowlist (rig never removes the user's entries; that stays your call) |
+| `allow` | str[] | `[]` | RAW permission-rule entries (`Tool` or `Tool(specifier)`, e.g. `WebFetch`, `Bash(kubectl get:*)`, `Read(//tmp/**)`) asserted present in the allow list, on TOP of the tool-derived entries — this is how a hand-grown allowlist is adopted as declared config. claude-code only — see below |
+| `deny` | str[] | the baked deny baseline | rule entries asserted present in the deny list; **replaces** the baseline wholesale (`[]` disables it). claude-code only — see below |
+| `ask` | str[] | the baked ask baseline | rule entries asserted present in the ask list; **replaces** the baseline wholesale (`[]` disables it). claude-code only — see below |
 | `settings_path` | path (`.json`) | per-harness default | override the settings file to merge into (default: `~/.claude/settings.json` for claude-code, `~/.config/opencode/opencode.json` for opencode) |
 
 **Default tool set.** Our ecosystem CLIs — `tg`, `review`, `draw`, `3d`, `rig`, `task` — plus
 the external tools we lean on: `gh`, `git`, `rg`, `uv`, `bun`, `jq`, `gitleaks`.
+
+**Baked deny/ask baselines (claude-code, rig-cli#100).** Deliberately conservative and
+word-boundary precise — a deny rule that false-positives on legitimate commands teaches agents
+to route around the belt. Deny: `Bash(gh pr merge:*)` (merges go through `gh ship`),
+`Bash(git push --force:*)` + `Bash(git push * --force *)` + `Bash(git push * --force)` +
+`Bash(git push -f:*)` + `Bash(git push * -f *)` + `Bash(git push * -f)` (force pushes in
+flag-first, mid AND end-anchored positions; `--force-with-lease` is NOT matched — the word
+boundary excludes it), `Bash(git commit --no-verify:*)` (flag-first only: the flag-anywhere form
+cannot be pattern-matched without false-positiving on commit messages that merely mention the
+flag — the `block-no-verify` agent-hook remains the authoritative argv-level guard),
+`Bash(sudo rm:*)`, and `Bash(screencapture:*)` (screenshots go through Playwright/CDP). Ask
+(prompt, don't block): `Bash(pkill:*)`, `Bash(killall:*)`, `Bash(git reset --hard:*)` +
+`Bash(git reset * --hard *)` + `Bash(git reset * --hard)`. The full annotated list lives in
+`riglib/permissions.py`. For **opencode** the raw `allow`/`deny`/`ask` lists are **N/A**: its
+`permission.bash` object accepts deny/ask values, but its glob-key dialect is a DIFFERENT syntax
+from claude-code rule strings and is unverified for multi-word rules — a configured raw list
+under `kind: opencode` is dropped with a visible plan note, never guessed at (a claude-shaped
+rule written as an opencode glob key would be a bogus entry that never matches). The
+tool-derived allowlist (`tools`/`extra`/`disable`) still works for opencode.
 
 **What gets written, per harness (keyed off `harness.kind`).**
 
@@ -444,7 +476,11 @@ prior file is backed up per `defaults.on_conflict` before converging; a file tha
 JSON is backed up before being rewritten for any policy other than `skip`, which leaves it
 untouched and surfaces the drift). `rig status` reports a desired entry that is absent as `missing`
 drift `rig apply` would add; a wrong-shape file (non-object root, non-array/non-object container) as
-`modified` (matching the error `apply` would raise — status and apply agree on what to fix).
+`modified` (matching the error `apply` would raise — status and apply agree on what to fix); and a
+user entry BEYOND the rig-managed baseline as `extra` drift — reported, **never deleted** (allow
+extras are summarized into one counted item, since a live allowlist accumulates hundreds of
+hand-approved entries; deny/ask extras are named per entry). To silence an allow `extra`, adopt the
+entry into `permissions.allow` in the config or prune it from the settings file by hand.
 
 ---
 
