@@ -1,50 +1,44 @@
-# Dependency review — block a PR that ADDS a vulnerable or disallowed-license dependency.
+# Dependency audit — fail on a dependency with a known high+ vulnerability (free, no GHAS).
 #
-# Standard engine = actions/dependency-review-action (GitHub's official). It diffs the
-# dependency manifests/lockfiles in the PR and fails on (a) newly introduced dependencies
-# with known vulnerabilities at/above a severity threshold, and (b) dependencies whose
-# license is not allowed. This is the PR-time, "don't let it IN" complement to the audit
-# scanners in ../sast/ and ../secret-scan/ (which scan what's already there).
+# WHY NOT actions/dependency-review-action: that action requires GitHub Advanced Security
+# (GHAS, paid) on PRIVATE repos — it hard-fails "Dependency review is not supported on this
+# repository … requires GitHub Advanced Security" even with the (free) Dependency Graph ON.
+# We dropped it. Instead this gate runs dep-audit.sh: the native auditor for each ecosystem
+# (bun / npm / pnpm / yarn audit, pip-audit, cargo-audit, govulncheck). It needs NO GitHub
+# feature, audits the WHOLE tree (not just the PR diff), and draws from the same advisory
+# databases — so vuln coverage is equal-or-better than the GHAS action.
 #
-# AVAILABILITY: dependency-review needs the GitHub Dependency Graph. It's ON for PUBLIC
-# repos; for PRIVATE repos it requires GitHub Advanced Security (Settings -> Code security
-# -> Dependency graph). Without it, this action errors — use `bun audit` / `npm audit` /
-# `pip-audit` / `cargo audit` in a plain CI step instead (see README).
+# ONE GAP vs the GHAS action: it does NOT enforce a LICENSE allow/deny policy. If you need
+# that, add an OSS license gate (license-checker / cargo-deny / pip-licenses) — see the
+# ci/license-policy/ template and agent-tools#21.
 #
-# INSTALL: copy to .github/workflows/dependency-review.yml.
-#
-# KNOBS: fail-on-severity, and license allow/deny lists below.
-#
-# Triggered by `pull_request` (read-only token) — safe; the action reads the dependency
-# diff from the PR, runs no PR code.
+# INSTALL: copy to .github/workflows/dependency-review.yml. Add the toolchain setup your
+# repo's ecosystems need (see the commented examples below). If your repo already has its
+# own dependency-audit job, you don't need this one.
 
 name: dependency-review
 
 on:
   pull_request:
+  push:
+    branches: ["**"]
 
 permissions:
   contents: read
-  # `comment-summary-in-pr` posts a summary comment — that needs write. Drop this to
-  # `contents: read` only if you also set `comment-summary-in-pr: never`.
-  pull-requests: write
 
 jobs:
-  dependency-review:
+  dependency-audit:
     name: dependency-review
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Dependency review
-        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
-        with:
-          # Fail if a newly added dependency has a vuln at/above this severity.
-          fail-on-severity: high
-          # License policy — set ONE of these (allow-list is stricter). Examples:
-          # allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC
-          deny-licenses: AGPL-3.0, GPL-2.0, GPL-3.0
-          # To waive a specific known advisory, list its GHSA id(s):
-          # allow-ghsas: GHSA-xxxx-xxxx-xxxx
-          comment-summary-in-pr: on-failure
+      # rig-cli is a Python project — dep-audit.sh needs pip-audit to scan pyproject.toml.
+      - name: Install pip-audit
+        run: pipx install pip-audit==2.10.1
+
+      - name: Dependency audit (OSS — whole-tree vulns, fail on high+)
+        # dep-audit.sh fails CLOSED if it finds a manifest whose auditor isn't installed
+        # (set DEP_AUDIT_ALLOW_MISSING=1 to intentionally skip a missing ecosystem).
+        run: sh ci/dependency-review/dep-audit.sh
