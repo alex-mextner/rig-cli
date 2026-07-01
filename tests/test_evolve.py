@@ -15,6 +15,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -936,20 +937,30 @@ def test_render_page_exposes_health_bucket_controls_and_treemap_probe_hooks(hist
     assert "lastPanAt" in page
     assert "selectedClass" in page
     assert "SYMBOL_ZOOM_THRESHOLD" in page
+    assert "const zoom = currentZoom();" in page
     assert "function renderSymbolOverlay" in page
+    assert "function symbolOverlayReason" in page
+    assert "function appendSymbolOverlayNote" in page
     assert "function renderRelationshipArcs" in page
     assert "relationshipArc" in page
     assert "'data-testid':'relationship-arc'" in page
     assert "'data-relation':arc.relation" in page
     assert "'marker-end':marker" in page
     assert "rect.w * zoom" in page
-    assert "baseFont / zoom" in page
+    assert "renderSymbolOverlay(svg, targetRect, selectedSymbols, zoom)" in page
+    assert "if (!symbolFrame)" in page
+    assert "data-testid':'symbol-overlay-empty'" in page
+    assert "Zoom to " in page
+    assert "Need at least 88x54 px" in page
+    assert "if (r.role === 'leaf' && r.w > 32 && r.h > 14) addWrappedLabel(svg, r, r.node.name, 'leafLabel', 2);" in page
+    assert "'font-size':fontSizePx / zoom" in page
+    assert "'font-size':8 / activeZoom" in page
     assert "function visibleLabelRect" in page
     assert "labelRect.w * zoom" in page
     assert "labelRect.w < r.w * 0.92" in page
     assert "minScreenW" in page
     assert "maxVisibleLines" in page
-    assert "clean.length > chars * maxLineCount" in page
+    assert "klass === 'leafLabel' && clean.length > chars * maxLineCount" in page
     assert "selectedSymbolError" in page
     assert "Symbol provider error:" in page
     assert "Open Current to inspect live symbols." in page
@@ -974,6 +985,124 @@ def test_render_page_exposes_health_bucket_controls_and_treemap_probe_hooks(hist
     assert "sources: " not in page
     assert "prefers-reduced-motion" in page
     assert "requestAnimationFrame" in page
+
+
+def _run_evolve_js_contract(script: str) -> dict[str, object]:
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout.strip())
+
+
+def test_evolve_js_contract_rerenders_on_any_view_change():
+    script = textwrap.dedent(
+        """
+        let renderCount = 0;
+        let symbolFrame = 0;
+        let view = {x: 0, y: 0, w: 100, h: 100};
+        let world = {w: 100, h: 100};
+        function currentZoom() {
+          if (!view || !world.w) return 1;
+          return Math.max(1, world.w / Math.max(1, view.w));
+        }
+        function updateZoomHud() {}
+        function renderTreemap() { renderCount += 1; }
+        function setView(next) {
+          if (!next) return;
+          const minW = Math.max(32, world.w / 12);
+          const minH = Math.max(32, world.h / 12);
+          const w = Math.min(world.w, Math.max(minW, next.w));
+          const h = Math.min(world.h, Math.max(minH, next.h));
+          const x = Math.min(Math.max(0, next.x), Math.max(0, world.w - w));
+          const y = Math.min(Math.max(0, next.y), Math.max(0, world.h - h));
+          view = {x, y, w, h};
+          updateZoomHud();
+          if (!symbolFrame) {
+            symbolFrame = 1;
+            renderTreemap();
+            symbolFrame = 0;
+          }
+        }
+        setView({x: 10, y: 10, w: 50, h: 50});
+        console.log(JSON.stringify({renderCount, zoom: currentZoom(), view}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out["renderCount"] == 1
+    assert out["zoom"] == 2
+    assert out["view"]["w"] == 50
+
+
+def test_evolve_js_contract_keeps_frame_labels_and_truncates_leaf_labels():
+    script = textwrap.dedent(
+        """
+        const captured = [];
+        let view = {x: 0, y: 0, w: 200, h: 100};
+        let world = {w: 200, h: 100};
+        function currentZoom() { return 1; }
+        function visibleLabelRect(r) { return r; }
+        function wrapByChars(text, chars, maxLines) {
+          const clean = text.replace(/\\s+/g, ' ').trim();
+          if (!clean) return [];
+          const chunks = [];
+          let rest = clean;
+          while (rest.length && chunks.length < maxLines) {
+            chunks.push(rest.slice(0, chars));
+            rest = rest.slice(chars);
+          }
+          if (rest && chunks.length) chunks[chunks.length - 1] = chunks[chunks.length - 1].replace(/.$/, '…');
+          return chunks;
+        }
+        function el(name, attrs, text) {
+          return {
+            name,
+            attrs: {...attrs},
+            textContent: text || '',
+            children: [],
+            appendChild(child) { this.children.push(child); },
+          };
+        }
+        function addWrappedLabel(svg, r, text, klass, maxLines) {
+          const labelRect = visibleLabelRect(r);
+          if (!labelRect) return;
+          const zoom = currentZoom();
+          if (klass !== 'symbolLabel' && (labelRect.w < r.w * 0.92 || labelRect.h < r.h * 0.92)) return;
+          const minScreenW = klass === 'frameLabel' ? 78 : (klass === 'leafLabel' ? 96 : (klass === 'symbolLabel' ? 52 : 112));
+          const minScreenH = klass === 'frameLabel' ? 18 : (klass === 'leafLabel' ? 20 : (klass === 'symbolLabel' ? 14 : 24));
+          if (labelRect.w * zoom < minScreenW || labelRect.h * zoom < minScreenH) return;
+          const fontSizePx = klass === 'frameLabel' ? 10 : (klass === 'symbolLabel' ? 8 : 9);
+          const pad = 4 / zoom;
+          const lineHeight = (fontSizePx + 1) / zoom;
+          const maxVisibleLines = Math.max(1, Math.floor((labelRect.h * zoom - 4) / (fontSizePx + 1)));
+          const maxLineCount = Math.min(maxLines, maxVisibleLines, 2);
+          const label = el('text', {x:labelRect.x + pad, y:labelRect.y + (fontSizePx + 2) / zoom, class:klass, 'font-size':fontSizePx / zoom});
+          const chars = Math.max(2, Math.floor((labelRect.w * zoom - 8) / (klass === 'symbolLabel' ? 5.4 : 7.2)));
+          const clean = String(text || '').replace(/\\s+/g, ' ').trim();
+          if (klass === 'leafLabel' && clean.length > chars * maxLineCount) return;
+          const lines = wrapByChars(clean, chars, maxLineCount);
+          lines.forEach((line, i) => {
+            const tspan = el('tspan', {x:labelRect.x + pad, dy:i ? lineHeight : 0}, line);
+            label.appendChild(tspan);
+          });
+          svg.appendChild(label);
+        }
+        const svg = {children: [], appendChild(node) { this.children.push(node); }};
+        addWrappedLabel(svg, {x: 0, y: 0, w: 120, h: 28}, 'A very long directory label that should still render', 'frameLabel', 2);
+        addWrappedLabel(svg, {x: 0, y: 0, w: 120, h: 28}, 'A very long file label that should be dropped', 'leafLabel', 2);
+        console.log(JSON.stringify({
+          count: svg.children.length,
+          frameClass: svg.children[0]?.attrs?.class,
+          frameText: svg.children[0]?.children?.[0]?.textContent || svg.children[0]?.textContent || '',
+        }));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out["count"] == 1
+    assert out["frameClass"] == "frameLabel"
+    assert out["frameText"].startswith("A very long")
 
 
 def test_snapshot_payload_uses_head_keyed_ttl_cache(history_repo: Path):

@@ -406,10 +406,13 @@ def _build_html(repo_root: Path) -> str:
   .frame:hover {{ stroke:var(--fg); stroke-width:2; }}
   .frame.selected {{ stroke:var(--accent); stroke-width:3; }}
   .tile:focus-visible,.frame:focus-visible,.bar:focus-visible {{ outline:2px solid var(--focus); outline-offset:2px; stroke:var(--focus); stroke-width:3; }}
-  .label {{ fill:var(--fg); font-size:9px; pointer-events:none; }}
-  .frameLabel {{ fill:#cbd5e1; font-size:10px; font-weight:650; pointer-events:none; }}
+  .label {{ fill:var(--fg); pointer-events:none; }}
+  .leafLabel {{ fill:var(--fg); pointer-events:none; }}
+  .frameLabel {{ fill:#cbd5e1; font-weight:650; pointer-events:none; }}
   .symbolTile {{ fill:rgba(125,211,252,.24); stroke:rgba(125,211,252,.8); stroke-width:1; pointer-events:none; }}
-  .symbolLabel {{ fill:#dff6ff; font-size:8px; pointer-events:none; }}
+  .symbolLabel {{ fill:#dff6ff; pointer-events:none; }}
+  .symbolOverlayNote rect {{ fill:rgba(15,23,42,.88); stroke:rgba(125,211,252,.55); stroke-width:1; }}
+  .symbolOverlayNote text {{ fill:#dff6ff; pointer-events:none; }}
   .relationshipArcShadow,.relationshipArc,.relationshipArcGlow {{ fill:none; stroke-linecap:round; pointer-events:none; }}
   .relationshipArcShadow {{ stroke:rgba(0,0,0,.46); stroke-width:5; }}
   .relationshipArcGlow {{ stroke-width:7; opacity:.18; }}
@@ -767,10 +770,11 @@ function renderTreemap() {{
   const previousWorld = world;
   world = {{w, h}};
   if (!view || previousWorld.w !== w || previousWorld.h !== h) resetView();
+  const zoom = currentZoom();
   const rects = layoutTree(tree, 0, 0, w, h, 0);
   root.dataset.layout = 'squarified';
   root.dataset.bucket = bucket;
-  root.innerHTML = `<svg viewBox="${{view.x}} ${{view.y}} ${{view.w}} ${{view.h}}" data-testid="treemap-canvas" data-layout="squarified" data-bucket="${{escapeHtml(bucket)}}"></svg><div class="zoomHud" id="zoomHud" aria-hidden="true">${{Math.round(currentZoom()*100)}}%</div>`;
+  root.innerHTML = `<svg viewBox="${{view.x}} ${{view.y}} ${{view.w}} ${{view.h}}" data-testid="treemap-canvas" data-layout="squarified" data-bucket="${{escapeHtml(bucket)}}"></svg><div class="zoomHud" id="zoomHud" aria-hidden="true">${{Math.round(zoom*100)}}%</div>`;
   const svg = root.firstChild;
   const rectByPath = new Map();
   rects.forEach(r => {{
@@ -805,12 +809,13 @@ function renderTreemap() {{
     tile.addEventListener('keydown', (ev) => handleTileKey(ev, r.node, tile));
     svg.appendChild(tile);
     if (r.node.path) rectByPath.set(r.node.path, r);
+    if (r.role === 'leaf' && r.w > 32 && r.h > 14) addWrappedLabel(svg, r, r.node.name, 'leafLabel', 2);
     if (isFrame && r.w > 40 && r.h > 16) addWrappedLabel(svg, r, r.node.name, 'frameLabel', 2);
   }});
   renderRelationshipArcs(svg, rectByPath);
-  if (selected && selected.path && selectedSymbols && currentZoom() >= SYMBOL_ZOOM_THRESHOLD) {{
+  if (selected && selected.path && selectedSymbols) {{
     const targetRect = rectByPath.get(selected.path);
-    if (targetRect) renderSymbolOverlay(svg, targetRect, selectedSymbols);
+    if (targetRect) renderSymbolOverlay(svg, targetRect, selectedSymbols, zoom);
   }}
   bindPanZoom(root, svg);
   updateZoomHud();
@@ -1011,7 +1016,7 @@ function setView(next) {{
   const svg = qs('#map svg');
   if (svg) svg.setAttribute('viewBox', `${{x}} ${{y}} ${{w}} ${{h}}`);
   updateZoomHud();
-  if (selectedSymbols && selected && currentZoom() >= SYMBOL_ZOOM_THRESHOLD && !symbolFrame) {{
+  if (!symbolFrame) {{
     symbolFrame = requestAnimationFrame(() => {{
       symbolFrame = 0;
       renderTreemap();
@@ -1141,19 +1146,19 @@ function addWrappedLabel(svg, r, text, klass, maxLines) {{
   if (!labelRect) return;
   const zoom = currentZoom();
   if (klass !== 'symbolLabel' && (labelRect.w < r.w * 0.92 || labelRect.h < r.h * 0.92)) return;
-  const minScreenW = klass === 'frameLabel' ? 78 : (klass === 'symbolLabel' ? 52 : 112);
-  const minScreenH = klass === 'frameLabel' ? 18 : (klass === 'symbolLabel' ? 14 : 24);
+  const minScreenW = klass === 'frameLabel' ? 78 : (klass === 'leafLabel' ? 96 : (klass === 'symbolLabel' ? 52 : 112));
+  const minScreenH = klass === 'frameLabel' ? 18 : (klass === 'leafLabel' ? 20 : (klass === 'symbolLabel' ? 14 : 24));
   if (labelRect.w * zoom < minScreenW || labelRect.h * zoom < minScreenH) return;
-  // ViewBox zoom scales SVG text; convert fixed screen-pixel label metrics back to world units.
+  // ViewBox zoom scales SVG coordinates; convert label font sizes back into world units.
+  const fontSizePx = klass === 'frameLabel' ? 10 : (klass === 'symbolLabel' ? 8 : 9);
   const pad = 4 / zoom;
-  const baseFont = klass === 'symbolLabel' ? 8 : (klass === 'frameLabel' ? 10 : 9);
-  const lineHeight = 10 / zoom;
-  const maxVisibleLines = Math.max(1, Math.floor((labelRect.h * zoom - 4) / 10));
+  const lineHeight = (fontSizePx + 1) / zoom;
+  const maxVisibleLines = Math.max(1, Math.floor((labelRect.h * zoom - 4) / (fontSizePx + 1)));
   const maxLineCount = Math.min(maxLines, maxVisibleLines, 2);
-  const label = el('text', {{x:labelRect.x + pad, y:labelRect.y + 11 / zoom, class:klass, 'font-size':Math.max(3, baseFont / zoom)}});
+  const label = el('text', {{x:labelRect.x + pad, y:labelRect.y + (fontSizePx + 2) / zoom, class:klass, 'font-size':fontSizePx / zoom}});
   const chars = Math.max(2, Math.floor((labelRect.w * zoom - 8) / (klass === 'symbolLabel' ? 5.4 : 7.2)));
   const clean = String(text || '').replace(/\\s+/g, ' ').trim();
-  if (klass === 'label' && clean.length > chars * maxLineCount) return;
+  if (klass === 'leafLabel' && clean.length > chars * maxLineCount) return;
   const lines = wrapByChars(clean, chars, maxLineCount);
   lines.forEach((line, i) => {{
     const tspan = el('tspan', {{x:labelRect.x + pad, dy:i ? lineHeight : 0}}, line);
@@ -1186,23 +1191,59 @@ function wrapByChars(text, chars, maxLines) {{
   return chunks;
 }}
 
-function renderSymbolOverlay(svg, rect, symbols) {{
+function symbolOverlayReason(rect, zoom, count) {{
+  if (zoom < SYMBOL_ZOOM_THRESHOLD) {{
+    return 'Zoom to ' + Math.round(SYMBOL_ZOOM_THRESHOLD * 100) + '% for symbols';
+  }}
+  const widthPx = Math.round(rect.w * zoom);
+  const heightPx = Math.round(rect.h * zoom);
+  return 'Need at least 88x54 px, now ' + widthPx + 'x' + heightPx + ' px for ' + count + ' symbols';
+}}
+
+function appendSymbolOverlayNote(svg, rect, reason, zoom) {{
+  const text = String(reason || '').trim();
+  if (!text || !rect) return;
+  const activeZoom = zoom || currentZoom();
+  const pad = 4 / activeZoom;
+  const height = 14 / activeZoom;
+  const width = Math.max(0, rect.w - pad * 2);
+  const x = rect.x + pad;
+  const y = rect.y + rect.h - pad - height;
+  const group = el('g', {{class:'symbolOverlayNote', 'data-testid':'symbol-overlay-empty'}});
+  group.appendChild(el('rect', {{x, y, width, height, rx:2}}));
+  group.appendChild(el('text', {{x:x + pad, y:y + 10 / activeZoom, 'font-size':8 / activeZoom}}, text));
+  svg.appendChild(group);
+}}
+
+function renderSymbolOverlay(svg, rect, symbols, zoom) {{
   const flat = flattenSymbols(symbols).slice(0, 80);
-  const zoom = currentZoom();
-  if (!flat.length || rect.w * zoom < 88 || rect.h * zoom < 54) return;
+  const activeZoom = zoom || currentZoom();
+  if (!flat.length || !rect) return;
+  const minWorldW = 88 / activeZoom;
+  const minWorldH = 54 / activeZoom;
+  const canFitOverlay = activeZoom >= SYMBOL_ZOOM_THRESHOLD && rect.w >= minWorldW && rect.h >= minWorldH;
+  if (!canFitOverlay) {{
+    appendSymbolOverlayNote(svg, rect, symbolOverlayReason(rect, activeZoom, flat.length), activeZoom);
+    return;
+  }}
   const total = Math.max(1, flat.reduce((sum, s) => sum + Math.max(1, s.size || 1), 0));
-  const pad = 4 / zoom;
-  const gap = 2 / zoom;
-  const minH = 12 / zoom;
+  const pad = 4 / activeZoom;
+  const gap = 2 / activeZoom;
+  const minH = 12 / activeZoom;
+  let rendered = 0;
   let y = rect.y + pad;
   flat.forEach(sym => {{
     const h = Math.max(minH, Math.min(rect.h - pad * 2, (rect.h - pad * 2) * Math.max(1, sym.size || 1) / total));
     if (y + h > rect.y + rect.h - pad) return;
     const r = {{x:rect.x + pad, y, w:Math.max(0, rect.w - pad * 2), h, node:sym}};
     svg.appendChild(el('rect', {{x:r.x, y:r.y, width:r.w, height:r.h, rx:2, class:'symbolTile', 'data-symbol-kind':sym.kind || ''}}));
-    if (r.w * zoom > 42 && r.h * zoom > 12) addWrappedLabel(svg, r, (sym.kind || 'symbol') + ' ' + sym.name, 'symbolLabel', 2);
+    if (r.w * activeZoom > 42 && r.h * activeZoom > 12) addWrappedLabel(svg, r, (sym.kind || 'symbol') + ' ' + sym.name, 'symbolLabel', 2);
+    rendered += 1;
     y += h + gap;
   }});
+  if (rendered < flat.length) {{
+    appendSymbolOverlayNote(svg, rect, 'Showing ' + rendered + ' of ' + flat.length + ' symbols', activeZoom);
+  }}
 }}
 
 function flattenSymbols(nodes) {{
