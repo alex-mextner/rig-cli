@@ -193,6 +193,7 @@ def _build_fake_agent_tools(root: Path) -> None:
         _write(disp / "hooks" / composer, "#!/usr/bin/env bash\nexec ../run-global-hooks\n", executable=True)
     _write(disp / "global-hooks.d" / "pre-commit" / "10-secret-scan", "#!/usr/bin/env bash\n", executable=True)
     _write(disp / "global-hooks.d" / "commit-msg" / "10-conventional-commit", "#!/usr/bin/env bash\n", executable=True)
+    _write(disp / "global-hooks.d" / "pre-push" / "10-protect-main", "#!/usr/bin/env bash\n", executable=True)
     _write(disp / "README.md", "# dispatcher\nglobal hooks\n")
 
     # the cc_hook_bridge dispatcher the hook-bridge wiring points at (its presence is checked by

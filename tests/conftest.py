@@ -251,6 +251,8 @@ def fake_agent_tools(tmp_path: Path) -> Path:
         _write(disp / "hooks" / composer, "#!/usr/bin/env bash\nexec ../run-global-hooks\n")
     _write(disp / "global-hooks.d" / "pre-commit" / "10-secret-scan", "#!/usr/bin/env bash\n")
     _write(disp / "global-hooks.d" / "commit-msg" / "10-conventional-commit", "#!/usr/bin/env bash\n")
+    # deliberately NOT executable: pins that the installer force-chmods +x fragments
+    _write(disp / "global-hooks.d" / "pre-push" / "10-protect-main", "#!/usr/bin/env bash\n")
     _write(disp / "README.md", "# dispatcher\nglobal hooks\n")
 
     # mcp — a CLEARLY-SYNTHETIC item ("fake-mcp"). It must MIRROR catalog reality: the real

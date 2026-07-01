@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -261,6 +262,83 @@ def test_dispatcher_fragments_filtered(fake_agent_tools, tmp_path, monkeypatch):
     # secret-scan fragment present, conventional-commit fragment filtered out
     assert (ghd / "pre-commit" / "10-secret-scan").is_file()
     assert not (ghd / "commit-msg" / "10-conventional-commit").exists()
+
+
+def _dispatcher_cfg(fake_agent_tools, repo, home, fragments=None):
+    """A minimal LoadedConfig with ONLY the dispatcher enabled (shared by the
+    pre-push fragment tests below)."""
+    disp = {
+        "enabled": True,
+        "dir": str(home / "ghd"),
+        "runner": str(home / "run-global-hooks"),
+        "set_global_hooks_path": False,
+        "install_local_retrofit_script": False,
+    }
+    if fragments is not None:
+        disp["fragments"] = fragments
+    return LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False},
+            "ci": {"enabled": False}, "mcp": {"enabled": False},
+            "git_hooks": {"dispatcher": disp},
+        },
+        repo_root=repo,
+    )
+
+
+def test_prepush_fragment_installed_executable_and_drifts(fake_agent_tools, tmp_path, monkeypatch):
+    """A PRE-PUSH event fragment (protect-main, HYP-856) is provisioned like any other
+    fragment: installed per-file + executable, and a deletion is config→disk drift.
+
+    Pins that the fragment pipeline is EVENT-GENERIC — nothing in install/drift may
+    special-case pre-commit; protect-main is the first shipped pre-push fragment."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setattr("riglib.actions.runner._set_git_global", lambda k, v: 0)
+    monkeypatch.setattr("riglib.actions.runner._git_global", lambda k: None)
+    monkeypatch.setattr("riglib.drift._git_global", lambda k: None)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_dispatcher_cfg(fake_agent_tools, repo, home), cat, project_type="unknown")
+    run_plan(plan)
+    frag = home / "ghd" / "pre-push" / "10-protect-main"
+    assert frag.is_file()
+    assert os.access(frag, os.X_OK)  # git ignores a non-executable hook
+    # content-modified drift is detected too (the pipeline is event-generic for
+    # BOTH directions, matching test_drift_ci_content_modified for ci items)
+    frag.write_text("#!/bin/sh\ntampered\n", encoding="utf-8")
+    report = detect(plan)
+    assert any(
+        i.category == "git_hooks" and i.direction == "modified" and "protect-main" in i.item
+        for i in report.items
+    )
+    frag.unlink()
+    report = detect(plan)
+    assert any(
+        i.category == "git_hooks" and i.direction == "missing" and "protect-main" in i.item
+        for i in report.items
+    )
+
+
+def test_prepush_fragment_disabled_via_config(fake_agent_tools, tmp_path, monkeypatch):
+    """`fragments.protect-main.enabled: false` (rig.yaml) opts the pre-push gate out
+    without touching the other events' fragments."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setattr("riglib.actions.runner._set_git_global", lambda k, v: 0)
+    monkeypatch.setattr("riglib.actions.runner._git_global", lambda k: None)
+    monkeypatch.setattr("riglib.drift._git_global", lambda k: None)
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _dispatcher_cfg(
+        fake_agent_tools, repo, home, fragments={"protect-main": {"enabled": False}}
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    run_plan(plan)
+    ghd = home / "ghd"
+    assert not (ghd / "pre-push" / "10-protect-main").exists()
+    assert (ghd / "pre-commit" / "10-secret-scan").is_file()  # others unaffected
 
 
 def test_drift_ci_content_modified(fake_agent_tools, tmp_path):
