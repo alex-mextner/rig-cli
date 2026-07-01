@@ -430,7 +430,8 @@ def run_sverklo(repo_root: Path, operation: str) -> tuple[str, str]:
 
     exe = shutil.which("sverklo")
     if not exe:
-        return "error", "sverklo CLI not found on PATH"
+        # sverklo is an optional external tool — not installed is not an error.
+        return "skipped", "sverklo CLI not found on PATH — skipping (optional tool)"
     if operation == "register":
         registered, detail = sverklo_registered(repo_root)
         if registered:
