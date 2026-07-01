@@ -191,18 +191,23 @@ AREAS: tuple[Area, ...] = (
         ),
     ),
     Area(
-        "permissions", "harness command allowlist",
-        "Pre-allow our ecosystem CLIs + safe external dev tools in the harness allowlist (no per-call prompts).",
+        "permissions", "harness permissions (allow / deny / ask)",
+        "Reconcile the harness permissions layer: pre-allow our CLIs + safe dev tools, and assert "
+        "the conservative deny/ask rule baselines (the outer belt under the agent-hooks).",
         (
             _opt("permissions.enabled", KIND_BOOL, True,
-                 "Provision the per-harness command allowlist so tg/review/draw/3d/rig/task + "
-                 "gh/git/rg/uv/bun/jq/gitleaks are pre-allowed (no permission prompt per call). "
-                 "Additive — merges into the existing allowlist, never clobbers. Off = leave it alone. "
-                 "GLOBAL-only (the allowlist file is per-machine) — never written to a repo rig.yaml."),
+                 "Provision the per-harness permissions layer: the command allowlist (tg/review/draw/"
+                 "3d/rig/task + gh/git/rg/uv/bun/jq/gitleaks pre-allowed, no per-call prompts) plus "
+                 "the deny/ask rule baselines (claude-code only; raw PR-merge, force-push, sudo rm, "
+                 "screencapture denied; pkill/killall/git reset --hard prompt). Additive — merges "
+                 "into the existing lists, never clobbers or removes the user's own entries. Off = "
+                 "leave it alone. GLOBAL-only (the settings file is per-machine) — never written to "
+                 "a repo rig.yaml."),
             _opt("permissions.kind", KIND_ENUM, "claude-code",
-                 "Which harness's allowlist to provision. opencode is supported here independently "
-                 "of harness.kind; codex/gemini have no additively-mergeable allowlist (N/A). "
-                 "The tool LIST (tools/extra/disable) is a list — edit it directly in the config file.",
+                 "Which harness's permissions to provision. opencode is supported for the ALLOWLIST "
+                 "independently of harness.kind (its deny/ask dialect is unverified → N/A); "
+                 "codex/gemini have no additively-mergeable allowlist (N/A). The lists "
+                 "(tools/extra/disable, allow/deny/ask) are edited directly in the config file.",
                  choices=("claude-code", "opencode")),
         ),
     ),

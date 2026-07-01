@@ -247,20 +247,27 @@ YAML
   pass "rig init --yes --apply installed skills + CI + dispatcher + harness skill links"
 
   # permissions (default-ON): the command allowlist lands in the harness settings.json with our
-  # ecosystem CLIs + safe dev tools pre-allowed (Bash(<tool>:*)). This is the security-sensitive
-  # default-on path — assert it actually wrote, not just that status is green.
+  # ecosystem CLIs + safe dev tools pre-allowed (Bash(<tool>:*)), AND the deny/ask rule baselines
+  # (rig-cli#100 — the outer belt) land alongside it. This is the security-sensitive default-on
+  # path — assert it actually wrote, not just that status is green.
   CCSET="$HOME/.claude/settings.json"
   [[ -f "$CCSET" ]] || fail "permissions: harness settings.json not written"
   # structural check (robust to JSON formatting), not a brittle grep of the pretty-printed text
-  python3 - "$CCSET" <<'PY' || fail "permissions: ecosystem CLIs + dev tools not in permissions.allow"
+  python3 - "$CCSET" <<'PY' || fail "permissions: allow tools / deny+ask baselines not in settings.json"
 import json, sys
-allow = set(json.load(open(sys.argv[1])).get("permissions", {}).get("allow", []))
+perms = json.load(open(sys.argv[1])).get("permissions", {})
+allow = set(perms.get("allow", []))
 # the full default set — our ecosystem CLIs + the safe external dev tools
 tools = ("tg", "review", "draw", "3d", "rig", "task", "gh", "git", "rg", "uv", "bun", "jq", "gitleaks")
 missing = {f"Bash({t}:*)" for t in tools} - allow
+# the deny/ask baselines (spot-check one loud rule each — the exact list is unit-tested)
+if "Bash(sudo rm:*)" not in set(perms.get("deny", [])):
+    missing.add("deny: Bash(sudo rm:*)")
+if "Bash(pkill:*)" not in set(perms.get("ask", [])):
+    missing.add("ask: Bash(pkill:*)")
 sys.exit(0 if not missing else (print("missing:", sorted(missing)) or 1))
 PY
-  pass "rig init --yes pre-allowed our CLIs + dev tools in permissions.allow"
+  pass "rig init --yes pre-allowed our CLIs + dev tools and asserted the deny/ask baselines"
 
   # tmux v2: the managed config + boot script (DEFECT 1) land on disk (dry-run skips only the
   # LIVE steps — plugin clone / launchctl load — not the artifact writes).

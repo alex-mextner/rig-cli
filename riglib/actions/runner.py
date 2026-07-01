@@ -761,16 +761,33 @@ def permissions_settings_file(action: Action) -> Path:
     return target if target.suffix == ".json" else target / "settings.json"
 
 
-def desired_permission_entries(action: Action) -> tuple[tuple[str, ...], str, list[str], str | None]:
-    """Return ``(key_path, container, entries, value)`` the allowlist should contain.
+@dataclass(frozen=True)
+class PermissionSpec:
+    """One desired permissions container: which list it is, where it lives, what must be in it.
 
-    Shared by the install handler and drift so both agree on the on-disk shape: where the
-    allowlist lives (``key_path`` dotted segments), whether it is a JSON ``"array"`` or
-    ``"object"``, the per-harness entry strings, and the object-form ``value`` (``"allow"``).
-    Reads the resolved tool list + kind straight off the action options (the plan resolved them),
-    so the harness module is consulted ONCE at plan time and the runner stays pure of config.
+    ``role`` is ``"allow"``/``"deny"``/``"ask"`` (drift keys its extras-reporting style off it);
+    ``container`` is ``"array"`` (claude-code) or ``"object"`` (opencode ``permission.bash``);
+    ``value`` is the object-form value per entry (``"allow"``), ``None`` for arrays.
     """
-    from ..permissions import HARNESS_ALLOWLISTS, desired_entries
+
+    role: str
+    key_path: tuple[str, ...]
+    container: str  # "array" | "object"
+    entries: tuple[str, ...]
+    value: str | None
+
+
+def desired_permission_specs(action: Action) -> list[PermissionSpec]:
+    """Every permissions container this action reconciles, in a fixed order (allow, deny, ask).
+
+    allow = the tool-derived allowlist entries + the config's raw ``allow_rules`` (the adopted
+    hand-grown baseline), deduped. deny/ask = the plan-resolved rule lists, present only for
+    harness kinds with VERIFIED rule containers (claude-code — see
+    ``riglib.permissions.HARNESS_RULE_CONTAINERS``). Shared by the install handler and drift so
+    apply and status can never diverge on what rig manages. Reads everything off the action
+    options (the plan resolved them), so the runner stays pure of config.
+    """
+    from ..permissions import HARNESS_ALLOWLISTS, HARNESS_RULE_CONTAINERS, desired_entries
 
     kind = str(action.options.get("kind", "claude-code"))
     try:
@@ -781,7 +798,24 @@ def desired_permission_entries(action: Action) -> tuple[tuple[str, ...], str, li
         # raw KeyError traceback out of the runner/drift.
         raise ValueError(f"no allowlist mechanism for harness kind {kind!r}") from None
     tools = [str(t) for t in action.options.get("tools", [])]
-    return spec.key_path, spec.container, desired_entries(kind, tools), spec.value
+    # defensive copy — we append the raw allow_rules below, and mutating whatever
+    # desired_entries returns would be fragile if it ever starts sharing/caching its list
+    allow_entries = list(desired_entries(kind, tools))
+    for raw in action.options.get("allow_rules", []) or []:
+        if str(raw) not in allow_entries:
+            allow_entries.append(str(raw))
+    specs = [PermissionSpec("allow", spec.key_path, spec.container, tuple(allow_entries), spec.value)]
+    containers = HARNESS_RULE_CONTAINERS.get(kind, {})
+    # emit the deny/ask specs whenever the kind HAS the container — even with EMPTY entries
+    # (config `deny: []`): rig still manages the container, so a previously-applied baseline
+    # left on disk shows up as per-entry extras instead of silently vanishing from status
+    # (codex review finding, rig-cli#100).
+    for role in ("deny", "ask"):
+        if role not in containers:
+            continue
+        rules = [str(r) for r in action.options.get(f"{role}_rules", []) or []]
+        specs.append(PermissionSpec(role, containers[role], "array", tuple(rules), None))
+    return specs
 
 
 def _container_at(data: dict, key_path: tuple[str, ...]) -> tuple[dict, str]:
@@ -804,25 +838,65 @@ def _container_at(data: dict, key_path: tuple[str, ...]) -> tuple[dict, str]:
     return cur, key_path[-1]
 
 
+def _merge_permission_container(data: dict, ps: PermissionSpec) -> int:
+    """Merge ONE desired container into ``data`` (ADDITIVE) — returns how many entries were added.
+
+    - array form: append each missing entry, order-stable — the user's entries stay first.
+    - object form: set each missing entry KEY → ``ps.value`` only when the key is absent (never
+      downgrade a user's ``"deny"``/``"ask"`` override on an allow entry — that is the user's
+      call, not rig's; drift surfaces it as ``modified`` instead).
+
+    Raises ``ValueError`` on a shape mismatch (non-dict parent, non-array/non-object container);
+    the caller turns that into an action error — never a blind overwrite of the user's data.
+    """
+    parent, leaf = _container_at(data, ps.key_path)
+    dotted = ".".join(ps.key_path)
+    existing = parent.get(leaf)
+    added = 0
+    if ps.container == "array":
+        if existing is None:
+            existing = []
+        if not isinstance(existing, list):
+            raise ValueError(f"'{dotted}' is not an array")
+        # membership over the STRING entries only — a hand-edited list can carry non-string
+        # junk (an object would even make set(existing) raise TypeError). Junk is preserved
+        # (rig never deletes) and drift reports it as `modified`; apply just works around it.
+        present = {e for e in existing if isinstance(e, str)}
+        for entry in ps.entries:
+            if entry not in present:
+                existing.append(entry)
+                present.add(entry)
+                added += 1
+    else:  # object form — entry KEY → value, only when the key is absent
+        if existing is None:
+            existing = {}
+        if not isinstance(existing, dict):
+            raise ValueError(f"'{dotted}' is not an object")
+        for entry in ps.entries:
+            if entry not in existing:
+                existing[entry] = ps.value
+                added += 1
+    parent[leaf] = existing
+    return added
+
+
 def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
-    """Merge the per-harness command allowlist into the harness settings JSON — ADDITIVE.
+    """Merge the per-harness permissions layer into the harness settings JSON — ADDITIVE.
 
-    The invariant this enforces (and the tests assert): every existing allowlist entry is
-    PRESERVED, the desired ecosystem/external entries are MERGED IN, the result is DEDUPED, and a
+    One action reconciles EVERY container the plan resolved (rig-cli#100): the ``allow`` list
+    (tool-derived entries + adopted raw entries) and, for claude-code, the ``deny``/``ask`` rule
+    baselines. The invariant this enforces (and the tests assert): every existing entry in every
+    container is PRESERVED, the desired entries are MERGED IN, the result is DEDUPED, and a
     re-apply with the same config is a true no-op. The accumulated ``permissions.allow`` in the
-    user's live settings (auto-mode, docker, psql, …) is never clobbered — we only ever ADD the
-    entries that are missing.
-
-    - array form (claude-code): append each missing entry to the existing list, order-stable.
-    - object form (opencode): set each missing entry KEY → ``"allow"`` only when absent (never
-      downgrade a user's ``"deny"``/``"ask"`` — that is the user's call, not rig's).
+    user's live settings (auto-mode, docker, psql, …) and the user's own deny/ask rules are
+    never clobbered — rig only ever ADDS what is missing (see :func:`_merge_permission_container`).
 
     Backup-noted under ``on_conflict=backup`` when the file changes; ``skip`` leaves a malformed
     file untouched; a non-dict settings root or a non-array/object container is a hard error
     (never a blind overwrite of the user's data).
     """
     try:
-        key_path, container, entries, value = desired_permission_entries(action)
+        specs = desired_permission_specs(action)
     except ValueError as exc:
         return ActionResult(action, "error", f"permissions/{action.item}: {exc}")
     config_file = permissions_settings_file(action)
@@ -831,7 +905,7 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
     data: dict = {}
     backup_note = ""
     existed = config_file.is_file()
-    if config_file.is_file():
+    if existed:
         try:
             data = json.loads(config_file.read_text(encoding="utf-8"))
         except ValueError:
@@ -848,43 +922,23 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
     if not isinstance(data, dict):
         return ActionResult(action, "error", f"permissions/{action.item}: {config_file} is not a JSON object")
 
-    try:
-        parent, leaf = _container_at(data, key_path)
-    except ValueError as exc:
-        return ActionResult(action, "error", f"permissions/{action.item}: {exc} in {config_file}")
+    added_per_container: list[str] = []
+    total_added = 0
+    for ps in specs:
+        try:
+            n = _merge_permission_container(data, ps)
+        except ValueError as exc:
+            return ActionResult(action, "error", f"permissions/{action.item}: {exc} in {config_file}")
+        if n:
+            added_per_container.append(f"{n} to {'.'.join(ps.key_path)}")
+            total_added += n
 
-    dotted = ".".join(key_path)
-    added = 0
-    if container == "array":
-        existing = parent.get(leaf)
-        if existing is None:
-            existing = []
-        if not isinstance(existing, list):
-            return ActionResult(action, "error", f"permissions/{action.item}: '{dotted}' is not an array in {config_file}")
-        present = set(existing)
-        for entry in entries:
-            if entry not in present:
-                existing.append(entry)
-                present.add(entry)
-                added += 1
-        parent[leaf] = existing
-    else:  # object form — entry KEY → value, only when the key is absent
-        existing = parent.get(leaf)
-        if existing is None:
-            existing = {}
-        if not isinstance(existing, dict):
-            return ActionResult(action, "error", f"permissions/{action.item}: '{dotted}' is not an object in {config_file}")
-        for entry in entries:
-            if entry not in existing:
-                existing[entry] = value
-                added += 1
-        parent[leaf] = existing
-
-    if added == 0:
+    total_desired = sum(len(ps.entries) for ps in specs)
+    if total_added == 0:
         detail = (
-            f"permissions/{action.item}: no desired entries to provision (empty tool set)"
-            if not entries
-            else f"permissions/{action.item}: all {len(entries)} entries already in {dotted} of {config_file}"
+            f"permissions/{action.item}: no desired entries to provision (empty tool + rule sets)"
+            if total_desired == 0
+            else f"permissions/{action.item}: all {total_desired} entries already in {config_file}"
         )
         return ActionResult(action, "skipped", detail)
 
@@ -899,7 +953,7 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
     status = "backed_up" if backup_note else ("updated" if existed else "created")
     return ActionResult(
         action, status,
-        f"permissions/{action.item}: added {added} of {len(entries)} entries to {dotted} in {config_file}{backup_note}",
+        f"permissions/{action.item}: added {', '.join(added_per_container)} in {config_file}{backup_note}",
     )
 
 

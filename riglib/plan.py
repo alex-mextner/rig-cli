@@ -683,19 +683,21 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
 
 
 def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
-    """Plan the per-harness command-allowlist provisioning, unless ``enabled: false``.
+    """Plan the per-harness permissions provisioning (allow + deny/ask), unless ``enabled: false``.
 
     Default **ON** (like ``agents_md``/``github``/``tg_ctl``): an ABSENT or empty ``permissions:``
-    block still provisions the allowlist with the default tool set, so ``rig init`` on a clean
-    machine pre-allows our ecosystem CLIs + the safe external dev tools with no config at all.
+    block still provisions the allowlist with the default tool set AND the conservative deny/ask
+    rule baselines (rig-cli#100 — the outer belt), so ``rig init`` on a clean machine gets both
+    with no config at all.
 
-    The tool list is CONFIG-DRIVEN — ``permissions.tools`` (a list) REPLACES the default set;
-    ``permissions.extra`` adds; ``permissions.disable`` removes. The action carries the RESOLVED
-    tool list (so the runner stays config-pure) and is keyed off ``harness.kind`` (exactly like
-    the auto-mode write), targeting the SAME per-harness user-scope settings file. A harness whose
-    kind has no additively-mergeable allowlist (codex, gemini/pi — see
-    :mod:`riglib.permissions`) emits NO action and is recorded N/A; a note explains why so
-    ``rig status`` isn't silently empty.
+    Everything is CONFIG-DRIVEN — ``permissions.tools`` (a list) REPLACES the default set;
+    ``permissions.extra`` adds; ``permissions.disable`` removes; ``permissions.allow`` adds RAW
+    rule entries on top of the tool-derived allowlist; ``permissions.deny``/``ask`` REPLACE the
+    baked rule baselines. The action carries the RESOLVED lists (so the runner stays config-pure)
+    and is keyed off ``harness.kind`` (exactly like the auto-mode write), targeting the SAME
+    per-harness user-scope settings file. A harness whose kind has no additively-mergeable
+    allowlist (codex, gemini/pi — see :mod:`riglib.permissions`) emits NO action and is recorded
+    N/A; a note explains why so ``rig status`` isn't silently empty.
     """
     from .permissions import (
         HARNESS_ALLOWLISTS,
@@ -736,6 +738,7 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
         list(p.get("extra", []) or []) if isinstance(p.get("extra"), list) else [],
         list(p.get("disable", []) or []) if isinstance(p.get("disable"), list) else [],
     )
+    allow_rules, deny_rules, ask_rules = _resolve_permission_rules(p, kind, plan)
     spec = HARNESS_ALLOWLISTS[kind]
     # An explicit settings_path wins (lets a test/odd setup point elsewhere); else the harness's
     # documented per-machine settings file (the SAME file the auto-mode write targets for CC).
@@ -747,9 +750,46 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
             item=kind,
             source=config.repo_root,  # no carrier in agent-tools; anchor on the repo
             target=_expand(str(settings_path), config.repo_root),
-            options={"kind": kind, "tools": tools},
+            options={"kind": kind, "tools": tools, "allow_rules": allow_rules,
+                     "deny_rules": deny_rules, "ask_rules": ask_rules},
         )
     )
+
+
+def _resolve_permission_rules(
+    p: dict[str, Any], kind: str, plan: InstallPlan
+) -> tuple[list[str], list[str], list[str]]:
+    """Resolve the raw allow entries + the deny/ask rule lists for the permissions action.
+
+    ``allow`` is ADDITIVE raw entries on top of the tool-derived allowlist (this is how the
+    hand-grown machine allowlist is adopted as declared config); ``deny``/``ask`` REPLACE the
+    baked baseline (see :mod:`riglib.permissions` — an explicit ``[]`` disables it). All three
+    are RAW rule strings in claude-code's dialect, so a harness kind with no VERIFIED rule
+    dialect (opencode: its ``permission.bash`` glob keys are a DIFFERENT syntax) gets none of
+    them — with a plan note when the config explicitly asked, so the drop is visible in
+    ``rig plan``, never silent (a claude-shaped rule written as an opencode glob key would be a
+    bogus entry that never matches).
+    """
+    from .permissions import HARNESS_RULE_CONTAINERS, HARNESS_RULES_NA, resolve_rules
+
+    if kind not in HARNESS_RULE_CONTAINERS:
+        dropped = [k for k in ("allow", "deny", "ask") if isinstance(p.get(k), list)]
+        if dropped:
+            reason = HARNESS_RULES_NA.get(kind, "no verified rule dialect")
+            plan.notes.append(
+                f"permissions: raw {'/'.join(dropped)} entries dropped — harness '{kind}' ({reason})"
+            )
+        return [], [], []
+    allow_cfg = p.get("allow")
+    allow_rules: list[str] = []
+    seen: set[str] = set()
+    for entry in (allow_cfg if isinstance(allow_cfg, list) else []):
+        if str(entry) not in seen:
+            seen.add(str(entry))
+            allow_rules.append(str(entry))
+    deny = resolve_rules(kind, "deny", list(p["deny"]) if isinstance(p.get("deny"), list) else None)
+    ask = resolve_rules(kind, "ask", list(p["ask"]) if isinstance(p.get("ask"), list) else None)
+    return allow_rules, deny, ask
 
 
 # Harnesses whose settings file CC's hook contract applies to. Only claude-code today —

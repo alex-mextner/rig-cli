@@ -33,7 +33,7 @@ from .actions.runner import (
     crontab_with_managed,
     descriptor_text,
     desired_harness_value,
-    desired_permission_entries,
+    desired_permission_specs,
     find_managed_bridge_hook,
     github_actions_state,
     github_ghas_state,
@@ -858,22 +858,28 @@ def _check_harness(action: Action, report: DriftReport) -> None:
 
 
 def _check_permissions(action: Action, report: DriftReport) -> None:
-    """Flag drift between the configured command allowlist and the harness settings file.
+    """Flag drift between the configured permissions layer and the harness settings file.
 
-    missing  — the settings file is absent, the allowlist container is absent, OR a desired entry
-               (one of the ecosystem/external tools) is not present in it. ``rig apply`` ADDS the
-               missing entries (additive merge — never removing the user's own).
+    One action spans EVERY container rig manages (rig-cli#100): the allow list plus, for
+    claude-code, the deny/ask rule baselines. Per container:
+
+    missing  — the settings file is absent, the container is absent, OR a desired entry is not
+               present in it. ``rig apply`` ADDS the missing entries (additive merge — never
+               removing the user's own).
     modified — the settings file is malformed JSON, OR (object form) a desired entry's KEY is
                present but its value is not ``"allow"`` (the user set it to ``ask``/``deny`` — that
                is the user's call, surfaced so status isn't a silent green, but apply does NOT
                downgrade it).
-    Only the DESIRED entries are checked; every other entry in the user's allowlist is irrelevant
-    here (an undeclared extra entry is the user's, not rig-managed drift). Shares
-    :func:`desired_permission_entries` with the install handler so apply and status never diverge.
+    extra    — an entry in the container BEYOND the rig-managed baseline. Hand-edits to the
+               permissions lists must be visible drift, not silent config rot — but rig NEVER
+               deletes them (see :func:`_report_permission_extras` for the allow-vs-deny/ask
+               reporting shape).
+
+    Shares :func:`desired_permission_specs` with the install handler so apply and status never
+    diverge on what rig manages.
     """
-    key_path, container, entries, value = desired_permission_entries(action)
+    specs = desired_permission_specs(action)
     config_file = permissions_settings_file(action)
-    dotted = ".".join(key_path)
     if not config_file.is_file():
         report.items.append(
             DriftItem("missing", "permissions", action.item, config_file, "harness settings file not written")
@@ -893,56 +899,126 @@ def _check_permissions(action: Action, report: DriftReport) -> None:
             DriftItem("modified", "permissions", action.item, config_file, "harness settings file is not a JSON object")
         )
         return
-    # walk to the container (read-only — never mutate during a status scan). An INTERMEDIATE
-    # segment that exists as a NON-object is the same shape problem apply errors on (it can't create
-    # the container under a scalar) → report `modified`, not a stream of `missing` entries.
+    # Two passes on purpose: apply errors out on the FIRST shape problem and fixes NOTHING in the
+    # file, so when ANY container is mis-shaped the per-entry "apply adds it" claims would be false
+    # — report only the shape `modified` items then (status and apply agree on what to fix first).
+    resolved: list[tuple[object, object]] = []
+    shape_errors: list[str] = []
+    for ps in specs:
+        node, err = _resolve_permission_container(data, ps)
+        if err is not None:
+            # dedup by detail: a non-dict `permissions` node yields the SAME error for every
+            # container spec — apply raises it once, so status reports it once too
+            if err not in shape_errors:
+                shape_errors.append(err)
+        else:
+            resolved.append((ps, node))
+    if shape_errors:
+        for err in shape_errors:
+            report.items.append(DriftItem("modified", "permissions", action.item, config_file, err))
+        return
+    for ps, node in resolved:
+        _check_permission_entries(action, ps, node, config_file, report)
+
+
+def _resolve_permission_container(data: dict, ps) -> tuple[object, str | None]:
+    """Walk (read-only) to ``ps``'s container → ``(node, shape_error)``.
+
+    ``shape_error`` is the `modified` detail when an INTERMEDIATE segment exists as a non-object
+    or the container itself has the wrong type — the same problems apply hard-errors on (it can't
+    create a container under a scalar / merge into a wrong-typed one). An ABSENT intermediate or
+    container is fine (``node=None`` — apply creates it), never a shape error.
+    """
+    dotted = ".".join(ps.key_path)
     node: object = data
-    for seg in key_path[:-1]:
+    for seg in ps.key_path[:-1]:
         nxt = node.get(seg) if isinstance(node, dict) else None
         if nxt is not None and not isinstance(nxt, dict):
-            report.items.append(
-                DriftItem("modified", "permissions", action.item, config_file,
-                          f"'{seg}' in {dotted} is not an object")
-            )
-            return
+            # container-AGNOSTIC wording on purpose: a scalar `permissions` node blocks every
+            # container, and naming one container per spec would emit 3 items for 1 problem —
+            # the caller dedups identical details, so this reports once (matching apply's one error)
+            return None, f"'{seg}' in the harness settings is not an object"
         node = nxt
         if node is None:
-            break
+            return None, None
+    node = node.get(ps.key_path[-1]) if isinstance(node, dict) else None
     if node is not None:
-        node = node.get(key_path[-1]) if isinstance(node, dict) else None
-    if container == "array":
-        # the container exists but is the wrong type → SHAPE drift (apply errors); not per-entry missing.
-        if node is not None and not isinstance(node, list):
+        if ps.container == "array" and not isinstance(node, list):
+            return None, f"{dotted} is not an array"
+        if ps.container == "object" and not isinstance(node, dict):
+            return None, f"{dotted} is not an object"
+    return node, None
+
+
+def _check_permission_entries(action: Action, ps, node, config_file: Path, report: DriftReport) -> None:
+    """Per-entry drift for ONE well-shaped container — missing/modified for the desired entries,
+    then the user's extras (see :func:`_report_permission_extras` for the reporting shape)."""
+    dotted = ".".join(ps.key_path)
+    desired = set(ps.entries)
+    if ps.container == "array":
+        raw_list = node if isinstance(node, list) else []
+        junk = [e for e in raw_list if not isinstance(e, str)]
+        if junk:
+            # apply works AROUND non-string junk (string-only membership) but never removes it —
+            # surface it, or status would look clean over a hand-mangled list (apply/status parity)
             report.items.append(
-                DriftItem("modified", "permissions", action.item, config_file, f"{dotted} is not an array")
+                DriftItem("modified", "permissions", action.item, config_file,
+                          f"{dotted} contains {len(junk)} non-string entr{'y' if len(junk) == 1 else 'ies'} "
+                          "(hand-edit — apply ignores them, prune by hand)")
             )
-            return
-        present = set(node) if isinstance(node, list) else set()
-        for entry in entries:
+        present_list = [e for e in raw_list if isinstance(e, str)]
+        present = set(present_list)
+        for entry in ps.entries:
             if entry not in present:
                 report.items.append(
                     DriftItem("missing", "permissions", action.item, config_file,
                               f"'{entry}' not in {dotted} (apply adds it)")
                 )
-    else:  # object form — key present AND set to the desired value
-        if node is not None and not isinstance(node, dict):
+        _report_permission_extras(action, ps, [e for e in present_list if e not in desired], config_file, report)
+        return
+    existing = node if isinstance(node, dict) else {}
+    for entry in ps.entries:
+        if entry not in existing:
             report.items.append(
-                DriftItem("modified", "permissions", action.item, config_file, f"{dotted} is not an object")
+                DriftItem("missing", "permissions", action.item, config_file,
+                          f"'{entry}' not in {dotted} (apply adds it)")
             )
-            return
-        existing = node if isinstance(node, dict) else {}
-        for entry in entries:
-            if entry not in existing:
-                report.items.append(
-                    DriftItem("missing", "permissions", action.item, config_file,
-                              f"'{entry}' not in {dotted} (apply adds it)")
-                )
-            elif existing.get(entry) != value:
-                report.items.append(
-                    DriftItem("modified", "permissions", action.item, config_file,
-                              f"'{entry}' in {dotted} is {existing.get(entry)!r}, not {value!r} "
-                              "(user override — apply leaves it)")
-                )
+        elif existing.get(entry) != ps.value:
+            report.items.append(
+                DriftItem("modified", "permissions", action.item, config_file,
+                          f"'{entry}' in {dotted} is {existing.get(entry)!r}, not {ps.value!r} "
+                          "(user override — apply leaves it)")
+            )
+    _report_permission_extras(action, ps, [k for k in existing if k not in desired], config_file, report)
+
+
+def _report_permission_extras(action: Action, ps, extras: list[str], config_file: Path, report: DriftReport) -> None:
+    """User entries beyond the rig baseline — REPORTED as drift-extras, NEVER deleted (rig-cli#100).
+
+    The reporting shape differs by role on purpose:
+    - ``allow`` extras are SUMMARIZED into one item with a count — the live allowlist accumulates
+      hundreds of hand-approved "don't ask again" entries, and a per-entry dump would drown
+      ``rig status``. The remedy is named in the item: adopt via ``permissions.allow`` or prune
+      by hand.
+    - ``deny``/``ask`` extras are PER-ENTRY — those lists are small, and a rule someone slipped
+      into deny/ask is a semantically loud event worth naming individually.
+    """
+    if not extras:
+        return
+    dotted = ".".join(ps.key_path)
+    if ps.role == "allow":
+        n = len(extras)
+        report.items.append(
+            DriftItem("extra", "permissions", action.item, config_file,
+                      f"{n} entr{'y' if n == 1 else 'ies'} in {dotted} beyond the rig-managed baseline "
+                      "(rig never removes — adopt via permissions.allow in the config, or prune by hand)")
+        )
+        return
+    for entry in extras:
+        report.items.append(
+            DriftItem("extra", "permissions", action.item, config_file,
+                      f"'{entry}' in {dotted} but not in the rig-managed baseline (rig never removes it)")
+        )
 
 
 def _check_hook_bridge(action: Action, report: DriftReport) -> None:

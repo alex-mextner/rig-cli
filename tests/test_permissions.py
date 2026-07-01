@@ -17,10 +17,13 @@ from riglib.catalog import Catalog
 from riglib.config import LoadedConfig, validate, ConfigError
 from riglib.drift import detect
 from riglib.permissions import (
+    DEFAULT_RULES,
     DEFAULT_TOOLS,
     HARNESS_ALLOWLIST_NA,
+    HARNESS_RULE_CONTAINERS,
     desired_entries,
     harness_supported,
+    resolve_rules,
     resolve_tools,
 )
 from riglib.plan import build
@@ -160,7 +163,10 @@ def test_apply_is_additive_and_never_clobbers_existing(fake_agent_tools, tmp_pat
         },
     }), encoding="utf-8")
     cat = Catalog.scan(str(fake_agent_tools))
-    plan = build(_cfg(repo, fake_agent_tools, settings, tools=["git", "gh"]), cat, project_type="unknown")
+    # deny=[]/ask=[] isolates this test on the ALLOW merge (the deny/ask baseline has its own
+    # dedicated tests below — with the default baseline on, `deny` would gain the baked rules)
+    plan = build(_cfg(repo, fake_agent_tools, settings, tools=["git", "gh"], deny=[], ask=[]),
+                 cat, project_type="unknown")
     report = run_plan(plan)
     assert not report.errors
     data = json.loads(settings.read_text(encoding="utf-8"))
@@ -245,7 +251,9 @@ def test_drift_modified_when_user_partially_present(fake_agent_tools, tmp_path):
     # git present, gh absent → gh is missing drift, git is in sync
     settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git:*)"]}}), encoding="utf-8")
     cat = Catalog.scan(str(fake_agent_tools))
-    plan = build(_cfg(repo, fake_agent_tools, settings, tools=["git", "gh"]), cat, project_type="unknown")
+    # deny=[]/ask=[]: keep this drift test focused on the allowlist (deny/ask drift is below)
+    plan = build(_cfg(repo, fake_agent_tools, settings, tools=["git", "gh"], deny=[], ask=[]),
+                 cat, project_type="unknown")
     rep = detect(plan)
     missing = [d for d in rep.by_direction("missing") if d.category == "permissions"]
     assert len(missing) == 1 and "Bash(gh:*)" in missing[0].detail
@@ -387,7 +395,8 @@ def test_default_on_apply_writes_default_set_and_is_in_sync(fake_agent_tools, tm
 def test_empty_tools_list_is_noop(fake_agent_tools, tmp_path):
     repo = tmp_path / "repo"; repo.mkdir()
     settings = repo / "settings.json"
-    report = run_plan(build(_cfg(repo, fake_agent_tools, settings, tools=[]),
+    # deny=[]/ask=[] too — with every list empty the action has literally nothing to add
+    report = run_plan(build(_cfg(repo, fake_agent_tools, settings, tools=[], deny=[], ask=[]),
                             Catalog.scan(str(fake_agent_tools)), project_type="unknown"))
     perm = _perm_results(report)
     assert perm and perm[0].status == "skipped"  # zero entries → nothing added
@@ -577,7 +586,10 @@ def test_drift_non_object_intermediate_is_modified(fake_agent_tools, tmp_path):
     plan = build(_cfg(repo, fake_agent_tools, settings, tools=["git"]),
                  Catalog.scan(str(fake_agent_tools)), project_type="unknown")
     rep = detect(plan)
-    assert [d for d in rep.by_direction("modified") if d.category == "permissions"]
+    mod = [d for d in rep.by_direction("modified") if d.category == "permissions"]
+    # ONE item, not one per container (allow/deny/ask all hit the same scalar `permissions` node;
+    # apply raises exactly one error, so status must report exactly one problem)
+    assert len(mod) == 1
     assert not [d for d in rep.by_direction("missing") if d.category == "permissions"]
 
 
@@ -589,3 +601,241 @@ def test_opencode_apply_errors_on_non_object_bash(fake_agent_tools, tmp_path):
                             Catalog.scan(str(fake_agent_tools)), project_type="unknown"))
     perm = _perm_results(report)
     assert perm and perm[0].status == "error" and "not an object" in perm[0].detail
+
+
+# ═══ deny / ask / raw-allow — the FULL permissions layer (rig-cli#100) ═══════════════
+# CTO decision 2026-07-01: the harness permissions layer (deny, ask, AND allow) must be
+# provisioned/reconciled by rig, not hand-edited. The harness evaluates deny → ask → allow
+# BEFORE PreToolUse hooks and independent of the model — the OUTER belt; the argv-parsing
+# agent-hooks stay the deep layer. The invariants under test: the baked baseline is scoped +
+# conservative, the merge stays ADDITIVE per container, re-apply is a no-op, drift reports
+# missing rig-managed entries AND user extras — and apply never deletes an extra.
+def test_default_rules_are_scoped_and_conservative():
+    deny = DEFAULT_RULES["claude-code"]["deny"]
+    ask = DEFAULT_RULES["claude-code"]["ask"]
+    # every baked rule is SCOPED (Tool(specifier)) — a bare tool-name deny (e.g. "Bash") would
+    # remove the whole tool from the model's context; rig must never ship that as a default.
+    for rule in (*deny, *ask):
+        assert rule.startswith("Bash(") and rule.endswith(")") and rule != "Bash(*)"
+    # the CTO-decided deny baseline: raw PR merge, force push (flag-first AND later positions),
+    # hook-bypass commit (flag-first only — see riglib.permissions for why), sudo rm, screencapture
+    assert "Bash(gh pr merge:*)" in deny
+    assert "Bash(git push --force:*)" in deny and "Bash(git push * --force *)" in deny
+    assert "Bash(git push -f:*)" in deny and "Bash(git push * -f *)" in deny
+    # end-anchored forms are EXPLICIT — `git push origin main --force` (flag last, nothing after)
+    # must not hinge on the trailing-` *`-matches-end-of-string reading of the matcher
+    assert "Bash(git push * --force)" in deny and "Bash(git push * -f)" in deny
+    assert "Bash(git commit --no-verify:*)" in deny
+    assert "Bash(sudo rm:*)" in deny
+    assert "Bash(screencapture:*)" in deny
+    # the safe force (`--force-with-lease`) must never be denied — the word boundary in the
+    # rules above already excludes it; assert no rule names it explicitly either
+    assert not any("--force-with-lease" in r for r in deny)
+    # ask: sometimes-legit destructive commands prompt instead of hard-failing
+    assert "Bash(pkill:*)" in ask and "Bash(killall:*)" in ask
+    assert "Bash(git reset --hard:*)" in ask and "Bash(git reset * --hard *)" in ask
+    assert "Bash(git reset * --hard)" in ask  # end-anchored: `git reset HEAD~1 --hard`
+
+
+def test_resolve_rules_default_override_dedup_unknown():
+    # None → the baked default for the kind
+    assert resolve_rules("claude-code", "deny", None) == list(DEFAULT_RULES["claude-code"]["deny"])
+    # an explicit list REPLACES the default wholesale (atomic, like permissions.tools)…
+    assert resolve_rules("claude-code", "deny", ["Bash(foo:*)"]) == ["Bash(foo:*)"]
+    # …so an explicit EMPTY list disables the baseline
+    assert resolve_rules("claude-code", "ask", []) == []
+    # dedup, first-seen order preserved
+    assert resolve_rules("claude-code", "deny", ["Bash(a:*)", "Bash(a:*)", "Bash(b:*)"]) == \
+        ["Bash(a:*)", "Bash(b:*)"]
+    # a kind with no verified rule containers has NO baked rules
+    assert resolve_rules("opencode", "deny", None) == []
+    assert "opencode" not in HARNESS_RULE_CONTAINERS and "claude-code" in HARNESS_RULE_CONTAINERS
+
+
+def test_validate_rule_lists():
+    validate({"version": 1, "permissions": {
+        "allow": ["WebFetch", "Read(//tmp/x/**)", "mcp__pencil", "Bash(git push * --force *)"],
+        "deny": ["Bash(sudo rm:*)"], "ask": ["Bash(pkill:*)"]}})
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "permissions": {"deny": "Bash(x:*)"}})   # not a list
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "permissions": {"deny": [42]}})          # not strings
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "permissions": {"ask": ["Bash rm"]}})    # space outside specifier
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "permissions": {"allow": ["Bash()"]}})   # empty specifier
+
+
+def test_plan_carries_rule_options_defaults_and_overrides(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    # defaults: the baked deny/ask baseline, no raw allow entries
+    plan = build(_cfg(repo, fake_agent_tools, settings), cat, project_type="unknown")
+    opts = [a for a in plan.actions if a.kind == "provision_permissions"][0].options
+    assert opts["deny_rules"] == list(DEFAULT_RULES["claude-code"]["deny"])
+    assert opts["ask_rules"] == list(DEFAULT_RULES["claude-code"]["ask"])
+    assert opts["allow_rules"] == []
+    # config overrides: deny/ask REPLACE the baseline, allow ADDS raw entries
+    plan2 = build(_cfg(repo, fake_agent_tools, settings,
+                       deny=["Bash(shutdown:*)"], ask=[], allow=["WebFetch"]),
+                  cat, project_type="unknown")
+    opts2 = [a for a in plan2.actions if a.kind == "provision_permissions"][0].options
+    assert opts2["deny_rules"] == ["Bash(shutdown:*)"]
+    assert opts2["ask_rules"] == []
+    assert opts2["allow_rules"] == ["WebFetch"]
+
+
+def test_plan_opencode_drops_rules_with_note(fake_agent_tools, tmp_path):
+    # opencode has NO verified rule dialect (its permission.bash glob keys are a DIFFERENT syntax
+    # from claude-code rule strings) → rig plans no raw allow/deny/ask entries for it; a config
+    # that explicitly asked for them gets a visible plan note, never a silent drop — and never a
+    # claude-shaped string written as a bogus opencode glob key.
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "opencode.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_opencode_cfg(repo, fake_agent_tools, settings, tools=["git"],
+                               deny=["Bash(x:*)"], allow=["WebFetch"]), cat, project_type="unknown")
+    opts = [a for a in plan.actions if a.kind == "provision_permissions"][0].options
+    assert opts["deny_rules"] == [] and opts["ask_rules"] == [] and opts["allow_rules"] == []
+    note = [n for n in plan.notes if "dropped" in n]
+    assert note and "allow" in note[0] and "deny" in note[0] and "opencode" in note[0]
+    # …and the raw WebFetch entry must NOT leak into the opencode container on apply
+    report = run_plan(plan)
+    assert not report.errors
+    bash = json.loads(settings.read_text(encoding="utf-8"))["permission"]["bash"]
+    assert "WebFetch" not in bash and "git *" in bash
+    # …and with no raw lists configured there is no noise note
+    plan2 = build(_opencode_cfg(repo, fake_agent_tools, settings, tools=["git"]), cat, project_type="unknown")
+    assert not any("dropped" in n for n in plan2.notes)
+
+
+def test_apply_writes_deny_and_ask_containers_idempotently(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_cfg(repo, fake_agent_tools, settings, tools=["git"]), cat, project_type="unknown")
+    first = run_plan(plan)
+    assert not first.errors, [r.detail for r in first.errors]
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert data["permissions"]["deny"] == list(DEFAULT_RULES["claude-code"]["deny"])
+    assert data["permissions"]["ask"] == list(DEFAULT_RULES["claude-code"]["ask"])
+    second = run_plan(plan)  # every container converged → skipped, byte-stable
+    assert all(r.status == "skipped" for r in _perm_results(second))
+    assert json.loads(settings.read_text(encoding="utf-8")) == data
+
+
+def test_apply_preserves_user_deny_and_ask_entries(fake_agent_tools, tmp_path):
+    # the additive invariant extends to deny/ask: the user's own rules survive at their
+    # position, rig's baseline appends after them, overlap dedups
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    settings.write_text(json.dumps({"permissions": {
+        "deny": ["Bash(shutdown -h now)", "Bash(sudo rm:*)"],  # 2nd overlaps the baseline
+        "ask": ["Bash(reboot:*)"],
+    }}), encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    report = run_plan(build(_cfg(repo, fake_agent_tools, settings, tools=["git"]), cat, project_type="unknown"))
+    assert not report.errors, [r.detail for r in report.errors]
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    deny = data["permissions"]["deny"]
+    assert deny[:2] == ["Bash(shutdown -h now)", "Bash(sudo rm:*)"]  # user's order preserved
+    assert deny.count("Bash(sudo rm:*)") == 1                        # dedup — not re-appended
+    for rule in DEFAULT_RULES["claude-code"]["deny"]:
+        assert rule in deny
+    assert data["permissions"]["ask"][0] == "Bash(reboot:*)"
+
+
+def test_apply_merges_raw_allow_rules(fake_agent_tools, tmp_path):
+    # permissions.allow (raw rule entries — the adopted hand-grown allowlist) merges into the
+    # allow container alongside the tool-derived entries, deduped against what's already there
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    settings.write_text(json.dumps({"permissions": {"allow": ["WebFetch"]}}), encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    run_plan(build(_cfg(repo, fake_agent_tools, settings, tools=["git"],
+                        allow=["WebFetch", "Read(//tmp/reports/**)", "mcp__pencil"]),
+                   cat, project_type="unknown"))
+    allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
+    assert allow[0] == "WebFetch" and allow.count("WebFetch") == 1  # dedup against existing
+    assert "Bash(git:*)" in allow
+    assert "Read(//tmp/reports/**)" in allow and "mcp__pencil" in allow
+
+
+def test_drift_missing_deny_ask_entries_then_converged(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git:*)"]}}), encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_cfg(repo, fake_agent_tools, settings, tools=["git"]), cat, project_type="unknown")
+    missing = [d for d in detect(plan).by_direction("missing") if d.category == "permissions"]
+    assert any("permissions.deny" in d.detail and "Bash(gh pr merge:*)" in d.detail for d in missing)
+    assert any("permissions.ask" in d.detail and "Bash(pkill:*)" in d.detail for d in missing)
+    run_plan(plan)  # apply converges → clean
+    assert not [d for d in detect(plan).items if d.category == "permissions"]
+
+
+def test_drift_reports_user_extras_and_apply_never_deletes(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_cfg(repo, fake_agent_tools, settings, tools=["git"]), cat, project_type="unknown")
+    run_plan(plan)  # converge first
+    # the user hand-adds entries beyond the rig baseline
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    data["permissions"]["allow"] += ["Bash(kubectl:*)", "Bash(docker ps:*)"]
+    data["permissions"]["deny"].append("Bash(shutdown:*)")
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    rep = detect(plan)
+    extras = [d for d in rep.by_direction("extra") if d.category == "permissions"]
+    # allow extras are SUMMARIZED into one item (the live list is hundreds of entries — a
+    # per-entry dump would drown status); deny/ask extras are per-entry (small + loud)
+    allow_extras = [d for d in extras if "permissions.allow" in d.detail]
+    assert len(allow_extras) == 1 and "2" in allow_extras[0].detail
+    assert any("Bash(shutdown:*)" in d.detail and "permissions.deny" in d.detail for d in extras)
+    # extras are report-only: nothing is missing, and a re-apply STILL never deletes them
+    assert not [d for d in rep.by_direction("missing") if d.category == "permissions"]
+    run_plan(plan)
+    data2 = json.loads(settings.read_text(encoding="utf-8"))
+    assert "Bash(kubectl:*)" in data2["permissions"]["allow"]
+    assert "Bash(shutdown:*)" in data2["permissions"]["deny"]
+
+
+def test_explicit_empty_deny_keeps_container_managed(fake_agent_tools, tmp_path):
+    # `deny: []` disables the baseline (rig stops ADDING) but the container stays rig-MANAGED:
+    # a previously-applied baseline left on disk must show as per-entry extras, not silently
+    # vanish from status — and apply must still never delete it (codex finding, rig-cli#100).
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    run_plan(build(_cfg(repo, fake_agent_tools, settings, tools=["git"]), cat, project_type="unknown"))
+    plan2 = build(_cfg(repo, fake_agent_tools, settings, tools=["git"], deny=[], ask=[]),
+                  cat, project_type="unknown")
+    rep = detect(plan2)
+    deny_extras = [d for d in rep.by_direction("extra")
+                   if d.category == "permissions" and "permissions.deny" in d.detail]
+    assert len(deny_extras) == len(DEFAULT_RULES["claude-code"]["deny"])  # per-entry, all visible
+    report = run_plan(plan2)
+    assert all(r.status == "skipped" for r in _perm_results(report))  # nothing to add
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    for rule in DEFAULT_RULES["claude-code"]["deny"]:
+        assert rule in data["permissions"]["deny"]  # never deleted
+
+
+def test_apply_tolerates_and_drift_flags_nonstring_array_entries(fake_agent_tools, tmp_path):
+    # a hand-mangled allow list with non-string junk: apply must not crash (string-only
+    # membership; an object in the list would even make set() raise TypeError), junk survives,
+    # and drift flags it as `modified` so status never looks clean over it (apply/status parity)
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git:*)", {"oops": 1}, 42]}}),
+                        encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_cfg(repo, fake_agent_tools, settings, tools=["git", "gh"]), cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
+    assert {"oops": 1} in allow and 42 in allow          # junk preserved (rig never deletes)
+    assert "Bash(gh:*)" in allow                          # …and the merge still landed
+    mod = [d for d in detect(plan).by_direction("modified") if d.category == "permissions"]
+    assert any("non-string" in d.detail and "permissions.allow" in d.detail for d in mod)

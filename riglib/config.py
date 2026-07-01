@@ -807,7 +807,8 @@ def _validate_harness(h: dict[str, Any]) -> None:
 
 # The keys the permissions block accepts. Listed once so the validator rejects a typo (fail-closed,
 # consistent with every other block).
-_PERMISSIONS_KEYS = {"enabled", "kind", "tools", "extra", "disable", "settings_path"}
+_PERMISSIONS_KEYS = {"enabled", "kind", "tools", "extra", "disable", "settings_path",
+                     "allow", "deny", "ask"}
 # Harness kinds the ALLOWLIST provisioning supports — broader than the auto-mode write
 # (_VALID_HARNESS_KINDS), since opencode HAS an additively-mergeable allowlist even though its
 # auto-mode write is not yet implemented. codex/gemini/pi have no such mechanism → recorded N/A
@@ -820,6 +821,13 @@ _NA_PERMISSIONS_KINDS = {"codex", "gemini", "pi"}
 # chars that legitimately appear in a command name or path (``.``/``_``/``-``/``/``). No spaces, no
 # shell metachars; ``..`` is rejected separately (path traversal).
 _PERMISSION_TOOL_RE = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9._/-]*$")
+# A RAW permission-rule entry (``allow``/``deny``/``ask``) is ``Tool`` or ``Tool(specifier)`` in
+# the harness's own syntax: ``WebFetch``, ``mcp__pencil``, ``Bash(git push * --force *)``,
+# ``Read(//tmp/**)``. Shape-checked only — the tool-name part is a bare token (glob ``*`` allowed:
+# deny rules accept tool-name globs like ``mcp__*``), the specifier is any non-empty
+# parenthesized string. Semantics belong to the harness; rig never interprets the pattern.
+# ``.`` excludes newlines, so a multi-line "entry" is rejected as the typo it is.
+_PERMISSION_RULE_RE = re.compile(r"^[A-Za-z0-9_*.-]+(\(.+\))?\Z")
 
 
 def _validate_permissions(p: dict[str, Any]) -> None:
@@ -877,6 +885,7 @@ def _validate_permissions(p: dict[str, Any]) -> None:
                         "metachars, or '..')",
                         schema_path=f"permissions.{listkey}",
                     )
+    _validate_permission_rule_lists(p)
     settings_path = p.get("settings_path")
     if settings_path is not None:
         if not isinstance(settings_path, str):
@@ -893,6 +902,35 @@ def _validate_permissions(p: dict[str, Any]) -> None:
                 f"got {settings_path!r}",
                 schema_path="permissions.settings_path",
             )
+
+
+def _validate_permission_rule_lists(p: dict[str, Any]) -> None:
+    """Validate ``allow``/``deny``/``ask`` — RAW harness permission-rule entries (rig-cli#100).
+
+    Unlike ``tools`` (bare command names rig RENDERS into entries), these are full rule strings
+    in the harness's own syntax: ``allow`` adds raw entries on top of the tool-derived allowlist
+    (the adopted hand-grown machine allowlist), ``deny``/``ask`` REPLACE the baked baseline in
+    :mod:`riglib.permissions`. Shape-checked only — ``Tool`` or ``Tool(specifier)`` with a
+    non-empty specifier — never semantics (the harness owns matcher semantics). Rejects the
+    classic typo shapes fail-closed: a non-list, non-string items, whitespace outside the
+    parens (``Bash rm``), an empty ``Tool()``, newlines.
+    """
+    for listkey in ("allow", "deny", "ask"):
+        value = p.get(listkey)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ConfigError(
+                f"permissions.{listkey} must be a list of strings, got {value!r}",
+                schema_path=f"permissions.{listkey}",
+            )
+        for v in value:
+            if not _PERMISSION_RULE_RE.match(v):
+                raise ConfigError(
+                    f"permissions.{listkey} entry {v!r} is not a permission rule "
+                    "(expected Tool or Tool(specifier), e.g. WebFetch or Bash(git status:*))",
+                    schema_path=f"permissions.{listkey}",
+                )
 
 
 # The model-freshness schedule defaults to NOON (run once a day, at noon). A `time:` override
