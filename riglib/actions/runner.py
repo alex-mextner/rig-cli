@@ -971,9 +971,12 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
     ``lib/`` on PYTHONPATH so ``cc_hook_bridge`` resolves against the same checkout whose
     ``agent-hooks/`` scripts the installed descriptors point at.
 
-    Only PreToolUse (real prevention) and Stop are wired — PostToolUse cannot block a tool
-    that already ran (see lib/cc_hook_bridge/README.md). pre-write covers every CC
-    file-mutating tool via a `|`-alternation matcher.
+    PreToolUse is real prevention; Stop gates the turn end; PostToolUse (write tools only)
+    is the FEEDBACK channel for the agent-tools `post-write` point — it cannot un-run the
+    tool, but the bridge's ``{"decision": "block", "reason": …}`` surfaces e.g.
+    lint-on-write findings to the model right after the write (agent-tools#160; before
+    this entry existed the whole post-write point was silently dead). The write-tool
+    `|`-alternation matcher covers every CC file-mutating tool.
     """
     lib_dir = str(action.options["lib_dir"])
     py = str(action.options.get("python", "python3"))
@@ -989,6 +992,9 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
         "PreToolUse": [
             ("Bash", cmd("PreToolUse")),
             ("Edit|Write|MultiEdit|NotebookEdit", cmd("PreToolUse")),
+        ],
+        "PostToolUse": [
+            ("Edit|Write|MultiEdit|NotebookEdit", cmd("PostToolUse")),
         ],
         "Stop": [("", cmd("Stop"))],
     }

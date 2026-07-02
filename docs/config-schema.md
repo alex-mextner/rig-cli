@@ -362,16 +362,20 @@ config for now. opencode expresses the same intent through a `permission` block 
 `"ask"` for interactive); wiring that write is tracked separately.
 
 **The hook bridge (`hook_bridge`).** Claude Code only runs hooks declared in
-`settings.json` (`PreToolUse`/`Stop`) — it never reads the `~/.claude/hooks/*.json`
+`settings.json` (`PreToolUse`/`PostToolUse`/`Stop`) — it never reads the `~/.claude/hooks/*.json`
 `agents-hooks/v1` descriptors `agent_hooks` installs. Without a bridge, **every installed
 agent-hook is inert in CC** (agent-tools#18) and the "auto-mode is safe because the guards
 intercept" claim above is false. So when a `claude-code` harness block is present (and
 `agent_hooks` is enabled), `rig apply` also registers the `cc_hook_bridge` dispatcher
 (shipped in `agent-tools/lib/cc_hook_bridge`) into the same `settings.json`:
-`PreToolUse` (matchers `Bash` and `Edit|Write|MultiEdit|NotebookEdit`) and `Stop`, each
+`PreToolUse` (matchers `Bash` and `Edit|Write|MultiEdit|NotebookEdit`), `PostToolUse`
+(matcher `Edit|Write|MultiEdit|NotebookEdit` — the reactive `post-write` point:
+`format-on-write` reformats the just-written file, `lint-on-write` feeds lint findings
+back to the model) and `Stop`, each
 running `PYTHONPATH=<agent-tools>/lib python3 -m cc_hook_bridge <Event>`. The dispatcher
 runs the matching descriptors and translates their exit-10 BLOCK into CC's
-`permissionDecision: "deny"` / `decision: "block"`. The merge is **additive and
+`permissionDecision: "deny"` / `decision: "block"` (on PostToolUse the latter is
+FEEDBACK — the tool already ran; the reason is surfaced to the model). The merge is **additive and
 idempotent** — your other hooks (rtk-rewrite, tg-ctl, …) are preserved; a re-apply is a
 no-op; a drifted managed command (e.g. the checkout path moved) is rewritten in place.
 `rig status` reports the bridge as missing drift if a managed hook is absent.
