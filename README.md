@@ -207,9 +207,11 @@ classifier.
 `settings.json`, not the `~/.claude/hooks/*.json` descriptors `agent_hooks` installs — so a
 bridge is required to make the descriptors actually execute (agent-tools#18). The same
 `harness` block therefore also registers the `cc_hook_bridge` dispatcher into `settings.json`
-(`PreToolUse` for Bash + the file-edit tools, `Stop`), which runs the matching descriptors
-and translates their exit-10 BLOCK into CC's `permissionDecision: "deny"`. Without it the
-guards above would be inert files. Set `hook_bridge: { enabled: false }` to opt out. See
+(`PreToolUse` for Bash + the file-edit tools, `PostToolUse` for the file-edit tools —
+the post-write feedback point lint-on-write/format-on-write fire on — and `Stop`), which
+runs the matching descriptors and translates their exit-10 BLOCK into CC's
+`permissionDecision: "deny"` / `decision: "block"`. Without it the guards above would be
+inert files. Set `hook_bridge: { enabled: false }` to opt out. See
 [`docs/config-schema.md`](docs/config-schema.md) for the full `harness` schema and the
 opencode equivalent.
 
