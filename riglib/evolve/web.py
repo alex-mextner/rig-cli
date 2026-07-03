@@ -164,19 +164,19 @@ class EvolveApp:
 
     def providers_payload(self, *, project_path: str | None = None, refresh: bool = False) -> dict[str, Any]:
         from .cache import ProviderCache, ProviderCacheKey
-        from .providers import collect_default, default_providers
+        from .providers import collect_default, default_providers, not_wired_provider_payloads
 
         project = self._allowed_project(project_path)
         if project is None:
             raise PermissionError("project not allowed")
         version = _git_head(project)
         cache = ProviderCache()
-        provider_names = [provider.name for provider in default_providers()]
+        cacheable_provider_names = [provider.name for provider in default_providers()]
         payloads: list[dict[str, Any]] = []
         missing = False
 
         if not refresh:
-            for provider in provider_names:
+            for provider in cacheable_provider_names:
                 key = ProviderCacheKey(project_path=project, version=version, provider=provider)
                 cached = cache.get(key)
                 if cached is None:
@@ -185,18 +185,38 @@ class EvolveApp:
                 encoded = cached.to_dict()
                 encoded["cache"] = _provider_cache_meta(cache, key, status="hit")
                 payloads.append(encoded)
+            if not missing:
+                seen_sources = {payload["source"] for payload in payloads}
+                for payload in not_wired_provider_payloads(project, seen_sources):
+                    key = ProviderCacheKey(project_path=project, version=version, provider=payload.source)
+                    encoded = payload.to_dict()
+                    encoded["cache"] = _provider_cache_meta(
+                        cache,
+                        key,
+                        status="not-cacheable",
+                        message="Placeholder provider is generated, not cached.",
+                    )
+                    payloads.append(encoded)
 
         if refresh or missing:
             payloads = []
             for payload in collect_default(project):
                 key = ProviderCacheKey(project_path=project, version=version, provider=payload.source)
                 cache_status = "refresh" if refresh else "miss"
-                try:
-                    cache.set(key, payload)
-                except OSError as exc:
-                    cache_meta = _provider_cache_meta(cache, key, status="write-error", message=str(exc))
+                if payload.status == "not-wired":
+                    cache_meta = _provider_cache_meta(
+                        cache,
+                        key,
+                        status="not-cacheable",
+                        message="Placeholder provider is generated, not cached.",
+                    )
                 else:
-                    cache_meta = _provider_cache_meta(cache, key, status=cache_status)
+                    try:
+                        cache.set(key, payload)
+                    except OSError as exc:
+                        cache_meta = _provider_cache_meta(cache, key, status="write-error", message=str(exc))
+                    else:
+                        cache_meta = _provider_cache_meta(cache, key, status=cache_status)
                 encoded = payload.to_dict()
                 encoded["cache"] = cache_meta
                 payloads.append(encoded)
@@ -394,6 +414,7 @@ def _build_html(repo_root: Path) -> str:
   .healthStatus {{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; }}
   .health-ok {{ color:var(--ok); }}
   .health-error {{ color:var(--bad); }}
+  .health-not-wired {{ color:var(--muted); }}
   .health-warning,.health-pending,.health-unknown,.health-hit,.health-miss,.health-refresh,.health-write-error {{ color:var(--warn); }}
   svg {{ width:100%; height:100%; display:block; }}
   .bar {{ fill:#526071; cursor:pointer; transition:fill .12s,opacity .12s; }}
@@ -413,12 +434,15 @@ def _build_html(repo_root: Path) -> str:
   .symbolLabel {{ fill:#dff6ff; pointer-events:none; }}
   .symbolOverlayNote rect {{ fill:rgba(15,23,42,.88); stroke:rgba(125,211,252,.55); stroke-width:1; }}
   .symbolOverlayNote text {{ fill:#dff6ff; pointer-events:none; }}
+  .relationshipArcNote rect {{ fill:rgba(15,23,42,.9); stroke:rgba(245,158,11,.58); stroke-width:1; }}
+  .relationshipArcNote text {{ fill:#fde68a; pointer-events:none; }}
   .relationshipArcShadow,.relationshipArc,.relationshipArcGlow {{ fill:none; stroke-linecap:round; pointer-events:none; }}
   .relationshipArcShadow {{ stroke:rgba(0,0,0,.46); stroke-width:5; }}
   .relationshipArcGlow {{ stroke-width:7; opacity:.18; }}
   .relationshipArc {{ stroke-width:2; opacity:.92; filter:drop-shadow(0 2px 2px rgba(0,0,0,.35)); }}
   .relationshipArc.uses,.relationshipArcGlow.uses {{ stroke:#f59e0b; }}
   .relationshipArc.usedBy,.relationshipArcGlow.usedBy {{ stroke:#7dd3fc; }}
+  .relationshipArc[data-quality^="heuristic"],.relationshipArcGlow[data-quality^="heuristic"],.relationshipArcShadow[data-quality^="heuristic"] {{ stroke-dasharray:5 4; }}
   .loadingOverlay {{ position:fixed; inset:48px 0 0; z-index:5; display:none; align-items:center; justify-content:center; background:rgba(10,14,20,.54); backdrop-filter:blur(2px); }}
   .loadingOverlay.visible {{ display:flex; }}
   .loadingCard {{ width:min(420px, calc(100vw - 32px)); border:1px solid var(--border); border-radius:8px; background:#161b24; padding:14px; box-shadow:0 18px 48px rgba(0,0,0,.34); }}
@@ -792,6 +816,7 @@ function renderTreemap() {{
       'data-node-id':r.node.id || '',
       'data-node-kind':r.node.kind || '',
       'data-node-path':r.node.path || '',
+      'data-label-full':r.node.path || r.node.name,
       'data-layout':'squarified',
       'data-layout-orientation':r.orientation || 'unknown',
       'data-w':r.w.toFixed(2),
@@ -801,6 +826,7 @@ function renderTreemap() {{
       role:'button',
       'aria-label':`${{isFrame ? 'Open group' : 'Select file'}} ${{r.node.name}} ${{r.node.size || 0}} bytes`
     }});
+    tile.appendChild(el('title', {{}}, r.node.path || r.node.name));
     tile.addEventListener('click', (ev) => {{
       ev.stopPropagation();
       if (performance.now() - lastPanAt < PAN_CLICK_SUPPRESS_MS) return;
@@ -812,31 +838,96 @@ function renderTreemap() {{
     if (r.role === 'leaf' && r.w > 32 && r.h > 14) addWrappedLabel(svg, r, r.node.name, 'leafLabel', 2);
     if (isFrame && r.w > 40 && r.h > 16) addWrappedLabel(svg, r, r.node.name, 'frameLabel', 2);
   }});
-  renderRelationshipArcs(svg, rectByPath);
+  const relationshipNote = renderRelationshipArcs(svg, rectByPath, {{note:false}});
   if (selected && selected.path && selectedSymbols) {{
     const targetRect = rectByPath.get(selected.path);
     if (targetRect) renderSymbolOverlay(svg, targetRect, selectedSymbols, zoom);
   }}
+  appendRelationshipArcSummary(svg, relationshipNote);
   bindPanZoom(root, svg);
   updateZoomHud();
 }}
 
-function renderRelationshipArcs(svg, rectByPath) {{
-  if (!selected || !selected.path || !selectedRelationships) return;
+function renderRelationshipArcs(svg, rectByPath, options) {{
+  if (!selected || !selected.path || !selectedRelationships) return null;
   const source = rectByPath.get(selected.path);
-  if (!source || !isRectVisible(source)) return;
+  if (!source || !isRectVisible(source)) return null;
+  const renderNote = !(options && options.note === false);
   const arcs = [];
-  (selectedRelationships.uses || []).forEach(path => {{
-    const target = rectByPath.get(path);
-    if (target && isRectVisible(target)) arcs.push({{from:source, to:target, relation:'uses', fromPath:selected.path, toPath:path}});
+  const seen = new Set();
+  const seenRelationships = new Set();
+  const quality = selectedRelationships.quality || 'heuristic-imports-v1';
+  let relationshipCount = 0;
+  const addArc = (arc) => {{
+    if (!arc.from || !arc.to || arc.from === arc.to) return;
+    const sourceFromPath = arc.fromPath || arc.from.node && arc.from.node.path || '';
+    const sourceToPath = arc.toPath || arc.to.node && arc.to.node.path || '';
+    const visibleFromPath = arc.from.node && arc.from.node.path || sourceFromPath;
+    const visibleToPath = arc.to.node && arc.to.node.path || sourceToPath;
+    if (visibleFromPath === visibleToPath) return;
+    if (isAncestorPath(visibleFromPath, visibleToPath) || isAncestorPath(visibleToPath, visibleFromPath)) return;
+    const relationshipKey = relationshipKeyParts([arc.relation, sourceFromPath, sourceToPath]);
+    if (seenRelationships.has(relationshipKey)) return;
+    seenRelationships.add(relationshipKey);
+    relationshipCount += 1;
+    const key = relationshipKeyParts([arc.relation, visibleFromPath, visibleToPath]);
+    if (seen.has(key)) return;
+    seen.add(key);
+    arc.visibleFromPath = visibleFromPath;
+    arc.visibleToPath = visibleToPath;
+    arc.sourceFromPath = sourceFromPath;
+    arc.sourceToPath = sourceToPath;
+    arcs.push(arc);
+  }};
+  relationshipPathList(selectedRelationships.uses).forEach(path => {{
+    const target = relationshipTargetRect(path, rectByPath, isRectVisible);
+    if (target) addArc({{from:source, to:target, relation:'uses', fromPath:selected.path, toPath:path, quality}});
   }});
-  (selectedRelationships.used_by || []).forEach(path => {{
-    const target = rectByPath.get(path);
-    if (target && isRectVisible(target)) arcs.push({{from:target, to:source, relation:'usedBy', fromPath:path, toPath:selected.path}});
+  relationshipPathList(selectedRelationships.used_by).forEach(path => {{
+    const target = relationshipTargetRect(path, rectByPath, isRectVisible);
+    if (target) addArc({{from:target, to:source, relation:'usedBy', fromPath:path, toPath:selected.path, quality}});
   }});
-  if (!arcs.length) return;
+  if (!arcs.length) return null;
   addRelationshipDefs(svg);
-  arcs.slice(0, 36).forEach(arc => appendRelationshipArc(svg, arc));
+  const visibleArcs = visibleRelationshipArcs(arcs, 36);
+  visibleArcs.forEach(arc => appendRelationshipArc(svg, arc));
+  const summary = visibleArcs.length < relationshipCount ? {{source, visibleCount:visibleArcs.length, totalCount:relationshipCount}} : null;
+  if (renderNote) appendRelationshipArcSummary(svg, summary);
+  return summary;
+}}
+
+function visibleRelationshipArcs(arcs, limit) {{
+  const uses = arcs.filter(arc => arc.relation === 'uses');
+  const usedBy = arcs.filter(arc => arc.relation === 'usedBy');
+  const other = arcs.filter(arc => arc.relation !== 'uses' && arc.relation !== 'usedBy');
+  const visible = [];
+  let usesIndex = 0;
+  let usedByIndex = 0;
+  while (visible.length < limit && (usesIndex < uses.length || usedByIndex < usedBy.length)) {{
+    if (usesIndex < uses.length) visible.push(uses[usesIndex++]);
+    if (visible.length >= limit) break;
+    if (usedByIndex < usedBy.length) visible.push(usedBy[usedByIndex++]);
+  }}
+  let otherIndex = 0;
+  while (visible.length < limit && otherIndex < other.length) visible.push(other[otherIndex++]);
+  return visible;
+}}
+
+function relationshipTargetRect(path, rectByPath, predicate) {{
+  if (!path || !rectByPath) return null;
+  const usable = typeof predicate === 'function' ? predicate : () => true;
+  const parts = String(path).split('/').filter(Boolean);
+  while (parts.length) {{
+    const candidate = rectByPath.get(parts.join('/'));
+    if (candidate && usable(candidate)) return candidate;
+    parts.pop();
+  }}
+  return null;
+}}
+
+function isAncestorPath(parent, child) {{
+  if (!parent || !child || parent === child) return false;
+  return String(child).startsWith(String(parent).replace(/\\/+$/, '') + '/');
 }}
 
 function addRelationshipDefs(svg) {{
@@ -854,18 +945,45 @@ function appendRelationshipArc(svg, arc) {{
   const d = relationshipCurve(arc.from, arc.to);
   const relationClass = arc.relation === 'usedBy' ? 'usedBy' : 'uses';
   const marker = arc.relation === 'usedBy' ? 'url(#evolveArrowUsedBy)' : 'url(#evolveArrowUses)';
-  svg.appendChild(el('path', {{d, class:'relationshipArcGlow ' + relationClass, 'vector-effect':'non-scaling-stroke'}}));
-  svg.appendChild(el('path', {{d, class:'relationshipArcShadow', 'vector-effect':'non-scaling-stroke'}}));
+  const quality = arc.quality || 'heuristic-imports-v1';
+  svg.appendChild(el('path', {{d, class:'relationshipArcGlow ' + relationClass, 'data-quality':quality, 'vector-effect':'non-scaling-stroke'}}));
+  svg.appendChild(el('path', {{d, class:'relationshipArcShadow', 'data-quality':quality, 'vector-effect':'non-scaling-stroke'}}));
   svg.appendChild(el('path', {{
     d,
     class:'relationshipArc ' + relationClass,
     'data-testid':'relationship-arc',
     'data-relation':arc.relation === 'usedBy' ? 'used-by' : 'uses',
-    'data-from':arc.fromPath,
-    'data-to':arc.toPath,
+    'data-quality':quality,
+    'data-from':arc.visibleFromPath || arc.fromPath,
+    'data-to':arc.visibleToPath || arc.toPath,
+    'data-source-from':arc.sourceFromPath || arc.fromPath,
+    'data-source-to':arc.sourceToPath || arc.toPath,
     'marker-end':marker,
     'vector-effect':'non-scaling-stroke'
   }}));
+}}
+
+function appendRelationshipArcSummary(svg, summary) {{
+  if (!summary) return;
+  appendRelationshipArcNote(svg, summary.source, summary.visibleCount, summary.totalCount);
+}}
+
+function appendRelationshipArcNote(svg, rect, visibleCount, totalCount) {{
+  if (!rect || visibleCount >= totalCount) return;
+  const activeZoom = currentZoom();
+  const hiddenCount = Math.max(0, totalCount - visibleCount);
+  const text = visibleCount + ' shown' + (hiddenCount ? ' · ' + hiddenCount + ' hidden' : '');
+  const pad = 4 / activeZoom;
+  const height = 14 / activeZoom;
+  const width = Math.max(0, rect.w - pad * 2);
+  const x = rect.x + pad;
+  const y = rect.y + pad;
+  const maxChars = Math.max(4, Math.floor(width * activeZoom / 5.5));
+  const fittedText = text.length > maxChars ? text.slice(0, Math.max(1, maxChars - 1)) + '…' : text;
+  const group = el('g', {{class:'relationshipArcNote', 'data-testid':'relationship-arc-note'}});
+  group.appendChild(el('rect', {{x, y, width, height, rx:2}}));
+  group.appendChild(el('text', {{x:x + pad, y:y + 10 / activeZoom, 'font-size':8 / activeZoom}}, fittedText));
+  svg.appendChild(group);
 }}
 
 function relationshipCurve(from, to) {{
@@ -1193,11 +1311,9 @@ function wrapByChars(text, chars, maxLines) {{
 
 function symbolOverlayReason(rect, zoom, count) {{
   if (zoom < SYMBOL_ZOOM_THRESHOLD) {{
-    return 'Zoom to ' + Math.round(SYMBOL_ZOOM_THRESHOLD * 100) + '% for symbols';
+    return 'Zoom in to inspect symbols';
   }}
-  const widthPx = Math.round(rect.w * zoom);
-  const heightPx = Math.round(rect.h * zoom);
-  return 'Need at least 88x54 px, now ' + widthPx + 'x' + heightPx + ' px for ' + count + ' symbols';
+  return 'Zoom in or pick a larger tile to inspect ' + count + ' symbols';
 }}
 
 function appendSymbolOverlayNote(svg, rect, reason, zoom) {{
@@ -1406,8 +1522,8 @@ function renderDetail(n) {{
   }}
   const symbols = flattenSymbols(selectedSymbols || []);
   const rel = selectedRelationships || {{}};
-  const uses = rel.uses || [];
-  const usedBy = rel.used_by || [];
+  const uses = relationshipPathList(rel.uses);
+  const usedBy = relationshipPathList(rel.used_by);
   const historicalMode = Boolean(selectedPeriodId);
   const symbolNote = historicalMode
     ? 'Open Current to inspect live symbols.'
@@ -1427,19 +1543,47 @@ function renderDetail(n) {{
       <span class="muted">Path</span><code>${{escapeHtml(n.path||'')}}</code>
       <span class="muted">Symbols</span><span>${{escapeHtml(symbolNote)}}</span>
       <span class="muted">Relationships</span><span>${{escapeHtml(relationshipNote)}}</span>
+      <span class="muted">Quality</span><span>${{escapeHtml(relationshipQualityLabel(rel))}}</span>
     </div>
     <h2>Uses</h2>
-    ${{historicalMode ? historicalDetailNote : renderRelList(uses)}}
+    ${{historicalMode ? historicalDetailNote : renderRelList(uses, rel)}}
     <h2>Used By</h2>
-    ${{historicalMode ? historicalDetailNote : renderRelList(usedBy)}}
+    ${{historicalMode ? historicalDetailNote : renderRelList(usedBy, rel)}}
     <h2>Symbols</h2>
     ${{historicalMode ? historicalDetailNote : renderSymbolList(symbols, selectedSymbolError)}}
   `;
 }}
 
-function renderRelList(items) {{
-  if (!items || !items.length) return '<p class="muted">No relationships found by current provider.</p>';
+function renderRelList(items, rel) {{
+  if (!items || !items.length) {{
+    if ((rel && rel.quality) === 'error') return '<p class="muted">Relationship provider error.</p>';
+    return '<p class="muted">No relationships found by current provider.</p>';
+  }}
   return '<ul class="relList">' + items.slice(0, 32).map(item => `<li><code>${{escapeHtml(item)}}</code></li>`).join('') + '</ul>';
+}}
+
+function relationshipPathList(items) {{
+  if (!Array.isArray(items)) return [];
+  const seen = new Set();
+  const paths = [];
+  items.forEach(item => {{
+    if (typeof item !== 'string') return;
+    const path = item;
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    paths.push(path);
+  }});
+  return paths;
+}}
+
+function relationshipKeyParts(parts) {{
+  return JSON.stringify(parts);
+}}
+
+function relationshipQualityLabel(rel) {{
+  const quality = String((rel && rel.quality) || 'unknown');
+  if (quality.startsWith('heuristic')) return 'heuristic';
+  return quality;
 }}
 
 function ghostSelectionFromSnapshot(data, fallbackPath) {{

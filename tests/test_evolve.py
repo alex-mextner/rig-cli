@@ -138,6 +138,7 @@ def test_file_tree_scales_nodes_by_file_size(history_repo: Path):
     assert {"src", "web"} <= child_names
     src = next(child for child in tree["children"] if child["name"] == "src")
     assert src["children"][0]["name"] == "alpha.py"
+    assert src["children"][0]["path"] == "src/alpha.py"
     assert src["children"][0]["size"] > 0
 
 
@@ -326,7 +327,7 @@ def test_symbols_and_relationships_payloads_for_selected_file(history_repo: Path
     assert symbols["symbols"][0]["name"] == "alpha"
     assert relationships["relationships"]["quality"] == "heuristic-imports-v1"
     assert "capped at" in relationships["relationships"]["message"]
-    assert set(relationships["relationships"]) >= {"uses", "used_by"}
+    assert set(relationships["relationships"]) >= {"uses", "used_by", "quality", "message"}
 
 
 def test_relationships_payload_reuses_head_keyed_index_cache(history_repo: Path, monkeypatch: pytest.MonkeyPatch):
@@ -526,6 +527,7 @@ def test_providers_payload_returns_normalized_payloads_and_cache_metadata(
 
     first = EvolveApp(repo_root=history_repo).providers_payload(project_path=str(history_repo))
     second = EvolveApp(repo_root=history_repo).providers_payload(project_path=str(history_repo))
+    refreshed = EvolveApp(repo_root=history_repo).providers_payload(project_path=str(history_repo), refresh=True)
 
     assert first["schema"] == PROVIDER_SCHEMA
     assert first["project"]["path"] == str(history_repo)
@@ -533,15 +535,56 @@ def test_providers_payload_returns_normalized_payloads_and_cache_metadata(
 
     first_by_source = {payload["source"]: payload for payload in first["providers"]}
     second_by_source = {payload["source"]: payload for payload in second["providers"]}
+    refreshed_by_source = {payload["source"]: payload for payload in refreshed["providers"]}
 
-    assert {"git", "rig", "sverklo"} <= set(first_by_source)
+    assert {"git", "rig", "sverklo", "task", "tg", "review", "haft", "serena", "lsp", "tree-sitter"} <= set(
+        first_by_source
+    )
     assert first_by_source["git"]["schema"] == PROVIDER_SCHEMA
     assert first_by_source["git"]["cache"]["status"] == "miss"
     assert first_by_source["git"]["cache"]["age_s"] is not None
     assert first_by_source["rig"]["status"] == "warning"
     assert first_by_source["sverklo"]["status"] == "error"
     assert first_by_source["sverklo"]["errors"] == [{"message": "sverklo CLI not found on PATH"}]
-    assert all(payload["cache"]["status"] == "hit" for payload in second_by_source.values())
+    assert first_by_source["task"]["status"] == "not-wired"
+    assert first_by_source["task"]["health"]["message"] == "Provider not wired yet."
+    assert first_by_source["task"]["cache"]["status"] == "not-cacheable"
+    assert all(second_by_source[source]["cache"]["status"] == "hit" for source in {"git", "rig", "sverklo"})
+    assert second_by_source["task"]["cache"]["status"] == "not-cacheable"
+    assert refreshed_by_source["task"]["cache"]["status"] == "not-cacheable"
+
+
+def test_providers_payload_does_not_cache_not_wired_placeholders(
+    history_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from riglib.evolve import providers
+    from riglib.evolve.model import ProviderPayload
+    from riglib.evolve.web import EvolveApp
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    app = EvolveApp(repo_root=history_repo)
+    first = app.providers_payload(project_path=str(history_repo))
+    first_by_source = {payload["source"]: payload for payload in first["providers"]}
+
+    assert first_by_source["task"]["status"] == "not-wired"
+    assert first_by_source["task"]["cache"]["status"] == "not-cacheable"
+
+    class TaskProvider:
+        name = "task"
+
+        def collect(self, project_path: str | Path) -> ProviderPayload:
+            return ProviderPayload.ok(source="task", project_path=project_path, data={"wired": True})
+
+    monkeypatch.setattr(providers, "default_providers", lambda: [TaskProvider()])
+
+    second = app.providers_payload(project_path=str(history_repo))
+    second_by_source = {payload["source"]: payload for payload in second["providers"]}
+
+    assert second_by_source["task"]["status"] == "ok"
+    assert second_by_source["task"]["data"] == {"wired": True}
+    assert second_by_source["task"]["cache"]["status"] == "miss"
 
 
 def test_providers_api_serves_normalized_payloads_fail_soft(
@@ -880,6 +923,7 @@ def test_render_page_exposes_health_bucket_controls_and_treemap_probe_hooks(hist
     assert "/api/providers?project=" in page
     assert "data-cache=" in page
     assert "data-error-count=" in page
+    assert "health-not-wired" in page
     assert 'data-testid="bucket-controls"' in page
     assert 'data-bucket="day"' in page
     assert 'data-bucket="week"' in page
@@ -942,22 +986,48 @@ def test_render_page_exposes_health_bucket_controls_and_treemap_probe_hooks(hist
     assert "function symbolOverlayReason" in page
     assert "function appendSymbolOverlayNote" in page
     assert "function renderRelationshipArcs" in page
+    assert "function relationshipTargetRect" in page
+    assert "const seen = new Set()" in page
+    assert "const seenRelationships = new Set()" in page
+    assert "const relationshipKey = relationshipKeyParts([arc.relation, sourceFromPath, sourceToPath])" in page
+    assert "function relationshipKeyParts" in page
+    assert "function relationshipPathList" in page
+    assert "function visibleRelationshipArcs" in page
+    assert "const uses = relationshipPathList(rel.uses)" in page
+    assert "let relationshipCount = 0" in page
+    assert "relationshipCount += 1" in page
+    assert "arc.from === arc.to" in page
+    assert "function isAncestorPath" in page
     assert "relationshipArc" in page
     assert "'data-testid':'relationship-arc'" in page
     assert "'data-relation':arc.relation" in page
+    assert "'data-quality':quality" in page
+    assert "'data-source-from':arc.sourceFromPath || arc.fromPath" in page
+    assert "'data-source-to':arc.sourceToPath || arc.toPath" in page
+    assert '.relationshipArc[data-quality^="heuristic"],.relationshipArcGlow[data-quality^="heuristic"]' in page
     assert "'marker-end':marker" in page
-    assert "rect.w * zoom" in page
+    assert "appendRelationshipArcNote" in page
+    assert "data-testid':'relationship-arc-note'" in page
+    assert "' shown' + (hiddenCount ? ' · ' + hiddenCount + ' hidden' : '')" in page
+    assert "const maxChars = Math.max(4, Math.floor(width * activeZoom / 5.5))" in page
+    assert "appendRelationshipArcSummary(svg, summary)" in page
+    assert "const minWorldW = 88 / activeZoom" in page
+    assert "const minWorldH = 54 / activeZoom" in page
     assert "renderSymbolOverlay(svg, targetRect, selectedSymbols, zoom)" in page
     assert "if (!symbolFrame)" in page
     assert "data-testid':'symbol-overlay-empty'" in page
-    assert "Zoom to " in page
-    assert "Need at least 88x54 px" in page
+    assert "Zoom in to inspect symbols" in page
+    assert "Zoom in or pick a larger tile" in page
+    assert "Zoom to " not in page
+    assert "px for " not in page
     assert "if (r.role === 'leaf' && r.w > 32 && r.h > 14) addWrappedLabel(svg, r, r.node.name, 'leafLabel', 2);" in page
     assert "'font-size':fontSizePx / zoom" in page
     assert "'font-size':8 / activeZoom" in page
     assert "function visibleLabelRect" in page
     assert "labelRect.w * zoom" in page
     assert "labelRect.w < r.w * 0.92" in page
+    assert "'data-label-full':r.node.path || r.node.name" in page
+    assert "tile.appendChild(el('title', {}, r.node.path || r.node.name))" in page
     assert "minScreenW" in page
     assert "maxVisibleLines" in page
     assert "klass === 'leafLabel' && clean.length > chars * maxLineCount" in page
@@ -969,6 +1039,15 @@ def test_render_page_exposes_health_bucket_controls_and_treemap_probe_hooks(hist
     assert '<span class="muted">Kind</span>' not in page
     assert "rel.message" not in page
     assert "relationshipNote" in page
+    assert "relationshipQualityLabel" in page
+    assert "renderRelList(uses, rel)" in page
+    render_treemap = _evolve_page_js_function(page, "renderTreemap")
+    assert render_treemap.index("const relationshipNote = renderRelationshipArcs(svg, rectByPath, {note:false});") < (
+        render_treemap.index("renderSymbolOverlay(svg, targetRect, selectedSymbols, zoom);")
+    )
+    assert render_treemap.index("renderSymbolOverlay(svg, targetRect, selectedSymbols, zoom);") < render_treemap.index(
+        "appendRelationshipArcSummary(svg, relationshipNote);"
+    )
     assert "const missingState = selectedPeriodId ? 'Not present in selected period' : 'Not present in current snapshot'" in page
     assert "/api/symbols?project=" in page
     assert "/api/relationships?project=" in page
@@ -995,6 +1074,21 @@ def _run_evolve_js_contract(script: str) -> dict[str, object]:
         text=True,
     )
     return json.loads(result.stdout.strip())
+
+
+def _evolve_page_js_function(page: str, name: str) -> str:
+    start = page.index(f"function {name}(")
+    brace = page.index("{", start)
+    depth = 0
+    for index in range(brace, len(page)):
+        char = page[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return page[start : index + 1]
+    raise AssertionError(f"function {name} not found")
 
 
 def test_evolve_js_contract_rerenders_on_any_view_change():
@@ -1103,6 +1197,488 @@ def test_evolve_js_contract_keeps_frame_labels_and_truncates_leaf_labels():
     assert out["count"] == 1
     assert out["frameClass"] == "frameLabel"
     assert out["frameText"].startswith("A very long")
+
+
+def test_evolve_js_contract_symbol_overlay_hints_hide_zoom_percentages(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        const SYMBOL_ZOOM_THRESHOLD = 2.15;
+        {_evolve_page_js_function(page, "symbolOverlayReason")}
+        console.log(JSON.stringify({{
+          lowZoom: symbolOverlayReason({{w: 40, h: 20}}, 2.01, 7),
+          cramped: symbolOverlayReason({{w: 10, h: 10}}, 2.2, 7),
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out["lowZoom"] == "Zoom in to inspect symbols"
+    assert out["cramped"] == "Zoom in or pick a larger tile to inspect 7 symbols"
+    assert "%" not in out["lowZoom"] + out["cramped"]
+    assert "px" not in out["lowZoom"] + out["cramped"]
+
+
+def test_evolve_js_contract_relationship_note_uses_actual_helper_and_clips_text(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        function currentZoom() {{ return 2; }}
+        function el(name, attrs, text) {{
+          return {{
+            name,
+            attrs: {{...attrs}},
+            textContent: text || '',
+            children: [],
+            appendChild(child) {{ this.children.push(child); }},
+          }};
+        }}
+        {_evolve_page_js_function(page, "appendRelationshipArcNote")}
+        const wideSvg = {{children: [], appendChild(child) {{ this.children.push(child); }}}};
+        appendRelationshipArcNote(wideSvg, {{x:10, y:20, w:260, h:40}}, 36, 40);
+        const narrowSvg = {{children: [], appendChild(child) {{ this.children.push(child); }}}};
+        appendRelationshipArcNote(narrowSvg, {{x:10, y:20, w:38, h:40}}, 36, 40);
+        console.log(JSON.stringify({{
+          wideClass: wideSvg.children[0].attrs.class,
+          wideTestId: wideSvg.children[0].attrs['data-testid'],
+          wideText: wideSvg.children[0].children[1].textContent,
+          narrowText: narrowSvg.children[0].children[1].textContent,
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out["wideClass"] == "relationshipArcNote"
+    assert out["wideTestId"] == "relationship-arc-note"
+    assert out["wideText"] == "36 shown · 4 hidden"
+    assert out["narrowText"].startswith("36 shown")
+    assert out["narrowText"].endswith("…")
+
+
+def test_evolve_js_contract_relationship_note_stays_above_symbol_overlay_when_capped(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        const SYMBOL_ZOOM_THRESHOLD = 2.15;
+        function currentZoom() {{ return 3; }}
+        function el(name, attrs, text) {{
+          return {{
+            name,
+            attrs: {{...attrs}},
+            textContent: text || '',
+            children: [],
+            appendChild(child) {{ this.children.push(child); }},
+          }};
+        }}
+        function addWrappedLabel(svg, rect, text, klass) {{
+          svg.appendChild(el('text', {{class:klass}}, text));
+        }}
+        function isRectVisible() {{ return true; }}
+        function addRelationshipDefs(svg) {{ svg.defs = true; }}
+        function appendRelationshipArc(svg, arc) {{
+          svg.appendChild(el('path', {{class:'relationshipArc ' + arc.relation}}, ''));
+        }}
+        {_evolve_page_js_function(page, "appendRelationshipArcSummary")}
+        {_evolve_page_js_function(page, "appendRelationshipArcNote")}
+        {_evolve_page_js_function(page, "flattenSymbols")}
+        {_evolve_page_js_function(page, "appendSymbolOverlayNote")}
+        {_evolve_page_js_function(page, "renderSymbolOverlay")}
+        {_evolve_page_js_function(page, "renderRelationshipArcs")}
+        {_evolve_page_js_function(page, "relationshipTargetRect")}
+        {_evolve_page_js_function(page, "isAncestorPath")}
+        {_evolve_page_js_function(page, "relationshipPathList")}
+        {_evolve_page_js_function(page, "relationshipKeyParts")}
+        {_evolve_page_js_function(page, "visibleRelationshipArcs")}
+        const source = {{x:10, y:20, w:240, h:120, node:{{path:'lib/consumer.ts'}}}};
+        const rectByPath = new Map([['lib/consumer.ts', source]]);
+        const uses = [];
+        for (let i = 0; i < 40; i += 1) {{
+          const path = 'pkg/target-' + i + '.ts';
+          uses.push(path);
+          rectByPath.set(path, {{x:280 + i, y:20, w:24, h:20, node:{{path}}}});
+        }}
+        let selected = {{path:'lib/consumer.ts'}};
+        let selectedRelationships = {{quality:'heuristic-imports-v1', uses, used_by:[]}};
+        const svg = {{children: [], appendChild(child) {{ this.children.push(child); }}}};
+        const summary = renderRelationshipArcs(svg, rectByPath, {{note:false}});
+        renderSymbolOverlay(svg, source, [{{name:'main', kind:'function', size:20}}], 3);
+        appendRelationshipArcSummary(svg, summary);
+        const arcIndex = svg.children.findIndex(child => child.attrs && child.attrs.class === 'relationshipArc uses');
+        const symbolTileIndex = svg.children.findIndex(child => child.attrs && child.attrs.class === 'symbolTile');
+        const noteIndex = svg.children.findIndex(child => child.attrs && child.attrs['data-testid'] === 'relationship-arc-note');
+        console.log(JSON.stringify({{
+          arcIndex,
+          symbolTileIndex,
+          noteIndex,
+          arcBeforeSymbolTile: arcIndex < symbolTileIndex,
+          noteAfterSymbolTile: noteIndex > symbolTileIndex,
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out["arcIndex"] >= 0
+    assert out["symbolTileIndex"] >= 0
+    assert out["noteIndex"] >= 0
+    assert out["arcBeforeSymbolTile"] is True
+    assert out["noteAfterSymbolTile"] is True
+
+
+def test_evolve_js_contract_relationships_fall_back_to_nearest_visible_parent(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        {_evolve_page_js_function(page, "relationshipTargetRect")}
+        const rectByPath = new Map([
+          ['lib', {{id: 'lib'}}],
+          ['lib/ast', {{id: 'ast'}}],
+          ['lib/ast/exact.ts', {{id: 'exact'}}],
+        ]);
+        const visible = rect => rect.id !== 'exact';
+        console.log(JSON.stringify({{
+          exact: relationshipTargetRect('lib/ast/exact.ts', rectByPath)?.id,
+          parent: relationshipTargetRect('lib/ast/missing.ts', rectByPath, visible)?.id,
+          invisibleExact: relationshipTargetRect('lib/ast/exact.ts', rectByPath, visible)?.id,
+          root: relationshipTargetRect('server/missing.ts', rectByPath),
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out == {"exact": "exact", "parent": "ast", "invisibleExact": "ast", "root": None}
+
+
+def test_evolve_js_contract_relationship_ancestor_path_matches_segment_boundaries(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        {_evolve_page_js_function(page, "isAncestorPath")}
+        console.log(JSON.stringify({{
+          directChild: isAncestorPath('lib', 'lib/consumer.ts'),
+          nestedChild: isAncestorPath('lib', 'lib/ast/foo.ts'),
+          samePath: isAncestorPath('lib', 'lib'),
+          segmentPrefix: isAncestorPath('lib', 'library/foo.ts'),
+          reverse: isAncestorPath('lib/ast/foo.ts', 'lib'),
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out == {
+        "directChild": True,
+        "nestedChild": True,
+        "samePath": False,
+        "segmentPrefix": False,
+        "reverse": False,
+    }
+
+
+def test_evolve_js_contract_relationship_path_list_deduplicates_provider_data(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        {_evolve_page_js_function(page, "relationshipPathList")}
+        console.log(JSON.stringify({{
+          paths: relationshipPathList(['lib/a.ts', '', 'lib/a.ts', null, ' lib/b.ts ']),
+          empty: relationshipPathList([]),
+          nonArray: relationshipPathList('lib/a.ts'),
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out == {
+        "paths": ["lib/a.ts", " lib/b.ts "],
+        "empty": [],
+        "nonArray": [],
+    }
+
+
+def test_evolve_js_contract_relationship_keys_are_structured_for_newline_paths(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        {_evolve_page_js_function(page, "relationshipKeyParts")}
+        const first = relationshipKeyParts(['uses', 'lib/a\\nb.ts', 'lib/c.ts']);
+        const second = relationshipKeyParts(['uses', 'lib/a.ts', 'lib/b\\nc.ts']);
+        console.log(JSON.stringify({{
+          first,
+          second,
+          distinct: first !== second,
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out["distinct"] is True
+    assert out["first"].startswith('["uses"')
+    assert out["second"].startswith('["uses"')
+
+
+def test_evolve_js_contract_detail_counts_deduplicated_relationship_paths(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        const detailNode = {{innerHTML: ''}};
+        function qs(selector) {{ return selector === '#selection-detail' ? detailNode : null; }}
+        let selectedPeriodId = null;
+        let selectedSymbols = [{{kind:'function', name:'alpha', line_start:7}}];
+        let selectedSymbolError = null;
+        let selectedRelationships = {{
+          quality:'heuristic-imports-v1',
+          uses:['lib/a.ts', 'lib/a.ts', '', ' lib/b.ts '],
+          used_by:['lib/c.ts', 'lib/c.ts'],
+        }};
+        {_evolve_page_js_function(page, "flattenSymbols")}
+        {_evolve_page_js_function(page, "escapeHtml")}
+        {_evolve_page_js_function(page, "formatBytes")}
+        {_evolve_page_js_function(page, "relationshipPathList")}
+        {_evolve_page_js_function(page, "renderRelList")}
+        {_evolve_page_js_function(page, "relationshipQualityLabel")}
+        {_evolve_page_js_function(page, "renderSymbolList")}
+        {_evolve_page_js_function(page, "renderDetail")}
+        renderDetail({{name:'consumer.ts', path:'lib/consumer.ts', kind:'file', size:12}});
+        const html = detailNode.innerHTML;
+        const occurrences = needle => (html.match(new RegExp(needle.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\$&'), 'g')) || []).length;
+        console.log(JSON.stringify({{
+          relationshipNote: html.includes('2 outgoing · 1 incoming'),
+          aCount: occurrences('lib/a.ts'),
+          bCount: occurrences(' lib/b.ts '),
+          cCount: occurrences('lib/c.ts'),
+          quality: html.includes('<span>heuristic</span>'),
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out == {
+        "relationshipNote": True,
+        "aCount": 1,
+        "bCount": 1,
+        "cCount": 1,
+        "quality": True,
+    }
+
+
+def test_evolve_js_contract_relationship_arcs_skip_self_loops_and_deduplicate_parents(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        {_evolve_page_js_function(page, "renderRelationshipArcs")}
+        {_evolve_page_js_function(page, "relationshipTargetRect")}
+        {_evolve_page_js_function(page, "isAncestorPath")}
+        {_evolve_page_js_function(page, "relationshipPathList")}
+        {_evolve_page_js_function(page, "relationshipKeyParts")}
+        {_evolve_page_js_function(page, "visibleRelationshipArcs")}
+        function isRectVisible() {{ return true; }}
+        function addRelationshipDefs(svg) {{ svg.defs = true; }}
+        function appendRelationshipArc(svg, arc) {{
+          svg.arcs.push({{
+            from: arc.from.node.path,
+            to: arc.to.node.path,
+            relation: arc.relation,
+            originalFrom: arc.sourceFromPath,
+            originalTo: arc.sourceToPath
+          }});
+        }}
+        {_evolve_page_js_function(page, "appendRelationshipArcSummary")}
+        function appendRelationshipArcNote(svg, rect, visibleCount, totalCount) {{
+          svg.note = {{visibleCount, totalCount}};
+        }}
+        const selectedParent = {{path:'lib/ast/a.ts'}};
+        const parentRects = new Map([
+          ['lib/ast', {{node:{{path:'lib/ast'}}}}],
+          ['lib/ast/a.ts', {{node:{{path:'lib/ast/a.ts'}}}}],
+        ]);
+        const selectedFile = {{path:'lib/consumer.ts'}};
+        const collapsedRects = new Map([
+          ['lib/consumer.ts', {{node:{{path:'lib/consumer.ts'}}}}],
+          ['lib/ast', {{node:{{path:'lib/ast'}}}}],
+          ['lib/callers', {{node:{{path:'lib/callers'}}}}],
+        ]);
+        const ancestorRects = new Map([
+          ['lib', {{node:{{path:'lib'}}}}],
+          ['lib/consumer.ts', {{node:{{path:'lib/consumer.ts'}}}}],
+        ]);
+        const descendantRects = new Map([
+          ['lib', {{node:{{path:'lib'}}}}],
+          ['lib/ast', {{node:{{path:'lib/ast'}}}}],
+        ]);
+        const cappedRects = new Map([['lib/consumer.ts', {{node:{{path:'lib/consumer.ts'}}}}]]);
+        const cappedUses = [];
+        for (let i = 0; i < 40; i += 1) {{
+          const path = 'pkg/target-' + i + '.ts';
+          cappedUses.push(path);
+          cappedRects.set(path, {{node:{{path}}}});
+        }}
+        const balancedUsedBy = [];
+        for (let i = 0; i < 4; i += 1) {{
+          const path = 'callers/source-' + i + '.ts';
+          balancedUsedBy.push(path);
+          cappedRects.set(path, {{node:{{path}}}});
+        }}
+        let selected = selectedParent;
+        let selectedRelationships = {{uses:['lib/ast/foo.ts']}};
+        const ownSvg = {{arcs:[]}};
+        renderRelationshipArcs(ownSvg, parentRects);
+        selected = selectedFile;
+        selectedRelationships = {{
+          uses:['lib/ast/foo.ts', 'lib/ast/bar.ts'],
+          used_by:['lib/callers/a.ts', 'lib/callers/b.ts'],
+        }};
+        const collapsedSvg = {{arcs:[]}};
+        renderRelationshipArcs(collapsedSvg, collapsedRects);
+        selected = selectedFile;
+        selectedRelationships = {{uses:['lib/ast/foo.ts']}};
+        const ancestorSvg = {{arcs:[]}};
+        renderRelationshipArcs(ancestorSvg, ancestorRects);
+        selected = {{path:'lib'}};
+        selectedRelationships = {{uses:['lib/ast/a.ts']}};
+        const descendantSvg = {{arcs:[]}};
+        renderRelationshipArcs(descendantSvg, descendantRects);
+        selected = selectedFile;
+        selectedRelationships = {{uses:['pkg/target-0.ts', 'pkg/target-0.ts']}};
+        const duplicateSvg = {{arcs:[]}};
+        renderRelationshipArcs(duplicateSvg, cappedRects);
+        selected = selectedFile;
+        selectedRelationships = {{uses:cappedUses}};
+        const cappedSvg = {{arcs:[]}};
+        renderRelationshipArcs(cappedSvg, cappedRects);
+        selected = selectedFile;
+        selectedRelationships = {{uses:cappedUses, used_by:balancedUsedBy}};
+        const balancedSvg = {{arcs:[]}};
+        renderRelationshipArcs(balancedSvg, cappedRects);
+        console.log(JSON.stringify({{
+          ownParentCount: ownSvg.arcs.length,
+          collapsedArcs: collapsedSvg.arcs,
+          collapsedNote: collapsedSvg.note,
+          ancestorArcs: ancestorSvg.arcs,
+          ancestorNote: ancestorSvg.note,
+          descendantArcs: descendantSvg.arcs,
+          descendantNote: descendantSvg.note,
+          duplicateCount: duplicateSvg.arcs.length,
+          duplicateNote: duplicateSvg.note,
+          cappedCount: cappedSvg.arcs.length,
+          cappedNote: cappedSvg.note,
+          balancedCount: balancedSvg.arcs.length,
+          balancedUsedByCount: balancedSvg.arcs.filter(arc => arc.relation === 'usedBy').length,
+          balancedNote: balancedSvg.note,
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out["ownParentCount"] == 0
+    assert out["collapsedArcs"] == [
+        {
+            "from": "lib/consumer.ts",
+            "to": "lib/ast",
+            "relation": "uses",
+            "originalFrom": "lib/consumer.ts",
+            "originalTo": "lib/ast/foo.ts",
+        },
+        {
+            "from": "lib/callers",
+            "to": "lib/consumer.ts",
+            "relation": "usedBy",
+            "originalFrom": "lib/callers/a.ts",
+            "originalTo": "lib/consumer.ts",
+        },
+    ]
+    assert out["collapsedNote"] == {"visibleCount": 2, "totalCount": 4}
+    assert out["ancestorArcs"] == []
+    assert out.get("ancestorNote") is None
+    assert out["descendantArcs"] == []
+    assert out.get("descendantNote") is None
+    assert out["duplicateCount"] == 1
+    assert out.get("duplicateNote") is None
+    assert out["cappedCount"] == 36
+    assert out["cappedNote"] == {"visibleCount": 36, "totalCount": 40}
+    assert out["balancedCount"] == 36
+    assert out["balancedUsedByCount"] == 4
+    assert out["balancedNote"] == {"visibleCount": 36, "totalCount": 44}
+
+
+def test_evolve_js_contract_relationship_arcs_write_actual_svg_data_attributes(history_repo: Path):
+    from riglib.evolve.web import EvolveApp
+
+    page = EvolveApp(repo_root=history_repo).render_page().decode("utf-8")
+    script = textwrap.dedent(
+        f"""
+        let selected = {{path:'lib/consumer.ts'}};
+        let selectedRelationships = {{
+          uses:['lib/ast/foo.ts'],
+          quality:'heuristic-imports-v1',
+        }};
+        function currentZoom() {{ return 3; }}
+        function isRectVisible() {{ return true; }}
+        function addRelationshipDefs(svg) {{ svg.defs = true; }}
+        {_evolve_page_js_function(page, "appendRelationshipArcSummary")}
+        function appendRelationshipArcNote(svg, rect, visibleCount, totalCount) {{
+          svg.note = {{visibleCount, totalCount}};
+        }}
+        function el(name, attrs, text) {{
+          return {{
+            name,
+            attrs: {{...attrs}},
+            textContent: text || '',
+            children: [],
+            appendChild(child) {{ this.children.push(child); }},
+          }};
+        }}
+        {_evolve_page_js_function(page, "renderRelationshipArcs")}
+        {_evolve_page_js_function(page, "visibleRelationshipArcs")}
+        {_evolve_page_js_function(page, "relationshipTargetRect")}
+        {_evolve_page_js_function(page, "isAncestorPath")}
+        {_evolve_page_js_function(page, "relationshipPathList")}
+        {_evolve_page_js_function(page, "relationshipKeyParts")}
+        {_evolve_page_js_function(page, "appendRelationshipArc")}
+        {_evolve_page_js_function(page, "relationshipCurve")}
+        {_evolve_page_js_function(page, "rectCenter")}
+        const rectByPath = new Map([
+          ['lib/consumer.ts', {{x:10, y:20, w:100, h:50, node:{{path:'lib/consumer.ts'}}}}],
+          ['lib/ast', {{x:160, y:40, w:80, h:40, node:{{path:'lib/ast'}}}}],
+        ]);
+        const svg = {{children: [], appendChild(child) {{ this.children.push(child); }}}};
+        renderRelationshipArcs(svg, rectByPath);
+        const arc = svg.children.find(child => child.attrs && child.attrs['data-testid'] === 'relationship-arc');
+        const layerQualities = svg.children.map(child => child.attrs && child.attrs['data-quality']).filter(Boolean);
+        console.log(JSON.stringify({{
+          defs: svg.defs,
+          pathCount: svg.children.length,
+          relation: arc && arc.attrs['data-relation'],
+          quality: arc && arc.attrs['data-quality'],
+          layerQualities,
+          from: arc && arc.attrs['data-from'],
+          to: arc && arc.attrs['data-to'],
+          sourceFrom: arc && arc.attrs['data-source-from'],
+          sourceTo: arc && arc.attrs['data-source-to'],
+          marker: arc && arc.attrs['marker-end'],
+        }}));
+        """
+    ).strip()
+    out = _run_evolve_js_contract(script)
+    assert out == {
+        "defs": True,
+        "pathCount": 3,
+        "relation": "uses",
+        "quality": "heuristic-imports-v1",
+        "layerQualities": ["heuristic-imports-v1", "heuristic-imports-v1", "heuristic-imports-v1"],
+        "from": "lib/consumer.ts",
+        "to": "lib/ast",
+        "sourceFrom": "lib/consumer.ts",
+        "sourceTo": "lib/ast/foo.ts",
+        "marker": "url(#evolveArrowUses)",
+    }
 
 
 def test_snapshot_payload_uses_head_keyed_ttl_cache(history_repo: Path):
