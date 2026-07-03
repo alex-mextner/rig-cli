@@ -2328,7 +2328,17 @@ _AGENTS_MD_PLACEHOLDER = (
     "Repository instructions for coding agents (Claude Code, Codex, etc.). This is the\n"
     "canonical file; the other agent-guide filename is a symlink to it, so every agent\n"
     "reads the same guide.\n\n"
-    "Replace this placeholder with the conventions, commands, and guardrails for this repo.\n"
+    "Replace the rest of this placeholder with the conventions, commands, and guardrails\n"
+    "for this repo. Keep the guardrail below — it applies to every repo.\n\n"
+    "## Writing reports for people (Telegram, PR bodies, spec summaries)\n\n"
+    "These are read by a human, not another agent, so optimize for being understood:\n\n"
+    "- Never invent abbreviations or compress terms into fragments. Write the full term.\n"
+    "- Prefer fewer points explained in full sentences over more points compressed into\n"
+    "  jargon. A short list of clear sentences beats a long list of cryptic stubs.\n"
+    "- Expand every non-obvious term at first use (name it in full, then abbreviate if you\n"
+    "  must reuse it).\n"
+    "- When a message exceeds the channel's length limit, cut secondary content — drop whole\n"
+    "  points — rather than compressing the wording of what remains.\n"
 )
 
 
