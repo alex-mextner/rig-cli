@@ -971,9 +971,26 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
     ``lib/`` on PYTHONPATH so ``cc_hook_bridge`` resolves against the same checkout whose
     ``agent-hooks/`` scripts the installed descriptors point at.
 
-    Only PreToolUse (real prevention) and Stop are wired — PostToolUse cannot block a tool
-    that already ran (see lib/cc_hook_bridge/README.md). pre-write covers every CC
-    file-mutating tool via a `|`-alternation matcher.
+    PreToolUse is real prevention; Stop gates the turn end; PostToolUse (write tools only)
+    is the FEEDBACK channel for the agent-tools `post-write` point — it cannot un-run the
+    tool, but the bridge's ``{"decision": "block", "reason": …}`` surfaces e.g.
+    lint-on-write findings to the model right after the write (agent-tools#160; before
+    this entry existed the whole post-write point was silently dead). The write-tool
+    `|`-alternation matcher covers every CC file-mutating tool.
+
+    Unconditional by design, NOT capability-gated: this always wires the PostToolUse block,
+    even against a ``lib_dir`` checkout whose ``cc_hook_bridge.dispatch.point_for_event``
+    doesn't map PostToolUse yet (agent-tools main, pre agent-tools#161). Read at the time of
+    this PR, that dispatcher version no-ops the call — ``point_for_event`` falls through to
+    ``None`` for an unmapped (event, tool) pair, and its caller treats ``None`` as "print
+    nothing, exit 0" — so the write-tool invocation is inert rather than erroring; that
+    behavior lives in agent-tools, not here, so it isn't pinned by a test in THIS repo and
+    could in principle change. A live version/capability probe here was considered and
+    rejected regardless: it would fight the pinned upgrade-path test (`rig status` already
+    reports the missing dispatcher support as ordinary drift; a re-apply after the agent-tools
+    checkout catches up converges) and would couple this single-source-of-truth function to
+    another repo's internals. The two PRs are meant to land together (agent-tools#160/#161);
+    until then the PostToolUse entry is expected to be inert on a stale dispatcher.
     """
     lib_dir = str(action.options["lib_dir"])
     py = str(action.options.get("python", "python3"))
@@ -989,6 +1006,9 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
         "PreToolUse": [
             ("Bash", cmd("PreToolUse")),
             ("Edit|Write|MultiEdit|NotebookEdit", cmd("PreToolUse")),
+        ],
+        "PostToolUse": [
+            ("Edit|Write|MultiEdit|NotebookEdit", cmd("PostToolUse")),
         ],
         "Stop": [("", cmd("Stop"))],
     }

@@ -1750,7 +1750,8 @@ def _bridge_results(report):
 
 
 def test_hook_bridge_registers_dispatcher_in_settings(fake_agent_tools, tmp_path):
-    """Apply wires PreToolUse (Bash + write tools) and Stop hooks into settings.json."""
+    """Apply wires PreToolUse (Bash + write tools), PostToolUse (write tools) and Stop
+    hooks into settings.json."""
     repo = tmp_path / "repo"
     repo.mkdir()
     settings = repo / ".claude" / "settings.json"
@@ -1772,6 +1773,15 @@ def test_hook_bridge_registers_dispatcher_in_settings(fake_agent_tools, tmp_path
         assert "cc_hook_bridge PreToolUse" in cmd
         # PYTHONPATH anchors on the agent-tools checkout lib/
         assert str(fake_agent_tools / "lib") in cmd
+    # PostToolUse: the write-tool matcher → the post-write FEEDBACK point (lint-on-write,
+    # format-on-write). Without this entry the whole agent-tools post-write point is dead
+    # (agent-tools#160) — pin it so it can't silently regress.
+    post = hooks["PostToolUse"]
+    assert len(post) == 1
+    assert post[0]["matcher"] == "Edit|Write|MultiEdit|NotebookEdit"
+    post_cmd = post[0]["hooks"][0]["command"]
+    assert "cc_hook_bridge PostToolUse" in post_cmd
+    assert str(fake_agent_tools / "lib") in post_cmd
     # Stop: one block, no matcher (match-all), → cc_hook_bridge Stop
     stop = hooks["Stop"]
     assert len(stop) == 1 and "matcher" not in stop[0]
@@ -1789,10 +1799,11 @@ def test_hook_bridge_idempotent_reapply(fake_agent_tools, tmp_path):
     second = run_plan(plan)
     res = _bridge_results(second)
     assert res and all(r.status == "skipped" for r in res), [r.detail for r in res]
-    # exactly one Bash block, not duplicated
+    # exactly one Bash block and one PostToolUse block, not duplicated
     data = json.loads(settings.read_text())
     bash_blocks = [b for b in data["hooks"]["PreToolUse"] if b.get("matcher") == "Bash"]
     assert len(bash_blocks) == 1
+    assert len(data["hooks"]["PostToolUse"]) == 1
 
 
 def test_hook_bridge_preserves_existing_unrelated_hooks(fake_agent_tools, tmp_path):
@@ -1806,6 +1817,9 @@ def test_hook_bridge_preserves_existing_unrelated_hooks(fake_agent_tools, tmp_pa
         "hooks": {
             "PreToolUse": [
                 {"matcher": "Bash", "hooks": [{"type": "command", "command": "/Users/x/.claude/hooks/rtk-rewrite.sh"}]},
+            ],
+            "PostToolUse": [
+                {"matcher": "Write", "hooks": [{"type": "command", "command": "/Users/x/bin/format-on-save.sh"}]},
             ],
             "Notification": [
                 {"matcher": "idle_prompt", "hooks": [{"type": "command", "command": "afplay glass.aiff"}]},
@@ -1822,6 +1836,12 @@ def test_hook_bridge_preserves_existing_unrelated_hooks(fake_agent_tools, tmp_pa
                  for hk in b["hooks"] if b.get("matcher") == "Bash"]
     assert any("rtk-rewrite.sh" in c for c in bash_cmds), bash_cmds
     assert any("cc_hook_bridge PreToolUse" in c for c in bash_cmds), bash_cmds
+    # the user's own PostToolUse hook (different matcher) survives ALONGSIDE our new
+    # managed PostToolUse block — the bridge must never clobber a format-on-save-style hook
+    post = data["hooks"]["PostToolUse"]
+    post_cmds = [hk["command"] for b in post for hk in b["hooks"]]
+    assert any("format-on-save.sh" in c for c in post_cmds), post_cmds
+    assert any("cc_hook_bridge PostToolUse" in c for c in post_cmds), post_cmds
     # unrelated event preserved verbatim
     assert data["hooks"]["Notification"][0]["hooks"][0]["command"] == "afplay glass.aiff"
     # the permissions block survives the hooks merge (apply_harness, which also runs under
@@ -1835,10 +1855,13 @@ def test_hook_bridge_repoints_drifted_command(fake_agent_tools, tmp_path):
     repo.mkdir()
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True)
-    # a stale managed entry pointing at an OLD lib path
+    # stale managed entries pointing at an OLD lib path (PreToolUse AND PostToolUse)
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [
         {"matcher": "Bash", "hooks": [{"type": "command",
          "command": "PYTHONPATH=/old/path/lib python3 -m cc_hook_bridge PreToolUse"}]},
+    ], "PostToolUse": [
+        {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command",
+         "command": "PYTHONPATH=/old/path/lib python3 -m cc_hook_bridge PostToolUse"}]},
     ]}}, indent=2))
     cat = Catalog.scan(str(fake_agent_tools))
     plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
@@ -1849,6 +1872,13 @@ def test_hook_bridge_repoints_drifted_command(fake_agent_tools, tmp_path):
     cmd = bash_blocks[0]["hooks"][0]["command"]
     assert "/old/path/lib" not in cmd
     assert str(fake_agent_tools / "lib") in cmd
+    # the drifted PostToolUse command is likewise rewritten in place, not duplicated
+    post_blocks = data["hooks"]["PostToolUse"]
+    assert len(post_blocks) == 1
+    post_cmd = post_blocks[0]["hooks"][0]["command"]
+    assert "/old/path/lib" not in post_cmd
+    assert "cc_hook_bridge PostToolUse" in post_cmd
+    assert str(fake_agent_tools / "lib") in post_cmd
 
 
 def test_hook_bridge_drift_missing_then_synced(fake_agent_tools, tmp_path):
@@ -1861,6 +1891,29 @@ def test_hook_bridge_drift_missing_then_synced(fake_agent_tools, tmp_path):
     before = detect(plan)
     assert any(i.item == "hook-bridge" and i.direction == "missing" for i in before.items), \
         [i.detail for i in before.items]
+    run_plan(plan)
+    after = detect(plan)
+    assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
+
+
+def test_hook_bridge_drift_missing_posttooluse_only(fake_agent_tools, tmp_path):
+    """The pre-0.8.0 upgrade state — PreToolUse + Stop wired, PostToolUse absent — is
+    reported as missing drift, and a re-apply converges it (this is exactly what every
+    existing installation shows until its next `rig apply`)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
+    run_plan(plan)
+    # strip the PostToolUse event wholesale → the pre-0.8.0 on-disk state
+    data = json.loads(settings.read_text())
+    del data["hooks"]["PostToolUse"]
+    settings.write_text(json.dumps(data, indent=2))
+    before = detect(plan)
+    missing = [i for i in before.items if i.item == "hook-bridge" and i.direction == "missing"]
+    assert missing, [i.detail for i in before.items]
+    assert any("PostToolUse" in i.detail for i in missing), [i.detail for i in missing]
     run_plan(plan)
     after = detect(plan)
     assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
@@ -1903,6 +1956,9 @@ def test_hook_bridge_skip_leaves_stale_command_untouched(fake_agent_tools, tmp_p
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [
         {"matcher": "Bash", "hooks": [{"type": "command", "command": stale}]},
         {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": stale}]},
+    ], "PostToolUse": [
+        {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command",
+         "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PostToolUse"}]},
     ], "Stop": [{"hooks": [{"type": "command", "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge Stop"}]}]}}, indent=2))
     cfg = _bridge_cfg(repo, fake_agent_tools, settings_path=settings)
     cfg.data["defaults"] = {"on_conflict": "skip"}
