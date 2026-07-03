@@ -195,6 +195,8 @@ agent_hooks:
   target: ~/.claude/hooks
   target_kind: claude-code          # claude-code | generic (logical point → harness event)
   all: true
+  worktree_only: true               # enforce the worktree-only workflow in THIS repo (default off)
+  orchestrator_only: true           # keep the orchestrator thin in THIS repo (default on)
   items:
     block-no-verify:     { enabled: true,  on_error: closed }
     enforce-timeout-on-bash: { enabled: true, on_error: open }
@@ -208,6 +210,22 @@ agent_hooks:
 The install action always writes an **absolute** `cmd` (rewriting the
 `/ABSOLUTE/PATH/TO/...` placeholder to the script's real path in the agent-tools checkout),
 per the `agents-hooks/v1` contract.
+
+### Per-repo workflow knobs — `worktree_only` / `orchestrator_only`
+
+Two booleans that configure the **runtime behaviour** of two installed hooks per repo. They
+are read by the hook scripts from **this committed `rig.yaml`** at fire time — `rig apply`
+does **not** consume them (nothing to install; the hooks self-read the knob). They live in the
+`agent_hooks` block so the strict validator accepts them.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `worktree_only` | bool | `false` | **opt-IN.** When `true`, the `worktree-only-writes` pre-write hook **denies an Edit/Write while the checkout is on the repo's default branch** (main/master, detected via `origin/HEAD` / `init.defaultBranch`, never hardcoded). Authoring must happen in a separate worktree on a feature branch; main is for merge/pull/read-only. Default **off** so a repo that legitimately works on main (e.g. `3d-cli`) is never blocked. Escape hatch for a deliberate one-off: `RIG_ALLOW_MAIN_EDIT=1`. (Alex tg#5742.) |
+| `orchestrator_only` | bool | `true` | **opt-OUT.** When `true` (default), the `orchestrator-stays-thin` hook blocks inline implementation Bash / code Edits by the main thread (delegate to a subagent). It allows read-only inspection **and** orchestration (`gh pr list/view/checks`, `gh ship`, `tg`, `review`, `git worktree list`). Set `false` to exempt a repo that works inline (e.g. `3d-cli`). Default **on** = no behaviour change for a repo that omits the key. Escape hatch: `ALLOW_ORCHESTRATOR_WORK=1` + reason. (Alex tg#5743.) |
+
+Both take effect only where the corresponding hook is installed (`agent_hooks.all: true`, or
+the item enabled). They are **runtime** signals, not provisioning — a fresh clone reads the
+committed value directly; no re-`apply` is needed to change enforcement.
 
 ---
 

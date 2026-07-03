@@ -136,6 +136,27 @@ a checkout (`agent_tools_source` → `$RIG_AGENT_TOOLS_SOURCE` → default candi
 flat `Item` registry. If agent-tools changes its layout, fix it *here* — nothing else
 should hard-code agent-tools paths.
 
+## Harness workflow guards (worktree-only + orchestrator-only)
+
+`rig apply` installs two agent-hooks (from agent-tools, via `agent_hooks.all`) that provision
+the harness workflow, each configured PER REPO by a boolean in that repo's committed `rig.yaml`
+(the hook scripts self-read `agent_hooks.<key>` at fire time — `rig apply` does not consume the
+value, so changing enforcement needs no re-apply):
+
+- **`agent_hooks.worktree_only`** (default **false**, opt-IN) — the `worktree-only-writes`
+  pre-write hook denies an Edit/Write while the checkout is on the repo's default branch. All
+  authoring goes in a worktree on a feature branch; the default branch is for merge/pull/
+  read-only. Enrol `hyperide` + the agent-ecosystem repos (`worktree_only: true`); leave it off
+  for repos that legitimately work on main (`3d-cli`). Escape hatch: `RIG_ALLOW_MAIN_EDIT=1`.
+  (Alex tg#5742.)
+- **`agent_hooks.orchestrator_only`** (default **true**, opt-OUT) — the `orchestrator-stays-thin`
+  hook blocks inline implementation by the main thread while allowing read-only inspection and
+  orchestration (`gh pr list/view/checks`, `gh ship`, `tg`, `review`, `git worktree list`). Set
+  `false` to exempt a repo. Escape hatch: `ALLOW_ORCHESTRATOR_WORK=1` + reason. (Alex tg#5743.)
+
+Both are complementary to the pre-push `protect-main` git-hook: that blocks a *push* to main,
+these block the *authoring* / inline work that precedes it. See `docs/config-schema.md#agent_hooks`.
+
 ## Tests
 
 - `python -m pytest -q` — the unit suite. Fast, hermetic; uses a fake agent-tools checkout

@@ -150,6 +150,19 @@ AREAS: tuple[Area, ...] = (
                  "intercept dangerous tool calls (block-no-verify, block-secrets-write, …) before they land."),
             _opt("agent_hooks.all", KIND_BOOL, True,
                  "Install ALL guard hooks (vs cherry-picking via items). Recommended on."),
+            _opt("agent_hooks.worktree_only", KIND_BOOL, False,
+                 "Opt-IN: enforce the worktree-only workflow. The worktree-only-writes hook "
+                 "denies an Edit/Write while the checkout sits on the default branch (main/"
+                 "master) — authoring happens in a feature-branch worktree instead. Off by "
+                 "default so a repo that legitimately works on main (e.g. 3d-cli) is never "
+                 "blocked. Escape hatch: RIG_ALLOW_MAIN_EDIT=1."),
+            _opt("agent_hooks.orchestrator_only", KIND_BOOL, True,
+                 "Opt-OUT: keep the orchestrator thin. The orchestrator-stays-thin hook blocks "
+                 "inline implementation (Bash / code Edits) by the main thread, delegating to a "
+                 "subagent, while still allowing read-only inspection and orchestration (gh pr "
+                 "list/view/checks, gh ship, tg, review, git worktree list). On by default — set "
+                 "false to exempt a repo that works inline (e.g. 3d-cli). Escape hatch: "
+                 "ALLOW_ORCHESTRATOR_WORK=1 + reason."),
         ),
     ),
     Area(

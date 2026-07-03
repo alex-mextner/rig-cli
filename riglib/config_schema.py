@@ -215,6 +215,25 @@ _AGENT_HOOKS_BLOCK = Block(
             "string", "logical-point → harness-event mapping", enum=("claude-code", "generic")
         ),
         "all": Leaf("boolean", "install all guard hooks", default=True),
+        # Two RUNTIME behaviour knobs read BY the installed hooks from this committed rig.yaml
+        # (rig apply does not consume them — the hook scripts parse agent_hooks.<key> at fire
+        # time). They live here so the strict validator/schema accept them per-repo.
+        "worktree_only": Leaf(
+            "boolean",
+            "enforce the worktree-only workflow: the worktree-only-writes hook DENIES an "
+            "Edit/Write while the checkout sits on the default branch (main/master). Opt-IN, "
+            "default OFF — a repo that works directly on main (e.g. 3d-cli) leaves it off and is "
+            "never blocked. Escape hatch: RIG_ALLOW_MAIN_EDIT=1. (Alex tg#5742.)",
+            default=False,
+        ),
+        "orchestrator_only": Leaf(
+            "boolean",
+            "keep the orchestrator thin: the orchestrator-stays-thin hook blocks inline "
+            "implementation Bash / code Edits by the main thread (delegate to a subagent). "
+            "Opt-OUT, default ON — set false to exempt a repo that legitimately works inline "
+            "(e.g. 3d-cli). Escape hatch: ALLOW_ORCHESTRATOR_WORK=1 + reason. (Alex tg#5743.)",
+            default=True,
+        ),
     },
     open_map="items",
     open_map_doc="per-hook overrides (enabled / on_error) keyed by hook name",

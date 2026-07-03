@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from riglib.actions.runner import (
+    _AGENTS_MD_PLACEHOLDER,
     _do_provision_agents_symlink,
     _is_broken_symlink,
     resolve_agents_md,
@@ -506,3 +507,15 @@ def test_end_to_end_build_apply_detect_in_sync(fake_agent_tools, tmp_path):
     second = run_plan(plan)
     assert all(r.status == "skipped" for r in second.results if r.action.category == "agents_md")
     assert not any(i.category == "agents_md" for i in detect(plan).items)
+
+
+def test_placeholder_carries_report_clarity_guardrail():
+    """The provisioned AGENTS.md template seeds a keep-it guardrail against invented
+    abbreviations / compressed fragments in user-facing reports (Alex tg#5802)."""
+    ph = _AGENTS_MD_PLACEHOLDER
+    assert "Writing reports for people" in ph
+    assert "Never invent abbreviations" in ph
+    assert "Expand every non-obvious term at first use" in ph
+    # cut secondary content rather than compress the wording that stays
+    assert "cut secondary content" in ph
+    assert "rather than compressing the wording" in ph
