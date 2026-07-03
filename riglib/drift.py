@@ -49,7 +49,10 @@ from .actions.runner import (
     resolve_ci_workflow,
     resolve_global_excludes,
     resolve_linter_config,
+    repo_self_hosts_ship,
     resolve_ship_delegator,
+    ship_env_file_content,
+    ship_env_file_path,
     schedule_plan_from_action,
     skill_harness_link_target,
     tg_ctl_plan_from_action,
@@ -313,6 +316,41 @@ def _check_agents_symlink(action: Action, report: DriftReport) -> None:
         )
 
 
+def _check_ship_env_file(canonical: Path, report: DriftReport) -> None:
+    """Flag drift on the MACHINE-level ``agent-tools/env`` file (category ``ship_env``).
+
+    Parity with the runner's three outcomes: a NON-FILE at the path or an unreadable file makes
+    apply ERROR (not rewrite), so report those as ``modified`` with the real failure — never a
+    misleading "missing (apply rewrites it)". Only a genuinely absent file is ``missing``.
+    ``is_symlink() or lexists-and-not-file`` matches ``_reconcile_ship_env_file`` exactly: a
+    dangling symlink, a dir, or ANY symlink is a non-file apply refuses to replace.
+    """
+    env_path = ship_env_file_path()
+    if env_path.is_symlink() or (os.path.lexists(env_path) and not env_path.is_file()):
+        report.items.append(
+            DriftItem("modified", "ship_env", "env-file", env_path,
+                      "a non-file sits at the machine env file path (apply errors on it)")
+        )
+        return
+    try:
+        # UnicodeDecodeError is a ValueError, not an OSError — a non-UTF-8 byte in the file must
+        # yield a drift item (apply errors on it the same way), never crash detect() itself.
+        env_current = env_path.read_text(encoding="utf-8") if env_path.is_file() else None
+    except (OSError, UnicodeDecodeError) as exc:
+        report.items.append(
+            DriftItem("modified", "ship_env", "env-file", env_path,
+                      f"machine env file unreadable (apply errors on it): {exc}")
+        )
+        return
+    if env_current != ship_env_file_content(canonical):
+        report.items.append(
+            DriftItem("missing" if env_current is None else "modified",
+                      "ship_env", "env-file", env_path,
+                      "machine env file with AGENT_TOOLS_ROOT absent/stale (apply rewrites it; "
+                      "a delegator with no $AGENT_TOOLS_ROOT and no repo-local ship.sh exits 127)")
+        )
+
+
 def _check_ship_delegator(action: Action, report: DriftReport) -> None:
     """Flag drift on the per-repo ``.claude/scripts/pr-ship.sh`` (``gh ship`` delegator).
 
@@ -325,10 +363,20 @@ def _check_ship_delegator(action: Action, report: DriftReport) -> None:
                      but the ``.git/info/exclude`` entry is gone (an un-ignored delegator would
                      dirty the worktree → ship refuses). ``apply`` reconciles either.
     - ``io_error`` → ``modified``: a directory/unreadable sits at the delegator path; apply errors.
+
+    Also byte-compares the MACHINE-level env file (``$XDG_CONFIG_HOME/agent-tools/env`` — where the
+    agent-tools root lives now that the delegator itself is a portable constant): a missing/stale
+    env file is drift apply repairs, and without it a provisioned delegator (absent an explicit
+    ``$AGENT_TOOLS_ROOT`` and a repo-local ship.sh) exits 127. Its items are emitted under the
+    ``ship_env`` category — classified GLOBAL in :mod:`riglib.layers`, because the file is a
+    machine-wide artifact, not this repo's — so ``rig status`` renders it under the machine layer
+    instead of blaming the repo. (The check runs from the repo-scoped ship_delegator action — for
+    ANY non-self-hosting target, git or plain dir, mirroring apply, which reconciles the env file
+    for those targets too; only a self-hosting repo skips it, see below.)
     """
-    # Mirror the runner's fail-closed guard: a malformed action with no canonical_ship must NOT be
-    # silently classified against Path(".") (which would render `canonical=.` and flag every existing
-    # delegator as modified — apply and drift would then disagree). Surface it as a modified item.
+    # Mirror the runner's fail-closed guard: a malformed action with no canonical_ship must NOT
+    # pass silently — apply errors on it (it cannot render the machine env file), so status must
+    # flag it too or the two would disagree. Surface it as a modified item.
     raw_canonical = str(action.options.get("canonical_ship", "")).strip()
     if not raw_canonical:
         report.items.append(
@@ -337,7 +385,15 @@ def _check_ship_delegator(action: Action, report: DriftReport) -> None:
         )
         return
     canonical = Path(raw_canonical)
-    r = resolve_ship_delegator(action.target, canonical)
+    # A SELF-HOSTING repo (carries its own ci/ship/ship.sh — agent-tools) never reads the env
+    # file: the delegator's repo-local branch wins first, and apply skips the env reconcile for
+    # it. Skip the env check for such a repo so status can't flag drift apply would never repair
+    # (status/apply parity) — every other target, including a non-git dir carrying a stray
+    # ci/ship/ship.sh (whose runtime git probe fails, so the env file IS needed), still gets the
+    # full check. `repo_self_hosts_ship` is the ONE shared predicate apply uses too.
+    if not repo_self_hosts_ship(action.target):
+        _check_ship_env_file(canonical, report)
+    r = resolve_ship_delegator(action.target)
     if r.state == "ok":
         return
     if r.state == "create":

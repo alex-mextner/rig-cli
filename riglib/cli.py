@@ -488,6 +488,7 @@ _CATEGORY_LABELS = {
     "permissions": "permissions",
     "agents_md": "agents.md",
     "ship_delegator": "ship gate",
+    "ship_env": "ship env (machine)",
     "github": "GitHub",
     "models": "models",
     "tmux": "tmux",
@@ -802,6 +803,19 @@ def _setup_headless(args: argparse.Namespace, *, use_default: bool) -> int:
     return 0
 
 
+def _scope_categories(only: str) -> set[str]:
+    """Parse ``--only`` into the set of ACTION categories to keep.
+
+    ``ship_env`` is a drift/status-only category (the machine env file): the action that writes
+    it IS the ``ship_delegator`` action, so a status-guided ``apply --only ship_env`` must not
+    silently no-op — alias it to the owning action category.
+    """
+    wanted = {s.strip() for s in only.split(",")}
+    if "ship_env" in wanted:
+        wanted.add("ship_delegator")
+    return wanted
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
     from .actions import run_plan
     from .catalog import CatalogError
@@ -823,7 +837,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return 2
 
     if args.only:
-        wanted = {s.strip() for s in args.only.split(",")}
+        wanted = _scope_categories(args.only)
         plan.actions = [a for a in plan.actions if a.category in wanted]
 
     _print_plan(plan, full=getattr(args, "plan", False))
@@ -1158,6 +1172,12 @@ def _declaring_config(category: str, loaded) -> str:
     """
     from .layers import GLOBAL, layer_for_category
 
+    # `ship_env` is a GLOBAL artifact (the machine env file) DECLARED by the repo-scoped
+    # ship_delegator block — there is no ship_env key in any config. Point its provenance at
+    # the declaring repo config, not the global file (which never mentions it) and never a
+    # misleading "not declared in any layer" in a repo-only setup.
+    if category == "ship_env":
+        return _declaring_config("ship_delegator", loaded)
     layer = layer_for_category(category)
     path = loaded.global_path if layer == GLOBAL else loaded.repo_path
     return str(path) if path is not None else "not declared in any layer"

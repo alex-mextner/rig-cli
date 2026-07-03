@@ -107,6 +107,14 @@ defaults:
 | `mcp_target` | path | `~/.claude/mcp` | default MCP config dir |
 | `on_conflict` | `skip`/`overwrite`/`backup` | `backup` | what `apply` does when a target already exists |
 
+`on_conflict` protects **user-authored** content. Files that carry a **rig provenance header** —
+the ship delegator (`.claude/scripts/pr-ship.sh`) and the machine env file
+(`agent-tools/env`) — are rig's own prior output: apply rewrites them **in place, no backup,
+regardless of `on_conflict`** (like the managed marker blocks). Anything at those paths
+*without* the header is treated as user content and gets the full policy. Corollary: lines you
+hand-append **below** a rig header are lost on the next apply — the header marks the whole file
+as rig's; put machine customization in `AGENT_TOOLS_ROOT` (env var, always wins) instead.
+
 ---
 
 ## `skills`
@@ -622,15 +630,19 @@ ship_delegator:
 | `enabled` | bool | `true` | provision the delegator (set `false` to leave the repo untouched) |
 
 **What the delegator does.** It's a thin shim that `exec`s the **canonical** generalized ship
-implementation (agent-tools' `ci/ship/ship.sh`). It prefers a **repo-local** `ci/ship/ship.sh`
-(so agent-tools self-hosts and runs its own checked-out version), and otherwise execs the
-**rig-baked canonical path** — the `ci/ship/ship.sh` in the agent-tools checkout rig applied from,
-resolved and baked in at plan time so the file content is deterministic. A clean machine therefore
-gets a working `gh ship` in every repo with no alias hacks.
+implementation (agent-tools' `ci/ship/ship.sh`). Resolution order: a **repo-local**
+`ci/ship/ship.sh` first (so agent-tools self-hosts and runs its own checked-out version), then
+`$AGENT_TOOLS_ROOT` from the environment, then `$AGENT_TOOLS_ROOT` sourced from the
+**machine-level env file** `${XDG_CONFIG_HOME:-~/.config}/agent-tools/env`, which `rig apply`
+writes idempotently from the agent-tools checkout it applied from. The rendered delegator itself
+is a **portable constant** — no machine-specific path is ever baked into it — so a repo may even
+commit the file verbatim (agent-tools does) and a re-apply stays a byte-for-byte no-op. A clean
+machine therefore gets a working `gh ship` in every repo with no alias hacks.
 
 **Repo-local shadowing is intentional (and a debugging footgun to know about).** Because the
 delegator runs a repo-local `ci/ship/ship.sh` first, any repo that happens to carry one — a stale,
-hand-edited, or old copy — will run THAT, not the rig-baked canonical, and rig emits **no drift**
+hand-edited, or old copy — will run THAT, not the canonical resolved via `AGENT_TOOLS_ROOT`, and
+rig emits **no drift**
 for it (rig reconciles the delegator's bytes, never the repo-local ship.sh it may exec). This is by
 design for agent-tools' self-hosting; if `gh ship` "runs the wrong thing" in another repo, check for
 a stray `ci/ship/ship.sh` in that repo.
@@ -650,6 +662,11 @@ reconciled idempotently (duplicates collapse, every other line is preserved verb
 **Drift.** `rig status` flags the delegator as drift when the file is missing, its bytes differ
 from the rig-generated delegator, or the file is present but **not** git-ignored (an un-ignored
 delegator would dirty the worktree). `rig apply` reconciles. Shown in the **repo** section.
+The **machine env file** is checked too, under its own `ship_env` category — shown in the
+**global** section, since the file is a machine-wide artifact (`rig apply --only ship_env`
+scopes to the owning `ship_delegator` action). A repo that carries its own `ci/ship/ship.sh`
+never reads the env file, so both `status` and `apply` leave it entirely alone for that repo —
+no check, no write, no backup (status/apply parity in both directions).
 
 ---
 
