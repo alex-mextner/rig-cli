@@ -666,7 +666,10 @@ The **machine env file** is checked too, under its own `ship_env` category — s
 **global** section, since the file is a machine-wide artifact (`rig apply --only ship_env`
 scopes to the owning `ship_delegator` action). A repo that carries its own `ci/ship/ship.sh`
 never reads the env file, so both `status` and `apply` leave it entirely alone for that repo —
-no check, no write, no backup (status/apply parity in both directions).
+no check, no write, no backup (status/apply parity in both directions). The env-file check also
+survives a **non-git** cwd: `status` there drops repo-scoped areas, but `apply` still reconciles
+the machine env file, so the `ship_env` check keeps running (parity again — a missing/stale env
+file surfaces even from `rig status` in `~`).
 
 ---
 

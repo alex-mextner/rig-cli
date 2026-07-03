@@ -96,7 +96,10 @@ def test_status_non_git_dir_ignores_local_rigyaml_repo_layer(
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
         "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
-        "permissions: {enabled: false}\n",
+        # ship_delegator off: default-on it would flag GLOBAL ship_env (machine env file) drift
+        # even outside git (by design — apply reconciles that file there too), and this test is
+        # about the repo layer being ignored, not about ship.
+        "permissions: {enabled: false}\nship_delegator: {enabled: false}\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
@@ -152,6 +155,95 @@ def test_status_non_git_explicit_config_still_reports_global_areas_only(
     assert "REPO — this repository" not in out
 
 
+def test_status_non_git_dir_still_flags_machine_env_file_drift(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    """The GLOBAL ship_env (machine env file) check survives the non-git repo-action drop.
+
+    `rig status` outside git drops repo-scoped actions — but `rig apply` does NOT, and it still
+    reconciles the machine-level agent-tools/env file there. A missing env file must therefore
+    surface as drift from a non-git cwd too (the codex P2 on PR #112), never a clean status
+    while every portable delegator on the machine would exit 127.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
+        "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
+        "permissions: {enabled: false}\n",  # ship_delegator stays default-ON
+        encoding="utf-8",
+    )
+
+    rc = main(["status", "-C", str(plain), "--config", str(cfg)])
+    out = capsys.readouterr().out
+
+    assert rc == errors.EXIT_DRIFT, out
+    assert "not a git repository" in out.lower()
+    assert "ship_env/env-file" in out, out  # the ship_env drift item survives the action drop
+    assert "machine env file" in out  # ...with the real remediation message
+    # rendered under the GLOBAL (machine) layer's area summary, not a dropped repo area
+    assert "agent-tools machine env (AGENT_TOOLS_ROOT): drift" in out
+
+    # …and with the env file UP TO DATE the area is "in sync" (apply manages the file from this
+    # cwd too) — NOT "not configured", which the plan-drop of the repo-scoped action would
+    # otherwise cause (the codex follow-up on the same P2).
+    from riglib.actions.runner import ship_env_file_content, ship_env_file_path
+
+    p = ship_env_file_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        ship_env_file_content(fake_agent_tools / "ci" / "ship" / "ship.sh"), encoding="utf-8"
+    )
+    rc2 = main(["status", "-C", str(plain), "--config", str(cfg)])
+    out2 = capsys.readouterr().out
+    assert rc2 == 0, out2
+    assert "agent-tools machine env (AGENT_TOOLS_ROOT): in sync" in out2
+    assert "ship_env/env-file" not in out2
+
+
+def test_apply_in_non_git_dir_writes_env_file_and_status_goes_clean(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    """The parity claim itself, end to end: `rig apply` in a NON-GIT cwd really does write the
+    machine env file (repo-scoped actions are NOT dropped by apply), so the ship_env drift that
+    non-git `status` now reports is drift apply genuinely repairs — never an unfixable
+    false-positive in `~`.
+    """
+    from riglib.actions.runner import ship_env_file_content, ship_env_file_path
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
+        "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
+        "permissions: {enabled: false}\n",  # ship_delegator stays default-ON
+        encoding="utf-8",
+    )
+
+    rc = main(["apply", "-C", str(plain), "--config", str(cfg)])
+    capsys.readouterr()
+    assert rc == 0
+
+    p = ship_env_file_path()
+    assert p.is_file()
+    assert p.read_text(encoding="utf-8") == ship_env_file_content(
+        fake_agent_tools / "ci" / "ship" / "ship.sh"
+    )
+
+    rc2 = main(["status", "-C", str(plain), "--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc2 == 0, out
+    assert "agent-tools machine env (AGENT_TOOLS_ROOT): in sync" in out
+
+
 def test_status_non_git_explicit_repo_only_config_says_repo_declarations_are_na(
     tmp_path, capsys, fake_agent_tools, monkeypatch
 ):
@@ -164,7 +256,10 @@ def test_status_non_git_explicit_repo_only_config_says_repo_declarations_are_na(
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nmodels: {enabled: false}\n"
         "tmux: {enabled: false}\ngitignore: {enabled: false}\ntg_ctl: {enabled: false}\n"
-        "permissions: {enabled: false}\n"
+        # ship_delegator off: default-on it would flag GLOBAL ship_env (machine env file) drift
+        # even outside git (by design — apply reconciles that file there too), and this test is
+        # about repo declarations rendering N/A, not about ship.
+        "permissions: {enabled: false}\nship_delegator: {enabled: false}\n"
         "ci: {enabled: true, all: false, items: {codeql: {enabled: true}}}\n",
         encoding="utf-8",
     )

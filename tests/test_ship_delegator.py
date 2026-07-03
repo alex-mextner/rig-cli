@@ -380,6 +380,61 @@ def test_drift_reports_directory_at_env_path_as_modified(tmp_path):
     assert res.status == "error"
 
 
+def test_drift_reports_file_at_env_parent_as_modified(tmp_path):
+    # a FILE where the PARENT dir should be (~/.config/agent-tools is a file) blocks apply's
+    # mkdir(parents=True) — apply ERRORS, it does NOT "rewrite" anything. drift must classify
+    # this `modified` naming the blocker, not a misleading "missing (apply rewrites it)"
+    # (status/apply parity — the codex P2 on PR #112).
+    repo = _git_repo(tmp_path / "repo")
+    canonical = _canonical_ship(tmp_path)
+    p = ship_env_file_path()
+    p.parent.parent.mkdir(parents=True, exist_ok=True)
+    p.parent.write_text("not a directory\n", encoding="utf-8")  # agent-tools/ as a file
+    report = detect(_plan_with_action(repo, canonical))
+    items = [i for i in report.items if i.category == "ship_env" and i.item == "env-file"]
+    assert items and items[0].direction == "modified"
+    assert "non-directory" in items[0].detail
+    res = _apply(repo, canonical)
+    assert res.status == "error"  # parity: apply really does error, not rewrite
+
+
+def test_non_git_status_env_check_still_runs_for_dropped_action(tmp_path):
+    # `rig status` outside git drops repo-scoped actions before drift detection — but apply does
+    # NOT drop them and still reconciles the MACHINE env file there. The dropped ship_delegator
+    # action's GLOBAL ship_env check must therefore still run (the codex P2 on PR #112): a
+    # missing/stale env file must surface even from a non-git cwd.
+    from riglib.drift import DriftReport, check_ship_env_for_dropped_repo_action
+
+    nongit = tmp_path / "plain-dir"
+    nongit.mkdir()
+    canonical = _canonical_ship(tmp_path)
+    report = DriftReport()
+    check_ship_env_for_dropped_repo_action(_action(nongit, canonical), report)
+    items = [i for i in report.items if i.category == "ship_env" and i.item == "env-file"]
+    assert items and items[0].direction == "missing"
+    # stale content is flagged too
+    p = _write_env_file(canonical)
+    p.write_text("AGENT_TOOLS_ROOT='/somewhere/else'\n", encoding="utf-8")
+    report2 = DriftReport()
+    check_ship_env_for_dropped_repo_action(_action(nongit, canonical), report2)
+    items2 = [i for i in report2.items if i.category == "ship_env" and i.item == "env-file"]
+    assert items2 and items2[0].direction == "modified"
+    # an up-to-date env file is clean
+    _write_env_file(canonical)
+    report3 = DriftReport()
+    check_ship_env_for_dropped_repo_action(_action(nongit, canonical), report3)
+    assert not [i for i in report3.items if i.category == "ship_env"]
+    # a malformed action (no canonical_ship) fails CLOSED — apply errors on it, so status must
+    # flag it too, under the GLOBAL ship_env category (renderable outside git)
+    bad = _action(nongit, canonical)
+    bad.options = {"canonical_ship": ""}
+    report4 = DriftReport()
+    check_ship_env_for_dropped_repo_action(bad, report4)
+    bad_items = [i for i in report4.items if i.category == "ship_env"]
+    assert bad_items and bad_items[0].direction == "modified"
+    assert "malformed plan" in bad_items[0].detail
+
+
 def test_dangling_symlink_at_env_path_is_refused_not_replaced(tmp_path):
     # a DANGLING symlink at the env path is a non-file: `exists()` is False (it follows the
     # link), so a naive check would classify it "absent" and clobber it outside the conflict

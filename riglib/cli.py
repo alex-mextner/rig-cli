@@ -1011,6 +1011,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     # The REPO layer only exists inside a git repository. In a non-git dir (e.g. ~) there is no
     # repo at all — do NOT nag "no rig.yaml, should be committed" (that advice applies only in a
     # real repo). Show that the repo layer is N/A and report the GLOBAL layer only.
+    dropped_ship_delegator = []  # repo-scoped ship_delegator actions dropped outside git
     if not env.is_git_repo:
         _print_non_git_note()
         # plan.build still emits default-on repo actions from built-in defaults even when no
@@ -1021,6 +1022,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         for action in plan.actions:
             (global_actions if _is_global_action(action) else repo_actions).append(action)
         plan.actions = global_actions
+        # ship_delegator carries the GLOBAL ship_env (machine env file) check, and apply does
+        # NOT drop repo actions outside git — it still reconciles that file. Remember the
+        # dropped actions so the env-file check can run after detect() (status/apply parity
+        # for the machine-wide artifact; the repo-local delegator part stays dropped).
+        dropped_ship_delegator = [a for a in repo_actions if a.category == "ship_delegator"]
         if repo_actions:
             print(_dim(
                 "  (repo-scoped areas are N/A outside a git repository: "
@@ -1067,6 +1073,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         scan_mcp_files=scan_mcp_files,
         scan_hook_dirs=scan_hook_dirs,
     )
+    if dropped_ship_delegator:
+        # non-git cwd: the repo-scoped delegator actions were dropped above, but their GLOBAL
+        # ship_env (machine env file) check must still run — apply reconciles that file here too.
+        from .drift import check_ship_env_for_dropped_repo_action
+
+        for action in dropped_ship_delegator:
+            check_ship_env_for_dropped_repo_action(action, report)
     # disabled-but-installed dispatcher: config turned the dispatcher off, but a prior apply
     # may have left core.hooksPath pointing at the installed composer dir. apply won't delete
     # it, so surface it as disk→config drift.
@@ -1107,7 +1120,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     # disabled-dispatcher/disabled-global-excludes augmentations have run; schedule/tg-ctl drift
     # is already in the report from detect(). Printed FIRST so it is the headline, with the richer
     # per-area detail lines (schedule cron time, tg-ctl launchd label) following it.
-    _render_area_summary(plan, report, env)
+    _render_area_summary(plan, report, env, extra_configured_actions=dropped_ship_delegator)
 
     # richer detail for two GLOBAL areas the summary counts but can't fully describe: the
     # model-freshness schedule (the daily cron time) and the tg-ctl inbound daemon (its launchd
@@ -1183,7 +1196,7 @@ def _declaring_config(category: str, loaded) -> str:
     return str(path) if path is not None else "not declared in any layer"
 
 
-def _area_state_line(area, plan, report) -> str:
+def _area_state_line(area, plan, report, extra_configured_actions=()) -> str:
     """The rendered state for ONE area: "not configured" / "in sync" / "drift (…)".
 
     The reliable, unit-stable numbers are the DRIFT counts (config→disk + disk→config), so those
@@ -1204,7 +1217,14 @@ def _area_state_line(area, plan, report) -> str:
     """
     from .areas import area_matches_action, area_matches_drift
 
-    configured = any(area_matches_action(area, a.category, a.options) for a in plan.actions)
+    # extra_configured_actions: plan-dropped actions (repo-scoped, non-git cwd) that still mark
+    # their GLOBAL areas configured — see _render_area_summary. Configured-ness only, no counts.
+    from itertools import chain
+
+    configured = any(
+        area_matches_action(area, a.category, a.options)
+        for a in chain(plan.actions, extra_configured_actions)
+    )
     missing = sum(
         1 for d in (report.by_direction("missing") + report.by_direction("modified"))
         if area_matches_drift(area, d.category, d.item, d.direction)
@@ -1239,7 +1259,7 @@ def _area_state_line(area, plan, report) -> str:
     return _warn(f"drift ({', '.join(parts)})")
 
 
-def _render_area_summary(plan, report, env) -> None:
+def _render_area_summary(plan, report, env, extra_configured_actions=()) -> None:
     """Print the AREA SUMMARY: every reconciled area, grouped by layer, with in-sync vs drift.
 
     The pre-summary status rendered ONLY drifting items as a flat dump dominated by skill rows
@@ -1251,6 +1271,12 @@ def _render_area_summary(plan, report, env) -> None:
 
     REPO-layer areas are gated to git repos (a non-git dir has no repo layer); in a non-git dir
     only the GLOBAL areas show.
+
+    ``extra_configured_actions`` are actions DROPPED from the plan (repo-scoped actions outside
+    git) that must still mark their GLOBAL areas configured: the ship_delegator action carries
+    the machine-wide ship_env artifact, and with it dropped a clean env file would render
+    ``not configured`` even though apply manages the file from this cwd too. They feed only the
+    configured-ness check, never drift counts (their repo-side drift stays out of a non-git run).
     """
     from .areas import areas_for_layer
     from .layers import GLOBAL, REPO
@@ -1263,7 +1289,8 @@ def _render_area_summary(plan, report, env) -> None:
     for layer in layers:
         print(_dim(f"    {_LAYER_HEADERS[layer]}"))
         for area in areas_for_layer(layer):
-            print(f"      {area.label}: {_area_state_line(area, plan, report)}")
+            line = _area_state_line(area, plan, report, extra_configured_actions)
+            print(f"      {area.label}: {line}")
 
 
 def _render_drift_by_layer(report, loaded, env) -> None:
