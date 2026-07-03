@@ -2090,12 +2090,15 @@ def _tool_install_timeout_s() -> int:
 def _do_provision_tools(action: Action, on_conflict: str) -> ActionResult:
     """Provision the personal CLI ecosystem by running each declared tool's OWN install.sh.
 
-    For each :class:`ToolSpec` carried by the action: if the tool is already installed (bin resolves
-    AND the skill blurb is advertised — :func:`tools.tool_status`) it is a no-op (``skipped``); else
-    rig runs ``bash <repo>/install.sh``, which does the tool's own locate→symlink→install-skill
-    dance. SAFE: rig never deletes a user's existing symlink; an already-working bin (even a Homebrew
-    one) counts as resolved and is left alone — only an unadvertised tool is (re)installed to wire up
-    the skill. A missing repo (no install.sh on disk) is an ``error`` for that tool, not a crash.
+    For each :class:`ToolSpec` carried by the action: FRESHNESS FIRST — if the tool ships
+    ``scripts/deploy.sh``, rig runs it (ff-only ``git pull``) to keep the checkout current, even when
+    the tool is already installed (a non-zero deploy exit is a non-fatal warning, folded into the
+    message). Then the install decision: if the tool is already installed (bin resolves AND the skill
+    blurb is advertised — :func:`tools.tool_status`) it is a no-op (``skipped``); else rig runs
+    ``bash <repo>/install.sh``, which does the tool's own locate→symlink→install-skill dance. SAFE:
+    rig never deletes a user's existing symlink; an already-working bin (even a Homebrew one) counts
+    as resolved and is left alone — only an unadvertised tool is (re)installed to wire up the skill. A
+    missing repo (no install.sh on disk) is an ``error`` for that tool, not a crash.
 
     Returns ``skipped`` when every tool was already current, ``created`` when at least one was
     installed, ``error`` if any tool's install failed or its repo was absent. ``RIG_TOOLS_DRY_RUN``
@@ -2124,26 +2127,61 @@ def _do_provision_tools(action: Action, on_conflict: str) -> ActionResult:
 
 
 def _provision_one_tool(spec: object, dry: bool) -> tuple[str, str]:
-    """Install one tool if needed. Returns ``(status, detail)`` — status ∈ installed/skipped/error.
+    """Provision one tool: keep its checkout fresh, then install it if needed.
 
-    ``spec`` is a :class:`tools.ToolSpec`. Already-installed (bin resolves + advertised) → skipped.
-    Missing repo (no install.sh) → error. Otherwise run its install.sh (or, under dry-run, report).
+    ``spec`` is a :class:`tools.ToolSpec`. The missing-repo guard runs FIRST: a repo with no
+    ``install.sh`` is not a rig-provisioned tool → ``error``, and — crucially — we run NO script
+    against it (a malformed/foreign ``tools.items.*.repo`` path never gets deploy.sh executed before
+    the error). FRESHNESS runs next: if the tool ships ``scripts/deploy.sh``, rig runs it to ff-pull
+    the checkout (:func:`_maybe_deploy_tool`, non-fatal, folded into the reported message) — BEFORE
+    the already-installed short-circuit, which is exactly what would otherwise hide a stale checkout.
+    Then the install decision: already-installed (bin resolves + advertised) → skipped; otherwise run
+    its install.sh (or, under dry-run, report). Returns ``(status, detail)`` — status ∈
+    installed/skipped/error. A deploy failure NEVER changes the status: a stale-but-installed tool
+    still reports skipped, so freshness rot surfaces as a warning, not an apply error.
     """
     from .. import tools as toolsmod
 
     assert isinstance(spec, toolsmod.ToolSpec)
     st = toolsmod.tool_status(spec)
-    if st.installed:
-        return "skipped", f"{spec.name} already installed ({spec.managed_bin})"
     if not st.repo_present:
         return "error", f"{spec.name}: no install.sh at {spec.install_script} (repo missing?)"
+    note = _maybe_deploy_tool(spec, dry)
+    if st.installed:
+        return "skipped", _with_note(f"{spec.name} already installed ({spec.managed_bin})", note)
     if dry:
-        return "installed", f"{spec.name} (dry-run — would run {spec.install_script})"
+        return "installed", _with_note(f"{spec.name} (dry-run — would run {spec.install_script})", note)
     rc, out = _run_tool_install(spec)
     if rc != 0:
         tail = out.strip().splitlines()[-1] if out.strip() else "(no output)"
         return "error", f"{spec.name}: install.sh exited {rc} — {tail}"
-    return "installed", f"{spec.name} installed via {spec.install_script.name}"
+    return "installed", _with_note(f"{spec.name} installed via {spec.install_script.name}", note)
+
+
+def _maybe_deploy_tool(spec: object, dry: bool) -> str:
+    """Keep a provisioned tool's checkout fresh via its own ``scripts/deploy.sh`` (opt-in, non-fatal).
+
+    Returns ``""`` (a no-op) when the tool ships no ``scripts/deploy.sh`` or under dry-run. Otherwise
+    runs the deploy hook (ff-only ``git pull``, guarded entirely by the script) and returns a short
+    note to fold into the tool's reported message. A non-zero exit (offline/dirty/diverged) is
+    DOWNGRADED to a warning note — never an apply abort — mirroring the offline-safe ``_git_clone``
+    discipline (a failed freshness pull is 'tool stale', not 'apply broken').
+    """
+    from .. import tools as toolsmod
+
+    assert isinstance(spec, toolsmod.ToolSpec)
+    if dry or not spec.deploy_script.exists():
+        return ""
+    rc, out = _run_tool_deploy(spec)
+    if rc == 0:
+        return "deploy.sh: ok"
+    tail = out.strip().splitlines()[-1] if out.strip() else "(no output)"
+    return f"deploy.sh WARN (rc={rc}): {tail}"
+
+
+def _with_note(detail: str, note: str) -> str:
+    """Append a bracketed ``note`` to ``detail`` (a no-op when ``note`` is empty)."""
+    return f"{detail} [{note}]" if note else detail
 
 
 def _run_tool_install(spec: object) -> tuple[int, str]:
@@ -2156,20 +2194,45 @@ def _run_tool_install(spec: object) -> tuple[int, str]:
     from .. import tools as toolsmod
 
     assert isinstance(spec, toolsmod.ToolSpec)
+    return _run_tool_bash_script(spec.install_script, spec.repo, "install.sh")
+
+
+def _run_tool_deploy(spec: object) -> tuple[int, str]:
+    """Run ``bash <repo>/scripts/deploy.sh`` to keep the tool's checkout fresh (ff-only ``git pull``).
+
+    Mirrors :func:`_run_tool_install` — same cwd, capture, and ``RIG_TOOL_INSTALL_TIMEOUT_S`` budget
+    (a network fetch needs the headroom). The deploy script owns all its own safety (refuses a
+    dirty/detached/diverged tree, ff-only); rig just invokes it. Returns ``(returncode,
+    combined_output)`` and never raises — the caller downgrades a non-zero rc to a warning.
+    """
+    from .. import tools as toolsmod
+
+    assert isinstance(spec, toolsmod.ToolSpec)
+    return _run_tool_bash_script(spec.deploy_script, spec.repo, "deploy.sh")
+
+
+def _run_tool_bash_script(script: Path, cwd: Path, label: str) -> tuple[int, str]:
+    """Run ``bash <script>`` in ``cwd`` under the tool-install timeout. Returns ``(rc, combined)``.
+
+    The shared core of :func:`_run_tool_install` (``install.sh``) and :func:`_run_tool_deploy`
+    (``scripts/deploy.sh``): identical invocation (bash + captured output + the
+    ``RIG_TOOL_INSTALL_TIMEOUT_S`` budget). Never raises — a timeout or spawn failure is reported as
+    a non-zero rc with a ``label``-tagged message, so a hung/broken script can't wedge or crash apply.
+    """
     timeout_s = _tool_install_timeout_s()
     try:
         proc = subprocess.run(
-            ["bash", str(spec.install_script)],
-            cwd=str(spec.repo),
+            ["bash", str(script)],
+            cwd=str(cwd),
             capture_output=True,
             text=True,
             timeout=timeout_s,
         )
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
-        return 1, f"install.sh timed out after {timeout_s}s"
+        return 1, f"{label} timed out after {timeout_s}s"
     except OSError as exc:
-        return 1, f"could not run install.sh: {exc}"
+        return 1, f"could not run {label}: {exc}"
 
 
 def _tools_result(

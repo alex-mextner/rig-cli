@@ -65,6 +65,12 @@ BLURBS_SUBDIR = ".blurbs"
 # at the repo root, so this is a constant, not per-tool config.
 INSTALL_SCRIPT = "install.sh"
 
+# Optional per-tool freshness hook. When a tool repo ships this, ``rig apply`` runs it (via
+# ``runner._run_tool_deploy``) BEFORE the already-installed short-circuit so a provisioned checkout
+# is kept current — the script does a safe ff-only ``git pull`` and owns all its own safety
+# (refuses dirty/detached/diverged trees). Opt-in: a tool without it just skips freshness.
+DEPLOY_SCRIPT = "scripts/deploy.sh"
+
 
 def _expand(path: str) -> Path:
     """Expand ``~`` and env vars and resolve to an absolute path (no disk access)."""
@@ -87,6 +93,11 @@ class ToolSpec:
     @property
     def install_script(self) -> Path:
         return self.repo / INSTALL_SCRIPT
+
+    @property
+    def deploy_script(self) -> Path:
+        """The tool's optional freshness hook ``<repo>/scripts/deploy.sh`` (may not exist)."""
+        return self.repo / DEPLOY_SCRIPT
 
     @property
     def managed_bin(self) -> Path:

@@ -588,8 +588,10 @@ _TOOLS_ITEM_BLOCK = Block(
 _TOOLS_BLOCK = Block(
     doc=(
         "the personal CLI tool ecosystem (tg/review/task/draw/…) rig installs + advertises at "
-        "apply, by running each tool's own install.sh. Default OFF (opt-in): list tools under "
-        "items. A per-MACHINE concern — belongs in the GLOBAL layer, not a committed rig.yaml."
+        "apply, by running each tool's own install.sh. rig also keeps a provisioned checkout FRESH: "
+        "if a tool repo ships scripts/deploy.sh, apply runs it (ff-only git pull) even when already "
+        "installed — opt-in per tool, non-fatal. Default OFF (opt-in): list tools under items. A "
+        "per-MACHINE concern — belongs in the GLOBAL layer, not a committed rig.yaml."
     ),
     leaves={
         "enabled": Leaf("boolean", "provision the listed tools (opt-in)", default=False),
