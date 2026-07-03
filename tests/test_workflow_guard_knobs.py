@@ -44,6 +44,17 @@ def test_validator_accepts_both_knobs():
     )
 
 
+@pytest.mark.parametrize("key", ["worktree_only", "orchestrator_only"])
+@pytest.mark.parametrize("bad", ["false", "true", 1, 0])
+def test_validator_rejects_non_bool_knob_values(key: str, bad: object):
+    """The published schema types both knobs as ``boolean``; the strict validator must reject a
+    non-bool (a string or an int) or it would silently accept configs the schema forbids — the
+    validator↔schema type invariant. Ints count: ``bool`` is an int subclass, but ``1``/``0``
+    are not bools, so a YAML ``worktree_only: 1`` is a type error, not a truthy toggle."""
+    with pytest.raises(config.ConfigError, match=f"agent_hooks.{key} must be a bool"):
+        config.validate({"version": 1, "agent_hooks": {key: bad}})
+
+
 def test_block_child_keys_includes_knobs():
     """The validator sources its accepted keys from config_schema — both must be there, or the
     published schema and the validator would disagree (the one-source invariant)."""

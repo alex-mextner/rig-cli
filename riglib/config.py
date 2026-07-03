@@ -584,6 +584,11 @@ def _validate_agent_hooks(ah: dict[str, Any]) -> None:
     _check_bool(ah, "enabled", "agent_hooks.enabled")
     _check_str(ah, "target", "agent_hooks.target")
     _check_bool(ah, "all", "agent_hooks.all")
+    # The two per-repo workflow knobs are booleans in the published schema; type-check them
+    # here so the strict validator and schema/rig.schema.json agree (else `worktree_only: "no"`
+    # would pass the validator but violate the schema). See tests/test_workflow_guard_knobs.py.
+    _check_bool(ah, "worktree_only", "agent_hooks.worktree_only")
+    _check_bool(ah, "orchestrator_only", "agent_hooks.orchestrator_only")
     target_kind = ah.get("target_kind")
     if target_kind is not None and target_kind not in _VALID_AGENT_HOOK_TARGET_KINDS:
         raise ConfigError(
