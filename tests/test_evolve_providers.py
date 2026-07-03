@@ -52,6 +52,19 @@ def test_provider_payload_records_errors_without_raising(tmp_path: Path):
     assert encoded["errors"] == [{"message": "sverklo CLI not found on PATH"}]
 
 
+def test_not_wired_provider_payloads_skip_seen_sources_and_keep_placeholder_contract(tmp_path: Path):
+    from riglib.evolve.providers import PLANNED_PROVIDER_SOURCES, not_wired_provider_payloads
+
+    payloads = not_wired_provider_payloads(tmp_path, {"task", "review"})
+    by_source = {payload.source: payload for payload in payloads}
+
+    assert set(by_source) == set(PLANNED_PROVIDER_SOURCES) - {"task", "review"}
+    assert by_source["tg"].project_path == str(tmp_path.resolve())
+    assert by_source["tg"].status == "not-wired"
+    assert by_source["tg"].message == "Provider not wired yet."
+    assert by_source["tg"].to_dict()["health"]["status"] == "not-wired"
+
+
 def test_provider_cache_round_trip_hit_miss_and_invalidation(tmp_path: Path):
     from riglib.evolve.cache import ProviderCache, ProviderCacheKey
     from riglib.evolve.model import ProviderPayload
@@ -145,7 +158,11 @@ def test_collect_default_providers_does_not_raise_when_tools_fail(tmp_path: Path
     payloads = collect_default(tmp_path)
     by_source = {payload.source: payload for payload in payloads}
 
-    assert set(by_source) == {"git", "rig", "sverklo"}
+    assert {"git", "rig", "sverklo", "task", "tg", "review", "haft", "serena", "lsp", "tree-sitter"} <= set(
+        by_source
+    )
     assert by_source["git"].status == "error"
     assert by_source["sverklo"].status == "error"
     assert by_source["rig"].status in {"ok", "warning"}
+    assert by_source["task"].status == "not-wired"
+    assert by_source["task"].message == "Provider not wired yet."

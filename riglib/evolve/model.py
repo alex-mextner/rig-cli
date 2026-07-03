@@ -19,7 +19,11 @@ PROVIDER_SCHEMA = "rig.evolve.provider.v1"
 
 @dataclass(frozen=True)
 class ProviderPayload:
-    """Versioned, JSON-serializable payload emitted by one evolve provider."""
+    """Versioned, JSON-serializable payload emitted by one evolve provider.
+
+    Status is intentionally string-based in v1. Current producers emit ok, warning, error, or
+    not-wired; not-wired represents a planned integration row, not a failed provider run.
+    """
 
     source: str
     project_path: str | Path
