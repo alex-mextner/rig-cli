@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from riglib import config, config_schema
+from riglib import config, config_schema, schema
 from riglib.actions.runner import hook_bridge_entries
 from riglib.plan import Action
 
@@ -84,6 +84,51 @@ def test_pretooluse_matchers_already_carry_both_guards():
     matchers = {m for m, _cmd in hook_bridge_entries(action)["PreToolUse"]}
     assert "Edit|Write|MultiEdit|NotebookEdit" in matchers  # carries the pre-write guards
     assert "Bash" in matchers  # carries the pre-bash orchestrator guard
+
+
+def test_wizard_registry_exposes_both_knobs_with_correct_defaults():
+    """`rig setup`/`config-web` enumerate `riglib.schema.AREAS`, a SEPARATE registry from the
+    strict validator/JSON-schema (`config_schema.py`) exercised above. Adding a key only to
+    config_schema makes hand edits and `config set` valid, but leaves it undiscoverable/
+    untoggleable in the interactive surfaces — a repo could not opt in to `worktree_only` or opt
+    out of `orchestrator_only` before activation. Regression for the codex P2 review finding on
+    PR #104 (`riglib/config_schema.py:221`)."""
+    worktree_opt = schema.option_for_key("agent_hooks.worktree_only")
+    orchestrator_opt = schema.option_for_key("agent_hooks.orchestrator_only")
+    assert worktree_opt is not None, "worktree_only missing from the wizard/config-web registry"
+    assert orchestrator_opt is not None, "orchestrator_only missing from the wizard/config-web registry"
+    assert worktree_opt.kind == schema.KIND_BOOL
+    assert orchestrator_opt.kind == schema.KIND_BOOL
+    # defaults must match config_schema's Leaf defaults exactly (the two-source invariant). Read
+    # the OTHER source's live value rather than a second hardcoded literal, or the two registries
+    # could drift to different values and this test would still pass.
+    config_schema_props = _agent_hooks_schema_props()
+    assert worktree_opt.default == config_schema_props["worktree_only"]["default"]
+    assert worktree_opt.default is False  # opt-IN
+    assert orchestrator_opt.default == config_schema_props["orchestrator_only"]["default"]
+    assert orchestrator_opt.default is True  # opt-OUT
+    assert worktree_opt.hint and orchestrator_opt.hint
+
+
+def test_wizard_can_toggle_both_knobs():
+    """The wizard/`config set` coercion + effective-value path must round-trip both knobs, i.e.
+    they are actually settable, not just visible."""
+    worktree_opt = schema.option_for_key("agent_hooks.worktree_only")
+    orchestrator_opt = schema.option_for_key("agent_hooks.orchestrator_only")
+    assert schema.coerce(worktree_opt, "yes") is True
+    assert schema.coerce(orchestrator_opt, "no") is False
+    # absent from a config -> falls back to the registry default (agent_hooks is not a
+    # block-presence-gated category, so this is the documented default, not a forced False).
+    assert schema.effective_value(worktree_opt, {}) is False
+    assert schema.effective_value(orchestrator_opt, {}) is True
+    assert schema.effective_value(worktree_opt, {"agent_hooks": {"worktree_only": True}}) is True
+    assert (
+        schema.effective_value(orchestrator_opt, {"agent_hooks": {"orchestrator_only": False}})
+        is False
+    )
+    # both write into the committed repo rig.yaml, not the global config (repo-runtime knobs).
+    assert worktree_opt.layer == schema.REPO
+    assert orchestrator_opt.layer == schema.REPO
 
 
 if __name__ == "__main__":  # pragma: no cover
