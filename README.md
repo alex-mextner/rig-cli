@@ -379,6 +379,8 @@ Part of the [HyperIDE.ai](https://hyperide.ai) agent toolchain:
 
 Each CLI registers a skill into your agent harnesses (`<tool> install-skill`) so agents know it exists — see Install.
 
+A machine opts into provisioning these tools with a global `tools:` block (see the config), and `rig apply` runs each tool's own `install.sh`. It also keeps them **fresh**: if a tool's repo ships a `scripts/deploy.sh`, `rig apply` runs it (a safe fast-forward-only `git pull`) on every apply — even when the tool is already installed — so a provisioned checkout doesn't silently drift behind origin. Freshness is opt-in per tool (no `deploy.sh` → skipped) and non-fatal (an offline/dirty/diverged tree is a warning, never an apply error). Both `install.sh` and `deploy.sh` run under the `RIG_TOOL_INSTALL_TIMEOUT_S` budget (default 300s) so a hung script can't wedge apply; raise it for a slow network fetch.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

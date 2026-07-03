@@ -173,6 +173,24 @@ def _fake_install_sh(repo: Path, bin_dir: Path, blurb_file: Path, marker: Path) 
     script.chmod(0o755)
 
 
+def _write_deploy_sh(repo: Path, *, sentinel: Path | None = None, exit_code: int = 0) -> None:
+    """Write a fake ``scripts/deploy.sh`` into ``repo`` (the freshness hook rig runs on apply).
+
+    Appends ``x`` to ``sentinel`` when given (so a test can count how many times deploy ran) and then
+    exits ``exit_code`` — a non-zero code simulates the offline/dirty/diverged tree the real deploy.sh
+    refuses on, so a test can assert that failure is downgraded to a warning, not an apply error.
+    """
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    body = "#!/usr/bin/env bash\nset -euo pipefail\n"
+    if sentinel is not None:
+        body += f'printf "x" >> "{sentinel}"\n'
+    body += f"exit {exit_code}\n"
+    script = scripts / "deploy.sh"
+    script.write_text(body)
+    script.chmod(0o755)
+
+
 def _spec_for(tmp_path: Path, name: str = "demo") -> tuple[tools.ToolSpec, Path, Path]:
     """A ToolSpec wired into tmp dirs, with a fake install.sh + a run-marker. Returns (spec, blurb, marker)."""
     repo = tmp_path / f"{name}-cli"
@@ -225,6 +243,69 @@ def test_reapply_is_a_noop_when_current(tmp_path, monkeypatch):
     assert second.status == "skipped", second.detail
     # install.sh ran ONLY on the first apply (marker not appended a second time).
     assert marker.read_text() == "x"
+
+
+def test_reapply_runs_deploy_script_when_present(tmp_path, monkeypatch):
+    """A tool whose repo ships scripts/deploy.sh gets it run on EVERY apply — including when the
+    tool is already installed — so a provisioned checkout is kept fresh. Contrast
+    test_reapply_is_a_noop_when_current above (no deploy.sh → the reapply is a true no-op).
+    """
+    spec, blurb, marker = _spec_for(tmp_path)
+    _isolate_blurb(monkeypatch, blurb)
+    sentinel = tmp_path / "deploy-ran"
+    _write_deploy_sh(spec.repo, sentinel=sentinel)  # rc 0; touches the sentinel each run
+    first = _run(spec, monkeypatch)
+    assert first.status == "created", first.detail
+    second = _run(spec, monkeypatch)
+    assert second.status == "skipped", second.detail  # tool already installed → install short-circuits
+    assert marker.read_text() == "x"  # install.sh ran ONCE (first apply only)
+    assert sentinel.read_text() == "xx"  # deploy.sh ran on BOTH applies (freshness even when installed)
+    assert "deploy" in second.detail.lower()  # the deploy result is folded into the reported message
+
+
+def test_freshness_skipped_when_no_deploy_script(tmp_path, monkeypatch):
+    """No scripts/deploy.sh in the repo → no deploy attempted, apply still succeeds (freshness is
+    opt-in per tool: a tool wires it up by ADDING a deploy.sh)."""
+    spec, blurb, marker = _spec_for(tmp_path)  # writes install.sh but NOT scripts/deploy.sh
+    _isolate_blurb(monkeypatch, blurb)
+    assert not spec.deploy_script.exists()
+    res = _run(spec, monkeypatch)
+    assert res.status == "created", res.detail
+    assert marker.read_text() == "x"  # install ran
+    assert "deploy" not in res.detail.lower()  # no deploy note when the tool has no deploy.sh
+
+
+def test_deploy_failure_is_non_fatal(tmp_path, monkeypatch):
+    """A non-zero deploy.sh exit (offline/dirty/diverged) is downgraded to a warning, NOT an error —
+    the tool's install/skip outcome is unchanged. Mirrors the offline-safe _git_clone discipline."""
+    spec, blurb, marker = _spec_for(tmp_path)
+    _isolate_blurb(monkeypatch, blurb)
+    sentinel = tmp_path / "deploy-ran"
+    _write_deploy_sh(spec.repo, sentinel=sentinel, exit_code=1)  # runs, then fails
+    first = _run(spec, monkeypatch)
+    assert first.status == "created", first.detail  # install succeeded; failing deploy did NOT fold to error
+    second = _run(spec, monkeypatch)
+    assert second.status == "skipped", second.detail  # already installed; failing deploy stays non-fatal
+    assert sentinel.read_text() == "xx"  # deploy ran on both applies despite exiting non-zero
+    assert "deploy" in second.detail.lower()  # the warning is surfaced, not silently swallowed
+
+
+def test_deploy_not_run_when_install_script_absent(tmp_path, monkeypatch):
+    """A repo with scripts/deploy.sh but NO install.sh is 'repo missing' (repo_present keys off
+    install.sh) → it errors WITHOUT running deploy.sh. The missing-repo guard runs before freshness,
+    so no script fires against a malformed/foreign repo path before the no-install.sh error."""
+    repo = tmp_path / "half-cli"
+    repo.mkdir()
+    sentinel = tmp_path / "deploy-ran"
+    _write_deploy_sh(repo, sentinel=sentinel)  # deploy.sh present…
+    assert not (repo / "install.sh").exists()  # …but install.sh absent → repo_present is False
+    spec = tools.ToolSpec(name="half", repo=repo, bin_dir=tmp_path / "bin")
+    _isolate_blurb(monkeypatch, tmp_path / "skills" / "half.md")
+    monkeypatch.setattr(tools.shutil, "which", lambda name: None)
+    res = _run(spec, monkeypatch)
+    assert res.status == "error"
+    assert "no install.sh" in res.detail
+    assert not sentinel.exists()  # deploy.sh must NOT have run before the missing-repo error
 
 
 def test_already_installed_elsewhere_is_not_clobbered(tmp_path, monkeypatch):
