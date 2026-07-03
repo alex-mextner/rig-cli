@@ -39,6 +39,10 @@ _CATEGORY_LAYER = {
     "tmux": GLOBAL,
     "tg_ctl": GLOBAL,
     "tools": GLOBAL,
+    # the machine-level agent-tools/env file (AGENT_TOOLS_ROOT). The CHECK runs from the
+    # repo-scoped ship_delegator action, but the artifact is machine-wide — its drift is the
+    # machine's, not this repo's, so status must render it under the GLOBAL heading.
+    "ship_env": GLOBAL,
     # REPO — this repo, from ./rig.yaml
     "ci": REPO,
     "ship_delegator": REPO,

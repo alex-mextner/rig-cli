@@ -1061,8 +1061,9 @@ GITIGNORE_BLOCK_COMMENT = (
 # ``gh ship`` alias (``gh ship`` → ``<repo>/.claude/scripts/pr-ship.sh``) works in EVERY managed
 # repo on a clean machine — not only in agent-tools, which is the only repo that historically
 # carried it. The delegator execs the canonical ``ci/ship/ship.sh`` (agent-tools' real ship
-# implementation): repo-local first (so agent-tools self-hosts), else the rig-baked canonical
-# path resolved from the agent-tools checkout at apply time. The provisioned file is IGNORED in
+# implementation): repo-local first (so agent-tools self-hosts), else via ``$AGENT_TOOLS_ROOT``
+# — from the environment or from the machine-level ``$XDG_CONFIG_HOME/agent-tools/env`` file rig
+# apply writes (the delegator itself is a portable constant, no baked path). The file is IGNORED in
 # the repo's ``.git/info/exclude`` (a per-repo, never-committed exclude) so it does not dirty the
 # worktree — ship refuses a dirty tree, so an un-ignored provisioned file would break the very
 # command it enables. Defined here (the schema layer, stdlib-only) so the plan builder, runner,

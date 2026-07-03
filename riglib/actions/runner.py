@@ -2652,37 +2652,45 @@ def _do_provision_agents_symlink(action: Action, on_conflict: str) -> ActionResu
 # git exclude) so the provisioned file does not dirty the worktree — ship refuses a dirty tree, so
 # an un-ignored provisioned file would break the very command it enables. apply + drift both go
 # through `resolve_ship_delegator`, so they can never disagree on whether the repo is in sync.
+#
+# PORTABILITY (agent-tools#151 / rig-cli#108): the rendered delegator is a CONSTANT — no
+# machine-specific absolute path is ever baked in — so a repo that chooses to COMMIT the file
+# (agent-tools does) stays byte-identical to what rig renders and a re-apply never dirties the
+# tree. The machine-specific agent-tools root lives in ONE machine-level env file
+# (`$XDG_CONFIG_HOME/agent-tools/env`, default `~/.config/agent-tools/env`) that rig apply writes
+# idempotently; the delegator sources it only when $AGENT_TOOLS_ROOT is not already set.
 
 
-def ship_delegator_content(canonical_ship: Path) -> str:
-    """The exact bytes of the provisioned ``.claude/scripts/pr-ship.sh`` for a canonical ship.sh.
+def ship_delegator_content() -> str:
+    """The exact bytes of the provisioned ``.claude/scripts/pr-ship.sh`` — a pure constant.
 
     A thin delegator: the global ``gh ship`` alias runs ``<repo>/.claude/scripts/pr-ship.sh``; this
-    script execs the canonical generalized ship implementation. It prefers a REPO-LOCAL
-    ``ci/ship/ship.sh`` (so agent-tools — which carries the real ship.sh — self-hosts and always
-    runs its own checked-out version) and otherwise resolves the canonical via ``$AGENT_TOOLS_ROOT``,
-    with the rig-baked root as a bash default (``${var:=default}``) when the env var is unset.
+    script execs the canonical generalized ship implementation. Resolution order:
 
-    ``AGENT_TOOLS_ROOT`` is exported so callers of this script inherit it — e.g. a spawned sub-shell
-    or a nested invocation. Set it in the environment to point at a different agent-tools checkout
-    without re-running ``rig apply``; that env value wins over the baked default.
+    1. REPO-LOCAL ``ci/ship/ship.sh`` (agent-tools — which carries the real ship.sh — self-hosts
+       and always runs its own checked-out version).
+    2. ``$AGENT_TOOLS_ROOT`` from the environment (an explicit env always wins).
+    3. ``$AGENT_TOOLS_ROOT`` sourced from the machine-level env file
+       ``${XDG_CONFIG_HOME:-$HOME/.config}/agent-tools/env`` (written by ``rig apply`` — see
+       :func:`ship_env_file_content`), consulted only when the env var is unset.
 
-    SECURITY: ``canonical_ship`` derives from the user-controlled ``agent_tools_source`` config, so
-    the baked agent-tools root is shell-quoted with :func:`shlex.quote`. Without that, a path
-    containing ``"``, ``$()``, backticks, or a space would either break the generated script or
-    EXECUTE arbitrary commands every time ``gh ship`` runs (e.g. ``agent_tools_source:
-    /tmp/$(curl evil)/agent-tools``). Single-quoting renders every metacharacter inert.
+    The rendered script is deliberately PORTABLE and BYTE-STABLE: it takes no parameters and bakes
+    no machine-specific path, so a repo may commit the file verbatim (agent-tools#151 does) and a
+    later ``rig apply`` byte-compares equal — no rewrite, no ``.rig-bak``, no dirty tree
+    (rig-cli#108 was exactly that recurring drift).
+
+    ``AGENT_TOOLS_ROOT`` is exported (once resolved) so nested invocations and spawned sub-shells
+    inherit the same checkout.
     """
-    # Derive the agent-tools root from the canonical ship.sh path (always ci/ship/ship.sh below root).
-    agent_tools_root = canonical_ship.parent.parent.parent
-    quoted_root = shlex.quote(str(agent_tools_root))
     return (
         "#!/usr/bin/env bash\n"
         "# Provisioned by rig (ship_delegator). The global `gh ship` alias runs\n"
         "# <repo>/.claude/scripts/pr-ship.sh. agent-tools' canonical, generalized ship\n"
         "# implementation lives at ci/ship/ship.sh — delegate to it so `gh ship` works in this\n"
         "# repo with the same green-CI-gated merge + cleanup as everywhere else. Repo-local\n"
-        "# ci/ship/ship.sh wins (agent-tools self-hosts); otherwise the rig-baked canonical path.\n"
+        "# ci/ship/ship.sh wins (agent-tools self-hosts); otherwise $AGENT_TOOLS_ROOT — from the\n"
+        "# environment, or from the machine-level env file rig apply writes. This script is\n"
+        "# PORTABLE (no machine-specific paths), so a repo may commit it verbatim.\n"
         "set -euo pipefail\n"
         # `git rev-parse` EXITS NON-ZERO outside a git repo; under `set -e` a failing command
         # substitution in this assignment would abort the whole script (exit 128) before we ever
@@ -2693,22 +2701,178 @@ def ship_delegator_content(canonical_ship: Path) -> str:
         'if [[ -n "$repo_local" && -f "$repo_local" ]]; then\n'
         '  exec "$repo_local" "$@"\n'
         "fi\n"
-        # AGENT_TOOLS_ROOT baked default is user-derived (agent_tools_source), so it is quoted.
-        # A temp var receives the single-quoted literal (safe for paths with spaces and metacharacters)
-        # then ${var:-default} substitution expands it — an env-supplied AGENT_TOOLS_ROOT wins.
-        # unset cleans the temp var; export propagates the resolved value to child processes.
-        f"_rig_default={quoted_root}\n"
-        'AGENT_TOOLS_ROOT="${AGENT_TOOLS_ROOT:-$_rig_default}"\n'
-        "unset _rig_default\n"
-        "export AGENT_TOOLS_ROOT\n"
-        'canonical="$AGENT_TOOLS_ROOT/ci/ship/ship.sh"\n'
-        'if [[ -f "$canonical" ]]; then\n'
+        # The machine-level env file supplies AGENT_TOOLS_ROOT when the env var is unset. An
+        # explicit env always wins (source is skipped), so pointing a shell at another checkout
+        # needs no re-apply. The file is rig-written (shell-quoted assignment) and user-owned
+        # config — same trust level as the script itself. ${HOME:-} keeps `set -u` from aborting
+        # in a sanitized env (no HOME) where AGENT_TOOLS_ROOT is passed explicitly.
+        # `! -L` mirrors apply/drift, which REFUSE a symlink at this path: without it the
+        # delegator would happily source (execute) a symlink target rig itself refuses to
+        # manage — the enforcement and the runtime must draw the same line.
+        'env_file="${XDG_CONFIG_HOME:-${HOME:-}/.config}/agent-tools/env"\n'
+        'if [[ -z "${AGENT_TOOLS_ROOT:-}" && ! -L "$env_file" && -f "$env_file" ]]; then\n'
+        "  # shellcheck source=/dev/null\n"
+        '  source "$env_file"\n'
+        "fi\n"
+        # ${var:+...} keeps `set -u` safe when AGENT_TOOLS_ROOT is still unset (no env, no file):
+        # canonical stays empty and we fall through to the diagnostic instead of aborting.
+        'canonical="${AGENT_TOOLS_ROOT:+$AGENT_TOOLS_ROOT/ci/ship/ship.sh}"\n'
+        'if [[ -n "$canonical" && -f "$canonical" ]]; then\n'
+        "  export AGENT_TOOLS_ROOT\n"
         '  exec "$canonical" "$@"\n'
         "fi\n"
-        'echo "pr-ship.sh: canonical ship.sh not found (repo-local $repo_local nor $canonical)." >&2\n'
-        'echo "Set AGENT_TOOLS_ROOT to your agent-tools checkout, or re-run \'rig apply\'." >&2\n'
+        'echo "pr-ship.sh: canonical ship.sh not found (repo-local $repo_local; AGENT_TOOLS_ROOT=${AGENT_TOOLS_ROOT:-<unset>}; env file $env_file)." >&2\n'
+        "echo \"Set AGENT_TOOLS_ROOT (or write $env_file), or re-run 'rig apply'.\" >&2\n"
         "exit 127\n"
     )
+
+
+def ship_env_file_path() -> Path:
+    """The machine-level env file the delegator sources: ``$XDG_CONFIG_HOME/agent-tools/env``.
+
+    Resolved at CALL time (not import time) so tests can monkeypatch ``XDG_CONFIG_HOME``/``HOME``
+    — and it MIRRORS the bash-side reader (``${XDG_CONFIG_HOME:-${HOME:-}/.config}/agent-tools/env``
+    in :func:`ship_delegator_content`) expansion-for-expansion, so writer and reader can never
+    point at different files. That rules out ``os.path.expanduser`` (its passwd-database fallback
+    when ``HOME`` is unset has no bash equivalent — the two sides would silently diverge in a
+    sanitized env and the delegator would exit 127 reading a file apply never wrote). With both
+    ``XDG_CONFIG_HOME`` and ``HOME`` unset this yields ``/.config/agent-tools/env`` — exactly what
+    the bash reader expands to — and the write fails LOUDLY (permission denied) instead of the two
+    sides quietly disagreeing.
+    """
+    base = os.environ.get("XDG_CONFIG_HOME") or f"{os.environ.get('HOME', '')}/.config"
+    return Path(base) / "agent-tools" / "env"
+
+
+# The first line of a rig-written env file — the ownership marker `_reconcile_ship_env_file`
+# keys on to tell a rig-owned file (rewritten in place) from user content (backed up first).
+_SHIP_ENV_HEADER = "# Managed by rig (ship_delegator)"
+
+
+def ship_env_file_content(canonical_ship: Path) -> str:
+    """The exact bytes of the machine-level ``agent-tools/env`` file for a canonical ship.sh.
+
+    One shell-quoted assignment: ``AGENT_TOOLS_ROOT='<agent-tools root>'``. This file — NOT the
+    per-repo delegator — is where the machine-specific path lives, so the delegator itself stays
+    portable and byte-stable.
+
+    INVARIANT: one agent-tools checkout per machine. ``agent_tools_source`` is effectively a
+    machine-level setting (the global config layer), and this file holds the ONE machine-wide
+    pointer. If two repos on one machine declare DIVERGENT roots, each apply rewrites the file to
+    its own root (last apply wins) and status in the other repo reports env-file drift — an honest
+    signal of a genuinely ambiguous setup, not silent corruption. A per-shell
+    ``AGENT_TOOLS_ROOT`` env var (which always wins over this file) or a repo-local
+    ``ci/ship/ship.sh`` covers the exotic multi-checkout case.
+
+    SECURITY: ``canonical_ship`` derives from the user-controlled ``agent_tools_source`` config,
+    and the delegator ``source``\\ s this file, so the root is shell-quoted with
+    :func:`shlex.quote`. Without that, a path containing ``"``, ``$()``, backticks, or a space
+    would either break the sourced assignment or EXECUTE arbitrary commands every time ``gh ship``
+    runs (e.g. ``agent_tools_source: /tmp/$(curl evil)/agent-tools``). Single-quoting renders
+    every metacharacter inert.
+    """
+    # Derive the agent-tools root from the canonical ship.sh path (always ci/ship/ship.sh below root).
+    agent_tools_root = canonical_ship.parent.parent.parent
+    quoted_root = shlex.quote(str(agent_tools_root))
+    return (
+        f"{_SHIP_ENV_HEADER}: machine-level pointer to the agent-tools checkout.\n"
+        "# Sourced by each repo's .claude/scripts/pr-ship.sh when $AGENT_TOOLS_ROOT is unset.\n"
+        "# Rewritten by `rig apply` from agent_tools_source — edit that config, not this file.\n"
+        f"AGENT_TOOLS_ROOT={quoted_root}\n"
+    )
+
+
+def _reconcile_ship_env_file(canonical_ship: Path, on_conflict: str) -> tuple[bool, str, str]:
+    """Idempotently write the machine-level env file. Returns ``(ok, note, status)``.
+
+    ``status`` is one of ``"unchanged"`` (already correct — a true no-op), ``"written"`` (the file
+    was created/updated), or ``"skipped_user"`` (a user-owned file left as-is under
+    ``on_conflict=skip`` — NOT clean: the caller must surface the note, since ``rig status`` will
+    keep reporting env-file drift until the user reconciles it).
+
+    Byte-compares before writing so a matching file is a true no-op (``changed=False``) — a
+    re-apply must not churn mtimes or invent backups on the machine layer. A differing file that
+    carries the rig ownership header (:data:`_SHIP_ENV_HEADER`) is rig-OWNED — rewritten in place,
+    no backup, REGARDLESS of ``on_conflict`` (like the managed exclude block): the authoritative
+    value is ``agent_tools_source`` in config, and drift here is a stale root or a hand-edit that
+    belongs in config instead. Anything ELSE at this path is USER content rig did not write — it
+    honors ``on_conflict`` via :func:`fsutil.write_file` (``backup`` keeps a ``*.rig-bak-*`` copy,
+    ``skip`` leaves it untouched, ``overwrite`` replaces with no backup), never a silent clobber.
+    ``ok=False`` (an unreadable/unwritable path) is surfaced by the caller as an apply ERROR — a
+    delegator without a resolvable root exits 127 on machines with no env var.
+    """
+    path = ship_env_file_path()
+    desired = ship_env_file_content(canonical_ship)
+    # Anything that is not a plain regular file at the path — a directory, ANY symlink (dangling
+    # or resolving), a fifo — is refused, never silently replaced (drift reports the same, so
+    # status/apply agree). `lexists` (not `exists`) so a DANGLING symlink doesn't masquerade as
+    # an absent file and get clobbered outside the conflict policy. Symlinks to regular files
+    # are rejected too: the rig-owned rewrite goes through os.replace, which would swap the
+    # SYMLINK for a real file — silently breaking a centrally-managed (e.g. dotfiles-repo)
+    # symlink instead of updating its target.
+    if path.is_symlink() or (os.path.lexists(path) and not path.is_file()):
+        return False, f"a non-file sits at the env file path {path} (dir/symlink — refusing to replace it)", "unchanged"
+    try:
+        # UnicodeDecodeError is a ValueError, not an OSError — one non-UTF-8 byte (a hand-typed
+        # latin-1 path, corruption) must surface as the same readable error, not a traceback.
+        existing = path.read_text(encoding="utf-8") if path.is_file() else None
+    except (OSError, UnicodeDecodeError) as exc:
+        return False, f"could not read env file {path}: {exc}", "unchanged"
+    if existing == desired:
+        return True, f"env file {path} up to date", "unchanged"
+    try:
+        if existing is not None and not existing.startswith(_SHIP_ENV_HEADER):
+            out = fsutil.write_file(path, desired, on_conflict)
+            if out.status == "skipped":
+                return True, f"left user env file {path} as-is ({out.detail})", "skipped_user"
+            return True, f"wrote env file {path} ({out.detail})", "written"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_exclude(path, desired)
+    except OSError as exc:
+        return False, f"could not write env file {path}: {exc}", "unchanged"
+    return True, f"wrote env file {path}", "written"
+
+
+def repo_self_hosts_ship(repo_root: Path) -> bool:
+    """Whether ``repo_root``'s delegator will hit the repo-local ``ci/ship/ship.sh`` at runtime.
+
+    Shared by apply (skip the env-file reconcile) and drift (skip the env-file check) so the two
+    can never disagree — and it mirrors the DELEGATOR's own runtime branch EXACTLY: the runtime
+    resolves repo-local as ``$(git rev-parse --show-toplevel)/ci/ship/ship.sh``, so this predicate
+    runs the SAME probe (not a filesystem approximation like ``.git`` exists — a corrupt/fake
+    ``.git`` passes that but fails the real probe, and apply would then skip an env file the
+    runtime needs, exit 127). A plain non-git dir carrying a ``ci/ship/ship.sh`` is therefore NOT
+    self-hosting; the runtime, not the filesystem, is the contract.
+    """
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if res.returncode != 0:
+        return False
+    toplevel = res.stdout.strip()
+    if not toplevel:
+        return False
+    return (Path(toplevel) / "ci" / "ship" / "ship.sh").is_file()
+
+
+def _is_rig_owned_delegator(path: Path) -> bool:
+    """Whether an on-disk delegator carries the rig provenance header (ANY generation of it).
+
+    Keys on the ``# Provisioned by rig (ship_delegator)`` line every rig-rendered delegator has
+    opened with since the feature shipped — including the pre-0.9 baked-path format — so an
+    upgrade rewrite can tell rig's own stale output (replace in place, no backup) from a user's
+    hand-rolled file (conflict policy + backup). Unreadable/absent → ``False`` (treated as user
+    content, the conservative branch: worst case is a spurious backup, never a lost user file).
+    """
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:200] if path.is_file() else ""
+    except OSError:
+        return False
+    return "# Provisioned by rig (ship_delegator)" in head
 
 
 def ship_delegator_exclude_block_text() -> str:
@@ -2724,6 +2888,10 @@ def ship_delegator_exclude_block_text() -> str:
             SHIP_DELEGATOR_EXCLUDE_BEGIN_MARKER,
             SHIP_DELEGATOR_EXCLUDE_COMMENT,
             f"/{SHIP_DELEGATOR_REL_PATH}",
+            # a conflict backup of the delegator (a hand-edited copy displaced under
+            # on_conflict=backup) is an untracked SIBLING — un-ignored it dirties the worktree
+            # and breaks the very `gh ship` this feature enables (ship refuses a dirty tree).
+            f"/{SHIP_DELEGATOR_REL_PATH}.rig-bak-*",
             SHIP_DELEGATOR_EXCLUDE_END_MARKER,
         ]
     )
@@ -2832,16 +3000,16 @@ def _exclude_has_entry(exclude_path: Path | None) -> bool:
     return content[b_start:e_end] == ship_delegator_exclude_block_text()
 
 
-def resolve_ship_delegator(repo_root: Path, canonical_ship: Path) -> ShipDelegatorResolution:
+def resolve_ship_delegator(repo_root: Path) -> ShipDelegatorResolution:
     """Classify the on-disk ship-delegator state vs desired (pure, no writes).
 
     Reads the delegator file + the repo's ``.git/info/exclude`` and returns the one ``state`` apply
     and drift both switch on, so ``status`` never misreports the on-disk state. Idempotent: a correct
     file + a present exclude entry is ``ok``; an absent file is ``create``; a drifted file OR a
     correct file with a missing exclude entry is ``update``; a directory/unreadable path is
-    ``io_error``.
+    ``io_error``. Takes no canonical path — the desired content is a portable constant.
     """
-    content = ship_delegator_content(canonical_ship)
+    content = ship_delegator_content()
     deleg = repo_root / SHIP_DELEGATOR_REL_PATH
     exclude_path = repo_info_exclude_path(repo_root)
     exclude_ok = _exclude_has_entry(exclude_path)
@@ -3001,11 +3169,47 @@ def _do_provision_ship_delegator(action: Action, on_conflict: str) -> ActionResu
     if not raw_canonical:
         return ActionResult(action, "error", "ship-delegator: no canonical_ship in action options")
     canonical = Path(raw_canonical)
-    r = resolve_ship_delegator(action.target, canonical)
+
+    # Step 0 — reconcile the MACHINE-level env file (the one place the agent-tools root lives; the
+    # per-repo delegator is a portable constant that sources it). Runs before the state switch so a
+    # repo whose delegator is already "ok" still gets a missing/stale env file repaired — a correct
+    # delegator with no resolvable root would exit 127. Idempotent: a matching file is not rewritten.
+    #
+    # A SELF-HOSTING repo (carries its own ci/ship/ship.sh — agent-tools) is skipped entirely: its
+    # delegator never reads the env file (the repo-local branch wins first), so touching a machine
+    # file that repo doesn't need would (a) fail apply on an unwritable $XDG_CONFIG_HOME exactly
+    # where the file is useless, and (b) rewrite/back-up a file `rig status` — which skips the env
+    # check for self-hosting repos in `_check_ship_env_file`'s caller — never flagged (status/apply
+    # parity cuts BOTH ways). Any ordinary repo on the machine reconciles the file when applied.
+    # `repo_self_hosts_ship` requires GIT too: the runtime repo-local branch needs a git toplevel.
+    if repo_self_hosts_ship(action.target):
+        env_ok, env_note, env_status = True, "env file not needed (repo-local ci/ship/ship.sh)", "unchanged"
+    else:
+        env_ok, env_note, env_status = _reconcile_ship_env_file(canonical, on_conflict)
+    if not env_ok:
+        return ActionResult(
+            action, "error",
+            f"ship-delegator: {env_note} — delegator cannot resolve the agent-tools checkout "
+            "without it (gh ship would exit 127 unless AGENT_TOOLS_ROOT is set)",
+        )
+
+    r = resolve_ship_delegator(action.target)
 
     if r.state == "io_error":
         return ActionResult(action, "error", f"ship-delegator: {r.detail}")
     if r.state == "ok":
+        if env_status == "written":
+            return ActionResult(
+                action, "updated",
+                f"ship-delegator: {r.delegator_path.name} already correct + ignored; {env_note}",
+            )
+        if env_status == "skipped_user":
+            # NOT silently clean: a stale user env file left per on_conflict=skip — surface the
+            # note so the operator knows status will keep flagging env-file drift.
+            return ActionResult(
+                action, "skipped",
+                f"ship-delegator: {r.delegator_path.name} already correct + ignored; {env_note}",
+            )
         return ActionResult(action, "skipped", f"ship-delegator: {r.delegator_path.name} already correct + ignored")
 
     # Step 1 — write the file only when its bytes are wrong/absent (no needless backup when only the
@@ -3017,7 +3221,14 @@ def _do_provision_ship_delegator(action: Action, on_conflict: str) -> ActionResu
         backup = None
         skipped_user_file = False
     else:
-        out = fsutil.write_file(r.delegator_path, r.content, on_conflict)
+        # An on-disk delegator carrying the rig provenance header is RIG content (e.g. the
+        # pre-0.9 baked-path generation): replace it with NO .rig-bak sibling, regardless of
+        # on_conflict — an upgrade that changes the rendered bytes would otherwise drop an
+        # untracked backup next to the delegator in EVERY managed repo at once (dirty tree →
+        # ship refuses → `gh ship` broken by its own provisioning). Only a file rig did not
+        # write (no header — user content) gets the conflict policy and a backup.
+        effective_conflict = "overwrite" if _is_rig_owned_delegator(r.delegator_path) else on_conflict
+        out = fsutil.write_file(r.delegator_path, r.content, effective_conflict)
         _chmod_x_if_changed(r.delegator_path, out)
         file_note = out.detail
         backup = out.backup
@@ -3038,12 +3249,16 @@ def _do_provision_ship_delegator(action: Action, on_conflict: str) -> ActionResu
             backup,
         )
 
-    if skipped_user_file:
-        return ActionResult(action, "skipped", f"ship-delegator: {file_note}; {exclude_note}", backup)
+    env_suffix = f"; {env_note}" if env_status != "unchanged" else ""
+    # An unresolved user env file (on_conflict=skip) must not vanish into a "created"/"updated"
+    # success — status will keep flagging env-file drift, so the action reports "skipped" (with
+    # the file_note naming what WAS written) exactly like the delegator-ok branch above.
+    if skipped_user_file or env_status == "skipped_user":
+        return ActionResult(action, "skipped", f"ship-delegator: {file_note}; {exclude_note}{env_suffix}", backup)
     # status: a changed file OR a freshly-added exclude entry is a change. file_correct→exclude-only
     # change reports "updated" (the exclude was added); a written file reports its own write status.
     status = out.status if out is not None else "updated"
-    return ActionResult(action, status, f"ship-delegator: {file_note}; {exclude_note}", backup)
+    return ActionResult(action, status, f"ship-delegator: {file_note}; {exclude_note}{env_suffix}", backup)
 
 
 # ── linter / formatter config files (the `linters` block) ──────────────────────────

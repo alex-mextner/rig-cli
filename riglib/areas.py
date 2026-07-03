@@ -38,6 +38,13 @@ class Area:
     ``riglib.drift.DriftItem.category``) that roll up into this area. ``ship_slot`` carries the
     ``ci`` split: ``True`` counts only ``slot == "ship"`` actions/items, ``False`` only the
     non-ship CI slots, ``None`` (the default) counts every action in ``categories`` regardless.
+
+    ``configured_by`` names EXTRA action categories whose presence in the plan marks this area
+    configured, WITHOUT claiming their drift items or their layer. It exists for a derived
+    machine-wide artifact produced by a repo-scoped action (the ``ship_env`` machine env file is
+    written by the ``ship_delegator`` action — there is no standalone ship_env action), so the
+    area can render "in sync" rather than a false "not configured" while the layer registry and
+    this area still agree that the artifact itself is GLOBAL.
     """
 
     key: str
@@ -45,6 +52,7 @@ class Area:
     layer: str
     categories: tuple[str, ...]
     ship_slot: bool | None = None
+    configured_by: tuple[str, ...] = ()
 
 
 # Order is the DISPLAY order within each layer: skills first (the historically-dominant area),
@@ -66,6 +74,14 @@ AREAS: tuple[Area, ...] = (
     Area("models", "model-freshness cron", GLOBAL, ("models",)),
     Area("tg_ctl", "tg-ctl inbound daemon", GLOBAL, ("tg_ctl",)),
     Area("tools", "personal CLI ecosystem (tg/review/task/draw/…)", GLOBAL, ("tools",)),
+    # the machine-level agent-tools/env file (AGENT_TOOLS_ROOT): a GLOBAL artifact written by the
+    # repo-scoped ship_delegator action — hence configured_by, not a category claim on that action.
+    # In a SELF-HOSTING repo (carries ci/ship/ship.sh) the env file is deliberately neither
+    # checked nor written, so this area renders "in sync" there — which is the honest reading
+    # ("nothing rig needs to do here"), not a blind spot: any ordinary repo's status/apply on the
+    # same machine checks and reconciles the file.
+    Area("ship_env", "agent-tools machine env (AGENT_TOOLS_ROOT)", GLOBAL, ("ship_env",),
+         configured_by=("ship_delegator",)),
     # ── REPO — this repository, from ./rig.yaml ──
     Area("ci", "CI gates", REPO, ("ci",), ship_slot=False),
     Area("ship", "ship / `gh ship` merge gate", REPO, ("ci",), ship_slot=True),
@@ -97,7 +113,11 @@ def area_matches_action(area: Area, category: str, options: dict[str, Any] | Non
     Honors the ``ci``/``ship`` split: an ``Area`` with ``ship_slot=True`` matches only ship-slot
     CI actions, ``ship_slot=False`` only non-ship CI actions, ``None`` matches any action in the
     area's categories. Used to bucket the resolved plan's actions per area for the in-sync count.
+    ``configured_by`` categories also match (they mark the area configured — see :class:`Area`);
+    they carry no ship-slot semantics.
     """
+    if category in area.configured_by:
+        return True
     if category not in area.categories:
         return False
     if area.ship_slot is None:

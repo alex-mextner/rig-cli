@@ -903,8 +903,10 @@ def _build_ship_delegator(config: LoadedConfig, catalog: Catalog, plan: InstallP
 
     Fail-CLOSED on a checkout lacking the canonical ``ci/ship/ship.sh``: rig never provisions a
     delegator that would exec a non-existent script. The canonical path is resolved from the
-    agent-tools checkout NOW and baked into the action, so the generated delegator content is
-    deterministic (a re-apply / drift compare is a byte-for-byte no-op). The classify-and-converge
+    agent-tools checkout NOW and carried in the action's ``canonical_ship`` option — apply writes
+    it (as the agent-tools root) into the MACHINE-level ``$XDG_CONFIG_HOME/agent-tools/env`` file,
+    NOT into the delegator, whose rendered content is a portable constant (a re-apply / drift
+    compare is a byte-for-byte no-op even for a repo that commits it). The classify-and-converge
     + the ``.git/info/exclude`` ignore handling live in ``actions/`` (they depend on what is on
     disk); the plan emits one idempotent action anchored at the repo root. No carrier in agent-tools.
     """
