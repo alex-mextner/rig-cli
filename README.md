@@ -200,8 +200,8 @@ into full bypass at project scope, e.g. inside a container). `rig apply` merges 
 key (everything else is preserved), idempotently with a backup on conflict, and `rig status`
 flags drift. Defense-in-depth: the agent-hook guards `rig` installs in the same pass
 (`block-secrets-write`, `block-no-verify`, `enforce-timeout-on-bash`, `block-raw-process-env`,
-**`block-raw-pr-merge`**) catch dangerous tool calls before the side effect, complementing the
-classifier.
+`block-raw-pr-merge`, **`block-reset-hard`**) catch dangerous tool calls before the side
+effect, complementing the classifier.
 
 **Those guards only fire because of the hook bridge.** Claude Code runs hooks declared in
 `settings.json`, not the `~/.claude/hooks/*.json` descriptors `agent_hooks` installs — so a
