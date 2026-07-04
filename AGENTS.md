@@ -138,24 +138,49 @@ should hard-code agent-tools paths.
 
 ## Harness workflow guards (worktree-only + orchestrator-only)
 
-`rig apply` installs two agent-hooks (from agent-tools, via `agent_hooks.all`) that provision
-the harness workflow, each configured PER REPO by a boolean in that repo's committed `rig.yaml`
+`rig apply` installs agent-hooks from THREE hook directories (from agent-tools, via
+`agent_hooks.all`) that provision the harness workflow — though as the `orchestrator_only` entry
+below notes, one of those directories currently only gets HALF its descriptors installed (a
+separate catalog bug, agent-tools#184). Each is configured PER REPO by a boolean in that repo's
+committed `rig.yaml`
 (the hook scripts self-read `agent_hooks.<key>` at fire time — `rig apply` does not consume the
 value, so changing enforcement needs no re-apply):
 
-- **`agent_hooks.worktree_only`** (default **false**, opt-IN) — the `worktree-only-writes`
-  pre-write hook denies an Edit/Write while the checkout is on the repo's default branch. All
-  authoring goes in a worktree on a feature branch; the default branch is for merge/pull/
-  read-only. Enrol `hyperide` + the agent-ecosystem repos (`worktree_only: true`); leave it off
-  for repos that legitimately work on main (`3d-cli`). Escape hatch: `RIG_ALLOW_MAIN_EDIT=1`.
-  (Alex tg#5742.)
+- **`agent_hooks.worktree_only`** (default **false**, opt-IN) — gates TWO hooks together (one
+  feature, one flag):
+  - `worktree-only-writes` (pre-write) denies an Edit/Write while the checkout is on the repo's
+    default branch.
+  - `pin-primary-worktree` (pre-bash, agent-tools#182/#183) denies a `git checkout`/`git switch`
+    that would move the repo's PRIMARY worktree (never a linked `git worktree add` tree) onto
+    anything but the default branch. Added after `worktree-only-writes` alone failed to catch a
+    real incident (Alex tg#6462/tg#6477, 2026-07-04): a bare `git checkout <branch>` in the
+    shared primary checkout is invisible to a pre-*write* hook, and once ON a feature branch,
+    `worktree-only-writes`'s own branch check can't tell "the primary checkout" from "a linked
+    worktree" — this hook is the piece that actually distinguishes them.
+  Together: all authoring goes in a SEPARATE worktree on a feature branch; the PRIMARY checkout
+  is for merge/pull/read-only. Enrol `hyperide` + the agent-ecosystem repos (`worktree_only:
+  true`); leave it off for repos that legitimately work on main (`3d-cli`). **Caution when
+  enrolling a repo**: audit any sanctioned automated flow (release scripts, `gh ship` wrappers)
+  for a `git checkout`/`switch` to a non-default branch in the primary checkout FIRST — this
+  guard will block it too, with no special-casing. Escape hatch (both hooks):
+  `RIG_ALLOW_MAIN_EDIT=1`. (Alex tg#5742, tg#6462/tg#6477.)
 - **`agent_hooks.orchestrator_only`** (default **true**, opt-OUT) — the `orchestrator-stays-thin`
   hook blocks inline implementation by the main thread while allowing read-only inspection and
   orchestration (`gh pr list/view/checks`, `gh ship`, `tg`, `review`, `git worktree list`). Set
   `false` to exempt a repo. Escape hatch: `ALLOW_ORCHESTRATOR_WORK=1` + reason. (Alex tg#5743.)
+  Known gap (agent-tools#184): this hook ships a `pre-write` descriptor alongside its
+  `pre-bash` one, but the catalog's one-descriptor-per-directory scan only ever installs the
+  first alphabetically (`pre-bash`) — the `pre-write` half (inline CODE edits) has never
+  actually been provisioned.
 
-Both are complementary to the pre-push `protect-main` git-hook: that blocks a *push* to main,
-these block the *authoring* / inline work that precedes it. See `docs/config-schema.md#agent_hooks`.
+All three are complementary to the pre-push `protect-main` git-hook: that blocks a *push* to
+main, these block the *authoring* / inline work that precedes it. Scope note: these are Claude
+Code agent-hooks specifically — a different harness (e.g. a raw Codex/script invocation) issuing
+`git checkout` is not intercepted by them; git itself has no `pre-checkout` hook to fall back on.
+The primary-vs-linked-worktree distinction (`--git-dir` vs `--git-common-dir`) is the most fragile
+part of `pin-primary-worktree`'s logic — its regression coverage lives in agent-tools'
+`tests/test_pin_primary_worktree.py` (real temp repos + real `git worktree add` trees, not
+mocks), not in this repo. See `docs/config-schema.md#agent_hooks`.
 
 ## Tests
 
