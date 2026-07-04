@@ -78,8 +78,9 @@ when a lifecycle verb actually needs it). The server binds `127.0.0.1` only and 
   (`actions/runner.py::_do_apply_harness`), writing only the managed permission key into the
   harness settings JSON, idempotent + backup-on-conflict, with drift surfaced by `rig
   status`. Recommend `auto_mode: true` by default — it is safe *because* the agent-hook
-  guards (incl. `block-raw-pr-merge`) are installed in the same apply. The auto/permission-MODE
-  write is claude-code-only today; a kind without a mode-writer self-skips with a plan note.
+  guards (incl. `block-raw-pr-merge`, `block-reset-hard`) are installed in the same apply.
+  The auto/permission-MODE write is claude-code-only today; a kind without a mode-writer
+  self-skips with a plan note.
 - **Per-harness skill/instruction discovery is one registry: `riglib/harness_skills.py`.** It
   maps `harness.kind` → either a skills DIRECTORY (claude-code → `~/.claude/skills`, opencode →
   `~/.config/opencode/skill`; rig symlinks each skill in via a `link_skill_harness` action) OR a

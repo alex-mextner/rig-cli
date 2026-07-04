@@ -207,6 +207,7 @@ agent_hooks:
   orchestrator_only: true           # keep the orchestrator thin in THIS repo (default on)
   items:
     block-no-verify:     { enabled: true,  on_error: closed }
+    block-reset-hard:    { enabled: true,  on_error: closed }
     enforce-timeout-on-bash: { enabled: true, on_error: open }
 ```
 
@@ -344,8 +345,8 @@ Provisions the **agent harness's auto/permission mode** as part of the reconcile
 (the agent runs autonomously, auto-accepting tool calls, with minimum babysitting) is part
 of the reproducible config — not a manual per-machine toggle. **Recommended on by default**:
 auto-mode is safe because the agent-hook guards (`block-secrets-write`, `block-no-verify`,
-`enforce-timeout-on-bash`, `block-raw-process-env`, `block-raw-pr-merge`) are installed in
-the same apply and catch the dangerous tool calls before the side effect.
+`enforce-timeout-on-bash`, `block-raw-process-env`, `block-raw-pr-merge`, `block-reset-hard`)
+are installed in the same apply and catch the dangerous tool calls before the side effect.
 
 ```yaml
 harness:
