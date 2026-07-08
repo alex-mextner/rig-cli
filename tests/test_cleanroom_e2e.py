@@ -115,7 +115,8 @@ def _build_fake_agent_tools(root: Path) -> None:
     Mirrors ``conftest.fake_agent_tools`` so the container needs NO real agent-tools checkout
     (the test stays self-contained + runnable in CI). Carries exactly what the clean-room
     config below provisions: universal + cli skills, one agent-hook, the CI slots, the global
-    dispatcher, and ``lib/cc_hook_bridge/dispatch.py`` (so the hook-bridge is wired, not skipped).
+    dispatcher, and a runnable ``lib/cc_hook_bridge`` package (so the hook-bridge is wired, not
+    skipped, and the generated command can execute).
     """
     # universal skills
     for name in ("shell-timeouts", "naming", "push-regularly"):
@@ -199,7 +200,12 @@ def _build_fake_agent_tools(root: Path) -> None:
     # the cc_hook_bridge dispatcher the hook-bridge wiring points at (its presence is checked by
     # plan._build_hook_bridge before it registers the settings.json hooks — without it the bridge
     # is SKIPPED and the guards stay inert, so the clean-room MUST ship it to prove the wire-up).
-    _write(root / "lib" / "cc_hook_bridge" / "dispatch.py", "#!/usr/bin/env python3\n")
+    _write(root / "lib" / "cc_hook_bridge" / "__init__.py", "")
+    _write(
+        root / "lib" / "cc_hook_bridge" / "__main__.py",
+        "import sys\nfrom .dispatch import main\nraise SystemExit(main(sys.argv[1:]))\n",
+    )
+    _write(root / "lib" / "cc_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
     # the model-freshness checker the DEFAULT scaffold's `models:` schedule runs (its presence is
     # checked by plan._build_models before it provisions the cron) — needed by the no-config leg.
     _write(root / "lib" / "checker" / "model_freshness.py", "#!/usr/bin/env python3\n")
@@ -351,7 +357,7 @@ _ASSERT_SCRIPT = textwrap.dedent(
 
     # the agents-hooks -> Claude Code bridge: a PreToolUse hook referencing cc_hook_bridge must be
     # wired into the SAME settings file (the piece that makes the guards FIRE in CC).
-    python3 /opt/cleanroom/check_settings.py hook_bridge "$SETTINGS" \\
+    python3 /opt/cleanroom/check_settings.py hook_bridge "$SETTINGS" "$SRC/lib" \\
       || fail "cc_hook_bridge PreToolUse hook not wired into settings.json"
     pass "agents-hooks -> CC bridge wired (cc_hook_bridge in PreToolUse)"
 
@@ -442,8 +448,8 @@ _ASSERT_SCRIPT = textwrap.dedent(
 
 # A tiny in-container settings.json checker (staged as a file, not an inline heredoc, so its
 # Python body never inherits the bash script's indentation). `auto_mode` asserts
-# `permissions.defaultMode == 'auto'`; `hook_bridge` asserts a `cc_hook_bridge` command is wired
-# into a PreToolUse hook. Exits non-zero with a message on any miss.
+# `permissions.defaultMode == 'auto'`; `hook_bridge` asserts the full managed
+# `cc_hook_bridge` shape is wired. Exits non-zero with a message on any miss.
 _CHECK_SETTINGS = textwrap.dedent(
     """\
     #!/usr/bin/env python3
@@ -456,6 +462,28 @@ _CHECK_SETTINGS = textwrap.dedent(
         # checks below return a clean labeled miss instead of an AttributeError traceback.
         sect = data.get(key, {})
         return sect if isinstance(sect, dict) else {}
+
+
+    def _has_bridge_hook(groups, matcher, expected_command):
+        items = groups if isinstance(groups, list) else []
+        for group in items:
+            if not isinstance(group, dict):
+                continue
+            if matcher is not None and group.get("matcher") != matcher:
+                continue
+            if matcher is None and group.get("matcher") is not None:
+                continue
+            for hook in group.get("hooks", []):
+                if not isinstance(hook, dict):
+                    continue
+                command = hook.get("command")
+                if (
+                    hook.get("type") == "command"
+                    and isinstance(command, str)
+                    and command == expected_command
+                ):
+                    return True
+        return False
 
 
     def main() -> int:
@@ -475,20 +503,32 @@ _CHECK_SETTINGS = textwrap.dedent(
                 return 1
             return 0
         if which == "hook_bridge":
-            # walk the real CC settings shape: PreToolUse is a list of matcher groups, each with a
-            # `hooks` list of {type:command, command:...}. Assert at least one entry's COMMAND
-            # references the bridge — not a bare substring anywhere (a path/comment would false-pass).
-            pre = _section(data, "hooks").get("PreToolUse", [])
-            pre = pre if isinstance(pre, list) else []
-            found = any(
-                "cc_hook_bridge" in str(hook.get("command", ""))
-                for group in pre
-                if isinstance(group, dict)
-                for hook in group.get("hooks", [])
-                if isinstance(hook, dict)
-            )
-            if not found:
-                print("no cc_hook_bridge command wired into a PreToolUse hook", file=sys.stderr)
+            if len(sys.argv) < 4:
+                print("hook_bridge check requires expected lib path", file=sys.stderr)
+                return 2
+            expected_lib = sys.argv[3]
+            # walk the real CC settings shape: each event is a list of matcher groups, each with a
+            # `hooks` list of {type:command, command:...}. Assert the managed bridge command exists
+            # for every matcher rig maintains, with the exact lib path this clean-room rig.yaml used.
+            hooks = _section(data, "hooks")
+            expected = [
+                ("PreToolUse", "Bash"),
+                ("PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"),
+                ("PreToolUse", "Agent|Task"),
+                ("PostToolUse", "Edit|Write|MultiEdit|NotebookEdit"),
+                ("Stop", None),
+            ]
+            missing = [
+                f"{event}[{matcher or '*'}]"
+                for event, matcher in expected
+                if not _has_bridge_hook(
+                    hooks.get(event, []),
+                    matcher,
+                    f"PYTHONPATH={expected_lib} python3 -m cc_hook_bridge {event}",
+                )
+            ]
+            if missing:
+                print(f"missing cc_hook_bridge hook(s): {', '.join(missing)}", file=sys.stderr)
                 return 1
             return 0
         print(f"unknown check {which!r}", file=sys.stderr)

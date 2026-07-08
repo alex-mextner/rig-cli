@@ -427,4 +427,14 @@ def test_plan_hook_bridge_skipped_when_dispatcher_module_absent(fake_agent_tools
     cfg = _cfg({"harness": {"auto_mode": True}}, tmp_path)
     plan = build(cfg, cat, project_type="unknown")
     assert _bridge_action(plan) is None
-    assert any("cc_hook_bridge not found" in n for n in plan.notes), plan.notes
+    assert any("cc_hook_bridge" in n and "dispatch.py" in n for n in plan.notes), plan.notes
+
+
+def test_plan_hook_bridge_skipped_when_entrypoint_absent(fake_agent_tools, tmp_path):
+    """The managed command is `python -m cc_hook_bridge`, so __main__.py is required."""
+    (fake_agent_tools / "lib" / "cc_hook_bridge" / "__main__.py").unlink()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"harness": {"auto_mode": True}}, tmp_path)
+    plan = build(cfg, cat, project_type="unknown")
+    assert _bridge_action(plan) is None
+    assert any("cc_hook_bridge" in n and "__main__.py" in n for n in plan.notes), plan.notes

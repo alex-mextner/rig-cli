@@ -268,7 +268,13 @@ def fake_agent_tools(tmp_path: Path) -> Path:
     _write(root / "lib" / "checker" / "model_freshness.py", "#!/usr/bin/env python3\n")
 
     # the cc_hook_bridge dispatcher the `harness.hook_bridge` wiring points at (its presence
-    # is checked by plan._build_hook_bridge before it registers the settings.json hooks).
-    _write(root / "lib" / "cc_hook_bridge" / "dispatch.py", "#!/usr/bin/env python3\n")
+    # is checked by plan._build_hook_bridge before it registers the settings.json hooks). Include
+    # a runnable `python3 -m cc_hook_bridge` entrypoint, matching the real package shape.
+    _write(root / "lib" / "cc_hook_bridge" / "__init__.py", "")
+    _write(
+        root / "lib" / "cc_hook_bridge" / "__main__.py",
+        "import sys\nfrom .dispatch import main\nraise SystemExit(main(sys.argv[1:]))\n",
+    )
+    _write(root / "lib" / "cc_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
 
     return root

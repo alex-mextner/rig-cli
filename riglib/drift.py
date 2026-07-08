@@ -41,6 +41,7 @@ from .actions.runner import (
     github_ruleset_state,
     harness_settings_file,
     hook_bridge_entries,
+    managed_bridge_hook_in_sync,
     desired_mcp_server_entry,
     permissions_settings_file,
     _is_rig_import_line,
@@ -1138,8 +1139,9 @@ def _check_hook_bridge(action: Action, report: DriftReport) -> None:
     missing  — the settings file is absent, or a managed dispatcher hook (one whose command
                carries ``cc_hook_bridge``) is not present for an (event, matcher) we ship.
     modified — the settings file is malformed JSON, OR a managed hook is present but its
-               COMMAND differs from what apply would write (stale PYTHONPATH / moved
-               checkout / changed ``hook_bridge.python``). ``rig apply`` rewrites it.
+               TYPE/COMMAND differs from what apply would write (stale PYTHONPATH / moved
+               checkout / changed ``hook_bridge.python`` / malformed hook type). ``rig apply``
+               rewrites it.
     Drift and apply share ``find_managed_bridge_hook`` + ``hook_bridge_entries`` so they
     never diverge. Only OUR managed blocks are checked; the user's other hooks are ignored.
     """
@@ -1168,10 +1170,10 @@ def _check_hook_bridge(action: Action, report: DriftReport) -> None:
                     DriftItem("missing", "harness", action.item, config_file,
                               f"cc_hook_bridge not wired for {label}")
                 )
-            elif str(hk.get("command", "")) != command:
+            elif not managed_bridge_hook_in_sync(hk, command):
                 report.items.append(
                     DriftItem("modified", "harness", action.item, config_file,
-                              f"cc_hook_bridge command for {label} is stale (apply will rewrite)")
+                              f"cc_hook_bridge hook for {label} is stale (apply will rewrite)")
                 )
 
 

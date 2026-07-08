@@ -839,12 +839,17 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
     lib_dir = catalog.source / "lib"
     # Fail-CLOSED: never wire a settings.json command that would error at runtime. The
     # catalog only checks for skills/ + agent-hooks/, so an older agent-tools checkout can
-    # lack lib/cc_hook_bridge — wiring it anyway means every CC tool call hits a broken hook
-    # (which, fail-open, is harmless but noisy). Skip with a clear, actionable note instead.
-    if not (lib_dir / "cc_hook_bridge" / "dispatch.py").is_file():
+    # lack a runnable lib/cc_hook_bridge package — wiring it anyway means every CC tool call
+    # hits a broken hook (which, fail-open, is harmless but noisy). Skip with a clear,
+    # actionable note instead.
+    bridge_dir = lib_dir / "cc_hook_bridge"
+    bridge_required = [bridge_dir / "dispatch.py", bridge_dir / "__main__.py"]
+    bridge_missing = [p.name for p in bridge_required if not p.is_file()]
+    if bridge_missing:
         plan.notes.append(
-            f"hook_bridge: skipped — {lib_dir}/cc_hook_bridge not found in this agent-tools "
-            "checkout (update agent-tools to a version that ships the dispatcher)"
+            f"hook_bridge: skipped — {bridge_dir} is incomplete in this agent-tools checkout "
+            f"(missing {', '.join(bridge_missing)}; update agent-tools to a version that ships "
+            "the runnable dispatcher)"
         )
         return
     settings_path = h.get("settings_path") or _HARNESS_SETTINGS[kind]

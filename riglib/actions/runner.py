@@ -958,8 +958,8 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
 
 
 # ── agents-hooks/v1 → Claude Code bridge (settings.json hook registration) ──────────
-# A managed cc_hook_bridge command is identified by this substring — so we can find,
-# update, and de-dup OUR entries without ever touching the user's other hooks.
+# A managed cc_hook_bridge candidate is identified by this substring; the in-sync
+# shape still requires type="command" plus the exact command we would write.
 _BRIDGE_MARKER = "cc_hook_bridge"
 
 
@@ -976,7 +976,8 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
     tool, but the bridge's ``{"decision": "block", "reason": …}`` surfaces e.g.
     lint-on-write findings to the model right after the write (agent-tools#160; before
     this entry existed the whole post-write point was silently dead). The write-tool
-    `|`-alternation matcher covers every CC file-mutating tool.
+    `|`-alternation matcher covers every CC file-mutating tool; the Agent|Task matcher
+    carries the agent-tools `pre-agent` point for subagent dispatch.
 
     Unconditional by design, NOT capability-gated: this always wires the PostToolUse block,
     even against a ``lib_dir`` checkout whose ``cc_hook_bridge.dispatch.point_for_event``
@@ -1006,6 +1007,7 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
         "PreToolUse": [
             ("Bash", cmd("PreToolUse")),
             ("Edit|Write|MultiEdit|NotebookEdit", cmd("PreToolUse")),
+            ("Agent|Task", cmd("PreToolUse")),
         ],
         "PostToolUse": [
             ("Edit|Write|MultiEdit|NotebookEdit", cmd("PostToolUse")),
@@ -1018,8 +1020,9 @@ def find_managed_bridge_hook(blocks, matcher: str) -> dict | None:
     """Return OUR managed hook dict for ``matcher`` in an event's block list, else None.
 
     Single source of truth for "where is the cc_hook_bridge entry" — shared by apply
-    (upsert) and drift (compare command), so both agree on what counts as the managed hook
-    and never diverge. A managed hook is one whose ``command`` carries the bridge marker.
+    (upsert) and drift (compare shape + command), so both agree on what counts as the
+    managed hook and never diverge. This identifies a hook by the bridge marker in its
+    command; callers validate the full in-sync shape separately.
     """
     if not isinstance(blocks, list):
         return None
@@ -1030,6 +1033,11 @@ def find_managed_bridge_hook(blocks, matcher: str) -> dict | None:
             if isinstance(hk, dict) and _BRIDGE_MARKER in str(hk.get("command", "")):
                 return hk
     return None
+
+
+def managed_bridge_hook_in_sync(hook: dict, command: str) -> bool:
+    """True when a managed bridge hook exactly matches the shape apply writes."""
+    return hook.get("type") == "command" and str(hook.get("command", "")) == command
 
 
 def _bridge_block(matcher: str, command: str) -> dict:
@@ -1050,14 +1058,15 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
     """Register the cc_hook_bridge dispatcher in the harness ``settings.json`` hooks.
 
     Idempotent and additive: each (event, matcher) gets OUR managed block appended only if
-    an equivalent managed block (command contains ``cc_hook_bridge``) is not already there.
+    an equivalent managed block (type=command and command contains ``cc_hook_bridge``) is not
+    already there.
     Every other hook in the file — the user's rtk-rewrite, tg-ctl, etc. — is preserved
     untouched: ``hooks`` is a SHARED namespace, so we never rewrite a whole event array.
 
-    A managed block whose COMMAND drifted (e.g. the agent-tools lib path moved) is rewritten
-    in place — UNLESS ``on_conflict=skip``, which leaves the stale command untouched (matching
-    the file-level skip semantics; ``rig status`` still surfaces it as drift). Removing an
-    unmanaged matcher's hooks, or a matcher we no longer ship, is left to ``rig status``.
+    A managed block whose shape drifted (e.g. the agent-tools lib path moved or the hook type
+    is malformed) is rewritten in place — UNLESS ``on_conflict=skip``, which leaves it untouched
+    (matching the file-level skip semantics; ``rig status`` still surfaces it as drift). Removing
+    an unmanaged matcher's hooks, or a matcher we no longer ship, is left to ``rig status``.
     """
     config_file = harness_settings_file(action)
     config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1123,17 +1132,18 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
 def _upsert_bridge(blocks: list, matcher: str, command: str, on_conflict: str) -> str:
     """Insert/refresh OUR managed block for (matcher, command). Returns the outcome.
 
-    - already present with the SAME command → ``"noop"`` (idempotent).
-    - present with a DIFFERENT command (path drift) → rewrite in place → ``"changed"``,
+    - already present with the same type+command → ``"noop"`` (idempotent).
+    - present with a different type or command → rewrite in place → ``"changed"``,
       UNLESS ``on_conflict=skip`` → leave it, return ``"skipped-stale"``.
     - absent → append a fresh managed block → ``"changed"``.
     """
     hk = find_managed_bridge_hook(blocks, matcher)
     if hk is not None:
-        if str(hk.get("command", "")) == command:
+        if managed_bridge_hook_in_sync(hk, command):
             return "noop"
         if on_conflict == "skip":
             return "skipped-stale"
+        hk["type"] = "command"
         hk["command"] = command
         return "changed"
     blocks.append(_bridge_block(matcher, command))
