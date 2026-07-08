@@ -132,7 +132,7 @@ defaults:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `skills_target` | path | `~/.agents/skills` | default skills install dir |
-| `hooks_target` | path | `~/.claude/hooks` | default agent-hooks dir |
+| `hooks_target` | path | `~/.claude/hooks` | default agent-hooks dir; with `harness.kind: codex`, the effective default is `~/.codex/hooks` unless a custom hook descriptor target is configured |
 | `ci_target` | path | `.github/workflows` | default CI workflows dir |
 | `mcp_target` | path | `~/.claude/mcp` | default MCP config dir |
 | `on_conflict` | `skip`/`overwrite`/`backup` | `backup` | what `apply` does when a target already exists |
@@ -231,7 +231,7 @@ and directory *content*, which a discovery symlink has neither of.
 agent_hooks:
   enabled: true
   target: ~/.claude/hooks
-  target_kind: claude-code          # claude-code | generic (logical point → harness event)
+  target_kind: claude-code          # claude-code | generic
   all: true
   worktree_only: true               # enforce the worktree-only workflow in THIS repo (default off)
   orchestrator_only: true           # keep the orchestrator thin in THIS repo (default on)
@@ -249,6 +249,10 @@ agent_hooks:
 The install action always writes an **absolute** `cmd` (rewriting the
 `/ABSOLUTE/PATH/TO/...` placeholder to the script's real path in the agent-tools checkout),
 per the `agents-hooks/v1` contract.
+
+When `harness.kind: codex` is active, rig defaults the descriptor target to `~/.codex/hooks`
+unless `agent_hooks.target` / `defaults.hooks_target` is set to a non-default custom path. Claude
+behavior is unchanged: `claude-code` still defaults to `~/.claude/hooks`.
 
 ### Per-repo workflow knobs — `worktree_only` / `orchestrator_only`
 
@@ -385,8 +389,8 @@ harness:
   auto_mode: true              # true → auto-accept tool calls; false → interactive prompts (claude-code write only)
   # mode: bypassPermissions    # optional: pin the exact mode value (overrides the auto_mode map)
   # settings_path: .claude/settings.json   # where to write (repo-local default; committed)
-  hook_bridge:                 # wire the agents-hooks/v1 → CC dispatcher (default ON)
-    enabled: true              # set false to skip wiring the dispatcher into settings.json
+  hook_bridge:                 # wire the agents-hooks/v1 → harness dispatcher (default ON)
+    enabled: true              # set false to skip wiring the dispatcher into harness config
     # python: python3          # optional: the interpreter the dispatcher runs under
 ```
 
@@ -396,8 +400,8 @@ harness:
 | `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`) auto-loads `~/.agents/skills`; instruction-file (`gemini`, `pi`, `commandcode`) get their skill discovery via `AGENTS.md`/`GEMINI.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
-| `settings_path` | path | `.claude/settings.json` | the settings file to merge into (repo-relative default keeps it committed/reproducible) |
-| `hook_bridge.enabled` | bool | `true` | wire the `cc_hook_bridge` dispatcher into `settings.json` so installed agent-hooks actually fire (claude-code only) |
+| `settings_path` | path | `.claude/settings.json` for Claude auto/mode writes; `~/.codex/config.toml` for the Codex hook bridge | the settings/config file to merge into. If overridden, point it at the harness's native format (JSON for Claude, TOML for Codex). A suffixed path is treated as the file; a suffixless path is treated as a directory containing the native settings filename |
+| `hook_bridge.enabled` | bool | `true` | wire the harness bridge dispatcher so installed agent-hooks actually fire (`cc_hook_bridge` for Claude, `codex_hook_bridge` for Codex) |
 | `hook_bridge.python` | str | `python3` | the Python interpreter the dispatcher command runs under |
 
 **What gets written.** For `kind: claude-code`, rig merges `permissions.defaultMode` into
@@ -418,24 +422,47 @@ config for now. opencode expresses the same intent through a `permission` block 
 `opencode.json` (`"permission": { "edit": "allow", "bash": "allow" }` for auto-accept, vs
 `"ask"` for interactive); wiring that write is tracked separately.
 
-**The hook bridge (`hook_bridge`).** Claude Code only runs hooks declared in
-`settings.json` (`PreToolUse`/`PostToolUse`/`Stop`) — it never reads the `~/.claude/hooks/*.json`
-`agents-hooks/v1` descriptors `agent_hooks` installs. Without a bridge, **every installed
-agent-hook is inert in CC** (agent-tools#18) and the "auto-mode is safe because the guards
-intercept" claim above is false. So when a `claude-code` harness block is present (and
-`agent_hooks` is enabled), `rig apply` also registers the `cc_hook_bridge` dispatcher
-(shipped in `agent-tools/lib/cc_hook_bridge`) into the same `settings.json`:
-`PreToolUse` (matchers `Bash`, `Edit|Write|MultiEdit|NotebookEdit`, and `Agent|Task`),
-`PostToolUse` (matcher `Edit|Write|MultiEdit|NotebookEdit` — the reactive `post-write` point:
-`format-on-write` reformats the just-written file, `lint-on-write` feeds lint findings
-back to the model) and `Stop`, each
-running `PYTHONPATH=<agent-tools>/lib python3 -m cc_hook_bridge <Event>`. The dispatcher
-runs the matching descriptors and translates their exit-10 BLOCK into CC's
-`permissionDecision: "deny"` / `decision: "block"` (on PostToolUse the latter is
-FEEDBACK — the tool already ran; the reason is surfaced to the model). The merge is **additive and
-idempotent** — your other hooks (rtk-rewrite, tg-ctl, …) are preserved; a re-apply is a
-no-op; a drifted managed command (e.g. the checkout path moved) is rewritten in place.
-`rig status` reports the bridge as missing drift if a managed hook is absent.
+**The hook bridge (`hook_bridge`).** Harnesses only run hooks declared in their own config; they
+do not execute the `agents-hooks/v1` descriptors directly. Without a bridge, installed
+agent-hooks are inert. So when a supported harness block is present (and `agent_hooks` is
+enabled), `rig apply` registers the matching dispatcher from `agent-tools/lib`:
+
+- `kind: claude-code` writes `cc_hook_bridge` into `settings.json`: `PreToolUse` matchers
+  `Bash`, `Edit|Write|MultiEdit|NotebookEdit`, and `Agent|Task`; `PostToolUse` matcher
+  `Edit|Write|MultiEdit|NotebookEdit`; and `Stop`.
+- `kind: codex` writes `codex_hook_bridge` into `~/.codex/config.toml` (or `settings_path`) as a
+  managed `[hooks]` TOML block: `PreToolUse` matchers `Bash` and `apply_patch`, `PostToolUse`
+  matcher `apply_patch`, and `Stop`. A custom Codex `settings_path` must end in `.toml`.
+
+Each command runs `PYTHONPATH=<agent-tools>/lib python3 -m <bridge_module> <Event>`. The merge is
+idempotent and preserves unrelated config; `rig status` reports the bridge as missing/stale drift
+if a managed hook is absent or points at an old checkout. Other harness kinds still skip the bridge
+with a note when explicitly enabled.
+
+Codex `pre-agent` is not wired yet: rig may install `pre-agent` descriptors into `~/.codex/hooks`
+alongside the rest of the selected catalog, but the Codex bridge currently dispatches only
+`pre-bash`, `pre-write`, `post-write`, and `stop` via the confirmed Codex hook events above.
+The managed TOML block has this shape, with full commands including the resolved
+`PYTHONPATH=<agent-tools>/lib`:
+
+```toml
+[hooks]
+# >>> rig managed: codex hook bridge
+PreToolUse = [{matcher = "Bash", hooks = [{type = "command", command = "... codex_hook_bridge PreToolUse"}]}, {matcher = "apply_patch", hooks = [{type = "command", command = "... codex_hook_bridge PreToolUse"}]}]
+PostToolUse = [{matcher = "apply_patch", hooks = [{type = "command", command = "... codex_hook_bridge PostToolUse"}]}]
+Stop = [{hooks = [{type = "command", command = "... codex_hook_bridge Stop"}]}]
+# <<< rig managed: codex hook bridge
+```
+
+Codex TOML merge is intentionally conservative: rig refuses to add the managed bridge when the
+top-level `hooks` table already uses an inline table (`hooks = { ... }`), array-of-tables
+(`[[hooks]]`), dotted hook keys (`hooks.PreToolUse = ...`), nested hook tables
+(`[hooks.foo]`), or unmanaged keys for events rig owns (`PreToolUse`, `PostToolUse`, `Stop`)
+inside `[hooks]`. It also refuses files containing TOML triple-quote tokens (`"""` or `'''`),
+because multiline strings can contain table-shaped text that this preservation merge must not
+reinterpret.
+Unrelated `[hooks]` keys such as `Notification` are preserved, as are `hooks` keys inside other
+tables such as `[profiles.default]`.
 
 ---
 
@@ -480,7 +507,7 @@ permissions:
   #   - "Read(//private/tmp/reports/**)"
   # deny: []                   # REPLACES the baked deny baseline ([] disables it; absent → baseline)
   # ask: []                    # REPLACES the baked ask baseline ([] disables it; absent → baseline)
-  # settings_path: ~/.claude/settings.json   # override the per-harness settings file (rare; .json)
+  # settings_path: ~/.claude/settings.json   # override the per-harness settings file (rare; JSON)
 ```
 
 | Key | Type | Default | Meaning |
@@ -493,7 +520,7 @@ permissions:
 | `allow` | str[] | `[]` | RAW permission-rule entries (`Tool` or `Tool(specifier)`, e.g. `WebFetch`, `Bash(kubectl get:*)`, `Read(//tmp/**)`) asserted present in the allow list, on TOP of the tool-derived entries — this is how a hand-grown allowlist is adopted as declared config. claude-code only — see below |
 | `deny` | str[] | the baked deny baseline | rule entries asserted present in the deny list; **replaces** the baseline wholesale (`[]` disables it). claude-code only — see below |
 | `ask` | str[] | the baked ask baseline | rule entries asserted present in the ask list; **replaces** the baseline wholesale (`[]` disables it). claude-code only — see below |
-| `settings_path` | path (`.json`) | per-harness default | override the settings file to merge into (default: `~/.claude/settings.json` for claude-code, `~/.config/opencode/opencode.json` for opencode) |
+| `settings_path` | path (JSON) | per-harness default | override the settings file to merge into (default: `~/.claude/settings.json` for claude-code, `~/.config/opencode/opencode.json` for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory |
 
 **Default tool set.** Our ecosystem CLIs — `tg`, `review`, `draw`, `3d`, `rig`, `task` — plus
 the external tools we lean on: `gh`, `git`, `rg`, `uv`, `bun`, `jq`, `gitleaks`.

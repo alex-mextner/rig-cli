@@ -199,8 +199,8 @@ AREAS: tuple[Area, ...] = (
                  "Auto-accept tool calls (the agent runs autonomously). SAFE because the agent-hook "
                  "guards above catch the dangerous calls first. Off = interactive permission prompts."),
             _opt("harness.hook_bridge.enabled", KIND_BOOL, True,
-                 "Wire the cc_hook_bridge into settings.json so installed agent-hooks actually FIRE in "
-                 "Claude Code. Without it every agent-hook is inert and auto-mode is NOT safe."),
+                 "Wire the supported harness hook bridge so installed agent-hooks actually FIRE. "
+                 "Without it every agent-hook is inert and auto-mode is NOT safe."),
         ),
     ),
     Area(

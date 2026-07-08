@@ -211,6 +211,22 @@ def fake_agent_tools(tmp_path: Path) -> Path:
     )
     _write(root / "agent-hooks" / "block-no-verify" / "block_no_verify.py", "#!/usr/bin/env python3\n")
     _write(root / "agent-hooks" / "block-no-verify" / "README.md", "# block-no-verify\nblocks bypass\n")
+    _write(
+        root / "agent-hooks" / "background-subagent-gate" / "background-subagent-gate.pre-agent.json",
+        json.dumps(
+            {
+                "id": "background-subagent-gate",
+                "point": "pre-agent",
+                "cmd": "/ABSOLUTE/PATH/TO/agent-hooks/background-subagent-gate/background_subagent_gate.py",
+                "on_error": "open",
+            }
+        ),
+    )
+    _write(
+        root / "agent-hooks" / "background-subagent-gate" / "background_subagent_gate.py",
+        "#!/usr/bin/env python3\n",
+    )
+    _write(root / "agent-hooks" / "background-subagent-gate" / "README.md", "# background-subagent-gate\n")
 
     # CI slots: workflow.yml + a variant + a slot-named file + the slots the default
     # scaffold (riglib/state.py) references, so `setup --yes` (default) is satisfiable.
@@ -276,5 +292,15 @@ def fake_agent_tools(tmp_path: Path) -> Path:
         "import sys\nfrom .dispatch import main\nraise SystemExit(main(sys.argv[1:]))\n",
     )
     _write(root / "lib" / "cc_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
+
+    # the codex_hook_bridge dispatcher the `harness.hook_bridge` wiring points at for Codex.
+    # Keep the fake package shape parallel to cc_hook_bridge so plan tests catch missing
+    # entrypoint/module regressions without depending on the real agent-tools checkout.
+    _write(root / "lib" / "codex_hook_bridge" / "__init__.py", "")
+    _write(
+        root / "lib" / "codex_hook_bridge" / "__main__.py",
+        "import sys\nfrom .dispatch import main\nraise SystemExit(main(sys.argv[1:]))\n",
+    )
+    _write(root / "lib" / "codex_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
 
     return root

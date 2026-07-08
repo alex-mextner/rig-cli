@@ -668,9 +668,13 @@ _HARNESS_MODE_KEY = {
 
 
 def harness_settings_file(action: Action) -> Path:
-    """The settings file an ``apply_harness`` action targets (shared with drift)."""
+    """The settings file an ``apply_harness`` action targets (shared with drift).
+
+    Any suffixed target is an explicit file path; a suffixless target is a directory that
+    contains the harness's default settings filename.
+    """
     target = action.target
-    return target if target.suffix == ".json" else target / "settings.json"
+    return target if target.suffix else target / "settings.json"
 
 
 def desired_harness_value(action: Action) -> tuple[tuple[str, str], str]:
@@ -753,12 +757,12 @@ def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
 def permissions_settings_file(action: Action) -> Path:
     """The settings file a ``provision_permissions`` action targets (shared with drift).
 
-    Mirrors :func:`harness_settings_file`: a ``.json`` target is the file itself, else a dir
-    holding the per-harness settings filename. The plan resolves an absolute path; this just
-    normalizes the file-vs-dir target.
+    Mirrors :func:`harness_settings_file`: any suffixed target is the file itself, else a
+    directory holding the per-harness settings filename. The plan resolves an absolute path;
+    this just normalizes the file-vs-dir target.
     """
     target = action.target
-    return target if target.suffix == ".json" else target / "settings.json"
+    return target if target.suffix else target / "settings.json"
 
 
 @dataclass(frozen=True)
@@ -957,51 +961,55 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
     )
 
 
-# ── agents-hooks/v1 → Claude Code bridge (settings.json hook registration) ──────────
-# A managed cc_hook_bridge candidate is identified by this substring; the in-sync
-# shape still requires type="command" plus the exact command we would write.
+# ── agents-hooks/v1 → harness bridge registration ───────────────────────────────────
+# A managed bridge candidate is identified by this module substring; the in-sync shape
+# still requires type="command" plus the exact command we would write.
 _BRIDGE_MARKER = "cc_hook_bridge"
+_CODEX_BRIDGE_BEGIN = "# >>> rig managed: codex hook bridge"
+_CODEX_BRIDGE_END = "# <<< rig managed: codex hook bridge"
+_CODEX_HOOK_EVENTS = ("PreToolUse", "PostToolUse", "Stop")
 
 
 def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
-    """The (matcher, command) pairs the bridge maintains per CC hook event.
+    """The (matcher, command) pairs the bridge maintains per harness hook event.
 
     Single source of truth shared by the install handler and drift, so both agree on what
-    ``settings.json`` should contain. The command runs the dispatcher with the agent-tools
-    ``lib/`` on PYTHONPATH so ``cc_hook_bridge`` resolves against the same checkout whose
+    the harness config should contain. The command runs the dispatcher with the agent-tools
+    ``lib/`` on PYTHONPATH so the bridge resolves against the same checkout whose
     ``agent-hooks/`` scripts the installed descriptors point at.
 
     PreToolUse is real prevention; Stop gates the turn end; PostToolUse (write tools only)
-    is the FEEDBACK channel for the agent-tools `post-write` point — it cannot un-run the
-    tool, but the bridge's ``{"decision": "block", "reason": …}`` surfaces e.g.
-    lint-on-write findings to the model right after the write (agent-tools#160; before
-    this entry existed the whole post-write point was silently dead). The write-tool
-    `|`-alternation matcher covers every CC file-mutating tool; the Agent|Task matcher
-    carries the agent-tools `pre-agent` point for subagent dispatch.
+    is the feedback channel for the agent-tools ``post-write`` point. Claude Code uses its
+    pipe-alternation tool matcher for writes and ``Agent|Task`` for subagent dispatch. Codex
+    uses the hook matchers exposed by its TOML contract here: ``Bash`` and ``apply_patch``.
 
-    Unconditional by design, NOT capability-gated: this always wires the PostToolUse block,
-    even against a ``lib_dir`` checkout whose ``cc_hook_bridge.dispatch.point_for_event``
-    doesn't map PostToolUse yet (agent-tools main, pre agent-tools#161). Read at the time of
-    this PR, that dispatcher version no-ops the call — ``point_for_event`` falls through to
-    ``None`` for an unmapped (event, tool) pair, and its caller treats ``None`` as "print
-    nothing, exit 0" — so the write-tool invocation is inert rather than erroring; that
-    behavior lives in agent-tools, not here, so it isn't pinned by a test in THIS repo and
-    could in principle change. A live version/capability probe here was considered and
-    rejected regardless: it would fight the pinned upgrade-path test (`rig status` already
-    reports the missing dispatcher support as ordinary drift; a re-apply after the agent-tools
-    checkout catches up converges) and would couple this single-source-of-truth function to
-    another repo's internals. The two PRs are meant to land together (agent-tools#160/#161);
-    until then the PostToolUse entry is expected to be inert on a stale dispatcher.
+    Entries are unconditional by design, not capability-probed against the bridge package at
+    plan time: the plan already verifies the runnable module files exist, and drift/apply share
+    this function as the desired state.
     """
     lib_dir = str(action.options["lib_dir"])
     py = str(action.options.get("python", "python3"))
+    module = hook_bridge_module(action)
+    kind = str(action.options.get("kind", "claude-code"))
 
     def cmd(event: str) -> str:
         # quote BOTH the lib path and the interpreter: a path with spaces would break the
         # hook, and an unquoted config-supplied `python` would let shell syntax be injected
-        # into every CC hook command. `-m {_BRIDGE_MARKER}` keeps the run command and the
+        # into every hook command. `-m <module>` keeps the run command and the
         # presence-marker in lockstep (rename the module → both change together).
-        return f"PYTHONPATH={shlex.quote(lib_dir)} {shlex.quote(py)} -m {_BRIDGE_MARKER} {event}"
+        return f"PYTHONPATH={shlex.quote(lib_dir)} {shlex.quote(py)} -m {module} {event}"
+
+    if kind == "codex":
+        return {
+            "PreToolUse": [
+                ("Bash", cmd("PreToolUse")),
+                ("apply_patch", cmd("PreToolUse")),
+            ],
+            "PostToolUse": [
+                ("apply_patch", cmd("PostToolUse")),
+            ],
+            "Stop": [("", cmd("Stop"))],
+        }
 
     return {
         "PreToolUse": [
@@ -1016,10 +1024,28 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
     }
 
 
-def find_managed_bridge_hook(blocks, matcher: str) -> dict | None:
+def hook_bridge_module(action: Action) -> str:
+    """The bridge Python module this action registers."""
+    return str(action.options.get("module") or _BRIDGE_MARKER)
+
+
+def hook_bridge_format(action: Action) -> str:
+    """The harness config format this action mutates."""
+    return str(action.options.get("format") or "json")
+
+
+def hook_bridge_settings_file(action: Action) -> Path:
+    """The settings/config file a ``register_hook_bridge`` action targets."""
+    target = action.target
+    if target.suffix:
+        return target
+    return target / ("config.toml" if hook_bridge_format(action) == "toml" else "settings.json")
+
+
+def find_managed_bridge_hook(blocks, matcher: str, marker: str = _BRIDGE_MARKER) -> dict | None:
     """Return OUR managed hook dict for ``matcher`` in an event's block list, else None.
 
-    Single source of truth for "where is the cc_hook_bridge entry" — shared by apply
+    Single source of truth for "where is the bridge entry" — shared by apply
     (upsert) and drift (compare shape + command), so both agree on what counts as the
     managed hook and never diverge. This identifies a hook by the bridge marker in its
     command; callers validate the full in-sync shape separately.
@@ -1030,7 +1056,7 @@ def find_managed_bridge_hook(blocks, matcher: str) -> dict | None:
         if not isinstance(block, dict) or str(block.get("matcher", "")) != matcher:
             continue
         for hk in block.get("hooks", []) or []:
-            if isinstance(hk, dict) and _BRIDGE_MARKER in str(hk.get("command", "")):
+            if isinstance(hk, dict) and marker in str(hk.get("command", "")):
                 return hk
     return None
 
@@ -1055,11 +1081,11 @@ def _should_backup(on_conflict: str) -> bool:
 
 
 def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
-    """Register the cc_hook_bridge dispatcher in the harness ``settings.json`` hooks.
+    """Register the agents-hooks bridge dispatcher in the harness config.
 
     Idempotent and additive: each (event, matcher) gets OUR managed block appended only if
-    an equivalent managed block (type=command and command contains ``cc_hook_bridge``) is not
-    already there.
+    an equivalent managed block (type=command and command contains the bridge module name) is
+    not already there.
     Every other hook in the file — the user's rtk-rewrite, tg-ctl, etc. — is preserved
     untouched: ``hooks`` is a SHARED namespace, so we never rewrite a whole event array.
 
@@ -1068,7 +1094,9 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
     (matching the file-level skip semantics; ``rig status`` still surfaces it as drift). Removing
     an unmanaged matcher's hooks, or a matcher we no longer ship, is left to ``rig status``.
     """
-    config_file = harness_settings_file(action)
+    if hook_bridge_format(action) == "toml":
+        return _do_register_codex_hook_bridge(action, on_conflict)
+    config_file = hook_bridge_settings_file(action)
     config_file.parent.mkdir(parents=True, exist_ok=True)
 
     data: dict = {}
@@ -1103,7 +1131,7 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
         if not isinstance(blocks, list):
             blocks = []
         for matcher, command in pairs:
-            outcome = _upsert_bridge(blocks, matcher, command, on_conflict)
+            outcome = _upsert_bridge(blocks, matcher, command, on_conflict, hook_bridge_module(action))
             if outcome == "changed":
                 changed += 1
             elif outcome == "skipped-stale":
@@ -1129,7 +1157,7 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
     )
 
 
-def _upsert_bridge(blocks: list, matcher: str, command: str, on_conflict: str) -> str:
+def _upsert_bridge(blocks: list, matcher: str, command: str, on_conflict: str, marker: str = _BRIDGE_MARKER) -> str:
     """Insert/refresh OUR managed block for (matcher, command). Returns the outcome.
 
     - already present with the same type+command → ``"noop"`` (idempotent).
@@ -1137,7 +1165,7 @@ def _upsert_bridge(blocks: list, matcher: str, command: str, on_conflict: str) -
       UNLESS ``on_conflict=skip`` → leave it, return ``"skipped-stale"``.
     - absent → append a fresh managed block → ``"changed"``.
     """
-    hk = find_managed_bridge_hook(blocks, matcher)
+    hk = find_managed_bridge_hook(blocks, matcher, marker)
     if hk is not None:
         if managed_bridge_hook_in_sync(hk, command):
             return "noop"
@@ -1148,6 +1176,298 @@ def _upsert_bridge(blocks: list, matcher: str, command: str, on_conflict: str) -
         return "changed"
     blocks.append(_bridge_block(matcher, command))
     return "changed"
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def _toml_inline(value) -> str:
+    if isinstance(value, str):
+        return _toml_string(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_inline(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k} = {_toml_inline(v)}" for k, v in value.items()) + "}"
+    raise TypeError(f"unsupported TOML value: {value!r}")
+
+
+def codex_hook_bridge_block(action: Action, *, include_table_header: bool) -> str:
+    """Render the rig-managed Codex TOML hook block."""
+    lines = [_CODEX_BRIDGE_BEGIN]
+    if include_table_header:
+        lines.append("[hooks]")
+    for event, pairs in hook_bridge_entries(action).items():
+        blocks = [_bridge_block(matcher, command) for matcher, command in pairs]
+        lines.append(f"{event} = {_toml_inline(blocks)}")
+    lines.append(_CODEX_BRIDGE_END)
+    return "\n".join(lines) + "\n"
+
+
+def codex_hook_bridge_block_bounds(text: str) -> tuple[int, int] | None:
+    offset = 0
+    start = None
+    for line in text.splitlines(keepends=True):
+        if line.strip() == _CODEX_BRIDGE_BEGIN:
+            start = offset
+        elif line.strip() == _CODEX_BRIDGE_END and start is not None:
+            return start, offset + len(line)
+        offset += len(line)
+    return None
+
+
+def codex_hook_bridge_block_malformed(text: str) -> bool:
+    has_begin = any(line.strip() == _CODEX_BRIDGE_BEGIN for line in text.splitlines())
+    has_end = any(line.strip() == _CODEX_BRIDGE_END for line in text.splitlines())
+    return (has_begin or has_end) and codex_hook_bridge_block_bounds(text) is None
+
+
+def codex_hook_bridge_block_has_table_header(block: str) -> bool:
+    """True when the managed block owns the ``[hooks]`` table header."""
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped in (_CODEX_BRIDGE_BEGIN, _CODEX_BRIDGE_END) or not stripped:
+            continue
+        return stripped == "[hooks]"
+    return False
+
+
+def _toml_value_delta(text: str) -> int:
+    """Return bracket/brace nesting delta for one TOML value line, ignoring quoted strings."""
+    delta = 0
+    quote: str | None = None
+    escaped = False
+    for ch in text:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "#":
+            break
+        elif ch in "[{":
+            delta += 1
+        elif ch in "]}":
+            delta -= 1
+    return delta
+
+
+def _toml_code_part(text: str) -> str:
+    """Strip a TOML comment marker unless it appears inside a quoted string."""
+    quote: str | None = None
+    escaped = False
+    for idx, ch in enumerate(text):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "#":
+            return text[:idx]
+    return text
+
+
+def _toml_key_parts(key: str) -> list[str]:
+    """Best-effort TOML dotted-key splitter with quoted key support."""
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for ch in key:
+        if quote is not None:
+            current.append(ch)
+            if escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+        elif ch == ".":
+            parts.append(_toml_key_part("".join(current).strip()))
+            current = []
+        else:
+            current.append(ch)
+    parts.append(_toml_key_part("".join(current).strip()))
+    return [part for part in parts if part]
+
+
+def _toml_key_part(part: str) -> str:
+    if len(part) >= 2 and part[0] == part[-1] == "'":
+        return part[1:-1]
+    if len(part) >= 2 and part[0] == part[-1] == '"':
+        try:
+            loaded = json.loads(part)
+            return loaded if isinstance(loaded, str) else part
+        except json.JSONDecodeError:
+            return part
+    return part
+
+
+def _toml_table_bounds(text: str, table: str) -> tuple[int, int] | None:
+    lines = text.splitlines(keepends=True)
+    offset = 0
+    start = None
+    value_depth = 0
+    for line in lines:
+        header = _toml_code_part(line).strip()
+        if value_depth > 0:
+            value_depth = max(0, value_depth + _toml_value_delta(header))
+        elif header.startswith("[[") and header.endswith("]]"):
+            if start is not None:
+                return start, offset
+        elif header.startswith("[") and header.endswith("]"):
+            name = ".".join(_toml_key_parts(header[1:-1].strip()))
+            if start is not None:
+                return start, offset
+            if name == table:
+                start = offset
+        elif "=" in header:
+            value_depth = max(0, _toml_value_delta(header.split("=", 1)[1]))
+        offset += len(line)
+    if start is None:
+        return None
+    return start, len(text)
+
+
+def codex_hook_bridge_needs_table_header(text: str) -> bool:
+    return _toml_table_bounds(text, "hooks") is None
+
+
+def codex_hook_bridge_conflict(text: str) -> str | None:
+    """Return why Codex hooks cannot be merged without clobbering user TOML, else None."""
+    if '"""' in text or "'''" in text:
+        return "TOML multiline strings are unsupported by the Codex hook bridge merge"
+    lines = text.splitlines()
+    in_hooks = False
+    current_table: str | None = None
+    value_depth = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        body = _toml_code_part(stripped).strip()
+        if value_depth > 0:
+            value_depth = max(0, value_depth + _toml_value_delta(body))
+            continue
+        if body.startswith("[[") and body.endswith("]]"):
+            parts = _toml_key_parts(body[2:-2].strip())
+            name = ".".join(parts)
+            if parts and parts[0] == "hooks":
+                return f"unmanaged [[{name}]] array-of-tables already exists"
+            current_table = name
+            in_hooks = False
+            continue
+        if body.startswith("[") and body.endswith("]"):
+            parts = _toml_key_parts(body[1:-1].strip())
+            name = ".".join(parts)
+            if parts[:1] == ["hooks"] and len(parts) > 1:
+                return f"unmanaged [{name}] table already exists"
+            current_table = name
+            in_hooks = parts == ["hooks"]
+            continue
+        key = body.split("=", 1)[0].strip() if "=" in body else ""
+        key_parts = _toml_key_parts(key)
+        if current_table is None and key_parts == ["hooks"]:
+            return "unmanaged hooks inline table already exists"
+        if in_hooks and key_parts and key_parts[0] in _CODEX_HOOK_EVENTS:
+            return f"unmanaged hooks.{key_parts[0]} already exists"
+        if current_table is None and key_parts[:1] == ["hooks"]:
+            if len(key_parts) > 1 and key_parts[1] in _CODEX_HOOK_EVENTS:
+                return f"unmanaged hooks.{key_parts[1]} already exists"
+            return f"unmanaged {'.'.join(key_parts)} uses dotted hooks TOML; cannot safely add a [hooks] table"
+        if "=" in body:
+            value_depth = max(0, _toml_value_delta(body.split("=", 1)[1]))
+    return None
+
+
+def merge_codex_hook_bridge_toml(existing: str, action: Action) -> tuple[str, str | None]:
+    """Merge the Codex bridge block, preserving unrelated TOML text."""
+    if codex_hook_bridge_block_malformed(existing):
+        return existing, "managed Codex hook bridge markers are incomplete"
+    bounds = codex_hook_bridge_block_bounds(existing)
+    stripped = existing
+    if bounds is not None:
+        start, end = bounds
+        stripped = existing[:start] + existing[end:]
+    conflict = codex_hook_bridge_conflict(stripped)
+    if conflict:
+        return existing, conflict
+    if bounds is not None:
+        start, end = bounds
+        current = existing[start:end]
+        block = codex_hook_bridge_block(
+            action,
+            include_table_header=codex_hook_bridge_block_has_table_header(current),
+        )
+        return existing[:start] + block + existing[end:], None
+    hooks_bounds = _toml_table_bounds(stripped, "hooks")
+    if hooks_bounds is not None:
+        _, table_end = hooks_bounds
+        block = codex_hook_bridge_block(action, include_table_header=False)
+        prefix = stripped[:table_end].rstrip()
+        suffix = stripped[table_end:].lstrip("\n")
+        merged = prefix + "\n" + block
+        if suffix:
+            merged += "\n" + suffix
+        return merged, None
+    block = codex_hook_bridge_block(action, include_table_header=True)
+    prefix = stripped.rstrip()
+    return (prefix + "\n\n" if prefix else "") + block, None
+
+
+def _do_register_codex_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
+    """Register codex_hook_bridge in ``config.toml`` with a managed TOML block."""
+    config_file = hook_bridge_settings_file(action)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    existed = config_file.is_file()
+    existing = ""
+    if existed:
+        try:
+            existing = config_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return ActionResult(action, "error", f"hook_bridge/{action.item}: cannot read {config_file}: {exc}")
+    had_managed_block = codex_hook_bridge_block_bounds(existing) is not None
+    desired, conflict = merge_codex_hook_bridge_toml(existing, action)
+    if conflict:
+        detail = f"hook_bridge/{action.item}: {conflict} in {config_file}"
+        if on_conflict == "skip":
+            return ActionResult(action, "skipped", detail + " (on_conflict=skip), left untouched")
+        return ActionResult(action, "error", detail)
+    if desired == existing:
+        return ActionResult(action, "skipped", f"hook_bridge/{action.item}: dispatcher already wired in {config_file}")
+    if had_managed_block and on_conflict == "skip":
+        return ActionResult(
+            action,
+            "skipped",
+            f"hook_bridge/{action.item}: managed Codex hook bridge block drifted but left untouched "
+            f"(on_conflict=skip) in {config_file}",
+        )
+    backup_note = ""
+    if _should_backup(on_conflict) and existed:
+        bak = fsutil.backup_path(config_file)
+        shutil.copy2(str(config_file), str(bak))
+        backup_note = f" (backed up prior → {bak})"
+    config_file.write_text(desired, encoding="utf-8")
+    status = "backed_up" if backup_note else ("updated" if existed else "created")
+    return ActionResult(
+        action,
+        status,
+        f"hook_bridge/{action.item}: wired Codex dispatcher hooks in {config_file}{backup_note}",
+    )
 
 
 # ── model-freshness schedule provisioning (launchd / crontab) ──────────────────────

@@ -166,7 +166,7 @@
         },
         "target_kind": {
           "type": "string",
-          "description": "logical-point → harness-event mapping",
+          "description": "descriptor target kind",
           "enum": [
             "claude-code",
             "generic"
@@ -365,11 +365,11 @@
         },
         "hook_bridge": {
           "type": "object",
-          "description": "wire the agents-hooks/v1 → CC dispatcher into settings.json.",
+          "description": "wire the agents-hooks/v1 dispatcher into the supported harness config.",
           "properties": {
             "enabled": {
               "type": "boolean",
-              "description": "wire the cc_hook_bridge dispatcher",
+              "description": "wire the supported harness hook-bridge dispatcher",
               "default": true
             },
             "python": {
