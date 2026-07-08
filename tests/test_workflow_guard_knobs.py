@@ -3,8 +3,8 @@
 `agent_hooks.worktree_only` (opt-IN, default off) and `agent_hooks.orchestrator_only`
 (opt-OUT, default on) are RUNTIME behaviour knobs read by the agent-hooks from the committed
 rig.yaml at fire time. rig-cli's job is only to (1) let the strict validator + published schema
-ACCEPT them per-repo, and (2) carry the two hooks via the ALREADY-registered PreToolUse
-matchers (so no new matcher/collision with the open lint-on-write bridge PRs).
+ACCEPT them per-repo, and (2) keep the managed PreToolUse matcher set that carries bash,
+write, and subagent-dispatch hooks.
 
 Run from the repo root::
 
@@ -69,10 +69,8 @@ def test_strictness_preserved_a_typo_is_still_rejected():
         config.validate({"version": 1, "agent_hooks": {"worktree_onlyy": True}})
 
 
-def test_pretooluse_matchers_already_carry_both_guards():
-    """No NEW matcher is required: worktree-only-writes (pre-write) rides the existing
-    Edit|Write|MultiEdit|NotebookEdit matcher; orchestrator-stays-thin (pre-bash) rides Bash.
-    This is why the change merges cleanly alongside the open bridge PRs (#103)."""
+def test_pretooluse_matchers_cover_the_full_managed_set():
+    """The bridge keeps every managed PreToolUse matcher, including subagent dispatch."""
     action = Action(
         kind="register_hook_bridge",
         category="agent_hooks",
@@ -82,8 +80,11 @@ def test_pretooluse_matchers_already_carry_both_guards():
         options={"lib_dir": "/agent-tools/lib", "python": "python3"},
     )
     matchers = {m for m, _cmd in hook_bridge_entries(action)["PreToolUse"]}
-    assert "Edit|Write|MultiEdit|NotebookEdit" in matchers  # carries the pre-write guards
-    assert "Bash" in matchers  # carries the pre-bash orchestrator guard
+    assert matchers == {
+        "Bash",
+        "Edit|Write|MultiEdit|NotebookEdit",
+        "Agent|Task",
+    }
 
 
 def test_wizard_registry_exposes_both_knobs_with_correct_defaults():

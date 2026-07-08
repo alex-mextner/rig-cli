@@ -395,8 +395,8 @@ agent-hook is inert in CC** (agent-tools#18) and the "auto-mode is safe because 
 intercept" claim above is false. So when a `claude-code` harness block is present (and
 `agent_hooks` is enabled), `rig apply` also registers the `cc_hook_bridge` dispatcher
 (shipped in `agent-tools/lib/cc_hook_bridge`) into the same `settings.json`:
-`PreToolUse` (matchers `Bash` and `Edit|Write|MultiEdit|NotebookEdit`), `PostToolUse`
-(matcher `Edit|Write|MultiEdit|NotebookEdit` — the reactive `post-write` point:
+`PreToolUse` (matchers `Bash`, `Edit|Write|MultiEdit|NotebookEdit`, and `Agent|Task`),
+`PostToolUse` (matcher `Edit|Write|MultiEdit|NotebookEdit` — the reactive `post-write` point:
 `format-on-write` reformats the just-written file, `lint-on-write` feeds lint findings
 back to the model) and `Stop`, each
 running `PYTHONPATH=<agent-tools>/lib python3 -m cc_hook_bridge <Event>`. The dispatcher

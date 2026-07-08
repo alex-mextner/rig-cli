@@ -11,6 +11,7 @@ is caught without standing up a container.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -22,18 +23,42 @@ from pathlib import Path
 import test_cleanroom_e2e as cr
 
 
-def _run_checker(tmp_path: Path, which: str, settings: dict) -> int:
+def _run_checker(tmp_path: Path, which: str, settings: dict, *, lib_path: str = "/x") -> int:
     """Run the staged ``check_settings.py`` against a settings dict; return its exit code."""
     script = tmp_path / "check_settings.py"
     script.write_text(cr._CHECK_SETTINGS, encoding="utf-8")
     sfile = tmp_path / "settings.json"
     sfile.write_text(json.dumps(settings), encoding="utf-8")
+    args = [sys.executable, str(script), which, str(sfile)]
+    if which == "hook_bridge":
+        args.append(lib_path)
     return subprocess.run(
-        [sys.executable, str(script), which, str(sfile)],
+        args,
         capture_output=True,
         text=True,
         timeout=30,
     ).returncode
+
+
+def _full_hook_bridge_settings() -> dict:
+    def command(event: str) -> dict:
+        return {"type": "command", "command": f"PYTHONPATH=/x python3 -m cc_hook_bridge {event}"}
+
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [command("PreToolUse")]},
+                {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [command("PreToolUse")]},
+                {"matcher": "Agent|Task", "hooks": [command("PreToolUse")]},
+            ],
+            "PostToolUse": [
+                {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [command("PostToolUse")]},
+            ],
+            "Stop": [
+                {"hooks": [command("Stop")]},
+            ],
+        }
+    }
 
 
 def test_check_settings_auto_mode(tmp_path: Path) -> None:
@@ -42,8 +67,12 @@ def test_check_settings_auto_mode(tmp_path: Path) -> None:
     assert _run_checker(tmp_path, "auto_mode", {}) == 1
 
 
-def test_check_settings_hook_bridge_accepts_a_wired_command(tmp_path: Path) -> None:
-    wired = {
+def test_check_settings_hook_bridge_accepts_the_full_managed_shape(tmp_path: Path) -> None:
+    assert _run_checker(tmp_path, "hook_bridge", _full_hook_bridge_settings()) == 0
+
+
+def test_check_settings_hook_bridge_rejects_partial_old_shape(tmp_path: Path) -> None:
+    old_shape = {
         "hooks": {
             "PreToolUse": [
                 {
@@ -55,7 +84,25 @@ def test_check_settings_hook_bridge_accepts_a_wired_command(tmp_path: Path) -> N
             ]
         }
     }
-    assert _run_checker(tmp_path, "hook_bridge", wired) == 0
+    assert _run_checker(tmp_path, "hook_bridge", old_shape) == 1
+
+
+def test_check_settings_hook_bridge_rejects_wrong_hook_type(tmp_path: Path) -> None:
+    wrong_type = _full_hook_bridge_settings()
+    wrong_type["hooks"]["PreToolUse"][0]["hooks"][0]["type"] = "prompt"
+    assert _run_checker(tmp_path, "hook_bridge", wrong_type) == 1
+
+    missing_type = _full_hook_bridge_settings()
+    del missing_type["hooks"]["PreToolUse"][0]["hooks"][0]["type"]
+    assert _run_checker(tmp_path, "hook_bridge", missing_type) == 1
+
+
+def test_check_settings_hook_bridge_rejects_wrong_lib_path(tmp_path: Path) -> None:
+    wrong_lib = _full_hook_bridge_settings()
+    wrong_lib["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = (
+        "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"
+    )
+    assert _run_checker(tmp_path, "hook_bridge", wrong_lib, lib_path="/x") == 1
 
 
 def test_check_settings_hook_bridge_rejects_bare_substring_elsewhere(tmp_path: Path) -> None:
@@ -106,9 +153,22 @@ def test_build_fake_agent_tools_produces_the_expected_tree(tmp_path: Path) -> No
     assert data["cmd"] == "/opt/agent-tools/agent-hooks/block-no-verify/block_no_verify.py"
     assert "PLACEHOLDER" not in data["cmd"] and "ABSOLUTE/PATH" not in data["cmd"]
 
-    # the global dispatcher runner + the cc_hook_bridge dispatcher (so the bridge wires, not skips)
+    # the global dispatcher runner + a runnable cc_hook_bridge package (so the bridge wires and
+    # the generated `python3 -m cc_hook_bridge <Event>` command can execute).
     assert (root / "git-hooks" / "global-dispatcher" / "run-global-hooks").is_file()
+    assert (root / "lib" / "cc_hook_bridge" / "__init__.py").is_file()
+    assert (root / "lib" / "cc_hook_bridge" / "__main__.py").is_file()
     assert (root / "lib" / "cc_hook_bridge" / "dispatch.py").is_file()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "lib")
+    bridge = subprocess.run(
+        [sys.executable, "-m", "cc_hook_bridge", "PreToolUse"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert bridge.returncode == 0, bridge.stderr
     # the CI slots the clean-room config enables
     assert (root / "ci" / "secret-scan" / "secret-scan.yml").is_file()
     assert (root / "ci" / "leftover-grep" / "workflow.yml").is_file()
@@ -156,8 +216,11 @@ def test_check_settings_handles_malformed_json_cleanly(tmp_path: Path) -> None:
     def rc(which: str, raw: str) -> int:
         f = tmp_path / "s.json"
         f.write_text(raw, encoding="utf-8")
+        args = [sys.executable, str(script), which, str(f)]
+        if which == "hook_bridge":
+            args.append("/x")
         return subprocess.run(
-            [sys.executable, str(script), which, str(f)], capture_output=True, text=True, timeout=30
+            args, capture_output=True, text=True, timeout=30
         ).returncode
 
     assert rc("auto_mode", "{ not json") == 3  # malformed
