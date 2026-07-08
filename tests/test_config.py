@@ -129,6 +129,10 @@ def test_validate_rejects_non_mapping_project_dev_blocks(key):
         ({"version": 1, "gitignore": {"entres": []}}, "gitignore.entres", "unknown gitignore key"),
         ({"version": 1, "tg_ctl": {"labl": "x"}}, "tg_ctl.labl", "unknown tg_ctl key"),
         ({"version": 1, "agents_md": {"symlnk": True}}, "agents_md.symlnk", "unknown agents_md key"),
+        ({"version": 1, "scripts": {"test": {"command": "pytest"}}}, "scripts.test.command", "unknown scripts.test key"),
+        ({"version": 1, "dev": {"serve": {"script": "server"}}}, "dev.serve", "unknown dev key"),
+        ({"version": 1, "dev": {"server": {"command": "vite"}}}, "dev.server.command", "unknown dev.server key"),
+        ({"version": 1, "dev": {"e2e": {"command": "playwright"}}}, "dev.e2e.command", "unknown dev.e2e key"),
     ],
 )
 def test_validate_rejects_unknown_block_key_with_schema_path(doc, schema_path, msg):
@@ -212,6 +216,102 @@ def test_open_map_block_fixed_knobs_are_type_checked(doc, schema_path):
     # agent_hooks/permissions is rejected at runtime, not only by an editor.
     with pytest.raises(config.ConfigError) as ei:
         config.validate(doc)
+    assert ei.value.schema_path == schema_path
+
+
+def test_validate_accepts_scripts_strings_and_cmd_mappings():
+    config.validate({
+        "version": 1,
+        "scripts": {
+            "test": "python -m pytest -q",
+            "lint": {"cmd": "ruff check ."},
+        },
+    })
+
+
+@pytest.mark.parametrize(
+    "doc, schema_path, msg",
+    [
+        ({"version": 1, "scripts": []}, "scripts", "scripts must be a mapping"),
+        ({"version": 1, "scripts": {"test": None}}, "scripts.test", "must be a string or a mapping"),
+        ({"version": 1, "scripts": {"test": []}}, "scripts.test", "must be a string or a mapping"),
+        ({"version": 1, "scripts": {"test": {}}}, "scripts.test.cmd", "requires a cmd string"),
+        ({"version": 1, "scripts": {"test": {"cmd": 123}}}, "scripts.test.cmd", "requires a cmd string"),
+    ],
+)
+def test_validate_rejects_bad_scripts(doc, schema_path, msg):
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate(doc)
+    assert msg in ei.value.what
+    assert ei.value.schema_path == schema_path
+
+
+def test_validate_accepts_dev_server_and_e2e_metadata():
+    config.validate({
+        "version": 1,
+        "scripts": {
+            "server": "npm run dev",
+            "e2e": {"cmd": "npx playwright test"},
+        },
+        "dev": {
+            "server": {
+                "script": "server",
+                "url": "http://localhost:3000",
+                "ready_url": "http://localhost:3000/health",
+                "ports": [3000, 5173],
+                "process_matchers": ["vite", "npm run dev"],
+                "logs_root": ".dev/logs/server",
+            },
+            "e2e": {
+                "script": "e2e",
+                "requires_server": True,
+                "artifacts_root": "test-results",
+                "logs_root": ".dev/logs/e2e",
+                "jobs": {
+                    "smoke": {
+                        "script": "e2e-smoke",
+                        "requires_server": True,
+                        "artifacts_root": "test-results/smoke",
+                        "logs_root": ".dev/logs/e2e-smoke",
+                    },
+                },
+            },
+        },
+    })
+
+
+@pytest.mark.parametrize(
+    "doc, schema_path, msg",
+    [
+        ({"version": 1, "dev": []}, "dev", "dev must be a mapping"),
+        ({"version": 1, "dev": {"server": []}}, "dev.server", "dev.server must be a mapping"),
+        ({"version": 1, "dev": {"e2e": []}}, "dev.e2e", "dev.e2e must be a mapping"),
+        ({"version": 1, "dev": {"server": {"script": 1}}}, "dev.server.script", "dev.server.script must be a string"),
+        ({"version": 1, "dev": {"server": {"url": 1}}}, "dev.server.url", "dev.server.url must be a string"),
+        ({"version": 1, "dev": {"server": {"ready_url": 1}}}, "dev.server.ready_url", "dev.server.ready_url must be a string"),
+        ({"version": 1, "dev": {"server": {"ports": "3000"}}}, "dev.server.ports", "dev.server.ports must be a list of ints"),
+        ({"version": 1, "dev": {"server": {"ports": [True]}}}, "dev.server.ports", "dev.server.ports must be a list of ints"),
+        ({"version": 1, "dev": {"server": {"ports": [0]}}}, "dev.server.ports", "dev.server.ports entries must be ints from 1 to 65535"),
+        ({"version": 1, "dev": {"server": {"ports": [65536]}}}, "dev.server.ports", "dev.server.ports entries must be ints from 1 to 65535"),
+        ({"version": 1, "dev": {"server": {"process_matchers": "vite"}}}, "dev.server.process_matchers", "dev.server.process_matchers must be a list of strings"),
+        ({"version": 1, "dev": {"server": {"process_matchers": ["vite", 1]}}}, "dev.server.process_matchers", "dev.server.process_matchers must be a list of strings"),
+        ({"version": 1, "dev": {"server": {"logs_root": 1}}}, "dev.server.logs_root", "dev.server.logs_root must be a string"),
+        ({"version": 1, "dev": {"e2e": {"script": 1}}}, "dev.e2e.script", "dev.e2e.script must be a string"),
+        ({"version": 1, "dev": {"e2e": {"requires_server": "yes"}}}, "dev.e2e.requires_server", "dev.e2e.requires_server must be a bool"),
+        ({"version": 1, "dev": {"e2e": {"artifacts_root": 1}}}, "dev.e2e.artifacts_root", "dev.e2e.artifacts_root must be a string"),
+        ({"version": 1, "dev": {"e2e": {"logs_root": 1}}}, "dev.e2e.logs_root", "dev.e2e.logs_root must be a string"),
+        ({"version": 1, "dev": {"e2e": {"jobs": []}}}, "dev.e2e.jobs", "dev.e2e.jobs must be a mapping"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": []}}}}, "dev.e2e.jobs.smoke", "dev.e2e.jobs.smoke must be a mapping"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": {"script": 1}}}}}, "dev.e2e.jobs.smoke.script", "dev.e2e.jobs.smoke.script must be a string"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": {"requires_server": "yes"}}}}}, "dev.e2e.jobs.smoke.requires_server", "dev.e2e.jobs.smoke.requires_server must be a bool"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": {"artifacts_root": 1}}}}}, "dev.e2e.jobs.smoke.artifacts_root", "dev.e2e.jobs.smoke.artifacts_root must be a string"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": {"logs_root": 1}}}}}, "dev.e2e.jobs.smoke.logs_root", "dev.e2e.jobs.smoke.logs_root must be a string"),
+    ],
+)
+def test_validate_rejects_bad_dev_metadata(doc, schema_path, msg):
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate(doc)
+    assert msg in ei.value.what
     assert ei.value.schema_path == schema_path
 
 

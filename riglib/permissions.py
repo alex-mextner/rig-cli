@@ -3,9 +3,8 @@
 What this is
 ------------
 rig provisions each agent harness's permission ALLOWLIST so our ecosystem CLIs (``tg``,
-``review``, ``draw``, ``3d``, ``rig``, ``task``, ``dev``, ``pm``, ``research``) and the
-recommended external tools we
-rely on (``gh``, ``git``, ``rg``, ``uv``, ``bun``, ``jq``, ``gitleaks``) are pre-allowed — the agent
+``review``, ``draw``, ``3d``, ``rig``, ``task``, ``dev``, ``pm``, ``research``) and read-only
+helper tools (``rg``, ``jq``, ``gitleaks``) are pre-allowed — the agent
 never stops to ask permission for a known-safe command. The tool list is CONFIG-DRIVEN
 (declared in ``rig.yaml`` / the global config under the ``permissions`` block) with a sensible
 default set ON; this module is the registry that backs it and the renderer that turns one tool
@@ -40,13 +39,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-# ── the default tool list — our ecosystem CLIs + the safe-to-allow external dev tools ────────
+# ── the default tool list — our ecosystem CLIs + read-only helper tools ─────────────────────
 # CONFIG-DRIVEN: this is the DEFAULT set rig pre-allows; a config ``permissions.tools`` replaces
 # it wholesale, and ``permissions.extra`` / ``permissions.disable`` apply deltas on top. The grant
-# is at the command-PREFIX level (``Bash(<tool>:*)`` covers a tool's subcommands/flags — so ``git``
-# does include ``git push --force``); the restraint is in WHICH tools are listed — dev/VCS tooling
-# we already lean on, NEVER inherently-destructive standalone commands (``rm``/``sudo``/``dd``),
-# which are deliberately absent so they stay behind a prompt.
+# is at the command-PREFIX level (``Bash(<tool>:*)`` covers a tool's subcommands/flags), so raw
+# process-control / package-manager / git-hosting tools stay OUT of the default set. Development
+# lifecycle work routes through ``dev``, whose implementation validates process/project ownership.
 #
 # Our ecosystem CLIs (tg/review/draw/3d/rig/task/dev/pm/research) and the external tools we lean
 # on. ``task`` is alex-mextner/task-cli (the binary is ``task``). ``dev`` is the agent-tools
@@ -54,11 +52,13 @@ from typing import Callable
 # helper's own implementation/provenance stays in agent-tools. ``pm`` (pm-cli) and ``research``
 # (research-cli) are read-only ecosystem coordinators — a project-manager observer/reconciler and
 # a multi-provider research/panel CLI; both observe and never edit code, matching the safe
-# read-only profile of ``review``/``task``. ``rg`` is ripgrep's binary name.
+# read-only profile of ``review``/``task``. ``rg`` is ripgrep's binary name. Raw ``gh``, ``git``,
+# ``uv``, ``bun``, ``npm``, ``docker``, ``kill``, ``lsof``, ``ps`` and ``pgrep`` are deliberately
+# absent by default.
 DEFAULT_ECOSYSTEM_TOOLS: tuple[str, ...] = (
     "tg", "review", "draw", "3d", "rig", "task", "dev", "pm", "research",
 )
-DEFAULT_EXTERNAL_TOOLS: tuple[str, ...] = ("gh", "git", "rg", "uv", "bun", "jq", "gitleaks")
+DEFAULT_EXTERNAL_TOOLS: tuple[str, ...] = ("rg", "jq", "gitleaks")
 DEFAULT_TOOLS: tuple[str, ...] = DEFAULT_ECOSYSTEM_TOOLS + DEFAULT_EXTERNAL_TOOLS
 
 

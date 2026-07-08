@@ -271,12 +271,12 @@ AREAS: tuple[Area, ...] = (
     ),
     Area(
         "permissions", "harness permissions (allow / deny / ask)",
-        "Reconcile the harness permissions layer: pre-allow our CLIs + safe dev tools, and assert "
+        "Reconcile the harness permissions layer: pre-allow our CLIs + read-only helpers, and assert "
         "the conservative deny/ask rule baselines (the outer belt under the agent-hooks).",
         (
             _opt("permissions.enabled", KIND_BOOL, True,
                  "Provision the per-harness permissions layer: the command allowlist (tg/review/draw/"
-                 "3d/rig/task/dev + gh/git/rg/uv/bun/jq/gitleaks pre-allowed, no per-call prompts) plus "
+                 "3d/rig/task/dev + read-only rg/jq/gitleaks pre-allowed, no per-call prompts) plus "
                  "the deny/ask rule baselines (claude-code AND opencode; raw PR-merge, force-push, sudo "
                  "rm, screencapture denied; pkill/killall/git reset --hard prompt). codex gets a "
                  "safe-command allow + coarse deny via its execpolicy .rules block. Additive — merges "

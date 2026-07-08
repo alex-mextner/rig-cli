@@ -59,114 +59,119 @@
     },
     "scripts": {
       "type": "object",
-      "description": "project-local named commands consumed by dev helpers; rig accepts and preserves the map.",
+      "description": "repo-level commands consumed by the agent-tools `dev run <name>` CLI.",
       "properties": {},
-      "additionalProperties": true
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "description": "command line run by `dev run <name>`"
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
     },
     "dev": {
       "type": "object",
-      "description": "project-local dev/e2e lifecycle metadata consumed by dev helpers; rig accepts and preserves the map.",
-      "properties": {},
-      "additionalProperties": true
-    },
-    "skills": {
-      "type": "object",
-      "description": "advisory markdown rules copied into the agent skills dir (opt-out model).",
+      "description": "repo-level development server and e2e metadata consumed by the agent-tools `dev` CLI.",
       "properties": {
-        "enabled": {
-          "type": "boolean",
-          "description": "install skills at all",
-          "default": true
-        },
-        "target": {
-          "type": "string",
-          "description": "where SKILL.md dirs are copied",
-          "default": "~/.agents/skills"
-        },
-        "all": {
-          "type": "boolean",
-          "description": "enable all skills (opt-out)",
-          "default": true
-        },
-        "harness_link": {
-          "type": "boolean",
-          "description": "also symlink each installed skill into the harness discovery dir",
-          "default": true
-        },
-        "harness_skill_dir": {
-          "type": "string",
-          "description": "override the harness skill-discovery dir"
-        },
-        "universal": {
+        "server": {
           "type": "object",
-          "description": "the universal skill set (opt-out via disable / opt-in via enable).",
+          "description": "development server metadata for `dev` lifecycle commands.",
           "properties": {
-            "all": {
+            "script": {
+              "type": "string",
+              "description": "name of the top-level scripts entry that starts the dev server"
+            },
+            "url": {
+              "type": "string",
+              "description": "base URL the development server serves"
+            },
+            "ready_url": {
+              "type": "string",
+              "description": "URL the dev CLI can poll before running e2e"
+            },
+            "ports": {
+              "type": "array",
+              "description": "known TCP ports the dev CLI may check",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            },
+            "process_matchers": {
+              "type": "array",
+              "description": "process command substrings the dev CLI may use to identify owned server processes",
+              "items": {
+                "type": "string"
+              }
+            },
+            "logs_root": {
+              "type": "string",
+              "description": "directory where the dev CLI writes server logs"
+            }
+          },
+          "additionalProperties": false
+        },
+        "e2e": {
+          "type": "object",
+          "description": "end-to-end test metadata for `dev` lifecycle commands.",
+          "properties": {
+            "script": {
+              "type": "string",
+              "description": "name of the top-level scripts entry that runs e2e tests"
+            },
+            "requires_server": {
               "type": "boolean",
-              "description": "enable all universal skills",
+              "description": "whether e2e expects the dev server to be running",
               "default": true
             },
-            "disable": {
-              "type": "array",
-              "description": "universal skills to drop",
-              "items": {
-                "type": "string"
-              }
+            "artifacts_root": {
+              "type": "string",
+              "description": "directory where e2e writes artifacts"
             },
-            "enable": {
-              "type": "array",
-              "description": "universal skills to add (with all:false)",
-              "items": {
-                "type": "string"
-              }
-            }
-          },
-          "additionalProperties": false
-        },
-        "by_type": {
-          "type": "object",
-          "description": "by-type skill bundles for the detected project type.",
-          "properties": {
-            "enable": {
-              "type": "array",
-              "description": "which by-type bundles to install whole",
-              "items": {
-                "type": "string"
-              }
+            "logs_root": {
+              "type": "string",
+              "description": "directory where the dev CLI writes e2e logs"
             },
-            "disable": {
-              "type": "array",
-              "description": "by-type bundles to drop",
-              "items": {
-                "type": "string"
-              }
-            },
-            "items": {
+            "jobs": {
               "type": "object",
-              "description": "per-skill overrides keyed by `by-type/<kind>/<name>`",
+              "description": "named e2e jobs keyed by job name",
               "additionalProperties": {
-                "type": "object"
-              }
-            }
-          },
-          "additionalProperties": false
-        },
-        "by_stack": {
-          "type": "object",
-          "description": "by-stack skills auto-selected by the repo's declared `stack` (hierarchical prefix match); tune with disable / per-item overrides.",
-          "properties": {
-            "disable": {
-              "type": "array",
-              "description": "by-stack skill item names (`by-stack/<l1>/<lang>[/<fw>]/<name>`) to drop even though the declared stack would select them",
-              "items": {
-                "type": "string"
-              }
-            },
-            "items": {
-              "type": "object",
-              "description": "per-skill overrides keyed by `by-stack/<l1>/<lang>[/<fw>]/<name>` (`enabled: true` force-adds an off-stack skill; `enabled: false` drops one)",
-              "additionalProperties": {
-                "type": "object"
+                "type": "object",
+                "description": "one named e2e job consumed by the agent-tools `dev` CLI.",
+                "properties": {
+                  "script": {
+                    "type": "string",
+                    "description": "name of the top-level scripts entry that runs this e2e job"
+                  },
+                  "requires_server": {
+                    "type": "boolean",
+                    "description": "whether this e2e job expects the dev server",
+                    "default": true
+                  },
+                  "artifacts_root": {
+                    "type": "string",
+                    "description": "directory where this e2e job writes artifacts"
+                  },
+                  "logs_root": {
+                    "type": "string",
+                    "description": "directory where this e2e job writes logs"
+                  }
+                },
+                "additionalProperties": false
               }
             }
           },
@@ -175,6 +180,112 @@
       },
       "additionalProperties": false
     },
+    "skills": {
+    "type": "object",
+    "description": "advisory markdown rules copied into the agent skills dir (opt-out model).",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "install skills at all",
+        "default": true
+      },
+      "target": {
+        "type": "string",
+        "description": "where SKILL.md dirs are copied",
+        "default": "~/.agents/skills"
+      },
+      "all": {
+        "type": "boolean",
+        "description": "enable all skills (opt-out)",
+        "default": true
+      },
+      "harness_link": {
+        "type": "boolean",
+        "description": "also symlink each installed skill into the harness discovery dir",
+        "default": true
+      },
+      "harness_skill_dir": {
+        "type": "string",
+        "description": "override the harness skill-discovery dir"
+      },
+      "universal": {
+        "type": "object",
+        "description": "the universal skill set (opt-out via disable / opt-in via enable).",
+        "properties": {
+          "all": {
+            "type": "boolean",
+            "description": "enable all universal skills",
+            "default": true
+          },
+          "disable": {
+            "type": "array",
+            "description": "universal skills to drop",
+            "items": {
+              "type": "string"
+            }
+          },
+          "enable": {
+            "type": "array",
+            "description": "universal skills to add (with all:false)",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "by_type": {
+        "type": "object",
+        "description": "by-type skill bundles for the detected project type.",
+        "properties": {
+          "enable": {
+            "type": "array",
+            "description": "which by-type bundles to install whole",
+            "items": {
+              "type": "string"
+            }
+          },
+          "disable": {
+            "type": "array",
+            "description": "by-type bundles to drop",
+            "items": {
+              "type": "string"
+            }
+          },
+          "items": {
+            "type": "object",
+            "description": "per-skill overrides keyed by `by-type/<kind>/<name>`",
+            "additionalProperties": {
+              "type": "object"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "by_stack": {
+        "type": "object",
+        "description": "by-stack skills auto-selected by the repo's declared `stack` (hierarchical prefix match); tune with disable / per-item overrides.",
+        "properties": {
+          "disable": {
+            "type": "array",
+            "description": "by-stack skill item names (`by-stack/<l1>/<lang>[/<fw>]/<name>`) to drop even though the declared stack would select them",
+            "items": {
+              "type": "string"
+            }
+          },
+          "items": {
+            "type": "object",
+            "description": "per-skill overrides keyed by `by-stack/<l1>/<lang>[/<fw>]/<name>` (`enabled: true` force-adds an off-stack skill; `enabled: false` drops one)",
+            "additionalProperties": {
+              "type": "object"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  },
     "agent_hooks": {
       "type": "object",
       "description": "programmatic guards that block before a side effect (no-verify, secrets, raw merge).",

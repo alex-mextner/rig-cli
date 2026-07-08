@@ -123,6 +123,52 @@ def test_linters_items_schema_enforces_item_shape():
     assert item["properties"]["enabled"]["type"] == "boolean"
 
 
+def test_scripts_schema_accepts_string_or_cmd_mapping_entries():
+    doc = config_schema.json_schema()
+    scripts = doc["properties"]["scripts"]
+    assert scripts["type"] == "object"
+    item = scripts["additionalProperties"]
+    assert item["anyOf"][0] == {"type": "string"}
+    mapping = item["anyOf"][1]
+    assert mapping["type"] == "object"
+    assert mapping["additionalProperties"] is False
+    assert mapping["required"] == ["cmd"]
+    assert mapping["properties"]["cmd"]["type"] == "string"
+
+
+def test_dev_schema_models_server_and_e2e_metadata():
+    doc = config_schema.json_schema()
+    dev = doc["properties"]["dev"]
+    assert dev["additionalProperties"] is False
+    assert set(dev["properties"]) == {"server", "e2e"}
+
+    server = dev["properties"]["server"]
+    assert server["additionalProperties"] is False
+    assert set(server["properties"]) == {"script", "url", "ready_url", "ports", "process_matchers", "logs_root"}
+    assert server["properties"]["script"]["type"] == "string"
+    assert server["properties"]["url"]["type"] == "string"
+    assert server["properties"]["ready_url"]["type"] == "string"
+    assert server["properties"]["ports"]["items"] == {"type": "integer", "minimum": 1, "maximum": 65535}
+    assert server["properties"]["process_matchers"]["items"] == {"type": "string"}
+    assert server["properties"]["logs_root"]["type"] == "string"
+
+    e2e = dev["properties"]["e2e"]
+    assert e2e["additionalProperties"] is False
+    assert set(e2e["properties"]) == {"script", "requires_server", "artifacts_root", "logs_root", "jobs"}
+    assert e2e["properties"]["script"]["type"] == "string"
+    assert e2e["properties"]["requires_server"]["type"] == "boolean"
+    assert e2e["properties"]["requires_server"]["default"] is True
+    assert e2e["properties"]["artifacts_root"]["type"] == "string"
+    assert e2e["properties"]["logs_root"]["type"] == "string"
+
+    job = e2e["properties"]["jobs"]["additionalProperties"]
+    assert job["additionalProperties"] is False
+    assert set(job["properties"]) == {"script", "requires_server", "artifacts_root", "logs_root"}
+    assert job["properties"]["script"]["type"] == "string"
+    assert job["properties"]["requires_server"]["type"] == "boolean"
+    assert job["properties"]["requires_server"]["default"] is True
+
+
 # ── registry ↔ validator agreement (no drift between the two key sets) ─────────────────
 @pytest.mark.parametrize(
     "block_path, config_keys",
@@ -144,6 +190,10 @@ def test_linters_items_schema_enforces_item_shape():
         ("mode.autonomous.parallel_worktree_comparison", {"enabled", "candidates"}),
         ("mode.autonomous.development_tools", {"allow"}),
         ("mode.autonomous.parallelism", {"max_agents", "max_worktrees", "reserve_slots", "limit_aware"}),
+        ("dev", getattr(config, "_DEV_KEYS", set())),
+        ("dev.server", getattr(config, "_DEV_SERVER_KEYS", set())),
+        ("dev.e2e", getattr(config, "_DEV_E2E_KEYS", set())),
+        ("dev.e2e.jobs", getattr(config, "_DEV_E2E_JOB_KEYS", set())),
         ("tg_ctl", config._TG_CTL_KEYS),
         ("github.ruleset", config._GITHUB_RULESET_KEYS),
         ("tmux", config._TMUX_TOP_KEYS),
@@ -166,6 +216,15 @@ def test_registry_block_keys_match_validator(block_path, config_keys):
 def test_registry_tmux_subblock_keys_match_validator():
     for sub, allowed in config._TMUX_SUBKEYS.items():
         assert config_schema.block_child_keys(f"tmux.{sub}") == set(allowed)
+
+
+def test_block_child_keys_can_descend_into_schema_shaped_open_maps():
+    assert config_schema.block_child_keys("linters.items") == {
+        "tool", "role", "path", "content", "enabled",
+    }
+    assert config_schema.block_child_keys("dev.e2e.jobs") == {
+        "script", "requires_server", "artifacts_root", "logs_root",
+    }
 
 
 def test_top_level_keys_match_validator():
