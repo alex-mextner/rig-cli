@@ -640,8 +640,20 @@ _TOP_LEAVES: dict[str, Leaf] = {
     "agent_tools_source": Leaf("string", "the agent-tools checkout to apply FROM (default: auto-detect)"),
 }
 
+_SCRIPTS_BLOCK = Block(
+    doc="project-local named commands consumed by dev helpers; rig accepts and preserves the map.",
+    closed=False,
+)
+
+_DEV_BLOCK = Block(
+    doc="project-local dev/e2e lifecycle metadata consumed by dev helpers; rig accepts and preserves the map.",
+    closed=False,
+)
+
 BLOCKS: dict[str, Block] = {
     "defaults": _DEFAULTS_BLOCK,
+    "scripts": _SCRIPTS_BLOCK,
+    "dev": _DEV_BLOCK,
     "skills": _SKILLS_BLOCK,
     "agent_hooks": _AGENT_HOOKS_BLOCK,
     "git_hooks": _GIT_HOOKS_BLOCK,
