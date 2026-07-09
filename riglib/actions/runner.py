@@ -3184,6 +3184,12 @@ def env_file_pins_transient_root(content: str | None) -> bool:
         return False
     for raw_line in content.splitlines():
         line = raw_line.strip()
+        # The delegator ``source``s this file, so ``export AGENT_TOOLS_ROOT=...`` is an equally
+        # shell-honored assignment. Strip an optional leading ``export`` keyword before matching
+        # so an EXPORTED poisoned pointer is not hidden behind the transient skip — otherwise
+        # ``gh ship`` would source a dead temp path (exit 127) while status reports clean.
+        if line.startswith("export") and line[6:7].isspace():
+            line = line[6:].lstrip()
         if line.startswith("AGENT_TOOLS_ROOT="):
             try:
                 parts = shlex.split(line.split("=", 1)[1])

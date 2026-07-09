@@ -1551,6 +1551,20 @@ def test_already_poisoned_pointer_is_not_hidden_by_transient_skip(tmp_path, monk
     assert env_file_pins_transient_root(ship_env_file_content(durable)) is False
 
 
+def test_env_file_pins_transient_root_detects_export_prefixed_pointer(tmp_path, monkeypatch):
+    # The delegator `source`s the machine env file, so `export AGENT_TOOLS_ROOT=/tmp/...` is a
+    # shell-honored assignment. The poisoned-pointer detector must recognize that form too — else
+    # an EXPORTED transient pointer slips past the drift surfacing and `gh ship` sources a dead
+    # temp path (exit 127) while status reports clean (codex P2 on #128).
+    _transient_setup(tmp_path, monkeypatch)  # monkeypatches the temp-root set to tmp_path/faketmp
+    stale = tmp_path / "faketmp" / "old-agent-tools" / "ci" / "ship" / "ship.sh"
+    assert env_file_pins_transient_root(f"export AGENT_TOOLS_ROOT='{stale}'\n") is True
+    assert env_file_pins_transient_root(f"export   AGENT_TOOLS_ROOT='{stale}'\n") is True
+    # a durable exported pointer stays the good (non-poisoned) case
+    durable = tmp_path / "xp" / "agent-tools" / "ci" / "ship" / "ship.sh"
+    assert env_file_pins_transient_root(f"export AGENT_TOOLS_ROOT='{durable}'\n") is False
+
+
 def test_poisoned_pointer_flagged_even_when_it_equals_the_transient_source(tmp_path, monkeypatch):
     # Edge: the existing poisoned pointer pins the SAME transient root as the current plan's source,
     # so env_current == desired. The content-equality check would say "clean" — but the pointer is
