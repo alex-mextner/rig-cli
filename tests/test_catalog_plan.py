@@ -392,6 +392,22 @@ def test_plan_codex_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_path,
     assert a.target == Path(os.path.expanduser("~/.codex/config.toml"))
 
 
+def test_plan_opencode_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_path, monkeypatch):
+    import os
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"harness": {"kind": "opencode", "hook_bridge": {"enabled": True}}}, tmp_path)
+    a = _bridge_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.options["kind"] == "opencode"
+    assert a.options["module"] == "opencode_hook_bridge"
+    assert a.options["format"] == "opencode-plugin"
+    assert a.options["lib_dir"] == str(fake_agent_tools / "lib")
+    assert a.target == Path(os.environ["XDG_CONFIG_HOME"]) / "opencode/plugins/agent-tools-hook-bridge.js"
+
+
 def test_plan_hook_bridge_skipped_without_harness(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
     cfg = _cfg({"skills": {"enabled": False}}, tmp_path)  # no harness block
@@ -522,6 +538,16 @@ def test_plan_codex_hook_bridge_skipped_when_dispatcher_absent(fake_agent_tools,
     assert any("codex_hook_bridge" in n and "__main__.py" in n for n in plan.notes), plan.notes
 
 
+def test_plan_opencode_hook_bridge_skipped_when_plugin_absent(fake_agent_tools, tmp_path):
+    """Fail-closed for opencode: never wire a plugin symlink when the bridge is incomplete."""
+    (fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js").unlink()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"harness": {"kind": "opencode", "hook_bridge": {"enabled": True}}}, tmp_path)
+    plan = build(cfg, cat, project_type="unknown")
+    assert _bridge_action(plan) is None
+    assert any("opencode_hook_bridge" in n and "plugin.js" in n for n in plan.notes), plan.notes
+
+
 def test_plan_codex_agent_hooks_default_to_codex_hooks(fake_agent_tools, tmp_path, monkeypatch):
     import os
 
@@ -544,6 +570,31 @@ def test_plan_codex_agent_hooks_default_to_codex_hooks(fake_agent_tools, tmp_pat
     assert {a.target for a in hook_actions} == {Path(os.path.expanduser("~/.codex/hooks"))}
     assert {a.item for a in hook_actions} >= {"block-no-verify", "background-subagent-gate"}
     assert resolve_category_target(cfg, "agent_hooks") == Path(os.path.expanduser("~/.codex/hooks"))
+
+
+def test_plan_opencode_agent_hooks_default_to_opencode_hooks(fake_agent_tools, tmp_path, monkeypatch):
+    import os
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "opencode"},
+        },
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    hook_actions = [a for a in plan.actions if a.kind == "install_agent_hook"]
+    assert hook_actions
+    expected = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode/hooks"
+    assert {a.target for a in hook_actions} == {expected}
+    assert {a.item for a in hook_actions} >= {"block-no-verify", "background-subagent-gate"}
+    assert resolve_category_target(cfg, "agent_hooks") == expected
 
 
 def test_plan_codex_bridge_does_not_wire_pre_agent_yet(fake_agent_tools, tmp_path):

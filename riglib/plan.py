@@ -55,6 +55,7 @@ _BUILTIN_TARGETS = {
 }
 _HARNESS_AGENT_HOOK_TARGETS = {
     "codex": "~/.codex/hooks",
+    "opencode": "~/.config/opencode/hooks",
 }
 _DEFAULTS_KEY = {
     "skills": "skills_target",
@@ -823,6 +824,11 @@ _HOOK_BRIDGE_HARNESSES = {
         "settings": "~/.codex/config.toml",
         "format": "toml",
     },
+    "opencode": {
+        "module": "opencode_hook_bridge",
+        "settings": "~/.config/opencode/plugins/agent-tools-hook-bridge.js",
+        "format": "opencode-plugin",
+    },
 }
 
 
@@ -845,9 +851,10 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
     bridge_cfg = h.get("hook_bridge")
     bridge_spec = _HOOK_BRIDGE_HARNESSES.get(kind)
     if bridge_spec is None:
-        # The schema accepts opencode/gemini/pi/commandcode for skills, but no hook bridge is
-        # known for those harness config formats yet. If a config EXPLICITLY asked for the bridge
-        # on such a kind, say it is not wired; the default-on case stays quiet.
+        # Reaching this branch means the harness has skill/instruction discovery but no known
+        # hook bridge surface yet (currently gemini/pi/commandcode). If a config EXPLICITLY
+        # asked for the bridge on such a kind, say it is not wired; the default-on case stays
+        # quiet.
         if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is True:
             plan.notes.append(
                 f"hook_bridge: skipped — kind '{kind}' has no supported agents-hooks bridge yet"
@@ -870,8 +877,11 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
     # hook (which, fail-open, is harmless but noisy). Skip with a clear,
     # actionable note instead.
     module = str(bridge_spec["module"])
+    bridge_format = str(bridge_spec["format"])
     bridge_dir = lib_dir / module
     bridge_required = [bridge_dir / "dispatch.py", bridge_dir / "__main__.py"]
+    if bridge_format == "opencode-plugin":
+        bridge_required.append(bridge_dir / "plugin.js")
     bridge_missing = [p.name for p in bridge_required if not p.is_file()]
     if bridge_missing:
         plan.notes.append(
@@ -882,10 +892,13 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
         return
     explicit_settings_path = h.get("settings_path")
     settings_path = explicit_settings_path or bridge_spec["settings"]
-    expected_suffix = ".toml" if bridge_spec["format"] == "toml" else ".json"
+    expected_suffix = {
+        "toml": ".toml",
+        "opencode-plugin": ".js",
+    }.get(bridge_format, ".json")
     actual_suffix = Path(str(settings_path)).suffix
     if (
-        bridge_spec["format"] == "toml"
+        bridge_format in {"toml", "opencode-plugin"}
         and explicit_settings_path
         and actual_suffix
         and actual_suffix != expected_suffix
@@ -899,7 +912,7 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
         "kind": kind,
         "lib_dir": str(lib_dir),
         "module": module,
-        "format": str(bridge_spec["format"]),
+        "format": bridge_format,
     }
     if isinstance(bridge_cfg, dict) and bridge_cfg.get("python"):
         options["python"] = str(bridge_cfg["python"])

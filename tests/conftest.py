@@ -303,4 +303,14 @@ def fake_agent_tools(tmp_path: Path) -> Path:
     )
     _write(root / "lib" / "codex_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
 
+    # the opencode_hook_bridge dispatcher is loaded by opencode as a JS plugin that shells
+    # into the Python bridge package.
+    _write(root / "lib" / "opencode_hook_bridge" / "__init__.py", "")
+    _write(
+        root / "lib" / "opencode_hook_bridge" / "__main__.py",
+        "import sys\nfrom .dispatch import main\nraise SystemExit(main(sys.argv[1:]))\n",
+    )
+    _write(root / "lib" / "opencode_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
+    _write(root / "lib" / "opencode_hook_bridge" / "plugin.js", "export default async function plugin() { return {}; }\n")
+
     return root

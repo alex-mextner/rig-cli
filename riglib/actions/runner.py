@@ -968,6 +968,7 @@ _BRIDGE_MARKER = "cc_hook_bridge"
 _CODEX_BRIDGE_BEGIN = "# >>> rig managed: codex hook bridge"
 _CODEX_BRIDGE_END = "# <<< rig managed: codex hook bridge"
 _CODEX_HOOK_EVENTS = ("PreToolUse", "PostToolUse", "Stop")
+_OPENCODE_PLUGIN_NAME = "agent-tools-hook-bridge.js"
 
 
 def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
@@ -1039,7 +1040,20 @@ def hook_bridge_settings_file(action: Action) -> Path:
     target = action.target
     if target.suffix:
         return target
-    return target / ("config.toml" if hook_bridge_format(action) == "toml" else "settings.json")
+    fmt = hook_bridge_format(action)
+    if fmt == "toml":
+        return target / "config.toml"
+    if fmt == "opencode-plugin":
+        return target / _OPENCODE_PLUGIN_NAME
+    return target / "settings.json"
+
+
+def opencode_hook_bridge_plugin_target(action: Action) -> tuple[Path, Path]:
+    """Return the opencode plugin symlink path and the bridge plugin it should target."""
+    plugin_path = hook_bridge_settings_file(action)
+    module = hook_bridge_module(action)
+    dest = Path(str(action.options["lib_dir"])) / module / "plugin.js"
+    return plugin_path, dest
 
 
 def find_managed_bridge_hook(blocks, matcher: str, marker: str = _BRIDGE_MARKER) -> dict | None:
@@ -1096,6 +1110,8 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
     """
     if hook_bridge_format(action) == "toml":
         return _do_register_codex_hook_bridge(action, on_conflict)
+    if hook_bridge_format(action) == "opencode-plugin":
+        return _do_register_opencode_hook_bridge(action, on_conflict)
     config_file = hook_bridge_settings_file(action)
     config_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1154,6 +1170,53 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
     return ActionResult(
         action, status,
         f"hook_bridge/{action.item}: wired {changed} dispatcher hook(s) in {config_file}{backup_note}",
+    )
+
+
+def _do_register_opencode_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
+    """Register opencode_hook_bridge by symlinking its auto-loaded plugin."""
+    plugin_path, dest = opencode_hook_bridge_plugin_target(action)
+    if not dest.is_file():
+        return ActionResult(action, "error", f"hook_bridge/{action.item}: bridge plugin missing: {dest}")
+    plugin_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if plugin_path.is_symlink():
+        try:
+            current = plugin_path.readlink()
+        except OSError as exc:
+            return ActionResult(action, "error", f"hook_bridge/{action.item}: cannot read symlink {plugin_path}: {exc}")
+        if _same_link_dest(plugin_path, current, dest):
+            return ActionResult(action, "skipped", f"hook_bridge/{action.item}: opencode plugin already linked → {dest}")
+        plugin_path.unlink()
+        plugin_path.symlink_to(dest)
+        return ActionResult(action, "updated", f"hook_bridge/{action.item}: re-pointed opencode plugin → {dest}")
+
+    backup_note = ""
+    replaced_existing = plugin_path.exists()
+    if replaced_existing:
+        if on_conflict == "skip":
+            return ActionResult(
+                action,
+                "skipped",
+                f"hook_bridge/{action.item}: existing opencode plugin at {plugin_path} "
+                "(on_conflict=skip), left untouched",
+            )
+        if _should_backup(on_conflict):
+            bak = fsutil.backup_path(plugin_path)
+            shutil.move(str(plugin_path), str(bak))
+            backup_note = f" (backed up prior → {bak})"
+        else:
+            if plugin_path.is_dir():
+                shutil.rmtree(plugin_path)
+            else:
+                plugin_path.unlink()
+
+    plugin_path.symlink_to(dest)
+    status = "backed_up" if backup_note else ("updated" if replaced_existing else "created")
+    return ActionResult(
+        action,
+        status,
+        f"hook_bridge/{action.item}: linked opencode plugin {plugin_path} → {dest}{backup_note}",
     )
 
 

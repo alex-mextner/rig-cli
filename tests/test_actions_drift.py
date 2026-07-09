@@ -888,9 +888,9 @@ def test_auto_mode_on_non_claude_kind_skips_write_with_note(fake_agent_tools, tm
     assert any("auto-mode write skipped" in n and kind in n for n in plan.notes), plan.notes
 
 
-@pytest.mark.parametrize("kind", ["opencode", "gemini", "pi", "commandcode"])
+@pytest.mark.parametrize("kind", ["gemini", "pi", "commandcode"])
 def test_explicit_hook_bridge_on_non_claude_kind_notes_skip(fake_agent_tools, tmp_path, kind):
-    """Explicitly enabling hook_bridge on a non-claude kind is reported skipped, not silently dropped."""
+    """Explicitly enabling hook_bridge on an unsupported kind is reported skipped, not silently dropped."""
     repo = tmp_path / "repo"
     repo.mkdir()
     cfg = _harness_skill_cfg(repo, fake_agent_tools, kind)
@@ -1772,20 +1772,24 @@ def test_drift_detects_modified_skill(fake_agent_tools, tmp_path):
 # ── hook bridge: register dispatchers in harness config ──────────────────────────────
 def _bridge_cfg(repo_root: Path, source: Path, *, settings_path: Path,
                 hook_bridge: dict | None = None,
-                kind: str = "claude-code") -> LoadedConfig:
+                kind: str = "claude-code",
+                on_conflict: str | None = None) -> LoadedConfig:
     harness: dict = {"kind": kind, "auto_mode": True,
                      "settings_path": str(settings_path)}
     if hook_bridge is not None:
         harness["hook_bridge"] = hook_bridge
+    data = {
+        "agent_tools_source": str(source),
+        "skills": {"enabled": False},
+        "agent_hooks": {"all": True},
+        "ci": {"enabled": False},
+        "mcp": {"enabled": False},
+        "harness": harness,
+    }
+    if on_conflict is not None:
+        data["defaults"] = {"on_conflict": on_conflict}
     return LoadedConfig(
-        data={
-            "agent_tools_source": str(source),
-            "skills": {"enabled": False},
-            "agent_hooks": {"all": True},
-            "ci": {"enabled": False},
-            "mcp": {"enabled": False},
-            "harness": harness,
-        },
+        data=data,
         repo_root=repo_root,
     )
 
@@ -1893,6 +1897,134 @@ def test_codex_hook_bridge_registers_dispatcher_in_config_toml(fake_agent_tools,
     stop = hooks["Stop"]
     assert "matcher" not in stop[0]
     assert "codex_hook_bridge Stop" in stop[0]["hooks"][0]["command"]
+
+
+def test_opencode_hook_bridge_links_plugin(fake_agent_tools, tmp_path):
+    """Apply wires opencode by symlinking the bridge plugin into the plugin directory."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plugin = repo / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert _bridge_results(report), "no register_hook_bridge action ran"
+    assert plugin.is_symlink()
+    assert plugin.resolve() == (fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
+
+    after = detect(plan)
+    assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
+
+
+def test_opencode_hook_bridge_backs_up_existing_plugin_file(fake_agent_tools, tmp_path):
+    """A user file at the opencode plugin path is backed up before rig links the bridge."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plugin = repo / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text("// user plugin\n", encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+            on_conflict="backup",
+        ),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    result = _bridge_results(report)[0]
+    assert result.status == "backed_up"
+    assert plugin.is_symlink()
+    backups = list(plugin.parent.glob("agent-tools-hook-bridge.js.rig-bak-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "// user plugin\n"
+    assert detect(plan).in_sync
+
+
+def test_opencode_hook_bridge_overwrites_existing_plugin_directory(fake_agent_tools, tmp_path):
+    """on_conflict=overwrite removes a directory collision before linking the opencode plugin."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plugin = repo / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    plugin.mkdir(parents=True)
+    (plugin / "old.js").write_text("// stale directory content\n", encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+            on_conflict="overwrite",
+        ),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    result = _bridge_results(report)[0]
+    assert result.status == "updated"
+    assert plugin.is_symlink()
+    assert plugin.resolve() == (fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
+    assert not (plugin / "old.js").exists()
+    assert detect(plan).in_sync
+
+
+def test_opencode_hook_bridge_repoints_existing_plugin_symlink(fake_agent_tools, tmp_path):
+    """A stale opencode plugin symlink is re-pointed without backup noise."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plugin = repo / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    plugin.parent.mkdir(parents=True)
+    wrong_dest = repo / "wrong-plugin.js"
+    wrong_dest.write_text("// wrong bridge\n", encoding="utf-8")
+    plugin.symlink_to(wrong_dest)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+
+    before = detect(plan)
+    assert any(i.item == "hook-bridge" and i.direction == "modified" for i in before.items)
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    result = _bridge_results(report)[0]
+    assert result.status == "updated"
+    assert plugin.is_symlink()
+    assert plugin.resolve() == (fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
+    assert wrong_dest.read_text(encoding="utf-8") == "// wrong bridge\n"
+    assert detect(plan).in_sync
 
 
 def test_codex_hook_bridge_enables_disabled_features_hooks(fake_agent_tools, tmp_path):
