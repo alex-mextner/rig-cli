@@ -62,6 +62,22 @@ def test_blocks_with_open_map_whitelist_only_that_map():
         assert doc["properties"][name]["properties"]["items"]["additionalProperties"] == {"type": "object"}
 
 
+def test_harness_settings_path_schema_has_no_materialized_default():
+    doc = config_schema.json_schema()
+    settings_path = doc["properties"]["harness"]["properties"]["settings_path"]
+
+    assert "default" not in settings_path
+    assert "harness-specific default" in settings_path["description"]
+
+
+def test_harness_kind_schema_describes_skill_discovery_modes():
+    description = config_schema.json_schema()["properties"]["harness"]["properties"]["kind"]["description"]
+
+    assert "skills-dir: claude-code/codex" in description
+    assert "native-discovery: opencode" in description
+    assert "instruction-file: codex/gemini/pi/commandcode" in description
+
+
 def test_mcp_items_schema_enforces_structured_item_shape():
     doc = config_schema.json_schema()
     item = doc["properties"]["mcp"]["properties"]["items"]["additionalProperties"]

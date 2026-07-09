@@ -400,8 +400,8 @@ harness:
 | `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`) auto-loads `~/.agents/skills`; instruction-file (`gemini`, `pi`, `commandcode`) get their skill discovery via `AGENTS.md`/`GEMINI.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
-| `settings_path` | path | `.claude/settings.json` for Claude auto/mode writes; `~/.codex/config.toml` for the Codex hook bridge | the settings/config file to merge into. If overridden, point it at the harness's native format (JSON for Claude, TOML for Codex). A suffixed path is treated as the file; a suffixless path is treated as a directory containing the native settings filename |
-| `hook_bridge.enabled` | bool | `true` | wire the harness bridge dispatcher so installed agent-hooks actually fire (`cc_hook_bridge` for Claude, `codex_hook_bridge` for Codex) |
+| `settings_path` | path | `.claude/settings.json` for Claude auto/mode writes; `~/.codex/config.toml` for the Codex hook bridge; `.opencode/plugins/zz-agent-tools-hook-bridge.js` for the opencode hook bridge | the settings/config file/plugin to converge. If overridden, point it at the harness's native format (JSON for Claude, TOML for Codex, JS plugin for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory containing the native settings/plugin filename |
+| `hook_bridge.enabled` | bool | `true` | wire the harness bridge dispatcher so installed agent-hooks actually fire (`cc_hook_bridge` for Claude, `codex_hook_bridge` for Codex, `opencode_hook_bridge` for opencode) |
 | `hook_bridge.python` | str | `python3` | the Python interpreter the dispatcher command runs under |
 
 **What gets written.** For `kind: claude-code`, rig merges `permissions.defaultMode` into
@@ -433,11 +433,24 @@ enabled), `rig apply` registers the matching dispatcher from `agent-tools/lib`:
 - `kind: codex` writes `codex_hook_bridge` into `~/.codex/config.toml` (or `settings_path`) as a
   managed `[hooks]` TOML block: `PreToolUse` matchers `Bash` and `apply_patch`, `PostToolUse`
   matcher `apply_patch`, and `Stop`. A custom Codex `settings_path` must end in `.toml`.
+- `kind: opencode` symlinks `opencode_hook_bridge/plugin.js` into
+  `.opencode/plugins/zz-agent-tools-hook-bridge.js` (or `settings_path`) so opencode
+  auto-loads it. The repo-local `zz-` path is deliberate: opencode documents global plugins as
+  loading before project `.opencode/plugins`, and project plugins can mutate tool arguments, so
+  the security bridge must run from the project plugin source after normal project plugins. The
+  symlink is added to the repo's `.git/info/exclude` because its target is machine-local. When
+  this repo-local bridge is applied, rig also removes the legacy managed global symlink at
+  `~/.config/opencode/plugins/agent-tools-hook-bridge.js` if it still points at an agent-tools
+  opencode bridge plugin. The plugin dispatches `tool.execute.before` for `bash`, `edit`, `write`, `apply_patch`,
+  and `task`, plus `tool.execute.after` for write tools. A custom opencode `settings_path` must
+  end in `.js`.
 
-Each command runs `PYTHONPATH=<agent-tools>/lib python3 -m <bridge_module> <Event>`. The merge is
-idempotent and preserves unrelated config; `rig status` reports the bridge as missing/stale drift
-if a managed hook is absent or points at an old checkout. Other harness kinds still skip the bridge
-with a note when explicitly enabled.
+Claude and Codex bridge commands run `PYTHONPATH=<agent-tools>/lib python3 -m <bridge_module>
+<Event>` from the harness config; opencode loads the JS plugin, which shells into the Python
+bridge with the same `PYTHONPATH`. The merge/symlink is idempotent and preserves unrelated
+config; `rig status` reports the bridge as missing/stale drift if a managed hook is absent or
+points at an old checkout. Gemini, Pi, and CommandCode still skip the bridge with a note when
+explicitly enabled.
 
 For Codex, the bridge also converges global hook feature flags that would make the managed hook
 block inert: `[features] hooks = false`, top-level `features.hooks = false`, and the deprecated
@@ -447,6 +460,9 @@ is enabled.
 Codex `pre-agent` is not wired yet: rig may install `pre-agent` descriptors into `~/.codex/hooks`
 alongside the rest of the selected catalog, but the Codex bridge currently dispatches only
 `pre-bash`, `pre-write`, `post-write`, and `stop` via the confirmed Codex hook events above.
+opencode has `task` tool dispatch for `pre-agent`, but no stop-equivalent blocking hook is
+documented, so the opencode bridge does not dispatch `stop`; use Claude Code or Codex for
+workflows that require stop-time enforcement until opencode exposes a blocking stop contract.
 The managed TOML block has this shape, with full commands including the resolved
 `PYTHONPATH=<agent-tools>/lib`:
 

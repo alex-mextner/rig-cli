@@ -26,6 +26,10 @@ from ..config import (
     GITIGNORE_BEGIN_MARKER,
     GITIGNORE_BLOCK_COMMENT,
     GITIGNORE_END_MARKER,
+    OPENCODE_HOOK_BRIDGE_EXCLUDE_BEGIN_MARKER,
+    OPENCODE_HOOK_BRIDGE_EXCLUDE_COMMENT,
+    OPENCODE_HOOK_BRIDGE_EXCLUDE_END_MARKER,
+    OPENCODE_HOOK_BRIDGE_PLUGIN_NAME,
     SHIP_DELEGATOR_EXCLUDE_BEGIN_MARKER,
     SHIP_DELEGATOR_EXCLUDE_COMMENT,
     SHIP_DELEGATOR_EXCLUDE_END_MARKER,
@@ -968,6 +972,8 @@ _BRIDGE_MARKER = "cc_hook_bridge"
 _CODEX_BRIDGE_BEGIN = "# >>> rig managed: codex hook bridge"
 _CODEX_BRIDGE_END = "# <<< rig managed: codex hook bridge"
 _CODEX_HOOK_EVENTS = ("PreToolUse", "PostToolUse", "Stop")
+_OPENCODE_PLUGIN_NAME = OPENCODE_HOOK_BRIDGE_PLUGIN_NAME
+_LEGACY_OPENCODE_PLUGIN_NAME = "agent-tools-hook-bridge.js"
 
 
 def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
@@ -1039,7 +1045,202 @@ def hook_bridge_settings_file(action: Action) -> Path:
     target = action.target
     if target.suffix:
         return target
-    return target / ("config.toml" if hook_bridge_format(action) == "toml" else "settings.json")
+    fmt = hook_bridge_format(action)
+    if fmt == "toml":
+        return target / "config.toml"
+    if fmt == "opencode-plugin":
+        return target / _OPENCODE_PLUGIN_NAME
+    return target / "settings.json"
+
+
+def opencode_hook_bridge_plugin_target(action: Action) -> tuple[Path, Path]:
+    """Return the opencode plugin symlink path and the bridge plugin it should target."""
+    plugin_path = hook_bridge_settings_file(action)
+    module = hook_bridge_module(action)
+    dest = Path(str(action.options["lib_dir"])) / module / "plugin.js"
+    return plugin_path, dest
+
+
+def opencode_hook_bridge_exclude_block_text(rel_path: str) -> str:
+    """The marker-delimited block rig owns for the repo-local opencode plugin symlink."""
+    rel_path = rel_path.lstrip("/")
+    return "\n".join(
+        [
+            OPENCODE_HOOK_BRIDGE_EXCLUDE_BEGIN_MARKER,
+            OPENCODE_HOOK_BRIDGE_EXCLUDE_COMMENT,
+            f"/{rel_path}",
+            f"/{rel_path}.rig-bak-*",
+            OPENCODE_HOOK_BRIDGE_EXCLUDE_END_MARKER,
+        ]
+    )
+
+
+def _path_for_git_probe(path: Path) -> Path:
+    probe = path if path.is_dir() else path.parent
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    return probe
+
+
+def _repo_root_for_path(path: Path) -> Path | None:
+    probe = _path_for_git_probe(path)
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    root = res.stdout.strip()
+    return Path(root) if root else None
+
+
+def _opencode_bridge_exclude_context(plugin_path: Path) -> tuple[Path, str] | None:
+    repo_root = _repo_root_for_path(plugin_path)
+    if repo_root is None:
+        return None
+    try:
+        abs_plugin_path = Path(os.path.abspath(plugin_path))
+        normalized_plugin_path = abs_plugin_path.parent.resolve(strict=False) / abs_plugin_path.name
+        rel_path = str(normalized_plugin_path.relative_to(repo_root.resolve(strict=False)))
+    except ValueError:
+        return None
+    exclude_path = repo_info_exclude_path(repo_root)
+    if exclude_path is None:
+        return None
+    return exclude_path, rel_path
+
+
+def _opencode_exclude_has_entry(exclude_path: Path | None, rel_path: str) -> bool:
+    if exclude_path is None:
+        return True
+    if not exclude_path.is_file():
+        return False
+    try:
+        with exclude_path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError:
+        return False
+    begins = _find_marker_lines(content, OPENCODE_HOOK_BRIDGE_EXCLUDE_BEGIN_MARKER)
+    ends = _find_marker_lines(content, OPENCODE_HOOK_BRIDGE_EXCLUDE_END_MARKER)
+    if len(begins) != 1 or len(ends) != 1:
+        return False
+    b_start, _b_end = begins[0]
+    e_start, e_end = ends[0]
+    if e_start < b_start:
+        return False
+    return content[b_start:e_end] == opencode_hook_bridge_exclude_block_text(rel_path)
+
+
+def _reconcile_opencode_bridge_exclude(plugin_path: Path) -> tuple[bool, bool, str]:
+    ctx = _opencode_bridge_exclude_context(plugin_path)
+    if ctx is None:
+        return True, False, ""
+    exclude_path, rel_path = ctx
+    desired = opencode_hook_bridge_exclude_block_text(rel_path)
+    if not exclude_path.is_file():
+        if not exclude_path.exists():
+            try:
+                exclude_path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_exclude(exclude_path, desired + "\n")
+            except OSError as exc:
+                return False, False, f"could not write {exclude_path}: {exc}"
+            return True, True, f"ignored in {exclude_path}"
+    try:
+        with exclude_path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError as exc:
+        return False, False, f"could not read {exclude_path}: {exc}"
+    begins = _find_marker_lines(content, OPENCODE_HOOK_BRIDGE_EXCLUDE_BEGIN_MARKER)
+    ends = _find_marker_lines(content, OPENCODE_HOOK_BRIDGE_EXCLUDE_END_MARKER)
+    if len(begins) != len(ends):
+        return False, False, f"{exclude_path} has unbalanced rig opencode hook bridge markers — reconcile by hand"
+    if not begins:
+        if not content:
+            new_content = f"{desired}\n"
+        else:
+            lead = content if content.endswith("\n") else content + "\n"
+            new_content = f"{lead}{desired}\n"
+    else:
+        markers = sorted(
+            [(b[0], b[1], "begin") for b in begins] + [(e[0], e[1], "end") for e in ends]
+        )
+        pairs: list[tuple[int, int]] = []
+        expect = "begin"
+        pending = -1
+        for start, line_end, kind in markers:
+            if kind != expect:
+                return False, False, f"{exclude_path} has misordered rig opencode hook bridge markers — reconcile by hand"
+            if kind == "begin":
+                pending = start
+                expect = "end"
+            else:
+                pairs.append((pending, line_end))
+                expect = "begin"
+        if len(pairs) == 1 and content[pairs[0][0] : pairs[0][1]] == desired:
+            return True, False, f"already ignored in {exclude_path}"
+        out: list[str] = []
+        cursor = 0
+        for idx, (r_start, r_end) in enumerate(pairs):
+            out.append(content[cursor:r_start])
+            if idx == 0:
+                out.append(desired)
+            elif content[r_end : r_end + 1] == "\n":
+                r_end += 1
+            cursor = r_end
+        out.append(content[cursor:])
+        new_content = "".join(out)
+    try:
+        _atomic_write_exclude(exclude_path, new_content)
+    except OSError as exc:
+        return False, False, f"could not write {exclude_path}: {exc}"
+    return True, True, f"ignored in {exclude_path}"
+
+
+def _normalized_path_without_following_leaf(path: Path) -> Path:
+    abs_path = Path(os.path.abspath(path))
+    return abs_path.parent.resolve(strict=False) / abs_path.name
+
+
+def legacy_opencode_bridge_symlink_path() -> Path:
+    return _expand_user_path(f"~/.config/opencode/plugins/{_LEGACY_OPENCODE_PLUGIN_NAME}")
+
+
+def _link_target_path(link_path: Path, target: Path) -> Path:
+    return target if target.is_absolute() else link_path.parent / target
+
+
+def _looks_like_agent_tools_opencode_bridge(link_path: Path, target: Path) -> bool:
+    parts = _link_target_path(link_path, target).parts
+    return len(parts) >= 3 and parts[-3:] == ("lib", "opencode_hook_bridge", "plugin.js")
+
+
+def legacy_opencode_bridge_needs_cleanup(plugin_path: Path, dest: Path) -> bool:
+    legacy = legacy_opencode_bridge_symlink_path()
+    if _normalized_path_without_following_leaf(legacy) == _normalized_path_without_following_leaf(plugin_path):
+        return False
+    if not legacy.is_symlink():
+        return False
+    try:
+        current = legacy.readlink()
+    except OSError:
+        return False
+    return _same_link_dest(legacy, current, dest) or _looks_like_agent_tools_opencode_bridge(legacy, current)
+
+
+def _remove_legacy_opencode_bridge_symlink(plugin_path: Path, dest: Path) -> tuple[bool, str]:
+    legacy = legacy_opencode_bridge_symlink_path()
+    if not legacy_opencode_bridge_needs_cleanup(plugin_path, dest):
+        return False, ""
+    try:
+        legacy.unlink()
+    except OSError as exc:
+        return False, f"legacy global opencode plugin still present (could not remove {legacy}: {exc})"
+    return True, f"removed legacy global opencode plugin {legacy}"
 
 
 def find_managed_bridge_hook(blocks, matcher: str, marker: str = _BRIDGE_MARKER) -> dict | None:
@@ -1096,6 +1297,8 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
     """
     if hook_bridge_format(action) == "toml":
         return _do_register_codex_hook_bridge(action, on_conflict)
+    if hook_bridge_format(action) == "opencode-plugin":
+        return _do_register_opencode_hook_bridge(action, on_conflict)
     config_file = hook_bridge_settings_file(action)
     config_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1155,6 +1358,74 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
         action, status,
         f"hook_bridge/{action.item}: wired {changed} dispatcher hook(s) in {config_file}{backup_note}",
     )
+
+
+def _do_register_opencode_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
+    """Register opencode_hook_bridge by symlinking its auto-loaded plugin."""
+    plugin_path, dest = opencode_hook_bridge_plugin_target(action)
+    if not dest.is_file():
+        return ActionResult(action, "error", f"hook_bridge/{action.item}: bridge plugin missing: {dest}")
+    plugin_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def finalize(status: str, detail: str) -> ActionResult:
+        notes: list[str] = []
+        legacy_removed, legacy_note = _remove_legacy_opencode_bridge_symlink(plugin_path, dest)
+        exclude_ok, exclude_changed, exclude_note = _reconcile_opencode_bridge_exclude(plugin_path)
+        if not exclude_ok:
+            return ActionResult(
+                action,
+                "error",
+                f"hook_bridge/{action.item}: {detail}; {exclude_note} — plugin linked but NOT git-ignored",
+            )
+        if exclude_note:
+            notes.append(exclude_note)
+        if legacy_note and not legacy_removed:
+            detail_with_notes = detail if not notes else f"{detail}; {'; '.join(notes)}"
+            return ActionResult(
+                action,
+                "error",
+                f"hook_bridge/{action.item}: {detail_with_notes}; {legacy_note}",
+            )
+        if legacy_note:
+            notes.append(legacy_note)
+        final_status = "updated" if status == "skipped" and (legacy_removed or exclude_changed) else status
+        final_detail = detail if not notes else f"{detail}; {'; '.join(notes)}"
+        return ActionResult(action, final_status, final_detail)
+
+    if plugin_path.is_symlink():
+        try:
+            current = plugin_path.readlink()
+        except OSError as exc:
+            return ActionResult(action, "error", f"hook_bridge/{action.item}: cannot read symlink {plugin_path}: {exc}")
+        if _same_link_dest(plugin_path, current, dest):
+            return finalize("skipped", f"hook_bridge/{action.item}: opencode plugin already linked → {dest}")
+        plugin_path.unlink()
+        plugin_path.symlink_to(dest)
+        return finalize("updated", f"hook_bridge/{action.item}: re-pointed opencode plugin → {dest}")
+
+    backup_note = ""
+    replaced_existing = plugin_path.exists()
+    if replaced_existing:
+        if on_conflict == "skip":
+            return ActionResult(
+                action,
+                "skipped",
+                f"hook_bridge/{action.item}: existing opencode plugin at {plugin_path} "
+                "(on_conflict=skip), left untouched",
+            )
+        if _should_backup(on_conflict):
+            bak = fsutil.backup_path(plugin_path)
+            shutil.move(str(plugin_path), str(bak))
+            backup_note = f" (backed up prior → {bak})"
+        else:
+            if plugin_path.is_dir():
+                shutil.rmtree(plugin_path)
+            else:
+                plugin_path.unlink()
+
+    plugin_path.symlink_to(dest)
+    status = "backed_up" if backup_note else ("updated" if replaced_existing else "created")
+    return finalize(status, f"hook_bridge/{action.item}: linked opencode plugin {plugin_path} → {dest}{backup_note}")
 
 
 def _upsert_bridge(blocks: list, matcher: str, command: str, on_conflict: str, marker: str = _BRIDGE_MARKER) -> str:

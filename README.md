@@ -184,9 +184,9 @@ so autonomy is part of the reproducible config — not a manual per-machine togg
 ```yaml
 harness:
   enabled: true
-  kind: claude-code          # skills-dir: claude-code|opencode · instruction-file: codex|gemini|pi|commandcode (config-schema.md)
+  kind: claude-code          # skills-dir: claude-code|codex · native: opencode · instruction-file: codex|gemini|pi|commandcode
   auto_mode: true            # RECOMMENDED: writes permissions.defaultMode=auto (user scope)
-  hook_bridge: { enabled: true }   # wire the agents-hooks/v1 → CC dispatcher (default ON)
+  hook_bridge: { enabled: true }   # wire the agents-hooks/v1 → harness dispatcher (default ON)
 ```
 
 For **claude-code**, `auto_mode: true` writes `permissions.defaultMode=auto` to the **user**
@@ -203,17 +203,19 @@ flags drift. Defense-in-depth: the agent-hook guards `rig` installs in the same 
 `block-raw-pr-merge`, **`block-reset-hard`**) catch dangerous tool calls before the side
 effect, complementing the classifier.
 
-**Those guards only fire because of the hook bridge.** Claude Code runs hooks declared in
-`settings.json`, not the `~/.claude/hooks/*.json` descriptors `agent_hooks` installs — so a
-bridge is required to make the descriptors actually execute (agent-tools#18). The same
-`harness` block therefore also registers the `cc_hook_bridge` dispatcher into `settings.json`
-(`PreToolUse` for Bash, the file-edit tools, and `Agent|Task` dispatch; `PostToolUse` for the
-file-edit tools — the post-write feedback point lint-on-write/format-on-write fire on — and
-`Stop`), which runs the matching descriptors and translates their exit-10 BLOCK into CC's
-`permissionDecision: "deny"` / `decision: "block"`. Without it the guards above would be
-inert files. Set `hook_bridge: { enabled: false }` to opt out. See
-[`docs/config-schema.md`](docs/config-schema.md) for the full `harness` schema and the
-opencode equivalent.
+**Those guards only fire because of the hook bridge.** Harnesses run hooks declared in their own
+native config/plugin surfaces, not the descriptor files `agent_hooks` installs, so a bridge is
+required to make the descriptors actually execute (agent-tools#18). The same `harness` block
+therefore registers the matching bridge: Claude Code gets `cc_hook_bridge` in `settings.json`,
+Codex gets `codex_hook_bridge` in `~/.codex/config.toml`, and opencode gets
+`opencode_hook_bridge/plugin.js` symlinked into the repo-local
+`.opencode/plugins/zz-agent-tools-hook-bridge.js` ordered plugin path. Without that bridge the
+guards above would be inert files. Set `hook_bridge: { enabled: false }` to opt out.
+Because that symlink is machine-local, rig also adds it to the repo's `.git/info/exclude`; when
+upgrading from the prior global opencode bridge path, rig removes the old managed global symlink
+if it still points at an agent-tools opencode bridge plugin.
+See [`docs/config-schema.md`](docs/config-schema.md) for the full `harness` schema and the
+per-harness event coverage.
 
 ### Model-freshness schedule — a daily cron, provisioned by the reconciler
 

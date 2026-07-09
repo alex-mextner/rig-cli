@@ -51,6 +51,7 @@ from .actions.runner import (
     hook_bridge_module,
     hook_bridge_settings_file,
     managed_bridge_hook_in_sync,
+    opencode_hook_bridge_plugin_target,
     desired_mcp_server_entry,
     permissions_settings_file,
     _is_rig_import_line,
@@ -1155,6 +1156,9 @@ def _check_hook_bridge(action: Action, report: DriftReport) -> None:
     never diverge. Only OUR managed blocks are checked; the user's other hooks are ignored.
     """
     config_file = hook_bridge_settings_file(action)
+    if hook_bridge_format(action) == "opencode-plugin":
+        _check_opencode_hook_bridge(action, config_file, report)
+        return
     if not config_file.is_file():
         report.items.append(
             DriftItem("missing", "harness", action.item, config_file, "harness settings file not written")
@@ -1187,6 +1191,57 @@ def _check_hook_bridge(action: Action, report: DriftReport) -> None:
                     DriftItem("modified", "harness", action.item, config_file,
                               f"{hook_bridge_module(action)} hook for {label} is stale (apply will rewrite)")
                 )
+
+
+def _check_opencode_hook_bridge(action: Action, config_file: Path, report: DriftReport) -> None:
+    plugin_path, dest = opencode_hook_bridge_plugin_target(action)
+    from .actions.runner import (
+        legacy_opencode_bridge_needs_cleanup,
+        _opencode_bridge_exclude_context,
+        _opencode_exclude_has_entry,
+        _same_link_dest,
+    )
+
+    if not plugin_path.is_symlink():
+        if plugin_path.exists():
+            report.items.append(
+                DriftItem("modified", "harness", action.item, config_file,
+                          "opencode hook bridge plugin is a real file (apply will replace it)")
+            )
+        else:
+            report.items.append(
+                DriftItem("missing", "harness", action.item, config_file,
+                          "opencode hook bridge plugin not linked")
+            )
+    else:
+        try:
+            current = plugin_path.readlink()
+        except OSError as exc:
+            report.items.append(
+                DriftItem("modified", "harness", action.item, config_file,
+                          f"opencode hook bridge symlink unreadable: {exc}")
+            )
+            current = None
+        if current is not None:
+            if not _same_link_dest(plugin_path, current, dest):
+                report.items.append(
+                    DriftItem("modified", "harness", action.item, config_file,
+                              f"opencode hook bridge plugin points elsewhere, expected → {dest}")
+                )
+            else:
+                ctx = _opencode_bridge_exclude_context(plugin_path)
+                if ctx is not None:
+                    exclude_path, rel_path = ctx
+                    if not _opencode_exclude_has_entry(exclude_path, rel_path):
+                        report.items.append(
+                            DriftItem("missing", "harness", action.item, exclude_path,
+                                      "opencode hook bridge plugin is not git-ignored")
+                        )
+    if legacy_opencode_bridge_needs_cleanup(plugin_path, dest):
+        report.items.append(
+            DriftItem("modified", "harness", action.item, config_file,
+                      "legacy global opencode hook bridge symlink still present")
+        )
 
 
 def _check_codex_hook_bridge(action: Action, config_file: Path, report: DriftReport) -> None:

@@ -338,7 +338,7 @@
         },
         "kind": {
           "type": "string",
-          "description": "which harness to provision (skills-dir: claude-code/opencode; instruction-file: codex/gemini/pi/commandcode). The auto/permission-MODE write is claude-code-only today; other kinds still get their skill discovery provisioned.",
+          "description": "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode; instruction-file: codex/gemini/pi/commandcode). The auto/permission-MODE write is claude-code-only today; other kinds still get their skill discovery provisioned.",
           "enum": [
             "claude-code",
             "codex",
@@ -360,8 +360,7 @@
         },
         "settings_path": {
           "type": "string",
-          "description": "the settings file to merge into",
-          "default": ".claude/settings.json"
+          "description": "override the per-harness settings/config/plugin path; absent means rig uses the harness-specific default"
         },
         "hook_bridge": {
           "type": "object",

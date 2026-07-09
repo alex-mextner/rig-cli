@@ -790,9 +790,9 @@ def _validate_harness(h: dict[str, Any]) -> None:
     mode = h.get("mode")
     if mode is not None and not isinstance(mode, str):
         raise ConfigError(f"harness.mode must be a string, got {mode!r}", schema_path="harness.mode")
-    # harness.hook_bridge — wires the agents-hooks/v1 → CC dispatcher into settings.json so
-    # installed agent-hooks actually FIRE (agent-tools#18). enabled defaults true; a custom
-    # python interpreter is optional. Fail-closed on the wrong types (typo guard).
+    # harness.hook_bridge — wires the agents-hooks/v1 → harness dispatcher into the harness's
+    # native hook surface so installed agent-hooks actually FIRE (agent-tools#18). enabled
+    # defaults true; a custom python interpreter is optional. Fail-closed on wrong types.
     bridge = h.get("hook_bridge")
     if bridge is not None:
         if not isinstance(bridge, dict):
@@ -1086,6 +1086,17 @@ SHIP_DELEGATOR_EXCLUDE_COMMENT = (
     "# rig provisions .claude/scripts/pr-ship.sh (the `gh ship` delegator); ignored so it "
     "does not dirty the worktree."
 )
+
+# rig provisions the opencode hook bridge as a repo-local symlink so it can run after project
+# plugins. The symlink target is machine-local, so it must be ignored per repo rather than
+# committed.
+OPENCODE_HOOK_BRIDGE_EXCLUDE_BEGIN_MARKER = "# >>> rig-managed opencode hook bridge (do not edit) >>>"
+OPENCODE_HOOK_BRIDGE_EXCLUDE_END_MARKER = "# <<< rig-managed opencode hook bridge (do not edit) <<<"
+OPENCODE_HOOK_BRIDGE_EXCLUDE_COMMENT = (
+    "# rig provisions the opencode hook bridge plugin symlink; ignored so it does not dirty "
+    "the worktree."
+)
+OPENCODE_HOOK_BRIDGE_PLUGIN_NAME = "zz-agent-tools-hook-bridge.js"
 
 
 def _validate_ship_delegator(sd: dict[str, Any]) -> None:
