@@ -20,12 +20,16 @@ from pathlib import Path
 
 import pytest
 
+from riglib.actions import runner
 from riglib.actions.runner import (
     _do_provision_ship_delegator,
+    _is_under_system_temp,
+    env_file_pins_transient_root,
     resolve_ship_delegator,
     ship_delegator_content,
     ship_env_file_content,
     ship_env_file_path,
+    transient_ship_root_skip_reason,
     run_plan,
 )
 from riglib.config import ConfigError, validate
@@ -1420,3 +1424,168 @@ def test_run_plan_provisions_and_is_idempotent(tmp_path):
     report2 = run_plan(plan)
     deleg = [r for r in report2.results if r.action.kind == "provision_ship_delegator"]
     assert deleg and deleg[0].status == "skipped"
+
+
+# ── transient (temp-dir) agent-tools root must never clobber the durable machine pointer ──────
+def _transient_setup(tmp_path: Path, monkeypatch):
+    """Wire a TRANSIENT agent-tools checkout + a PERSISTENT env-file location.
+
+    Everything a test creates lives under the real system tempdir (pytest tmp_path), so we can't
+    get a genuinely-non-temp path on disk. Instead we monkeypatch the temp-root set to a synthetic
+    dir that contains ONLY the fake agent-tools checkout — so the checkout reads as "transient" and
+    the env file (under a sibling XDG dir) reads as "persistent", exactly the real-machine leak.
+    Returns ``(transient_canonical, env_path)``.
+    """
+    faketmp = tmp_path / "faketmp"
+    canonical = faketmp / "agent-tools" / "ci" / "ship" / "ship.sh"
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.write_text("#!/usr/bin/env bash\necho ship\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "persistent-cfg"))
+    monkeypatch.setattr(runner, "_system_temp_roots", lambda: [faketmp.resolve()])
+    return canonical, ship_env_file_path()
+
+
+def test_transient_root_skip_reason_fires_only_for_persistent_pointer(tmp_path, monkeypatch):
+    # transient root + persistent pointer → a skip reason; a durable-to-durable apply → None.
+    canonical, _ = _transient_setup(tmp_path, monkeypatch)
+    reason = transient_ship_root_skip_reason(canonical)
+    assert reason is not None and "transient" in reason
+    # a canonical OUTSIDE the (monkeypatched) temp set is durable → no skip
+    durable = tmp_path / "xp" / "agent-tools" / "ci" / "ship" / "ship.sh"
+    durable.parent.mkdir(parents=True, exist_ok=True)
+    durable.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    assert transient_ship_root_skip_reason(durable) is None
+
+
+def test_both_transient_writes_normally(tmp_path):
+    # Default isolation: env file (XDG under tmp_path/.config via conftest) AND the source are both
+    # under the real tempdir → self-consistent, the guard must NOT fire, the write proceeds. This is
+    # the pytest/cleanroom-under-$TMPDIR path — proving the guard doesn't break ordinary applies.
+    canonical = _canonical_ship(tmp_path)
+    assert _is_under_system_temp(ship_env_file_path())  # conftest pins XDG under tmp
+    assert transient_ship_root_skip_reason(canonical) is None
+    repo = _git_repo(tmp_path / "repo")
+    res = _apply(repo, canonical)
+    assert res.status in ("created", "updated")
+    assert ship_env_file_path().read_text(encoding="utf-8") == ship_env_file_content(canonical)
+
+
+def test_transient_apply_leaves_existing_good_pointer_intact(tmp_path, monkeypatch):
+    # A one-off apply from a temp checkout must NOT overwrite a good machine pointer with a doomed
+    # temp path (the recurring `gh ship` breakage). apply skips the write (non-error) and the
+    # existing durable pointer survives byte-for-byte.
+    canonical, env_path = _transient_setup(tmp_path, monkeypatch)
+    good = tmp_path / "xp" / "agent-tools" / "ci" / "ship" / "ship.sh"
+    good.parent.mkdir(parents=True, exist_ok=True)
+    good_content = ship_env_file_content(good)
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(good_content, encoding="utf-8")
+    repo = _git_repo(tmp_path / "repo")
+    res = _apply(repo, canonical)
+    assert res.status != "error"
+    assert env_path.read_text(encoding="utf-8") == good_content  # doomed path NOT written
+    # the refusal is SURFACED (not a silent success): the operator sees why the pointer was left.
+    assert "transient" in res.detail
+
+
+def test_transient_apply_does_not_create_a_doomed_pointer(tmp_path, monkeypatch):
+    # With NO existing pointer, applying from a temp source must not CREATE one at the temp path —
+    # absent is strictly better than a path that vanishes and masks the misconfig. The refusal note
+    # is surfaced so a `gh ship` with no resolvable root here is visible, not silent.
+    canonical, env_path = _transient_setup(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")
+    res = _apply(repo, canonical)
+    assert res.status != "error"
+    assert not env_path.exists()
+    assert "transient" in res.detail
+
+
+def test_transient_drift_does_not_flag_env(tmp_path, monkeypatch):
+    # status/apply parity: apply skips the transient write, so drift must NOT report ship_env drift
+    # (a change apply would refuse to make) — mirrors the self-hosting skip.
+    canonical, _ = _transient_setup(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")
+    report = detect(_plan_with_action(repo, canonical))
+    assert not [i for i in report.items if i.category == "ship_env"]
+
+
+def test_transient_does_not_hide_a_broken_env_file(tmp_path, monkeypatch):
+    # A GENUINELY broken machine env file (a symlink/non-file at the path) must STILL surface even
+    # under a transient source — apply errors and drift flags it, not "clean". The structural check
+    # runs before the transient skip in BOTH, so status/apply agree (codex finding: don't let the
+    # transient skip mask a broken pointer the delegator can't source).
+    canonical, env_path = _transient_setup(tmp_path, monkeypatch)
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.symlink_to(tmp_path / "nowhere")  # dangling symlink = non-file
+    repo = _git_repo(tmp_path / "repo")
+    res = _apply(repo, canonical)
+    assert res.status == "error"
+    assert env_path.is_symlink()  # not silently replaced
+    report = detect(_plan_with_action(repo, canonical))
+    items = [i for i in report.items if i.category == "ship_env" and i.item == "env-file"]
+    assert items and items[0].direction == "modified"
+
+
+def test_already_poisoned_pointer_is_not_hidden_by_transient_skip(tmp_path, monkeypatch):
+    # The bug's AFTERMATH: the env file ALREADY pins a vanished temp checkout. A transient-source
+    # run must NOT hide that (status would say clean while `gh ship` sources the dead path and exits
+    # 127). Drift keeps flagging it (a durable apply repairs it); apply skips-with-note and does NOT
+    # clobber it with yet another temp path — same shape as skipped_user.
+    canonical, env_path = _transient_setup(tmp_path, monkeypatch)  # current source = faketmp/agent-tools
+    stale = tmp_path / "faketmp" / "old-agent-tools" / "ci" / "ship" / "ship.sh"  # a DIFFERENT temp root
+    stale_content = ship_env_file_content(stale)
+    assert env_file_pins_transient_root(stale_content) is True
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(stale_content, encoding="utf-8")
+    # drift still flags the poisoned pointer
+    repo = _git_repo(tmp_path / "repo")
+    report = detect(_plan_with_action(repo, canonical))
+    items = [i for i in report.items if i.category == "ship_env" and i.item == "env-file"]
+    assert items and items[0].direction == "modified"
+    # apply skips-with-note and leaves the stale content as-is (no clobber with a new temp path)
+    res = _apply(repo, canonical)
+    assert res.status != "error" and "transient" in res.detail
+    assert env_path.read_text(encoding="utf-8") == stale_content
+    # a DURABLE-existing pointer is NOT treated as poisoned (it is the good case we protect)
+    durable = tmp_path / "xp" / "agent-tools" / "ci" / "ship" / "ship.sh"
+    assert env_file_pins_transient_root(ship_env_file_content(durable)) is False
+
+
+def test_poisoned_pointer_flagged_even_when_it_equals_the_transient_source(tmp_path, monkeypatch):
+    # Edge: the existing poisoned pointer pins the SAME transient root as the current plan's source,
+    # so env_current == desired. The content-equality check would say "clean" — but the pointer is
+    # STILL a temp path that vanishes, so status must flag it regardless of equality.
+    canonical, env_path = _transient_setup(tmp_path, monkeypatch)
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(ship_env_file_content(canonical), encoding="utf-8")  # == desired, both transient
+    repo = _git_repo(tmp_path / "repo")
+    report = detect(_plan_with_action(repo, canonical))
+    items = [i for i in report.items if i.category == "ship_env" and i.item == "env-file"]
+    assert items and items[0].direction == "modified"
+
+
+def test_transient_env_skip_reports_skipped_even_when_delegator_written(tmp_path, monkeypatch):
+    # When the delegator file itself is freshly WRITTEN (r.state != "ok") but the machine env write
+    # was skipped for a transient source, the action must report "skipped" (not "created"/"updated")
+    # so a left-as-is / poisoned pointer never vanishes into a success — same as skipped_user.
+    canonical, env_path = _transient_setup(tmp_path, monkeypatch)
+    repo = _git_repo(tmp_path / "repo")  # no pre-existing delegator → r.state == "create"
+    assert not _delegator_path(repo).exists()
+    res = _apply(repo, canonical)
+    assert _delegator_path(repo).is_file()  # delegator WAS written
+    assert res.status == "skipped"  # but the action is skipped, not created
+    assert "transient" in res.detail
+
+
+def test_is_under_system_temp_survives_gettempdir_raising(tmp_path, monkeypatch):
+    # In a locked-down env `tempfile.gettempdir()` can RAISE; _is_under_system_temp must not crash —
+    # it falls back to the hard-coded roots. A /tmp path still reads as temp; an arbitrary one not.
+    import tempfile as _tf
+
+    def _boom():
+        raise FileNotFoundError("No usable temporary directory")
+
+    monkeypatch.setattr(_tf, "gettempdir", _boom)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    assert _is_under_system_temp(Path("/tmp/x/agent-tools")) is True
+    assert _is_under_system_temp(Path("/opt/agent-tools")) is False

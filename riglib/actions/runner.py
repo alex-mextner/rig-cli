@@ -3126,6 +3126,73 @@ def ship_delegator_content() -> str:
     )
 
 
+def _system_temp_roots() -> list[Path]:
+    """Resolved directories that hold throwaway, reboot-transient content.
+
+    A machine-level pointer written UNDER one of these would name a checkout that vanishes on
+    cleanup/reboot (a ``mkdtemp`` dir, ``$TMPDIR``, ``/tmp``). Paths are ``resolve()``-d so the
+    macOS ``/tmp`` -> ``/private/tmp`` and ``/var`` -> ``/private/var`` symlinks can't defeat a
+    containment check (``/tmp/x`` and ``/private/tmp/x`` are the same location).
+    """
+    # `tempfile.gettempdir()` can itself RAISE (FileNotFoundError: "No usable temporary directory")
+    # in a locked-down/read-only environment. Probe it defensively so a status/apply path that calls
+    # _is_under_system_temp() never crashes before the hard-coded roots below can answer.
+    try:
+        gettemp = tempfile.gettempdir()
+    except Exception:
+        gettemp = ""
+    candidates = (
+        gettemp,
+        os.environ.get("TMPDIR", ""),
+        "/tmp",
+        "/private/tmp",
+        "/var/folders",
+        "/private/var/folders",
+    )
+    roots: list[Path] = []
+    for c in candidates:
+        if not c:
+            continue
+        try:
+            roots.append(Path(c).resolve())
+        except OSError:
+            continue
+    return roots
+
+
+def _is_under_system_temp(p: Path) -> bool:
+    """Whether ``p`` resolves inside one of :func:`_system_temp_roots` (or IS one)."""
+    try:
+        rp = p.resolve()
+    except OSError:
+        return False
+    return any(rp == r or rp.is_relative_to(r) for r in _system_temp_roots())
+
+
+def env_file_pins_transient_root(content: str | None) -> bool:
+    """Whether an existing machine env file's ``AGENT_TOOLS_ROOT`` points UNDER a temp dir.
+
+    Guards against HIDING an already-poisoned pointer behind the transient-source skip: a pointer
+    that is ITSELF transient (a vanished ``mkdtemp`` checkout — the exact bug state this whole
+    feature exists to prevent) must keep surfacing as drift even when the CURRENT run's source is
+    also transient. Apply can't repair it from a throwaway source, so — mirroring the ``skipped_user``
+    pattern — apply skips-with-note while status keeps flagging until a durable apply runs. Parses
+    the same ``AGENT_TOOLS_ROOT=<shlex-quoted>`` line :func:`ship_env_file_content` writes; a
+    missing/absent/unparsable value is treated as NOT-transient (nothing to keep surfacing here).
+    """
+    if not content:
+        return False
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if line.startswith("AGENT_TOOLS_ROOT="):
+            try:
+                parts = shlex.split(line.split("=", 1)[1])
+            except ValueError:
+                return False
+            return bool(parts) and _is_under_system_temp(Path(parts[0]))
+    return False
+
+
 def ship_env_file_path() -> Path:
     """The machine-level env file the delegator sources: ``$XDG_CONFIG_HOME/agent-tools/env``.
 
@@ -3181,6 +3248,38 @@ def ship_env_file_content(canonical_ship: Path) -> str:
     )
 
 
+def transient_ship_root_skip_reason(canonical_ship: Path) -> str | None:
+    """Reason to SKIP writing the machine-level env file for a transient source, else ``None``.
+
+    The machine-level pointer (``$XDG_CONFIG_HOME/agent-tools/env``) names the ONE durable
+    agent-tools checkout on this machine. A one-off ``rig apply`` whose ``agent_tools_source``
+    resolves UNDER a temp dir (a ``mkdtemp`` clone, ``$TMPDIR``, ``/tmp`` — e.g. an agent testing
+    agent-tools from a throwaway worktree, the vector that produced ``AGENT_TOOLS_ROOT=/private/
+    var/folders/.../T/tmpXXXX/agent-tools``) must NOT clobber a PERSISTENT pointer with a path
+    that vanishes the moment the tempdir is cleaned up. Once it vanishes, every portable delegator
+    on the machine (``gh ship`` sources this file when ``$AGENT_TOOLS_ROOT`` is unset) exits 127
+    until someone re-points it — the recurring "gh ship broken for everyone" bug this guards.
+
+    Shared by apply (skip the WRITE, keep any existing good pointer) and drift (skip the CHECK, so
+    status can't flag a change apply intentionally won't make) — mirrors :func:`repo_self_hosts_ship`,
+    so status/apply never disagree.
+
+    Fires ONLY when the resolved root is transient AND the pointer file itself is PERSISTENT — the
+    exact doomed-pointer case. When BOTH are transient (pytest, or a cleanroom isolated under
+    ``$TMPDIR``) the setup is self-consistent and the write proceeds; a durable-to-durable apply is
+    the normal path and also proceeds.
+    """
+    root = canonical_ship.parent.parent.parent
+    if _is_under_system_temp(root) and not _is_under_system_temp(ship_env_file_path()):
+        return (
+            f"refused to pin the machine-level agent-tools pointer at a transient checkout ({root}) "
+            f"— left {ship_env_file_path()} unchanged; it would vanish on tempdir cleanup and break "
+            "`gh ship` machine-wide. Set agent_tools_source to a durable checkout "
+            "(e.g. ~/xp/agent-tools) and re-run `rig apply`."
+        )
+    return None
+
+
 def _reconcile_ship_env_file(canonical_ship: Path, on_conflict: str) -> tuple[bool, str, str]:
     """Idempotently write the machine-level env file. Returns ``(ok, note, status)``.
 
@@ -3208,7 +3307,9 @@ def _reconcile_ship_env_file(canonical_ship: Path, on_conflict: str) -> tuple[bo
     # an absent file and get clobbered outside the conflict policy. Symlinks to regular files
     # are rejected too: the rig-owned rewrite goes through os.replace, which would swap the
     # SYMLINK for a real file — silently breaking a centrally-managed (e.g. dotfiles-repo)
-    # symlink instead of updating its target.
+    # symlink instead of updating its target. This structural refusal runs BEFORE the transient-
+    # source skip below so a genuinely broken machine env file (dir/symlink/unreadable) still
+    # surfaces even when THIS apply's source is throwaway — drift mirrors the same ordering.
     if path.is_symlink() or (os.path.lexists(path) and not path.is_file()):
         return False, f"a non-file sits at the env file path {path} (dir/symlink — refusing to replace it)", "unchanged"
     try:
@@ -3217,6 +3318,17 @@ def _reconcile_ship_env_file(canonical_ship: Path, on_conflict: str) -> tuple[bo
         existing = path.read_text(encoding="utf-8") if path.is_file() else None
     except (OSError, UnicodeDecodeError) as exc:
         return False, f"could not read env file {path}: {exc}", "unchanged"
+    # Never pin a PERSISTENT machine pointer at a TRANSIENT (temp-dir) agent-tools checkout: that
+    # path dies on tempdir cleanup and breaks `gh ship` machine-wide (see the predicate). Skip the
+    # CONTENT write (leaving any existing pointer intact) instead of erroring, so applying from a
+    # throwaway source still succeeds — it just never poisons the durable pointer. Placed AFTER the
+    # structural/read checks (so a broken env file still errors) but BEFORE the content write; drift
+    # mirrors this exact ordering so status/apply stay in lockstep. The `skipped_transient` status
+    # is surfaced by the caller (NOT dropped like a plain "unchanged"), so a transient apply that
+    # left no resolvable pointer is visible, not a silent success.
+    skip_reason = transient_ship_root_skip_reason(canonical_ship)
+    if skip_reason is not None:
+        return True, skip_reason, "skipped_transient"
     if existing == desired:
         return True, f"env file {path} up to date", "unchanged"
     try:
@@ -3602,9 +3714,11 @@ def _do_provision_ship_delegator(action: Action, on_conflict: str) -> ActionResu
                 action, "updated",
                 f"ship-delegator: {r.delegator_path.name} already correct + ignored; {env_note}",
             )
-        if env_status == "skipped_user":
-            # NOT silently clean: a stale user env file left per on_conflict=skip — surface the
-            # note so the operator knows status will keep flagging env-file drift.
+        if env_status in ("skipped_user", "skipped_transient"):
+            # NOT silently clean: either a stale user env file left per on_conflict=skip, or a
+            # refusal to pin the machine pointer at a transient checkout. Surface the note so the
+            # operator sees WHY the machine env file was left as-is (and, for the transient case,
+            # that `gh ship` has no resolvable root here until agent_tools_source is durable).
             return ActionResult(
                 action, "skipped",
                 f"ship-delegator: {r.delegator_path.name} already correct + ignored; {env_note}",
@@ -3649,10 +3763,12 @@ def _do_provision_ship_delegator(action: Action, on_conflict: str) -> ActionResu
         )
 
     env_suffix = f"; {env_note}" if env_status != "unchanged" else ""
-    # An unresolved user env file (on_conflict=skip) must not vanish into a "created"/"updated"
-    # success — status will keep flagging env-file drift, so the action reports "skipped" (with
-    # the file_note naming what WAS written) exactly like the delegator-ok branch above.
-    if skipped_user_file or env_status == "skipped_user":
+    # A machine env file left AS-IS (a stale user file under on_conflict=skip, or a transient-source
+    # refusal to pin the pointer) must not vanish into a "created"/"updated" success — status may
+    # still report env-file drift (a poisoned pointer) or the delegator may have no resolvable root,
+    # so the action reports "skipped" (with the file_note naming what WAS written) exactly like the
+    # delegator-ok branch above. Mirrors the skipped_user handling for skipped_transient.
+    if skipped_user_file or env_status in ("skipped_user", "skipped_transient"):
         return ActionResult(action, "skipped", f"ship-delegator: {file_note}; {exclude_note}{env_suffix}", backup)
     # status: a changed file OR a freshly-added exclude entry is a change. file_correct→exclude-only
     # change reports "updated" (the exclude was added); a written file reports its own write status.

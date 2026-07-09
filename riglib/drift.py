@@ -60,9 +60,11 @@ from .actions.runner import (
     resolve_global_excludes,
     resolve_linter_config,
     repo_self_hosts_ship,
+    env_file_pins_transient_root,
     resolve_ship_delegator,
     ship_env_file_content,
     ship_env_file_path,
+    transient_ship_root_skip_reason,
     schedule_plan_from_action,
     skill_harness_link_target,
     tg_ctl_plan_from_action,
@@ -379,18 +381,14 @@ def _check_ship_env_file(canonical: Path, report: DriftReport) -> None:
     env path itself does not exist, but apply's ``mkdir(parents=True)`` errors on it — so it must
     be ``modified`` with the real failure, never "missing (apply rewrites it)".
     """
+    # Order mirrors the runner's `_reconcile_ship_env_file` EXACTLY so status/apply never disagree.
+    # Apply errors on an EXISTING non-file/symlink or an unreadable file BEFORE it would skip a
+    # transient source, so those checks run first here too (a genuinely broken machine env file
+    # surfaces even when THIS status run's source checkout is throwaway). The transient-source skip
+    # then matches apply's skip (which happens before the content write / the absent-path mkdir), so
+    # the parent-blocker + desired-content checks — which apply reaches only when it actually WRITES
+    # (never under a transient source) — run AFTER it.
     env_path = ship_env_file_path()
-    if not os.path.lexists(env_path):
-        blocker = _nearest_existing_ancestor(env_path.parent)
-        # is_dir() follows symlinks, matching mkdir(parents=True, exist_ok=True): a symlink
-        # RESOLVING to a dir is traversable (no error); a plain file or dangling link blocks.
-        if blocker is not None and not blocker.is_dir():
-            report.items.append(
-                DriftItem("modified", "ship_env", "env-file", env_path,
-                          f"a non-directory blocks the env file's parent path at {blocker} "
-                          "(apply errors on it)")
-            )
-            return
     if env_path.is_symlink() or (os.path.lexists(env_path) and not env_path.is_file()):
         report.items.append(
             DriftItem("modified", "ship_env", "env-file", env_path,
@@ -407,6 +405,34 @@ def _check_ship_env_file(canonical: Path, report: DriftReport) -> None:
                       f"machine env file unreadable (apply errors on it): {exc}")
         )
         return
+    # Transient (temp-dir) source + persistent pointer: apply SKIPS the write, so status must NOT
+    # flag drift apply would refuse to make. Placed after the structural/read checks, before the
+    # absent-path + content checks — the exact split apply uses. BUT never hide an ALREADY-poisoned
+    # pointer: if the existing env file itself pins a transient root (the vanished-tmp bug state),
+    # flag it REGARDLESS of whether it equals the current (also-transient) desired content — apply
+    # can't repair it from a throwaway source either, so it surfaces as drift until a durable apply
+    # runs (same shape as the skipped_user case). Return unconditionally afterwards to mirror apply's
+    # skip (a durable-good or absent existing pointer is left clean).
+    if transient_ship_root_skip_reason(canonical) is not None:
+        if env_file_pins_transient_root(env_current):
+            report.items.append(
+                DriftItem("modified", "ship_env", "env-file", env_path,
+                          "machine env file pins a TRANSIENT (temp-dir) AGENT_TOOLS_ROOT that vanishes "
+                          "on cleanup; apply cannot repair it from a transient source — re-run "
+                          "`rig apply` from a durable agent-tools checkout (e.g. ~/xp/agent-tools)")
+            )
+        return
+    if not os.path.lexists(env_path):
+        blocker = _nearest_existing_ancestor(env_path.parent)
+        # is_dir() follows symlinks, matching mkdir(parents=True, exist_ok=True): a symlink
+        # RESOLVING to a dir is traversable (no error); a plain file or dangling link blocks.
+        if blocker is not None and not blocker.is_dir():
+            report.items.append(
+                DriftItem("modified", "ship_env", "env-file", env_path,
+                          f"a non-directory blocks the env file's parent path at {blocker} "
+                          "(apply errors on it)")
+            )
+            return
     if env_current != ship_env_file_content(canonical):
         report.items.append(
             DriftItem("missing" if env_current is None else "modified",
