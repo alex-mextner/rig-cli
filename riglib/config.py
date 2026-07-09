@@ -57,6 +57,8 @@ _VALID_TOP_KEYS = {
     "ship_delegator",
     "linters",
     "project_tools",
+    "scripts",
+    "dev",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
@@ -532,6 +534,9 @@ def validate(data: dict[str, Any]) -> None:
     for cat in _VALID_CATEGORIES:
         if cat in data and not isinstance(data[cat], dict):
             raise ConfigError(f"category '{cat}' must be a mapping", schema_path=cat)
+    for project_block in ("scripts", "dev"):
+        if project_block in data and not isinstance(data[project_block], dict):
+            raise ConfigError(f"{project_block} must be a mapping", schema_path=project_block)
 
     _validate_ci(data.get("ci", {}))
     _validate_agent_hooks(data.get("agent_hooks", {}))

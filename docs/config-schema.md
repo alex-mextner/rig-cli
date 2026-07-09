@@ -33,12 +33,12 @@ This document is the human-readable reference; the machine-readable schema is
   (`tests/test_config_schema.py`) keeps the file, the registry, and `config.validate`'s key set in
   lockstep, so the three never disagree.
 
-**Strict by default — an unknown key is rejected, not ignored.** Every block is closed
+**Strict by default — an unknown key is rejected, not ignored.** Fixed rig-owned blocks are closed
 (`additionalProperties: false`): a typo'd key (`aut_mode`, `enabld`) fails loudly with the schema
-path, rather than silently having no effect. The *only* open maps are the catalog-keyed `items:`
-(under `skills.by_type`, `agent_hooks`, `ci`, `mcp`) and `fragments:` (under
-`git_hooks.dispatcher`), whose keys are item names — a bad item *name* there is caught later as a
-catalog/unknown-item error (exit `4`), not a schema typo.
+path, rather than silently having no effect. The deliberate pass-through maps are top-level
+`scripts:` / `dev:` (owned by dev helpers), catalog-keyed `items:` (under `skills.by_type`,
+`agent_hooks`, `ci`, `mcp`), and `fragments:` (under `git_hooks.dispatcher`). A bad catalog item
+*name* is caught later as a catalog/unknown-item error (exit `4`), not a schema typo.
 
 ## Top-level shape
 
@@ -54,6 +54,8 @@ defaults:                       # cross-category fallback targets/policy
 
 agent_tools_source: ~/xp/agent-tools   # the agent-tools checkout to apply FROM (default: auto-detect)
 
+scripts: { ... }             # project-local named commands consumed by dev helpers
+dev: { ... }                 # dev/e2e lifecycle metadata consumed by dev helpers
 skills: { ... }
 agent_hooks: { ... }
 git_hooks: { ... }
@@ -71,6 +73,34 @@ tg_ctl: { ... }               # tg-ctl inbound daemon as a macOS boot LaunchAgen
 
 If `agent_tools_source` is omitted, rig resolves it from `$RIG_AGENT_TOOLS_SOURCE`, then
 the default candidates (`~/xp/agent-tools`, `~/work/agent-tools`, `~/agent-tools`).
+
+## `scripts`
+
+Project-local named commands consumed by the `dev` CLI and portable hooks. `rig` validates that
+this top-level key is a mapping, then preserves it; command semantics are owned by the dev helper
+that executes the script.
+
+```yaml
+scripts:
+  test: uv run --with pytest pytest tests/
+  server: pnpm run dev
+  e2e: pnpm exec playwright test
+```
+
+## `dev`
+
+Project-local dev/e2e lifecycle metadata consumed by the `dev` CLI. `rig` validates that this
+top-level key is a mapping, then preserves it; fields such as `server`, `e2e`, `jobs`,
+`logs_root`, and `artifacts_root` are interpreted by the dev helper, not by `rig apply`.
+
+```yaml
+dev:
+  server:
+    script: server
+    ports: [5173]
+  e2e:
+    script: e2e
+```
 
 ## Resolution rules (so the file stays terse)
 
@@ -1492,8 +1522,9 @@ strict**: an unknown FIXED key in *any* block — `defaults`, `skills`, `agent_h
 (+ `dispatcher`), `ci`, `mcp`, `harness` (+ `hook_bridge`), `permissions`, `models` (+ `schedule`),
 `agents_md`, `github` (+ `ruleset` / `merge` / `ghas` / `actions` / `browser`), `tmux` (+ every
 sub-block), `gitignore`, `tg_ctl`, `project_tools` (+ `haft` / `workflow` / `serena` / `sverklo`) — is
-rejected with the schema path of the offender, not silently ignored. (The only open maps are the
-catalog-keyed `items:` / `fragments:` — see "Strict by default" above.) Bad-value rejections
+rejected with the schema path of the offender, not silently ignored. The deliberate pass-through
+maps are top-level `scripts:` / `dev:` and the catalog-keyed `items:` / `fragments:` maps described
+above. Bad-value rejections
 include: unsupported `version`, invalid `on_conflict` / ci `tier` / agent-hook `on_error`, an
 unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`, a non-mapping
 `harness.hook_bridge` / non-bool `hook_bridge.enabled` / non-string `hook_bridge.python`, a

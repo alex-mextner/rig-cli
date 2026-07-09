@@ -60,6 +60,43 @@ def test_validate_rejects_unknown_top_key():
         config.validate({"version": 1, "bogus": 1})
 
 
+def test_validate_accepts_project_dev_script_blocks():
+    config.validate({
+        "version": 1,
+        "scripts": {"test": "uv run pytest"},
+        "dev": {"server": {"script": "server", "ports": [5173]}},
+    })
+
+
+def test_load_preserves_project_dev_script_blocks(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        "version: 1\n"
+        "scripts:\n"
+        "  test: uv run pytest\n"
+        "  custom:\n"
+        "    cmd: ./scripts/custom.sh\n"
+        "    unexpected: [still, preserved]\n"
+        "dev:\n"
+        "  servver:\n"
+        "    typo_owned_by_dev_helper: true\n",
+    )
+
+    loaded = config.load(repo)
+
+    assert loaded.data["scripts"]["custom"]["unexpected"] == ["still", "preserved"]
+    assert loaded.data["dev"]["servver"]["typo_owned_by_dev_helper"] is True
+
+
+@pytest.mark.parametrize("key", ["scripts", "dev"])
+def test_validate_rejects_non_mapping_project_dev_blocks(key):
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate({"version": 1, key: ["test"]})
+    assert ei.value.schema_path == key
+
+
 # ── roadmap §5: every block REJECTS an unknown key (no silent no-op), with a schema path ──
 @pytest.mark.parametrize(
     "doc, schema_path, msg",

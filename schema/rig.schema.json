@@ -53,6 +53,18 @@
       },
       "additionalProperties": false
     },
+    "scripts": {
+      "type": "object",
+      "description": "project-local named commands consumed by dev helpers; rig accepts and preserves the map.",
+      "properties": {},
+      "additionalProperties": true
+    },
+    "dev": {
+      "type": "object",
+      "description": "project-local dev/e2e lifecycle metadata consumed by dev helpers; rig accepts and preserves the map.",
+      "properties": {},
+      "additionalProperties": true
+    },
     "skills": {
       "type": "object",
       "description": "advisory markdown rules copied into the agent skills dir (opt-out model).",
