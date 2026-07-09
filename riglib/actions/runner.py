@@ -1347,6 +1347,74 @@ def codex_hook_bridge_needs_table_header(text: str) -> bool:
     return _toml_table_bounds(text, "hooks") is None
 
 
+def _codex_hook_feature_flag(current_table: str | None, key_parts: list[str]) -> str | None:
+    if current_table == "features" and key_parts == ["hooks"]:
+        return "features.hooks"
+    if current_table is None and key_parts == ["features", "hooks"]:
+        return "features.hooks"
+    if current_table is None and key_parts == ["codex_hooks"]:
+        return "codex_hooks"
+    return None
+
+
+def codex_hook_bridge_disabled_features(text: str) -> tuple[str, ...]:
+    """Return Codex feature flags that disable hooks globally."""
+    disabled: list[str] = []
+    current_table: str | None = None
+    value_depth = 0
+    for line in text.splitlines():
+        body = _toml_code_part(line).strip()
+        if not body:
+            continue
+        if value_depth > 0:
+            value_depth = max(0, value_depth + _toml_value_delta(body))
+            continue
+        if body.startswith("[[") and body.endswith("]]"):
+            current_table = ".".join(_toml_key_parts(body[2:-2].strip()))
+            continue
+        if body.startswith("[") and body.endswith("]"):
+            current_table = ".".join(_toml_key_parts(body[1:-1].strip()))
+            continue
+        if "=" not in body:
+            continue
+        key, value = body.split("=", 1)
+        value_depth = max(0, _toml_value_delta(value))
+        flag = _codex_hook_feature_flag(current_table, _toml_key_parts(key.strip()))
+        if flag and value.strip() == "false":
+            disabled.append(flag)
+    return tuple(disabled)
+
+
+def enable_codex_hook_bridge_features(text: str) -> tuple[str, bool]:
+    """Enable Codex hook feature flags that would make the managed bridge inert."""
+    changed = False
+    lines: list[str] = []
+    current_table: str | None = None
+    value_depth = 0
+    for line in text.splitlines(keepends=True):
+        code = _toml_code_part(line)
+        body = code.strip()
+        replacement = line
+        if body:
+            if value_depth > 0:
+                value_depth = max(0, value_depth + _toml_value_delta(body))
+            elif body.startswith("[[") and body.endswith("]]"):
+                current_table = ".".join(_toml_key_parts(body[2:-2].strip()))
+            elif body.startswith("[") and body.endswith("]"):
+                current_table = ".".join(_toml_key_parts(body[1:-1].strip()))
+            elif "=" in body:
+                key, value = body.split("=", 1)
+                value_depth = max(0, _toml_value_delta(value))
+                flag = _codex_hook_feature_flag(current_table, _toml_key_parts(key.strip()))
+                if flag and value.strip() == "false":
+                    false_at = code.rfind("false")
+                    if false_at >= 0:
+                        replacement = code[:false_at] + "true" + code[false_at + len("false"):] + line[len(code):]
+                        changed = True
+        lines.append(replacement)
+    return "".join(lines), changed
+
+
 def codex_hook_bridge_conflict(text: str) -> str | None:
     """Return why Codex hooks cannot be merged without clobbering user TOML, else None."""
     if '"""' in text or "'''" in text:
@@ -1398,22 +1466,23 @@ def merge_codex_hook_bridge_toml(existing: str, action: Action) -> tuple[str, st
     """Merge the Codex bridge block, preserving unrelated TOML text."""
     if codex_hook_bridge_block_malformed(existing):
         return existing, "managed Codex hook bridge markers are incomplete"
-    bounds = codex_hook_bridge_block_bounds(existing)
-    stripped = existing
+    enabled, _ = enable_codex_hook_bridge_features(existing)
+    bounds = codex_hook_bridge_block_bounds(enabled)
+    stripped = enabled
     if bounds is not None:
         start, end = bounds
-        stripped = existing[:start] + existing[end:]
+        stripped = enabled[:start] + enabled[end:]
     conflict = codex_hook_bridge_conflict(stripped)
     if conflict:
         return existing, conflict
     if bounds is not None:
         start, end = bounds
-        current = existing[start:end]
+        current = enabled[start:end]
         block = codex_hook_bridge_block(
             action,
             include_table_header=codex_hook_bridge_block_has_table_header(current),
         )
-        return existing[:start] + block + existing[end:], None
+        return enabled[:start] + block + enabled[end:], None
     hooks_bounds = _toml_table_bounds(stripped, "hooks")
     if hooks_bounds is not None:
         _, table_end = hooks_bounds

@@ -1895,6 +1895,179 @@ def test_codex_hook_bridge_registers_dispatcher_in_config_toml(fake_agent_tools,
     assert "codex_hook_bridge Stop" in stop[0]["hooks"][0]["command"]
 
 
+def test_codex_hook_bridge_enables_disabled_features_hooks(fake_agent_tools, tmp_path):
+    """A wired Codex bridge must not report synced while [features].hooks disables hooks."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        '[features]\n'
+        'hooks = false # user disabled hooks\n\n'
+        '[profiles.default]\n'
+        'model = "gpt-5"\n',
+        encoding="utf-8",
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+
+    before = detect(plan)
+    assert any(
+        i.item == "hook-bridge"
+        and i.direction == "modified"
+        and "features.hooks" in i.detail
+        and "apply will enable" in i.detail
+        for i in before.items
+    ), [i.detail for i in before.items]
+
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    text = settings.read_text(encoding="utf-8")
+    assert "hooks = true # user disabled hooks" in text
+    data = _read_toml(settings)
+    assert data["features"]["hooks"] is True
+    assert data["profiles"]["default"]["model"] == "gpt-5"
+    assert "codex_hook_bridge PreToolUse" in data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert not any(i.item == "hook-bridge" for i in detect(plan).items), \
+        [i.detail for i in detect(plan).items]
+
+
+def test_codex_hook_bridge_enables_deprecated_codex_hooks_flag(fake_agent_tools, tmp_path):
+    """Deprecated top-level codex_hooks=false also disables hooks and must be converged."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('codex_hooks = false\nmodel = "gpt-5"\n', encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+
+    before = detect(plan)
+    assert any(
+        i.item == "hook-bridge"
+        and i.direction == "modified"
+        and "codex_hooks" in i.detail
+        for i in before.items
+    ), [i.detail for i in before.items]
+
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    data = _read_toml(settings)
+    assert data["codex_hooks"] is True
+    assert data["model"] == "gpt-5"
+    assert "codex_hook_bridge Stop" in data["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert not any(i.item == "hook-bridge" for i in detect(plan).items), \
+        [i.detail for i in detect(plan).items]
+
+
+def test_codex_hook_bridge_enables_top_level_features_hooks(fake_agent_tools, tmp_path):
+    """Top-level dotted features.hooks=false is equivalent to [features].hooks=false."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('features.hooks = false\nmodel = "gpt-5"\n', encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+
+    before = detect(plan)
+    assert any(
+        i.item == "hook-bridge"
+        and i.direction == "modified"
+        and "features.hooks" in i.detail
+        for i in before.items
+    ), [i.detail for i in before.items]
+
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    data = _read_toml(settings)
+    assert data["features"]["hooks"] is True
+    assert data["model"] == "gpt-5"
+    assert "codex_hook_bridge Stop" in data["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert not any(i.item == "hook-bridge" for i in detect(plan).items), \
+        [i.detail for i in detect(plan).items]
+
+
+def test_codex_hook_bridge_disabled_hooks_with_toml_conflict_reports_conflict(fake_agent_tools, tmp_path):
+    """If apply cannot merge TOML, status must not promise the disabled flag will be enabled."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    original = '[features]\nhooks = false\nnotes = """\n[hooks]\nPreToolUse = []\n"""\n'
+    settings.write_text(original, encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+
+    drift = detect(plan)
+    assert any(
+        i.item == "hook-bridge"
+        and i.direction == "modified"
+        and "multiline strings" in i.detail
+        for i in drift.items
+    ), [i.detail for i in drift.items]
+    assert not any("apply will enable" in i.detail for i in drift.items)
+
+    report = run_plan(plan)
+    res = _bridge_results(report)
+    assert res and res[0].status == "error", [r.detail for r in res]
+    assert settings.read_text(encoding="utf-8") == original
+
+
+def test_codex_hook_bridge_status_flags_disabled_hooks_after_bridge_written(fake_agent_tools, tmp_path):
+    """A present managed block is still drift if Codex globally disables hooks."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+    first = run_plan(plan)
+    assert not first.errors, [r.detail for r in first.errors]
+    settings.write_text(
+        settings.read_text(encoding="utf-8") + "\n[features]\nhooks = false\n",
+        encoding="utf-8",
+    )
+
+    drift = detect(plan)
+    assert any(
+        i.item == "hook-bridge"
+        and i.direction == "modified"
+        and "features.hooks" in i.detail
+        for i in drift.items
+    ), [i.detail for i in drift.items]
+
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert _read_toml(settings)["features"]["hooks"] is True
+    assert not any(i.item == "hook-bridge" for i in detect(plan).items), \
+        [i.detail for i in detect(plan).items]
+
+
 def test_codex_hook_bridge_preserves_existing_hooks_table(fake_agent_tools, tmp_path):
     """A user's unrelated Codex hook entries survive the managed bridge insertion."""
     repo = tmp_path / "repo"

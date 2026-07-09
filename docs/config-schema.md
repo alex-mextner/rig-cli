@@ -439,6 +439,11 @@ idempotent and preserves unrelated config; `rig status` reports the bridge as mi
 if a managed hook is absent or points at an old checkout. Other harness kinds still skip the bridge
 with a note when explicitly enabled.
 
+For Codex, the bridge also converges global hook feature flags that would make the managed hook
+block inert: `[features] hooks = false`, top-level `features.hooks = false`, and the deprecated
+top-level `codex_hooks = false` are reported as drift and rewritten to `true` when `hook_bridge`
+is enabled.
+
 Codex `pre-agent` is not wired yet: rig may install `pre-agent` descriptors into `~/.codex/hooks`
 alongside the rest of the selected catalog, but the Codex bridge currently dispatches only
 `pre-bash`, `pre-write`, `post-write`, and `stop` via the confirmed Codex hook events above.

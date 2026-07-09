@@ -36,6 +36,7 @@ from .actions.runner import (
     codex_hook_bridge_block_has_table_header,
     codex_hook_bridge_block_malformed,
     codex_hook_bridge_conflict,
+    codex_hook_bridge_disabled_features,
     descriptor_text,
     desired_harness_value,
     desired_permission_specs,
@@ -1216,6 +1217,18 @@ def _check_codex_hook_bridge(action: Action, config_file: Path, report: DriftRep
                 action.item,
                 config_file,
                 f"{conflict} in {config_file}; rig apply will not overwrite unmanaged Codex hooks TOML",
+            )
+        )
+        return
+    disabled = codex_hook_bridge_disabled_features(text)
+    if disabled:
+        report.items.append(
+            DriftItem(
+                "modified",
+                "harness",
+                action.item,
+                config_file,
+                f"Codex hooks disabled by {', '.join(disabled)} in {config_file} (apply will enable)",
             )
         )
         return
