@@ -9,7 +9,7 @@ each raw tool name + (for shells) the command string through :func:`categorize`.
 Why a shell command needs inspecting: every harness exposes ONE shell tool (Bash /
 exec_command / run_shell_command / bash). A bare count of that tool tells us nothing about
 adoption — the signal is *what the agent ran inside it*. So a Bash call whose command
-invokes ``review`` / ``tg`` / ``rig`` / ``draw`` / ``3d`` / ``task`` is re-labelled as an
+invokes ``review`` / ``tg`` / ``rig`` / ``draw`` / ``3d`` / ``task`` / ``dev`` is re-labelled as an
 "ours" CLI invocation and pulled OUT of the baseline shell count. That re-labelling is the
 core measurement this whole command exists to produce.
 """
@@ -79,8 +79,11 @@ BASELINE_ALIASES: dict[str, str] = {
 # go-task (and not our task-cli) a ``task build`` would be miscounted as "ours". We accept
 # this as a deliberate tradeoff — distinguishing the two reliably needs a path/marker probe
 # that the log doesn't carry — and it's a knob the CTO can drop here if it ever skews a real
-# number. The other five names are unambiguous to this ecosystem.
-OUR_CLIS: frozenset[str] = frozenset({"rig", "review", "tg", "draw", "3d", "task"})
+# number. ``dev`` is also generic (devbox/devcontainer-style commands can exist), but it is the
+# permissioned agent-tools development surface; count it here so adoption stats follow the same
+# default command surface rig provisions. The remaining five names are unambiguous to this
+# ecosystem.
+OUR_CLIS: frozenset[str] = frozenset({"rig", "review", "tg", "draw", "3d", "task", "dev"})
 
 # ── OUR MCP servers (the `mcp__<server>__<tool>` prefix) ───────────────────────────────
 OUR_MCP_SERVERS: frozenset[str] = frozenset({"review"})

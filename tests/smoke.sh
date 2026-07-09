@@ -253,13 +253,15 @@ YAML
   CCSET="$HOME/.claude/settings.json"
   [[ -f "$CCSET" ]] || fail "permissions: harness settings.json not written"
   # structural check (robust to JSON formatting), not a brittle grep of the pretty-printed text
-  python3 - "$CCSET" <<'PY' || fail "permissions: allow tools / deny+ask baselines not in settings.json"
+  python3 - "$CCSET" "$ROOT" <<'PY' || fail "permissions: allow tools / deny+ask baselines not in settings.json"
 import json, sys
+# Import the checkout under test, not any installed riglib from the developer's environment.
+sys.path.insert(0, sys.argv[2])
+from riglib.permissions import DEFAULT_TOOLS
 perms = json.load(open(sys.argv[1])).get("permissions", {})
 allow = set(perms.get("allow", []))
 # the full default set — our ecosystem CLIs + the safe external dev tools
-tools = ("tg", "review", "draw", "3d", "rig", "task", "gh", "git", "rg", "uv", "bun", "jq", "gitleaks")
-missing = {f"Bash({t}:*)" for t in tools} - allow
+missing = {f"Bash({t}:*)" for t in DEFAULT_TOOLS} - allow
 # the deny/ask baselines (spot-check one loud rule each — the exact list is unit-tested)
 if "Bash(sudo rm:*)" not in set(perms.get("deny", [])):
     missing.add("deny: Bash(sudo rm:*)")

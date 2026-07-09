@@ -74,7 +74,7 @@ mcp:
 
 # ── Permissions — allowlist + deny/ask baselines in the harness settings (rig-cli#100) ─────
 # Default **ON**: an ABSENT `permissions:` block still provisions the allowlist with the default
-# tool set, so rig pre-allows tg/review/draw/3d/rig/task + gh/git/rg/uv/bun/jq/gitleaks in the
+# tool set, so rig pre-allows tg/review/draw/3d/rig/task/dev + gh/git/rg/uv/bun/jq/gitleaks in the
 # harness's permission allowlist (claude-code: permissions.allow in ~/.claude/settings.json;
 # opencode: permission.bash) — AND, for claude-code, asserts the conservative deny/ask rule
 # baselines (raw `gh pr merge`, force pushes, sudo rm, screencapture denied; pkill/killall/
@@ -89,7 +89,7 @@ mcp:
 #   permissions:
 #     enabled: true
 #     kind: opencode        # target opencode's allowlist (default: follow harness.kind / claude-code)
-#     tools: [tg, review, draw, 3d, rig, task, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES default
+#     tools: [tg, review, draw, 3d, rig, task, dev, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES default
 #     extra: [kubectl]      # ADDS to the (default or explicit) set
 #     disable: [gitleaks]   # drops from rig's desired set (won't ADD it; never removes a live entry)
 #     allow: [WebFetch]     # RAW rule entries asserted in the allow list (adopt a hand-grown allowlist)

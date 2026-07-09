@@ -31,14 +31,17 @@ from riglib.plan import build
 import pytest
 
 
+_DESTRUCTIVE_RAW_COMMANDS = ("rm", "sudo", "dd", "kill", "killall", "pkill", "shutdown", "reboot", "mkfs")
+
+
 # ── the harness module (registry + renderers) ─────────────────────────────────────
 def test_default_tools_cover_ecosystem_and_external():
-    for t in ("tg", "review", "draw", "3d", "rig", "task"):  # our CLIs
+    for t in ("tg", "review", "draw", "3d", "rig", "task", "dev"):  # our CLIs
         assert t in DEFAULT_TOOLS
     for t in ("gh", "git", "rg", "uv", "bun", "jq", "gitleaks"):  # safe external dev tools
         assert t in DEFAULT_TOOLS
     # NOTHING destructive is blanket-allowed
-    for t in ("rm", "sudo", "dd"):
+    for t in _DESTRUCTIVE_RAW_COMMANDS:
         assert t not in DEFAULT_TOOLS
 
 
@@ -58,7 +61,7 @@ def test_claude_code_entry_shape_matches_live_settings():
 
 
 def test_opencode_entry_shape_is_glob_key():
-    assert desired_entries("opencode", ["git", "gh"]) == ["git *", "gh *"]
+    assert desired_entries("opencode", ["git", "gh", "dev"]) == ["git *", "gh *", "dev *"]
 
 
 def test_codex_and_gemini_are_na():
@@ -275,6 +278,22 @@ def _opencode_cfg(repo: Path, source: Path, settings: Path, **perm) -> LoadedCon
     )
 
 
+def test_opencode_default_on_apply_writes_default_set(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "opencode.json"
+    plan = build(_opencode_cfg(repo, fake_agent_tools, settings),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    bash = json.loads(settings.read_text(encoding="utf-8"))["permission"]["bash"]
+    assert bash == {f"{tool} *": "allow" for tool in DEFAULT_TOOLS}
+    for raw_command in _DESTRUCTIVE_RAW_COMMANDS:
+        assert f"{raw_command} *" not in bash
+    assert not [d for d in detect(plan).items if d.category == "permissions"]
+
+
 def test_permissions_kind_override_targets_opencode(fake_agent_tools, tmp_path):
     repo = tmp_path / "repo"; repo.mkdir()
     settings = repo / "opencode.json"
@@ -362,12 +381,26 @@ def test_disable_drops_tool_from_desired_set_end_to_end(fake_agent_tools, tmp_pa
     repo = tmp_path / "repo"; repo.mkdir()
     settings = repo / "settings.json"
     plan = build(_cfg(repo, fake_agent_tools, settings, disable=["gitleaks", "draw", "3d", "rig",
-                 "task", "tg", "review", "uv", "bun", "jq", "rg"]),
+                 "task", "dev", "tg", "review", "uv", "bun", "jq", "rg"]),
                  Catalog.scan(str(fake_agent_tools)), project_type="unknown")
     run_plan(plan)
     allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
     assert "Bash(gitleaks:*)" not in allow  # disabled → never added
+    assert "Bash(dev:*)" not in allow
     assert "Bash(git:*)" in allow and "Bash(gh:*)" in allow  # the rest survive
+
+
+def test_disable_dev_drops_dev_from_desired_set(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    plan = build(_cfg(repo, fake_agent_tools, settings, disable=["dev"]),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+
+    run_plan(plan)
+
+    allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
+    assert allow == [f"Bash({t}:*)" for t in DEFAULT_TOOLS if t != "dev"]
+    assert "Bash(dev:*)" not in allow
 
 
 def test_default_on_apply_writes_default_set_and_is_in_sync(fake_agent_tools, tmp_path):
@@ -389,6 +422,8 @@ def test_default_on_apply_writes_default_set_and_is_in_sync(fake_agent_tools, tm
     run_plan(plan)
     allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
     assert allow == [f"Bash({t}:*)" for t in DEFAULT_TOOLS]
+    for raw_command in _DESTRUCTIVE_RAW_COMMANDS:
+        assert f"Bash({raw_command}:*)" not in allow
     assert not [d for d in detect(plan).items if d.category == "permissions"]  # in sync after apply
 
 

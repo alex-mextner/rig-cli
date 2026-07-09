@@ -131,7 +131,7 @@ each tool is invoked, sorting every invocation into four buckets:
 - **baseline** — the harness built-ins (`Bash`, `Read`, `Write`, `Edit`/`MultiEdit`,
   `Grep`, `Glob`, `NotebookEdit`, `Task`/`Agent`, `WebFetch`/`WebSearch`). The yardstick.
 - **ours** — the agent-tools ecosystem: the CLIs `rig` / `review` / `tg` / `draw` / `3d` /
-  `task` (detected **inside** a shell command — a `Bash` call running `review …` is pulled
+  `task` / `dev` (detected **inside** a shell command — a `Bash` call running `review …` is pulled
   out of the baseline shell count and re-labelled `review (cli)`), our skills, and our
   `review` MCP.
 - **external-advertised** — the third-party tooling we ship/recommend: MCP servers (serena,
