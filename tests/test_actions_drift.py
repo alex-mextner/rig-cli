@@ -1937,6 +1937,7 @@ def test_opencode_hook_bridge_default_path_is_repo_local_ignored_and_in_sync(fak
     repo.mkdir()
     _git_init(repo)
     cat = Catalog.scan(str(fake_agent_tools))
+    repo_cfg = repo / "rig.yaml"
     cfg = LoadedConfig(
         data={
             "agent_tools_source": str(fake_agent_tools),
@@ -1947,6 +1948,8 @@ def test_opencode_hook_bridge_default_path_is_repo_local_ignored_and_in_sync(fak
             "harness": {"kind": "opencode", "auto_mode": True, "hook_bridge": {"enabled": True}},
         },
         repo_root=repo,
+        repo_path=repo_cfg,
+        layers=[f"repo:{repo_cfg}"],
     )
     plan = build(cfg, cat, project_type="unknown")
     plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
@@ -2023,6 +2026,44 @@ def test_opencode_hook_bridge_removes_legacy_global_managed_symlink(fake_agent_t
     assert plugin.is_symlink()
     assert not old.exists()
     assert "removed legacy global opencode plugin" in _bridge_results(report)[0].detail
+
+
+def test_opencode_hook_bridge_errors_when_legacy_cleanup_fails(fake_agent_tools, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    old = xdg / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    old.parent.mkdir(parents=True)
+    old.symlink_to(fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+    monkeypatch.setattr(
+        "riglib.actions.runner._remove_legacy_opencode_bridge_symlink",
+        lambda _plugin_path, _dest: (
+            False,
+            f"legacy global opencode plugin still present (could not remove {old}: denied)",
+        ),
+    )
+
+    report = run_plan(plan)
+
+    assert report.errors
+    result = _bridge_results(report)[0]
+    assert result.status == "error"
+    assert "legacy global opencode plugin still present" in result.detail
 
 
 def test_opencode_hook_bridge_drift_detects_legacy_global_symlink(fake_agent_tools, tmp_path, monkeypatch):

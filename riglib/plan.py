@@ -917,6 +917,16 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
     }
     if isinstance(bridge_cfg, dict) and bridge_cfg.get("python"):
         options["python"] = str(bridge_cfg["python"])
+    has_repo_config_layer = any(layer.startswith(("repo:", "config:")) for layer in config.layers)
+    if (
+        bridge_format == "opencode-plugin"
+        and not Path(os.path.expanduser(str(settings_path))).is_absolute()
+        and not has_repo_config_layer
+    ):
+        plan.notes.append(
+            "hook_bridge: skipped — repo-local opencode plugin path requires a repo config layer"
+        )
+        return
     plan.actions.append(
         Action(
             kind="register_hook_bridge",

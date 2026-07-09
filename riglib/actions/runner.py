@@ -1370,8 +1370,6 @@ def _do_register_opencode_hook_bridge(action: Action, on_conflict: str) -> Actio
     def finalize(status: str, detail: str) -> ActionResult:
         notes: list[str] = []
         legacy_removed, legacy_note = _remove_legacy_opencode_bridge_symlink(plugin_path, dest)
-        if legacy_note:
-            notes.append(legacy_note)
         exclude_ok, exclude_changed, exclude_note = _reconcile_opencode_bridge_exclude(plugin_path)
         if not exclude_ok:
             return ActionResult(
@@ -1381,6 +1379,15 @@ def _do_register_opencode_hook_bridge(action: Action, on_conflict: str) -> Actio
             )
         if exclude_note:
             notes.append(exclude_note)
+        if legacy_note and not legacy_removed:
+            detail_with_notes = detail if not notes else f"{detail}; {'; '.join(notes)}"
+            return ActionResult(
+                action,
+                "error",
+                f"hook_bridge/{action.item}: {detail_with_notes}; {legacy_note}",
+            )
+        if legacy_note:
+            notes.append(legacy_note)
         final_status = "updated" if status == "skipped" and (legacy_removed or exclude_changed) else status
         final_detail = detail if not notes else f"{detail}; {'; '.join(notes)}"
         return ActionResult(action, final_status, final_detail)

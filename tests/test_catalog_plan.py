@@ -398,7 +398,13 @@ def test_plan_opencode_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_pa
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     cat = Catalog.scan(str(fake_agent_tools))
-    cfg = _cfg({"harness": {"kind": "opencode", "hook_bridge": {"enabled": True}}}, tmp_path)
+    repo_cfg = tmp_path / "rig.yaml"
+    cfg = LoadedConfig(
+        data={"harness": {"kind": "opencode", "hook_bridge": {"enabled": True}}},
+        repo_root=tmp_path,
+        repo_path=repo_cfg,
+        layers=[f"repo:{repo_cfg}"],
+    )
     a = _bridge_action(build(cfg, cat, project_type="unknown"))
     assert a is not None
     assert a.options["kind"] == "opencode"
@@ -406,6 +412,68 @@ def test_plan_opencode_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_pa
     assert a.options["format"] == "opencode-plugin"
     assert a.options["lib_dir"] == str(fake_agent_tools / "lib")
     assert a.target == tmp_path / ".opencode/plugins/zz-agent-tools-hook-bridge.js"
+
+
+def test_plan_opencode_default_hook_bridge_skipped_without_repo_config(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    global_cfg = tmp_path / "config.yaml"
+    cfg = LoadedConfig(
+        data={"harness": {"kind": "opencode", "hook_bridge": {"enabled": True}}},
+        repo_root=tmp_path,
+        global_path=global_cfg,
+        layers=[f"global:{global_cfg}"],
+    )
+
+    plan = build(cfg, cat, project_type="unknown")
+
+    assert _bridge_action(plan) is None
+    assert any("repo-local opencode" in n for n in plan.notes), plan.notes
+
+
+def test_plan_opencode_default_hook_bridge_emitted_with_explicit_repo_config(
+    fake_agent_tools, tmp_path
+):
+    cat = Catalog.scan(str(fake_agent_tools))
+    explicit_cfg = tmp_path / "custom-rig.yaml"
+    cfg = LoadedConfig(
+        data={"harness": {"kind": "opencode", "hook_bridge": {"enabled": True}}},
+        repo_root=tmp_path,
+        repo_path=explicit_cfg,
+        layers=[f"config:{explicit_cfg}"],
+    )
+
+    action = _bridge_action(build(cfg, cat, project_type="unknown"))
+
+    assert action is not None
+    assert action.target == tmp_path / ".opencode/plugins/zz-agent-tools-hook-bridge.js"
+
+
+def test_plan_opencode_explicit_home_plugin_path_allowed_without_repo_config(
+    fake_agent_tools, tmp_path, monkeypatch
+):
+    import os
+
+    cat = Catalog.scan(str(fake_agent_tools))
+    global_cfg = tmp_path / "config.yaml"
+    cfg = LoadedConfig(
+        data={
+            "harness": {
+                "kind": "opencode",
+                "settings_path": "~/.config/opencode/plugins/zz-agent-tools-hook-bridge.js",
+                "hook_bridge": {"enabled": True},
+            }
+        },
+        repo_root=tmp_path,
+        global_path=global_cfg,
+        layers=[f"global:{global_cfg}"],
+    )
+
+    action = _bridge_action(build(cfg, cat, project_type="unknown"))
+
+    assert action is not None
+    assert action.target == Path(
+        os.path.expanduser("~/.config/opencode/plugins/zz-agent-tools-hook-bridge.js")
+    )
 
 
 def test_plan_hook_bridge_skipped_without_harness(fake_agent_tools, tmp_path):
