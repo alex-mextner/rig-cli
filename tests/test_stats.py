@@ -22,7 +22,8 @@ from riglib.stats.command import _passes, collect, parse_date
 from riglib.stats.model import ToolInvocation
 from riglib.stats.render import json_out, tui, web
 from riglib.stats.sources.base import parse_epoch, parse_iso
-from riglib.stats.taxonomy import categorize, detect_our_cli
+from riglib.stats.taxonomy import OUR_CLIS, categorize, detect_our_cli
+from riglib.permissions import DEFAULT_ECOSYSTEM_TOOLS
 
 
 # ── fixture builders: write minimal-but-real-shaped logs into a fake HOME ────────────────
@@ -95,6 +96,10 @@ def write_opencode_part(home: Path, session: str, repo: str, tool: str, command:
 
 
 # ── taxonomy unit tests ──────────────────────────────────────────────────────────────────
+def test_our_clis_track_the_provisioned_ecosystem_surface():
+    assert set(DEFAULT_ECOSYSTEM_TOOLS) <= OUR_CLIS
+
+
 def test_categorize_baseline_tools():
     assert categorize("Read")[0] == "baseline"
     assert categorize("Edit")[0] == "baseline"
@@ -108,6 +113,8 @@ def test_categorize_our_clis_inside_bash():
     cat, label = categorize("Bash", command="review --staged -C /repo")
     assert cat == "ours" and label == "review (cli)"
     assert categorize("Bash", command="tg 'done'")[0] == "ours"
+    cat, label = categorize("Bash", command="dev test")
+    assert cat == "ours" and label == "dev (cli)"
     assert categorize("Bash", command="cd /x && rig apply")[1] == "rig (cli)"
     # env-prefixed and piped commands still detect our CLI
     assert categorize("Bash", command="FOO=1 review -C /r")[0] == "ours"
@@ -150,6 +157,8 @@ def test_detect_our_cli_handles_pipelines():
     assert detect_our_cli("(cd /x && review)") == "review"
     assert detect_our_cli("{ review; }") == "review"
     assert detect_our_cli("/usr/local/bin/3d test") == "3d"
+    assert detect_our_cli("dev e2e smoke") == "dev"
+    assert detect_our_cli("dev-server up") is None
     assert detect_our_cli("(cd /x && ls)") is None
 
 
@@ -160,6 +169,7 @@ def test_detect_our_cli_is_quote_aware():
     assert detect_our_cli('echo "a && rig is great"') is None
     assert detect_our_cli('echo "tg"') is None
     assert detect_our_cli("printf 'run review later'") is None
+    assert detect_our_cli('git commit -m "wip; dev server fix"') is None
     # the headline case: a `;` INSIDE a quoted commit message must not split into a stage
     # whose "first program" is the frequent word `task` ∈ OUR_CLIS — that silently inflated
     # the adoption metric this command exists to measure (the original review HIGH finding).

@@ -210,7 +210,7 @@ AREAS: tuple[Area, ...] = (
         (
             _opt("permissions.enabled", KIND_BOOL, True,
                  "Provision the per-harness permissions layer: the command allowlist (tg/review/draw/"
-                 "3d/rig/task + gh/git/rg/uv/bun/jq/gitleaks pre-allowed, no per-call prompts) plus "
+                 "3d/rig/task/dev + gh/git/rg/uv/bun/jq/gitleaks pre-allowed, no per-call prompts) plus "
                  "the deny/ask rule baselines (claude-code only; raw PR-merge, force-push, sudo rm, "
                  "screencapture denied; pkill/killall/git reset --hard prompt). Additive — merges "
                  "into the existing lists, never clobbers or removes the user's own entries. Off = "

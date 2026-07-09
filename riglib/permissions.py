@@ -3,8 +3,8 @@
 What this is
 ------------
 rig provisions each agent harness's permission ALLOWLIST so our ecosystem CLIs (``tg``,
-``review``, ``draw``, ``3d``, ``rig``, ``task``) and the recommended external tools we rely on
-(``gh``, ``git``, ``rg``, ``uv``, ``bun``, ``jq``, ``gitleaks``) are pre-allowed — the agent
+``review``, ``draw``, ``3d``, ``rig``, ``task``, ``dev``) and the recommended external tools we
+rely on (``gh``, ``git``, ``rg``, ``uv``, ``bun``, ``jq``, ``gitleaks``) are pre-allowed — the agent
 never stops to ask permission for a known-safe command. The tool list is CONFIG-DRIVEN
 (declared in ``rig.yaml`` / the global config under the ``permissions`` block) with a sensible
 default set ON; this module is the registry that backs it and the renderer that turns one tool
@@ -48,9 +48,11 @@ from typing import Callable
 # we already lean on, NEVER inherently-destructive standalone commands (``rm``/``sudo``/``dd``),
 # which are deliberately absent so they stay behind a prompt.
 #
-# Our ecosystem CLIs (tg/review/draw/3d/rig/task) and the external tools we lean on. ``task`` is
-# alex-mextner/task-cli (the binary is ``task``). ``rg`` is ripgrep's binary name.
-DEFAULT_ECOSYSTEM_TOOLS: tuple[str, ...] = ("tg", "review", "draw", "3d", "rig", "task")
+# Our ecosystem CLIs (tg/review/draw/3d/rig/task/dev) and the external tools we lean on. ``task``
+# is alex-mextner/task-cli (the binary is ``task``). ``dev`` is the agent-tools project-local
+# development command surface: rig provisions the permission entry, while the dev helper's own
+# implementation/provenance stays in agent-tools. ``rg`` is ripgrep's binary name.
+DEFAULT_ECOSYSTEM_TOOLS: tuple[str, ...] = ("tg", "review", "draw", "3d", "rig", "task", "dev")
 DEFAULT_EXTERNAL_TOOLS: tuple[str, ...] = ("gh", "git", "rg", "uv", "bun", "jq", "gitleaks")
 DEFAULT_TOOLS: tuple[str, ...] = DEFAULT_ECOSYSTEM_TOOLS + DEFAULT_EXTERNAL_TOOLS
 

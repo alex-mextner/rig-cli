@@ -843,9 +843,9 @@ _PERMISSION_RULE_RE = re.compile(r"^[A-Za-z0-9_*.-]+(\(.+\))?\Z")
 def _validate_permissions(p: dict[str, Any]) -> None:
     """Validate the ``permissions`` block — the per-harness command allowlist rig provisions.
 
-    rig pre-allows our ecosystem CLIs (tg/review/draw/3d/rig/task) + the safe-to-allow external
-    dev tools (gh/git/rg/uv/bun/jq/gitleaks) in the harness's permission allowlist so the agent
-    never stops to ask for a known-safe command. Default **ON**: an EMPTY/absent block still
+    rig pre-allows our ecosystem CLIs (tg/review/draw/3d/rig/task/dev) + the safe-to-allow
+    external dev tools (gh/git/rg/uv/bun/jq/gitleaks) in the harness's permission allowlist so the
+    agent never stops to ask for a known-safe command. Default **ON**: an EMPTY/absent block still
     provisions the DEFAULT tool set (a present block with ``enabled`` not false opts in). The list
     is config-driven — ``tools`` (a list of command names) REPLACES the default set, ``extra``
     adds, ``disable`` removes. Fail-closed, consistent with every other block, on: a non-mapping
