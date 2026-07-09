@@ -25,6 +25,7 @@ from .config import (
     GITIGNORE_DEFAULT_ENTRIES,
     GITIGNORE_DEFAULT_EXCLUDESFILE,
     LoadedConfig,
+    OPENCODE_HOOK_BRIDGE_PLUGIN_NAME,
 )
 from .github_actions import GITHUB_ACTIONS_DEFAULTS
 from .github_browser import UI_ONLY_TOGGLES
@@ -826,7 +827,7 @@ _HOOK_BRIDGE_HARNESSES = {
     },
     "opencode": {
         "module": "opencode_hook_bridge",
-        "settings": "~/.config/opencode/plugins/agent-tools-hook-bridge.js",
+        "settings": f".opencode/plugins/{OPENCODE_HOOK_BRIDGE_PLUGIN_NAME}",
         "format": "opencode-plugin",
     },
 }

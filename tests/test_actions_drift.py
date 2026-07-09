@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1798,6 +1799,10 @@ def _bridge_results(report):
     return [r for r in report.results if r.action.kind == "register_hook_bridge"]
 
 
+def _git_init(repo: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, timeout=10)
+
+
 def _read_toml(path: Path) -> dict:
     try:
         import tomllib
@@ -1903,7 +1908,7 @@ def test_opencode_hook_bridge_links_plugin(fake_agent_tools, tmp_path):
     """Apply wires opencode by symlinking the bridge plugin into the plugin directory."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    plugin = repo / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    plugin = repo / "opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
     cat = Catalog.scan(str(fake_agent_tools))
     plan = build(
         _bridge_cfg(
@@ -1926,11 +1931,237 @@ def test_opencode_hook_bridge_links_plugin(fake_agent_tools, tmp_path):
     assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
 
 
+def test_opencode_hook_bridge_default_path_is_repo_local_ignored_and_in_sync(fake_agent_tools, tmp_path):
+    """The shipped opencode default is a repo-local ordered plugin symlink that rig git-ignores."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "opencode", "auto_mode": True, "hook_bridge": {"enabled": True}},
+        },
+        repo_root=repo,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    assert plugin.is_symlink()
+    assert plugin.resolve() == (fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude_text = exclude.read_text(encoding="utf-8")
+    assert "/.opencode/plugins/zz-agent-tools-hook-bridge.js" in exclude_text
+    assert "/.opencode/plugins/zz-agent-tools-hook-bridge.js.rig-bak-*" in exclude_text
+    assert detect(plan).in_sync
+
+
+def test_opencode_hook_bridge_drift_when_repo_local_plugin_not_ignored(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    (repo / ".git" / "info" / "exclude").write_text("", encoding="utf-8")
+
+    before = detect(plan)
+
+    assert any(
+        i.item == "hook-bridge" and i.direction == "missing" and "git-ignored" in i.detail
+        for i in before.items
+    )
+    repaired = run_plan(plan)
+    assert not repaired.errors, [r.detail for r in repaired.errors]
+    assert detect(plan).in_sync
+
+
+def test_opencode_hook_bridge_removes_legacy_global_managed_symlink(fake_agent_tools, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    old = xdg / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    old.parent.mkdir(parents=True)
+    old.symlink_to(fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    assert plugin.is_symlink()
+    assert not old.exists()
+    assert "removed legacy global opencode plugin" in _bridge_results(report)[0].detail
+
+
+def test_opencode_hook_bridge_drift_detects_legacy_global_symlink(fake_agent_tools, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    old = xdg / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    old.parent.mkdir(parents=True)
+    old.symlink_to(fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    old.symlink_to(fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
+
+    before = detect(plan)
+
+    assert any(
+        i.item == "hook-bridge" and i.direction == "modified" and "legacy global" in i.detail
+        for i in before.items
+    )
+    repaired = run_plan(plan)
+    assert not repaired.errors, [r.detail for r in repaired.errors]
+    assert not old.exists()
+    assert detect(plan).in_sync
+
+
+def test_opencode_hook_bridge_removes_legacy_symlink_to_prior_checkout(fake_agent_tools, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    prior = tmp_path / "old-agent-tools" / "lib" / "opencode_hook_bridge" / "plugin.js"
+    prior.parent.mkdir(parents=True)
+    prior.write_text("export const Old = async () => ({});\n", encoding="utf-8")
+    old = xdg / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    old.parent.mkdir(parents=True)
+    old.symlink_to(prior)
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    assert not old.exists()
+    assert plugin.is_symlink()
+    old.symlink_to(prior)
+    before = detect(plan)
+    assert any(i.item == "hook-bridge" and "legacy global" in i.detail for i in before.items)
+
+
+def test_opencode_hook_bridge_leaves_unrelated_legacy_global_symlink(fake_agent_tools, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    other = tmp_path / "other-plugin.js"
+    other.write_text("export const Other = async () => ({});\n", encoding="utf-8")
+    old = xdg / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    old.parent.mkdir(parents=True)
+    old.symlink_to(other)
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    assert old.is_symlink()
+    assert old.resolve() == other
+    assert not any("legacy global" in i.detail for i in detect(plan).items)
+
+
+def test_opencode_hook_bridge_legacy_settings_path_does_not_delete_itself(fake_agent_tools, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    plugin = xdg / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=plugin,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    assert plugin.is_symlink()
+    assert plugin.resolve() == (fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
+
+
 def test_opencode_hook_bridge_backs_up_existing_plugin_file(fake_agent_tools, tmp_path):
     """A user file at the opencode plugin path is backed up before rig links the bridge."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    plugin = repo / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    plugin = repo / "opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
     plugin.parent.mkdir(parents=True)
     plugin.write_text("// user plugin\n", encoding="utf-8")
     cat = Catalog.scan(str(fake_agent_tools))
@@ -1953,7 +2184,7 @@ def test_opencode_hook_bridge_backs_up_existing_plugin_file(fake_agent_tools, tm
     result = _bridge_results(report)[0]
     assert result.status == "backed_up"
     assert plugin.is_symlink()
-    backups = list(plugin.parent.glob("agent-tools-hook-bridge.js.rig-bak-*"))
+    backups = list(plugin.parent.glob("zz-agent-tools-hook-bridge.js.rig-bak-*"))
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == "// user plugin\n"
     assert detect(plan).in_sync
@@ -1963,7 +2194,7 @@ def test_opencode_hook_bridge_overwrites_existing_plugin_directory(fake_agent_to
     """on_conflict=overwrite removes a directory collision before linking the opencode plugin."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    plugin = repo / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    plugin = repo / "opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
     plugin.mkdir(parents=True)
     (plugin / "old.js").write_text("// stale directory content\n", encoding="utf-8")
     cat = Catalog.scan(str(fake_agent_tools))
@@ -1995,7 +2226,7 @@ def test_opencode_hook_bridge_repoints_existing_plugin_symlink(fake_agent_tools,
     """A stale opencode plugin symlink is re-pointed without backup noise."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    plugin = repo / "opencode" / "plugins" / "agent-tools-hook-bridge.js"
+    plugin = repo / "opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
     plugin.parent.mkdir(parents=True)
     wrong_dest = repo / "wrong-plugin.js"
     wrong_dest.write_text("// wrong bridge\n", encoding="utf-8")
@@ -2024,6 +2255,32 @@ def test_opencode_hook_bridge_repoints_existing_plugin_symlink(fake_agent_tools,
     assert plugin.is_symlink()
     assert plugin.resolve() == (fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
     assert wrong_dest.read_text(encoding="utf-8") == "// wrong bridge\n"
+    assert detect(plan).in_sync
+
+
+def test_opencode_hook_bridge_suffixless_settings_path_uses_ordered_plugin_name(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings_dir = repo / ".opencode" / "plugins"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(
+            repo,
+            fake_agent_tools,
+            settings_path=settings_dir,
+            kind="opencode",
+            hook_bridge={"enabled": True},
+        ),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+
+    plugin = settings_dir / "zz-agent-tools-hook-bridge.js"
+    assert not report.errors, [r.detail for r in report.errors]
+    assert plugin.is_symlink()
+    assert plugin.resolve() == (fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js")
     assert detect(plan).in_sync
 
 

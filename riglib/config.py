@@ -1087,6 +1087,17 @@ SHIP_DELEGATOR_EXCLUDE_COMMENT = (
     "does not dirty the worktree."
 )
 
+# rig provisions the opencode hook bridge as a repo-local symlink so it can run after project
+# plugins. The symlink target is machine-local, so it must be ignored per repo rather than
+# committed.
+OPENCODE_HOOK_BRIDGE_EXCLUDE_BEGIN_MARKER = "# >>> rig-managed opencode hook bridge (do not edit) >>>"
+OPENCODE_HOOK_BRIDGE_EXCLUDE_END_MARKER = "# <<< rig-managed opencode hook bridge (do not edit) <<<"
+OPENCODE_HOOK_BRIDGE_EXCLUDE_COMMENT = (
+    "# rig provisions the opencode hook bridge plugin symlink; ignored so it does not dirty "
+    "the worktree."
+)
+OPENCODE_HOOK_BRIDGE_PLUGIN_NAME = "zz-agent-tools-hook-bridge.js"
+
 
 def _validate_ship_delegator(sd: dict[str, Any]) -> None:
     """Validate the ``ship_delegator`` block — rig's per-repo ``gh ship`` delegator.

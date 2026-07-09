@@ -405,7 +405,7 @@ def test_plan_opencode_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_pa
     assert a.options["module"] == "opencode_hook_bridge"
     assert a.options["format"] == "opencode-plugin"
     assert a.options["lib_dir"] == str(fake_agent_tools / "lib")
-    assert a.target == Path(os.environ["XDG_CONFIG_HOME"]) / "opencode/plugins/agent-tools-hook-bridge.js"
+    assert a.target == tmp_path / ".opencode/plugins/zz-agent-tools-hook-bridge.js"
 
 
 def test_plan_hook_bridge_skipped_without_harness(fake_agent_tools, tmp_path):

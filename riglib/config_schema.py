@@ -306,15 +306,18 @@ _HARNESS_BLOCK = Block(
         "enabled": Leaf("boolean", "provision the harness setting", default=True),
         "kind": Leaf(
             "string",
-            "which harness to provision (skills-dir: claude-code/opencode; instruction-file: "
-            "codex/gemini/pi/commandcode). The auto/permission-MODE write is claude-code-only "
-            "today; other kinds still get their skill discovery provisioned.",
+            "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode; "
+            "instruction-file: codex/gemini/pi/commandcode). The auto/permission-MODE write is "
+            "claude-code-only today; other kinds still get their skill discovery provisioned.",
             enum=_HARNESS_KIND_ENUM,
             default="claude-code",
         ),
         "auto_mode": Leaf("boolean", "true → auto-accept tool calls; false → interactive", default=True),
         "mode": Leaf("string", "pin the exact permission value (overrides auto_mode map)"),
-        "settings_path": Leaf("string", "the settings file to merge into", default=".claude/settings.json"),
+        "settings_path": Leaf(
+            "string",
+            "override the per-harness settings/config/plugin path; absent means rig uses the harness-specific default",
+        ),
     },
     nested={
         "hook_bridge": Block(

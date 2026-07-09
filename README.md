@@ -184,7 +184,7 @@ so autonomy is part of the reproducible config — not a manual per-machine togg
 ```yaml
 harness:
   enabled: true
-  kind: claude-code          # skills-dir: claude-code|opencode · instruction-file: codex|gemini|pi|commandcode (config-schema.md)
+  kind: claude-code          # skills-dir: claude-code|codex · native: opencode · instruction-file: codex|gemini|pi|commandcode
   auto_mode: true            # RECOMMENDED: writes permissions.defaultMode=auto (user scope)
   hook_bridge: { enabled: true }   # wire the agents-hooks/v1 → harness dispatcher (default ON)
 ```
@@ -208,8 +208,12 @@ native config/plugin surfaces, not the descriptor files `agent_hooks` installs, 
 required to make the descriptors actually execute (agent-tools#18). The same `harness` block
 therefore registers the matching bridge: Claude Code gets `cc_hook_bridge` in `settings.json`,
 Codex gets `codex_hook_bridge` in `~/.codex/config.toml`, and opencode gets
-`opencode_hook_bridge/plugin.js` symlinked into `~/.config/opencode/plugins/`. Without that
-bridge the guards above would be inert files. Set `hook_bridge: { enabled: false }` to opt out.
+`opencode_hook_bridge/plugin.js` symlinked into the repo-local
+`.opencode/plugins/zz-agent-tools-hook-bridge.js` ordered plugin path. Without that bridge the
+guards above would be inert files. Set `hook_bridge: { enabled: false }` to opt out.
+Because that symlink is machine-local, rig also adds it to the repo's `.git/info/exclude`; when
+upgrading from the prior global opencode bridge path, rig removes the old managed global symlink
+if it still points at an agent-tools opencode bridge plugin.
 See [`docs/config-schema.md`](docs/config-schema.md) for the full `harness` schema and the
 per-harness event coverage.
 
