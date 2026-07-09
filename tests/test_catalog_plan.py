@@ -9,7 +9,7 @@ import pytest
 from riglib.catalog import Catalog, CatalogError
 from riglib.config import LoadedConfig
 from riglib.errors import UnknownItemError
-from riglib.plan import build
+from riglib.plan import build, resolve_category_target
 
 
 def test_catalog_scan_finds_all_categories(fake_agent_tools):
@@ -377,6 +377,21 @@ def test_plan_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_path):
     assert a.target == (tmp_path / ".claude" / "settings.json")
 
 
+def test_plan_codex_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_path, monkeypatch):
+    import os
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"harness": {"kind": "codex", "hook_bridge": {"enabled": True}}}, tmp_path)
+    a = _bridge_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.options["kind"] == "codex"
+    assert a.options["module"] == "codex_hook_bridge"
+    assert a.options["lib_dir"] == str(fake_agent_tools / "lib")
+    assert a.target == Path(os.path.expanduser("~/.codex/config.toml"))
+
+
 def test_plan_hook_bridge_skipped_without_harness(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
     cfg = _cfg({"skills": {"enabled": False}}, tmp_path)  # no harness block
@@ -418,6 +433,63 @@ def test_plan_hook_bridge_honors_settings_path_and_python(fake_agent_tools, tmp_
     assert a.options["python"] == "/opt/py/bin/python3"
 
 
+def test_plan_claude_hook_bridge_preserves_non_json_settings_suffix(fake_agent_tools, tmp_path):
+    """Claude behavior is unchanged: explicit settings_path suffixes are not rejected."""
+    settings = tmp_path / ".claude" / "settings.jsonc"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"harness": {"kind": "claude-code", "settings_path": str(settings),
+                     "hook_bridge": {"enabled": True}}},
+        tmp_path,
+    )
+    a = _bridge_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.target == settings
+
+
+def test_plan_codex_hook_bridge_honors_settings_path_and_python(fake_agent_tools, tmp_path):
+    settings = tmp_path / ".codex" / "config.toml"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"harness": {"kind": "codex", "settings_path": str(settings),
+                     "hook_bridge": {"enabled": True, "python": "/opt/py/bin/python3"}}},
+        tmp_path,
+    )
+    a = _bridge_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.target == settings
+    assert a.options["python"] == "/opt/py/bin/python3"
+
+
+def test_plan_codex_hook_bridge_accepts_suffixless_settings_dir(fake_agent_tools, tmp_path):
+    from riglib.actions.runner import hook_bridge_settings_file
+
+    settings_dir = tmp_path / "codex-config"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"harness": {"kind": "codex", "settings_path": str(settings_dir),
+                     "hook_bridge": {"enabled": True}}},
+        tmp_path,
+    )
+    a = _bridge_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.target == settings_dir
+    assert hook_bridge_settings_file(a) == settings_dir / "config.toml"
+
+
+def test_plan_codex_hook_bridge_skips_wrong_settings_path_format(fake_agent_tools, tmp_path):
+    settings = tmp_path / ".codex" / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"harness": {"kind": "codex", "settings_path": str(settings),
+                     "hook_bridge": {"enabled": True}}},
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    assert _bridge_action(plan) is None
+    assert any("expects a .toml settings_path" in n and str(settings) in n for n in plan.notes), plan.notes
+
+
 def test_plan_hook_bridge_skipped_when_dispatcher_module_absent(fake_agent_tools, tmp_path):
     """Fail-closed: an agent-tools checkout without lib/cc_hook_bridge must NOT wire a
     settings.json command that would error at runtime — skip with an actionable note."""
@@ -438,3 +510,104 @@ def test_plan_hook_bridge_skipped_when_entrypoint_absent(fake_agent_tools, tmp_p
     plan = build(cfg, cat, project_type="unknown")
     assert _bridge_action(plan) is None
     assert any("cc_hook_bridge" in n and "__main__.py" in n for n in plan.notes), plan.notes
+
+
+def test_plan_codex_hook_bridge_skipped_when_dispatcher_absent(fake_agent_tools, tmp_path):
+    """Fail-closed for Codex too: never register a config.toml command for a missing bridge."""
+    (fake_agent_tools / "lib" / "codex_hook_bridge" / "__main__.py").unlink()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"harness": {"kind": "codex", "hook_bridge": {"enabled": True}}}, tmp_path)
+    plan = build(cfg, cat, project_type="unknown")
+    assert _bridge_action(plan) is None
+    assert any("codex_hook_bridge" in n and "__main__.py" in n for n in plan.notes), plan.notes
+
+
+def test_plan_codex_agent_hooks_default_to_codex_hooks(fake_agent_tools, tmp_path, monkeypatch):
+    import os
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "codex"},
+        },
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    hook_actions = [a for a in plan.actions if a.kind == "install_agent_hook"]
+    assert hook_actions
+    assert {a.target for a in hook_actions} == {Path(os.path.expanduser("~/.codex/hooks"))}
+    assert {a.item for a in hook_actions} >= {"block-no-verify", "background-subagent-gate"}
+    assert resolve_category_target(cfg, "agent_hooks") == Path(os.path.expanduser("~/.codex/hooks"))
+
+
+def test_plan_codex_bridge_does_not_wire_pre_agent_yet(fake_agent_tools, tmp_path):
+    from riglib.actions.runner import hook_bridge_entries
+
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "codex", "hook_bridge": {"enabled": True}},
+        },
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    hook_actions = [a for a in plan.actions if a.kind == "install_agent_hook"]
+    assert any(a.item == "background-subagent-gate" for a in hook_actions)
+    bridge = _bridge_action(plan)
+    assert bridge is not None
+    assert bridge.options["kind"] == "codex"
+    entries = hook_bridge_entries(bridge)
+    assert set(entries) == {"PreToolUse", "PostToolUse", "Stop"}
+    assert "SubagentStart" not in str(entries)
+    assert "Agent" not in str(entries)
+
+
+def test_plan_codex_agent_hooks_preserve_custom_target(fake_agent_tools, tmp_path):
+    custom = tmp_path / "custom-hooks"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True, "target": str(custom)},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "codex"},
+        },
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    hook_actions = [a for a in plan.actions if a.kind == "install_agent_hook"]
+    assert hook_actions
+    assert {a.target for a in hook_actions} == {custom}
+    assert resolve_category_target(cfg, "agent_hooks") == custom
+
+
+def test_plan_codex_agent_hooks_preserve_custom_default_target(fake_agent_tools, tmp_path):
+    custom = tmp_path / "default-hooks"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "skills": {"enabled": False},
+            "defaults": {"hooks_target": str(custom)},
+            "agent_hooks": {"all": True},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "codex"},
+        },
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    hook_actions = [a for a in plan.actions if a.kind == "install_agent_hook"]
+    assert hook_actions
+    assert {a.target for a in hook_actions} == {custom}
+    assert resolve_category_target(cfg, "agent_hooks") == custom

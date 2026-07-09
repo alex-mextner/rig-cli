@@ -31,6 +31,12 @@ from .actions.runner import (
     _resolve_excludes_target,
     build_hook_descriptor,
     crontab_with_managed,
+    codex_hook_bridge_block,
+    codex_hook_bridge_block_bounds,
+    codex_hook_bridge_block_has_table_header,
+    codex_hook_bridge_block_malformed,
+    codex_hook_bridge_conflict,
+    codex_hook_bridge_disabled_features,
     descriptor_text,
     desired_harness_value,
     desired_permission_specs,
@@ -40,7 +46,10 @@ from .actions.runner import (
     github_merge_state,
     github_ruleset_state,
     harness_settings_file,
+    hook_bridge_format,
     hook_bridge_entries,
+    hook_bridge_module,
+    hook_bridge_settings_file,
     managed_bridge_hook_in_sync,
     desired_mcp_server_entry,
     permissions_settings_file,
@@ -1134,7 +1143,7 @@ def _report_permission_extras(action: Action, ps, extras: list[str], config_file
 
 
 def _check_hook_bridge(action: Action, report: DriftReport) -> None:
-    """Flag drift between the configured cc_hook_bridge wiring and the settings file.
+    """Flag drift between the configured hook-bridge wiring and the harness config.
 
     missing  — the settings file is absent, or a managed dispatcher hook (one whose command
                carries ``cc_hook_bridge``) is not present for an (event, matcher) we ship.
@@ -1145,11 +1154,14 @@ def _check_hook_bridge(action: Action, report: DriftReport) -> None:
     Drift and apply share ``find_managed_bridge_hook`` + ``hook_bridge_entries`` so they
     never diverge. Only OUR managed blocks are checked; the user's other hooks are ignored.
     """
-    config_file = harness_settings_file(action)
+    config_file = hook_bridge_settings_file(action)
     if not config_file.is_file():
         report.items.append(
             DriftItem("missing", "harness", action.item, config_file, "harness settings file not written")
         )
+        return
+    if hook_bridge_format(action) == "toml":
+        _check_codex_hook_bridge(action, config_file, report)
         return
     try:
         data = json.loads(config_file.read_text(encoding="utf-8"))
@@ -1164,17 +1176,79 @@ def _check_hook_bridge(action: Action, report: DriftReport) -> None:
         blocks = hooks.get(event)
         for matcher, command in pairs:
             label = f"{event}[{matcher or '*'}]"
-            hk = find_managed_bridge_hook(blocks, matcher)
+            hk = find_managed_bridge_hook(blocks, matcher, hook_bridge_module(action))
             if hk is None:
                 report.items.append(
                     DriftItem("missing", "harness", action.item, config_file,
-                              f"cc_hook_bridge not wired for {label}")
+                              f"{hook_bridge_module(action)} not wired for {label}")
                 )
             elif not managed_bridge_hook_in_sync(hk, command):
                 report.items.append(
                     DriftItem("modified", "harness", action.item, config_file,
-                              f"cc_hook_bridge hook for {label} is stale (apply will rewrite)")
+                              f"{hook_bridge_module(action)} hook for {label} is stale (apply will rewrite)")
                 )
+
+
+def _check_codex_hook_bridge(action: Action, config_file: Path, report: DriftReport) -> None:
+    try:
+        text = config_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        report.items.append(
+            DriftItem("modified", "harness", action.item, config_file, f"harness config unreadable: {exc}")
+        )
+        return
+    if codex_hook_bridge_block_malformed(text):
+        report.items.append(
+            DriftItem("modified", "harness", action.item, config_file,
+                      "managed Codex hook bridge markers are incomplete")
+        )
+        return
+    bounds = codex_hook_bridge_block_bounds(text)
+    stripped = text
+    if bounds is not None:
+        start, end = bounds
+        stripped = text[:start] + text[end:]
+    conflict = codex_hook_bridge_conflict(stripped)
+    if conflict:
+        report.items.append(
+            DriftItem(
+                "modified",
+                "harness",
+                action.item,
+                config_file,
+                f"{conflict} in {config_file}; rig apply will not overwrite unmanaged Codex hooks TOML",
+            )
+        )
+        return
+    disabled = codex_hook_bridge_disabled_features(text)
+    if disabled:
+        report.items.append(
+            DriftItem(
+                "modified",
+                "harness",
+                action.item,
+                config_file,
+                f"Codex hooks disabled by {', '.join(disabled)} in {config_file} (apply will enable)",
+            )
+        )
+        return
+    if bounds is None:
+        report.items.append(
+            DriftItem("missing", "harness", action.item, config_file,
+                      f"codex_hook_bridge not wired in {config_file}")
+        )
+        return
+    start, end = bounds
+    current = text[start:end]
+    desired = codex_hook_bridge_block(
+        action,
+        include_table_header=codex_hook_bridge_block_has_table_header(current),
+    )
+    if current != desired:
+        report.items.append(
+            DriftItem("modified", "harness", action.item, config_file,
+                      "codex_hook_bridge TOML block is stale (apply will rewrite)")
+        )
 
 
 def _check_schedule(action: Action, report: DriftReport) -> None:

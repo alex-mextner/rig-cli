@@ -53,6 +53,9 @@ _BUILTIN_TARGETS = {
     "ci": ".github/workflows",
     "mcp": "~/.claude/mcp",
 }
+_HARNESS_AGENT_HOOK_TARGETS = {
+    "codex": "~/.codex/hooks",
+}
 _DEFAULTS_KEY = {
     "skills": "skills_target",
     "agent_hooks": "hooks_target",
@@ -121,6 +124,21 @@ def _resolve_target(config: LoadedConfig, category: str) -> Path:
     if not target:
         target = _BUILTIN_TARGETS[category]
     return _expand(str(target), config.repo_root)
+
+
+def _resolve_agent_hooks_target(config: LoadedConfig) -> Path:
+    """Resolve the agent-hooks descriptor dir, defaulting to the active harness when needed."""
+    ah = config.category("agent_hooks")
+    target = ah.get("target")
+    defaults_target = config.defaults.get(_DEFAULTS_KEY["agent_hooks"])
+    kind = _harness_kind_for_skills(config)
+    harness_default = _HARNESS_AGENT_HOOK_TARGETS.get(kind)
+    legacy_default = _BUILTIN_TARGETS["agent_hooks"]
+    if harness_default and (not target or target == legacy_default) and (
+        not defaults_target or defaults_target == legacy_default
+    ):
+        return _expand(harness_default, config.repo_root)
+    return _resolve_target(config, "agent_hooks")
 
 
 def _same_dir(a: Path, b: Path) -> bool:
@@ -210,6 +228,8 @@ def resolve_category_target(config: LoadedConfig, category: str) -> Path | None:
     raw = config.category(category).get("target")
     if raw == "export-only":
         return None
+    if category == "agent_hooks":
+        return _resolve_agent_hooks_target(config)
     return _resolve_target(config, category)
 
 
@@ -403,8 +423,8 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     ah = config.category("agent_hooks")
     if ah.get("enabled") is not False:
         ah.setdefault("all", True)
-        hooks_target = _resolve_target(config, "agent_hooks")
-        target_kind = ah.get("target_kind", "claude-code")
+        hooks_target = _resolve_agent_hooks_target(config)
+        target_kind = ah.get("target_kind") or "claude-code"
         for item in catalog.by_category("agent_hooks"):
             if _item_enabled(ah, item, type_enabled=False):
                 spec = ah.get("items", {}).get(item.name, {})
@@ -792,38 +812,45 @@ def _resolve_permission_rules(
     return allow_rules, deny, ask
 
 
-# Harnesses whose settings file CC's hook contract applies to. Only claude-code today —
-# other harnesses don't use the settings.json PreToolUse/Stop mechanism this bridge targets.
-_HOOK_BRIDGE_HARNESSES = {"claude-code"}
+_HOOK_BRIDGE_HARNESSES = {
+    "claude-code": {
+        "module": "cc_hook_bridge",
+        "settings": ".claude/settings.json",
+        "format": "json",
+    },
+    "codex": {
+        "module": "codex_hook_bridge",
+        "settings": "~/.codex/config.toml",
+        "format": "toml",
+    },
+}
 
 
 def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) -> None:
     """Plan the agents-hooks/v1 → harness bridge registration, if applicable.
 
-    Claude Code never runs the ``~/.claude/hooks/*.json`` descriptors rig installs; it only
-    runs hooks declared in ``settings.json``. Without this, every agent-hook is INERT in CC
-    (agent-tools#18). This emits one ``register_hook_bridge`` action that wires the
-    ``cc_hook_bridge`` dispatcher into the SAME settings file the ``harness`` block writes.
+    Harnesses do not run the ``agent_hooks`` descriptors directly; they need a bridge registered
+    in their own config. This emits one ``register_hook_bridge`` action that wires the relevant
+    dispatcher from ``agent-tools/lib`` into that harness config.
 
     Gated on a harness block being present, enabled, of a supported kind, AND
     ``agent_hooks`` being enabled (a bridge with no installed descriptors is pointless) AND
     ``harness.hook_bridge`` not turned off. Anchored on the resolved agent-tools checkout so
-    the dispatcher command imports ``cc_hook_bridge`` from ``<checkout>/lib``.
+    the dispatcher command imports the harness bridge from ``<checkout>/lib``.
     """
     h = config.data.get("harness")
     if not isinstance(h, dict) or not h or h.get("enabled") is False:
         return
     kind = str(h.get("kind", _DEFAULT_HARNESS_KIND))
     bridge_cfg = h.get("hook_bridge")
-    if kind not in _HOOK_BRIDGE_HARNESSES or kind not in _HARNESS_SETTINGS:
-        # The schema now accepts opencode/codex/gemini/pi/commandcode (for skills), but the CC
-        # settings.json hook-bridge contract applies ONLY to claude-code. If a config EXPLICITLY
-        # asked for the bridge on such a kind, say it isn't wired (don't silently drop it) — the
-        # default-on case stays quiet since the bridge is a CC-only concept the user didn't pick.
+    bridge_spec = _HOOK_BRIDGE_HARNESSES.get(kind)
+    if bridge_spec is None:
+        # The schema accepts opencode/gemini/pi/commandcode for skills, but no hook bridge is
+        # known for those harness config formats yet. If a config EXPLICITLY asked for the bridge
+        # on such a kind, say it is not wired; the default-on case stays quiet.
         if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is True:
             plan.notes.append(
-                f"hook_bridge: skipped — kind '{kind}' does not use the claude-code settings.json "
-                "hook contract; the agents-hooks bridge is a claude-code-only concept"
+                f"hook_bridge: skipped — kind '{kind}' has no supported agents-hooks bridge yet"
             )
         return
     if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is False:
@@ -837,12 +864,13 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
         )
         return
     lib_dir = catalog.source / "lib"
-    # Fail-CLOSED: never wire a settings.json command that would error at runtime. The
+    # Fail-CLOSED: never wire a harness-config command that would error at runtime. The
     # catalog only checks for skills/ + agent-hooks/, so an older agent-tools checkout can
-    # lack a runnable lib/cc_hook_bridge package — wiring it anyway means every CC tool call
-    # hits a broken hook (which, fail-open, is harmless but noisy). Skip with a clear,
+    # lack a runnable bridge package — wiring it anyway means every tool call hits a broken
+    # hook (which, fail-open, is harmless but noisy). Skip with a clear,
     # actionable note instead.
-    bridge_dir = lib_dir / "cc_hook_bridge"
+    module = str(bridge_spec["module"])
+    bridge_dir = lib_dir / module
     bridge_required = [bridge_dir / "dispatch.py", bridge_dir / "__main__.py"]
     bridge_missing = [p.name for p in bridge_required if not p.is_file()]
     if bridge_missing:
@@ -852,10 +880,26 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
             "the runnable dispatcher)"
         )
         return
-    settings_path = h.get("settings_path") or _HARNESS_SETTINGS[kind]
+    explicit_settings_path = h.get("settings_path")
+    settings_path = explicit_settings_path or bridge_spec["settings"]
+    expected_suffix = ".toml" if bridge_spec["format"] == "toml" else ".json"
+    actual_suffix = Path(str(settings_path)).suffix
+    if (
+        bridge_spec["format"] == "toml"
+        and explicit_settings_path
+        and actual_suffix
+        and actual_suffix != expected_suffix
+    ):
+        plan.notes.append(
+            f"hook_bridge: skipped — kind '{kind}' expects a {expected_suffix} settings_path, "
+            f"got {settings_path}"
+        )
+        return
     options: dict[str, Any] = {
         "kind": kind,
         "lib_dir": str(lib_dir),
+        "module": module,
+        "format": str(bridge_spec["format"]),
     }
     if isinstance(bridge_cfg, dict) and bridge_cfg.get("python"):
         options["python"] = str(bridge_cfg["python"])

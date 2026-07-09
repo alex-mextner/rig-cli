@@ -212,7 +212,9 @@ _AGENT_HOOKS_BLOCK = Block(
         "enabled": Leaf("boolean", "install the agent-hook guards", default=True),
         "target": Leaf("string", "where hook descriptors are written", default="~/.claude/hooks"),
         "target_kind": Leaf(
-            "string", "logical-point → harness-event mapping", enum=("claude-code", "generic")
+            "string",
+            "descriptor target kind",
+            enum=("claude-code", "generic"),
         ),
         "all": Leaf("boolean", "install all guard hooks", default=True),
         # Two RUNTIME behaviour knobs read BY the installed hooks from this committed rig.yaml
@@ -316,9 +318,9 @@ _HARNESS_BLOCK = Block(
     },
     nested={
         "hook_bridge": Block(
-            doc="wire the agents-hooks/v1 → CC dispatcher into settings.json.",
+            doc="wire the agents-hooks/v1 dispatcher into the supported harness config.",
             leaves={
-                "enabled": Leaf("boolean", "wire the cc_hook_bridge dispatcher", default=True),
+                "enabled": Leaf("boolean", "wire the supported harness hook-bridge dispatcher", default=True),
                 "python": Leaf("string", "the interpreter the dispatcher runs under", default="python3"),
             },
         ),
