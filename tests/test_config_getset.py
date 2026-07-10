@@ -229,6 +229,39 @@ def test_cli_set_scalar_coercion_writes_bool(tmp_path, capsys, fake_agent_tools,
     assert len(_mock_apply) == 1  # reconcile ran
 
 
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        ("gitignore.enabled", "false"),
+        ("tg_ctl.enabled", "false"),
+        ("tmux.enabled", "false"),
+        ("mode.name", "autonomous"),
+    ],
+)
+def test_cli_set_rejects_global_only_key_without_global_flag(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply, path, value
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    repo = tmp_path / "repo"
+    rig = repo / "rig.yaml"
+    _w(
+        rig,
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n",
+    )
+
+    rc = main(["config", "set", path, value, "-C", str(repo)])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "global-only config block" in captured.err
+    assert "use `--global`" in captured.err
+    assert path.split(".", 1)[0] not in rig.read_text(encoding="utf-8")
+    assert not (tmp_path / "xdg" / "rig" / "config.yaml").exists()
+    assert _mock_apply == []
+
+
 def test_cli_set_creates_intermediate_keys(tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     repo = tmp_path / "repo"

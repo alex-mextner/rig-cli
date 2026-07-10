@@ -55,6 +55,7 @@ SCHEMA_ID = "https://github.com/alex-mextner/rig-cli/blob/main/schema/rig.schema
 # The relative path the generator writes to and the validator cites in errors. One constant so
 # the CLI, the docs, and the sync test name the same file.
 SCHEMA_REL_PATH = "schema/rig.schema.json"
+PERMISSION_RULE_JSON_PATTERN = r"^(?!.*[\r\n])[A-Za-z0-9_*.-]+(\(.+\))?$"
 
 
 # ── leaf + block descriptors (the declarative registry) ───────────────────────────────
@@ -64,7 +65,8 @@ class Leaf:
 
     ``type`` is a JSON-Schema type name (``boolean``/``string``/``integer``/``array``/``object``).
     ``enum`` pins the allowed string values; ``minimum`` an integer floor; ``items_type`` the
-    element type of an ``array``; ``additional_properties_type`` models a string-keyed object map.
+    element type of an ``array``; ``items_pattern`` constrains string array entries;
+    ``additional_properties_type`` models a string-keyed object map.
     ``default`` is shown in the schema (editors surface it); ``None`` means "no default
     advertised" (omitted from the emitted node).
     """
@@ -75,6 +77,7 @@ class Leaf:
     default: Any = None
     minimum: int | None = None
     items_type: str | None = None
+    items_pattern: str | None = None
     additional_properties_type: str | None = None
 
     def to_node(self) -> dict[str, Any]:
@@ -87,6 +90,8 @@ class Leaf:
             node["minimum"] = self.minimum
         if self.type == "array" and self.items_type:
             node["items"] = {"type": self.items_type}
+            if self.items_pattern:
+                node["items"]["pattern"] = self.items_pattern
         if self.type == "object" and self.additional_properties_type:
             node["additionalProperties"] = {"type": self.additional_properties_type}
         return node
@@ -346,18 +351,129 @@ _PERMISSIONS_BLOCK = Block(
             "array",
             "raw permission-rule entries asserted present in the allow list, on TOP of the tool-derived ones",
             items_type="string",
+            items_pattern=PERMISSION_RULE_JSON_PATTERN,
         ),
         "deny": Leaf(
             "array",
             "permission-rule entries asserted present in the deny list (REPLACES the baked baseline)",
             items_type="string",
+            items_pattern=PERMISSION_RULE_JSON_PATTERN,
         ),
         "ask": Leaf(
             "array",
             "permission-rule entries asserted present in the ask list (REPLACES the baked baseline)",
             items_type="string",
+            items_pattern=PERMISSION_RULE_JSON_PATTERN,
         ),
         "settings_path": Leaf("string", "override the settings file (.json)"),
+    },
+)
+
+_MODE_BLOCK = Block(
+    doc="machine-wide operating mode; `autonomous` provisions review/fix, quorum, escalation, and parallelism policy.",
+    leaves={
+        "name": Leaf(
+            "string",
+            "operating mode for agent sessions",
+            enum=("standard", "autonomous"),
+            default="standard",
+        ),
+    },
+    nested={
+        "autonomous": Block(
+            doc="policy knobs active when mode.name is autonomous.",
+            nested={
+                "review_fix": Block(
+                    doc="review/fix loop policy.",
+                    leaves={
+                        "enabled": Leaf("boolean", "run review/fix iterations", default=True),
+                        "max_iterations": Leaf(
+                            "integer",
+                            "maximum review/fix iterations before escalation or budget stop",
+                            default=5,
+                            minimum=1,
+                        ),
+                        "until": Leaf(
+                            "string",
+                            "loop stop condition",
+                            enum=("clean", "budget", "manual"),
+                            default="clean",
+                        ),
+                    },
+                ),
+                "decisions": Block(
+                    doc="decision-making policy before asking the user.",
+                    nested={
+                        "review_quorum": Block(
+                            doc="multi-model quorum required for decisions.",
+                            leaves={
+                                "enabled": Leaf("boolean", "require review quorum for decisions", default=True),
+                                "min_iterations": Leaf(
+                                    "integer",
+                                    "minimum recorded review iterations",
+                                    default=2,
+                                    minimum=1,
+                                ),
+                                "min_models": Leaf(
+                                    "integer",
+                                    "minimum distinct models in the quorum",
+                                    default=3,
+                                    minimum=2,
+                                ),
+                            },
+                        ),
+                    },
+                ),
+                "escalation": Block(
+                    doc="when and how an agent may escalate to the user.",
+                    leaves={
+                        "framework_skill": Leaf(
+                            "string",
+                            "skill that defines escalation message behavior",
+                            default="decision-request-discipline",
+                        ),
+                        "require_parallel_worktree_comparison": Leaf(
+                            "boolean",
+                            "compare independent worktree attempts before escalation",
+                            default=True,
+                        ),
+                    },
+                ),
+                "parallel_worktree_comparison": Block(
+                    doc="parallel worktree comparison before escalation.",
+                    leaves={
+                        "enabled": Leaf("boolean", "run independent worktree comparisons", default=True),
+                        "candidates": Leaf(
+                            "integer",
+                            "number of independent candidate implementations to compare",
+                            default=2,
+                            minimum=2,
+                        ),
+                    },
+                ),
+                "development_tools": Block(
+                    doc="extra allowlisted development-tool permission flows for autonomous mode.",
+                    leaves={
+                        "allow": Leaf(
+                            "array",
+                            "raw permission allow rules to add while in autonomous mode",
+                            default=["Bash(dev:*)", "Bash(review:*)", "Bash(task:*)"],
+                            items_type="string",
+                            items_pattern=PERMISSION_RULE_JSON_PATTERN,
+                        ),
+                    },
+                ),
+                "parallelism": Block(
+                    doc="limit-aware parallelism caps.",
+                    leaves={
+                        "max_agents": Leaf("integer", "maximum concurrent agents", default=4, minimum=1),
+                        "max_worktrees": Leaf("integer", "maximum concurrent worktrees", default=4, minimum=1),
+                        "reserve_slots": Leaf("integer", "slots held back for urgent work", default=1, minimum=0),
+                        "limit_aware": Leaf("boolean", "respect harness/model/rate limits when dispatching", default=True),
+                    },
+                ),
+            },
+        ),
     },
 )
 
@@ -664,6 +780,7 @@ BLOCKS: dict[str, Block] = {
     "git_hooks": _GIT_HOOKS_BLOCK,
     "ci": _CI_BLOCK,
     "mcp": _MCP_BLOCK,
+    "mode": _MODE_BLOCK,
     "harness": _HARNESS_BLOCK,
     "permissions": _PERMISSIONS_BLOCK,
     "models": _MODELS_BLOCK,
@@ -694,6 +811,7 @@ def json_schema() -> dict[str, Any]:
     props: dict[str, Any] = {name: leaf.to_node() for name, leaf in _TOP_LEAVES.items()}
     for name, block in BLOCKS.items():
         props[name] = block.to_node()
+    props["mode"]["x-rig-global-only"] = True
     # `scope` is a removed legacy key the loader still TOLERATES (drops it) — whitelist it so a
     # not-yet-cleaned committed file doesn't trip an editor, but it is intentionally undocumented.
     props["scope"] = {"type": "string", "description": "removed legacy key (tolerated, ignored)", "deprecated": True}

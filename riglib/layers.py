@@ -33,6 +33,7 @@ _CATEGORY_LAYER = {
     "mcp": GLOBAL,
     "harness": GLOBAL,
     "permissions": GLOBAL,
+    "mode": GLOBAL,
     "models": GLOBAL,
     "git_hooks": GLOBAL,
     "gitignore": GLOBAL,

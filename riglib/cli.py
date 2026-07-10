@@ -594,7 +594,7 @@ def _resolve_init_plan(args: argparse.Namespace, *, use_default: bool):
     plan-resolvers share one convention so a caller can't mix them up.
     """
     from .catalog import Catalog
-    from .config import LoadedConfig, load, validate
+    from .config import ConfigError, LoadedConfig, load, read_yaml_file, validate
     from .detect import detect_environment
     from .plan import build
     from .state import SetupState
@@ -627,6 +627,14 @@ def _resolve_init_plan(args: argparse.Namespace, *, use_default: bool):
         # a relative --config is relative to the -C repo root (mirrors `rig apply`).
         cp = Path(args.config)
         explicit = (cp if cp.is_absolute() else repo_root / cp).resolve()
+        template_data = read_yaml_file(explicit)
+        if "mode" in template_data:
+            raise ConfigError(
+                "mode is a global-only config block",
+                why=f"{explicit} was passed to `rig init --config`, which copies the template into ./rig.yaml",
+                fix="move mode to ~/.config/rig/config.yaml and remove it from the init template",
+                schema_path="mode",
+            )
         loaded = load(repo_root, explicit_config=explicit)
         # rig.yaml is committed-by-default: setting up from an external template must leave the
         # repo with its own rig.yaml. Copy it in unless it already IS it.
@@ -1634,7 +1642,9 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
     from .actions import run_plan
     from .catalog import CatalogError
     from .config import ConfigError, coerce_scalar, set_path, validate
+    from .layers import GLOBAL
     from .plan import PlanError
+    from .schema import writable_layer_for_category
     from .state import SetupState
 
     try:
@@ -1644,6 +1654,13 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         return 2
     except Exception as exc:  # noqa: BLE001 — environment detection failing must fail soft
         print(_err(f"error: {type(exc).__name__}: {exc}"), file=sys.stderr)
+        return 2
+
+    category = args.path.split(".", 1)[0]
+    if not args.is_global and writable_layer_for_category(category) == GLOBAL:
+        print(_err(f"error: `{category}` is a global-only config block; use `--global`."), file=sys.stderr)
+        print(_dim("  global-only settings are written to ~/.config/rig/config.yaml, never ./rig.yaml."),
+              file=sys.stderr)
         return 2
 
     # Refuse a repo-local `set` when ./rig.yaml does not exist yet: starting from {} and

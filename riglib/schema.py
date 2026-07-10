@@ -48,10 +48,11 @@ _KINDS = {KIND_BOOL, KIND_ENUM, KIND_STR, KIND_INT}
 # WRITTEN into the committed repo ``rig.yaml`` by the default scaffold (state.default_state), so
 # editing their value belongs in the repo file. The GLOBAL-ONLY categories are the machine-wide
 # blocks the scaffold deliberately NEVER writes into a committed repo file — ``gitignore`` and
-# ``tg_ctl`` (documented global-only in config.py/state.py) and ``tmux`` (machine tmux config).
+# ``tg_ctl`` (documented global-only in config.py/state.py), ``tmux`` (machine tmux config), and
+# ``mode`` (machine-wide agent policy).
 # Routing a GLOBAL-only value into a committed repo rig.yaml is the footgun this map prevents.
 # A category absent here defaults to REPO (the conservative "it lives in the committed file").
-_GLOBAL_ONLY_CATEGORIES = {"gitignore", "tg_ctl", "tmux", "permissions"}
+_GLOBAL_ONLY_CATEGORIES = {"gitignore", "tg_ctl", "tmux", "mode"}
 
 
 def writable_layer_for_category(category: str) -> str:
@@ -214,14 +215,35 @@ AREAS: tuple[Area, ...] = (
                  "the deny/ask rule baselines (claude-code only; raw PR-merge, force-push, sudo rm, "
                  "screencapture denied; pkill/killall/git reset --hard prompt). Additive — merges "
                  "into the existing lists, never clobbers or removes the user's own entries. Off = "
-                 "leave it alone. GLOBAL-only (the settings file is per-machine) — never written to "
-                 "a repo rig.yaml."),
+                 "leave it alone. The target settings file is per-machine; repo-local config is "
+                 "still accepted for compatibility."),
             _opt("permissions.kind", KIND_ENUM, "claude-code",
                  "Which harness's permissions to provision. opencode is supported for the ALLOWLIST "
                  "independently of harness.kind (its deny/ask dialect is unverified → N/A); "
                  "codex/gemini have no additively-mergeable allowlist (N/A). The lists "
                  "(tools/extra/disable, allow/deny/ask) are edited directly in the config file.",
                  choices=("claude-code", "opencode")),
+        ),
+    ),
+    Area(
+        "mode", "agent mode", "Machine-wide operating mode for autonomous agent sessions.",
+        (
+            _opt("mode.name", KIND_ENUM, "standard",
+                 "standard = normal rig behavior. autonomous = keep working through review/fix "
+                 "loops, quorum decisions, parallel comparisons, and limit-aware dispatch before "
+                 "asking for help.",
+                 choices=("standard", "autonomous")),
+            _opt("mode.autonomous.review_fix.max_iterations", KIND_INT, 5,
+                 "Maximum review/fix iterations while autonomous mode is active; the default loops "
+                 "until the diff is clean or this cap is reached."),
+            _opt("mode.autonomous.decisions.review_quorum.min_models", KIND_INT, 3,
+                 "Minimum distinct reviewer models required before a decision is considered settled."),
+            _opt("mode.autonomous.parallel_worktree_comparison.candidates", KIND_INT, 2,
+                 "Number of independent worktree candidates to compare before escalating a hard choice."),
+            _opt("mode.autonomous.parallelism.max_agents", KIND_INT, 4,
+                 "Limit-aware cap for concurrent agents; keep below provider and machine capacity."),
+            _opt("mode.autonomous.parallelism.max_worktrees", KIND_INT, 4,
+                 "Limit-aware cap for concurrent worktrees; prevents a swarm from exhausting local slots."),
         ),
     ),
     Area(

@@ -29,7 +29,7 @@ from .project_tools import (
     HAFT_KEYS,
     HAFT_WORKFLOW_KEYS,
     HAFT_WORKFLOW_MODES,
-    PROJECT_TOOLS_KEYS,
+    PROJECT_TOOLS_KEYS as PROJECT_TOOLS_KEYS,
     SERENA_KEYS,
     SVERKLO_KEYS,
 )
@@ -45,6 +45,7 @@ _VALID_TOP_KEYS = {
     "git_hooks",
     "ci",
     "mcp",
+    "mode",
     "harness",
     "permissions",
     "models",
@@ -66,6 +67,8 @@ _VALID_TIERS = {"block", "warn"}
 _VALID_ON_ERROR = {"open", "closed"}
 _MCP_ITEM_KEYS = {"enabled", "server", "command", "args", "env"}
 _VALID_TMUX_APPLY = {"import", "block"}
+_VALID_MODE_NAMES = {"standard", "autonomous"}
+_VALID_AUTONOMOUS_UNTIL = {"clean", "budget", "manual"}
 # Harness kinds rig knows a skill/instruction discovery convention for — the union of the
 # skills-DIRECTORY harnesses (claude-code, opencode) and the INSTRUCTION-FILE harnesses
 # (codex, gemini, pi, commandcode). A ``harness.kind`` in this set is ACCEPTED: rig can
@@ -450,6 +453,13 @@ def load(
         """
         nonlocal merged
         data = read_yaml_file(path)
+        if label == "repo" and "mode" in data:
+            raise ConfigError(
+                "mode is a global-only config block",
+                why=f"{path} is loaded as the repo layer, but mode is machine-wide policy",
+                fix=f"move mode to {global_config_path()} or run `rig config set mode.name ... --global`",
+                schema_path="mode",
+            )
         merged = _deep_merge(merged, data)
         for k in data:
             key_sources[k] = path
@@ -465,7 +475,8 @@ def load(
             rpath = explicit_config.resolve()
             if not rpath.is_file():
                 raise ConfigError(f"--config file not found: {rpath}")
-            _merge_layer(rpath, "config")
+            label = "repo" if rpath == repo_config_path(repo_root).resolve() else "config"
+            _merge_layer(rpath, label)
         else:
             rpath = repo_config_path(repo_root)
             if rpath.is_file():
@@ -543,6 +554,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_mcp(data.get("mcp", {}))
     _validate_git_hooks(data.get("git_hooks", {}))
     _validate_skills(data.get("skills", {}))
+    _validate_mode(data.get("mode", {}))
     _validate_harness(data.get("harness", {}))
     _validate_permissions(data.get("permissions", {}))
     _validate_models(data.get("models", {}))
@@ -815,6 +827,116 @@ def _validate_harness(h: dict[str, Any]) -> None:
             )
 
 
+def _check_int_min(block: dict[str, Any], key: str, path: str, minimum: int) -> None:
+    value = block.get(key)
+    if key in block and (isinstance(value, bool) or not isinstance(value, int) or value < minimum):
+        raise ConfigError(f"{path} must be an int >= {minimum}, got {value!r}", schema_path=path)
+
+
+def _check_mode_bool(block: dict[str, Any], key: str, path: str) -> None:
+    value = block.get(key)
+    if key in block and not isinstance(value, bool):
+        raise ConfigError(f"{path} must be a bool, got {value!r}", schema_path=path)
+
+
+def _check_mode_str(block: dict[str, Any], key: str, path: str) -> None:
+    value = block.get(key)
+    if key in block and not isinstance(value, str):
+        raise ConfigError(f"{path} must be a string, got {value!r}", schema_path=path)
+
+
+def _mode_mapping(parent: dict[str, Any], key: str, path: str) -> dict[str, Any]:
+    if key not in parent:
+        return {}
+    value = parent[key]
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path} must be a mapping", schema_path=path)
+    return value
+
+
+def _validate_mode(m: dict[str, Any]) -> None:
+    """Validate the global ``mode`` block.
+
+    ``mode.name: autonomous`` is a machine/global policy declaration. It does not replace the
+    existing harness or permissions reconcilers; instead it feeds them with extra notes/rules while
+    keeping the policy visible in the same config schema as every other rig setting.
+    """
+    if not isinstance(m, dict):
+        raise ConfigError("mode must be a mapping", schema_path="mode")
+    if not m:
+        return
+    _reject_unknown_keys(m, "mode")
+    name = m.get("name", "standard")
+    if not isinstance(name, str) or name not in _VALID_MODE_NAMES:
+        raise ConfigError(
+            f"mode.name must be one of {sorted(_VALID_MODE_NAMES)}, got {name!r}",
+            fix=f"use one of: {', '.join(sorted(_VALID_MODE_NAMES))}",
+            schema_path="mode.name",
+        )
+    auto = _mode_mapping(m, "autonomous", "mode.autonomous")
+    _reject_unknown_keys(auto, "mode.autonomous")
+
+    review_fix = _mode_mapping(auto, "review_fix", "mode.autonomous.review_fix")
+    _reject_unknown_keys(review_fix, "mode.autonomous.review_fix")
+    _check_mode_bool(review_fix, "enabled", "mode.autonomous.review_fix.enabled")
+    _check_int_min(review_fix, "max_iterations", "mode.autonomous.review_fix.max_iterations", 1)
+    until = review_fix.get("until")
+    if "until" in review_fix and (not isinstance(until, str) or until not in _VALID_AUTONOMOUS_UNTIL):
+        raise ConfigError(
+            f"mode.autonomous.review_fix.until must be one of {sorted(_VALID_AUTONOMOUS_UNTIL)}, got {until!r}",
+            fix=f"use one of: {', '.join(sorted(_VALID_AUTONOMOUS_UNTIL))}",
+            schema_path="mode.autonomous.review_fix.until",
+        )
+
+    decisions = _mode_mapping(auto, "decisions", "mode.autonomous.decisions")
+    _reject_unknown_keys(decisions, "mode.autonomous.decisions")
+    quorum = _mode_mapping(
+        decisions,
+        "review_quorum",
+        "mode.autonomous.decisions.review_quorum",
+    )
+    _reject_unknown_keys(quorum, "mode.autonomous.decisions.review_quorum")
+    _check_mode_bool(quorum, "enabled", "mode.autonomous.decisions.review_quorum.enabled")
+    _check_int_min(quorum, "min_iterations", "mode.autonomous.decisions.review_quorum.min_iterations", 1)
+    _check_int_min(quorum, "min_models", "mode.autonomous.decisions.review_quorum.min_models", 2)
+
+    escalation = _mode_mapping(auto, "escalation", "mode.autonomous.escalation")
+    _reject_unknown_keys(escalation, "mode.autonomous.escalation")
+    _check_mode_str(escalation, "framework_skill", "mode.autonomous.escalation.framework_skill")
+    _check_mode_bool(
+        escalation,
+        "require_parallel_worktree_comparison",
+        "mode.autonomous.escalation.require_parallel_worktree_comparison",
+    )
+
+    comparison = _mode_mapping(
+        auto,
+        "parallel_worktree_comparison",
+        "mode.autonomous.parallel_worktree_comparison",
+    )
+    _reject_unknown_keys(comparison, "mode.autonomous.parallel_worktree_comparison")
+    _check_mode_bool(comparison, "enabled", "mode.autonomous.parallel_worktree_comparison.enabled")
+    _check_int_min(comparison, "candidates", "mode.autonomous.parallel_worktree_comparison.candidates", 2)
+
+    devtools = _mode_mapping(auto, "development_tools", "mode.autonomous.development_tools")
+    _reject_unknown_keys(devtools, "mode.autonomous.development_tools")
+    if "allow" in devtools:
+        _validate_string_list(devtools["allow"], "mode.autonomous.development_tools.allow")
+        for entry in devtools["allow"]:
+            if not _PERMISSION_RULE_RE.match(entry):
+                raise ConfigError(
+                    f"mode.autonomous.development_tools.allow entry {entry!r} is not a permission rule",
+                    schema_path="mode.autonomous.development_tools.allow",
+                )
+
+    parallel = _mode_mapping(auto, "parallelism", "mode.autonomous.parallelism")
+    _reject_unknown_keys(parallel, "mode.autonomous.parallelism")
+    _check_int_min(parallel, "max_agents", "mode.autonomous.parallelism.max_agents", 1)
+    _check_int_min(parallel, "max_worktrees", "mode.autonomous.parallelism.max_worktrees", 1)
+    _check_int_min(parallel, "reserve_slots", "mode.autonomous.parallelism.reserve_slots", 0)
+    _check_mode_bool(parallel, "limit_aware", "mode.autonomous.parallelism.limit_aware")
+
+
 # The keys the permissions block accepts. Listed once so the validator rejects a typo (fail-closed,
 # consistent with every other block).
 _PERMISSIONS_KEYS = {"enabled", "kind", "tools", "extra", "disable", "settings_path",
@@ -836,8 +958,8 @@ _PERMISSION_TOOL_RE = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9._/-]*$")
 # ``Read(//tmp/**)``. Shape-checked only — the tool-name part is a bare token (glob ``*`` allowed:
 # deny rules accept tool-name globs like ``mcp__*``), the specifier is any non-empty
 # parenthesized string. Semantics belong to the harness; rig never interprets the pattern.
-# ``.`` excludes newlines, so a multi-line "entry" is rejected as the typo it is.
-_PERMISSION_RULE_RE = re.compile(r"^[A-Za-z0-9_*.-]+(\(.+\))?\Z")
+# Multi-line entries are rejected as typos; keep this aligned with the JSON Schema pattern.
+_PERMISSION_RULE_RE = re.compile(r"^(?!.*[\r\n])[A-Za-z0-9_*.-]+(\(.+\))?\Z")
 
 
 def _validate_permissions(p: dict[str, Any]) -> None:

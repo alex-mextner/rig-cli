@@ -176,6 +176,37 @@ Dicts merge recursively (per-repo wins); lists/scalars replace wholesale. See
 [`docs/config-schema.md`](docs/config-schema.md) for every key. A worked example is
 [`rig.yaml`](./rig.yaml) at the repo root (this repo dogfoods its own config).
 
+### Autonomous mode — global agent operating policy
+
+`mode.name: autonomous` belongs in the global config (`~/.config/rig/config.yaml`). It declares
+how an agent should keep working before it asks for help: review/fix iterations until a clean
+state, review quorum for decisions, escalation through the configured framework skill, parallel
+worktree comparison before escalation, allowlisted development-tool flows, and limit-aware
+parallelism caps.
+
+```yaml
+mode:
+  name: autonomous
+  autonomous:
+    review_fix: { enabled: true, max_iterations: 5, until: clean }
+    decisions:
+      review_quorum: { enabled: true, min_iterations: 2, min_models: 3 }
+    escalation:
+      framework_skill: decision-request-discipline
+      require_parallel_worktree_comparison: true
+    parallel_worktree_comparison: { enabled: true, candidates: 2 }
+    development_tools:
+      allow: [Bash(dev:*), Bash(review:*), Bash(task:*)]
+    parallelism: { max_agents: 4, max_worktrees: 4, reserve_slots: 1, limit_aware: true }
+```
+
+`rig apply --dry-run` surfaces that policy as plan notes, and the development-tool allow rules
+flow into the existing additive `permissions.allow` merge for supported harnesses. Raw
+development-tool allow rules are currently applied only to Claude Code's verified permission-rule
+dialect; unsupported harnesses get a plan note and the rules are skipped. `framework_skill` is a
+named behavioral skill for agents to follow during escalation, not a callable interface invoked by
+`rig`.
+
 ### Auto-mode — provisioned by the reconciler
 
 A `harness:` block tells `rig apply` to write the agent harness's auto/permission setting,

@@ -76,6 +76,7 @@ _DEFAULTS_KEY = {
 # area), so :func:`_resolve_harness_skill_dir` returns None for them and records a status note.
 # (The module-level alias name is preserved so ``plan._HARNESS_SKILL_DIRS`` keeps resolving.)
 _DEFAULT_HARNESS_KIND = "claude-code"
+_AUTONOMOUS_DEFAULT_ALLOW_RULES = ("Bash(dev:*)", "Bash(review:*)", "Bash(task:*)")
 
 
 @dataclass
@@ -584,6 +585,7 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     _build_harness(config, plan)
 
     # ── permissions (per-harness command allowlist) ───────────────────────────────
+    _build_mode(config, plan)
     _build_permissions(config, plan)
 
     # ── hook bridge (make agents-hooks/v1 descriptors FIRE in the harness) ─────────
@@ -761,6 +763,9 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
         list(p.get("disable", []) or []) if isinstance(p.get("disable"), list) else [],
     )
     allow_rules, deny_rules, ask_rules = _resolve_permission_rules(p, kind, plan)
+    for entry in _autonomous_allow_rules(config, kind, plan):
+        if entry not in allow_rules:
+            allow_rules.append(entry)
     spec = HARNESS_ALLOWLISTS[kind]
     # An explicit settings_path wins (lets a test/odd setup point elsewhere); else the harness's
     # documented per-machine settings file (the SAME file the auto-mode write targets for CC).
@@ -776,6 +781,108 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
                      "deny_rules": deny_rules, "ask_rules": ask_rules},
         )
     )
+
+
+def _autonomous_block(config: LoadedConfig) -> dict[str, Any] | None:
+    mode = config.data.get("mode")
+    if not isinstance(mode, dict) or mode.get("name") != "autonomous":
+        return None
+    auto = mode.get("autonomous", {})
+    return auto if isinstance(auto, dict) else {}
+
+
+def _subblock(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    child = parent.get(key, {})
+    return child if isinstance(child, dict) else {}
+
+
+def _build_mode(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Surface autonomous-mode policy in the plan.
+
+    The runtime execution lives in the agent skills/harnesses; rig's job is to make the policy
+    declared, validated, and visible in dry-run/status surfaces instead of burying it in prose.
+    """
+    auto = _autonomous_block(config)
+    if auto is None:
+        return
+    plan.actions.append(
+        Action(
+            kind="record_mode",
+            category="mode",
+            item="autonomous",
+            source=config.repo_root,
+            target=config.repo_root,
+            options={"name": "autonomous"},
+        )
+    )
+    review_fix = _subblock(auto, "review_fix")
+    if review_fix.get("enabled", True) is not False:
+        until = str(review_fix.get("until", "clean"))
+        max_iter = int(review_fix.get("max_iterations", 5))
+        plan.notes.append(f"autonomous mode: review/fix until {until} (max {max_iter} iterations)")
+
+    quorum = _subblock(_subblock(auto, "decisions"), "review_quorum")
+    if quorum.get("enabled", True) is not False:
+        min_iter = int(quorum.get("min_iterations", 2))
+        min_models = int(quorum.get("min_models", 3))
+        plan.notes.append(
+            f"autonomous mode: decisions require review quorum ({min_iter} iterations across {min_models} models)"
+        )
+
+    escalation = _subblock(auto, "escalation")
+    framework = str(escalation.get("framework_skill", "decision-request-discipline"))
+    plan.notes.append(f"autonomous mode: escalation framework skill '{framework}'")
+
+    comparison = _subblock(auto, "parallel_worktree_comparison")
+    if comparison.get("enabled", True) is not False and escalation.get("require_parallel_worktree_comparison", True) is not False:
+        candidates = int(comparison.get("candidates", 2))
+        plan.notes.append(
+            f"autonomous mode: parallel worktree comparison required before escalation ({candidates} candidates)"
+        )
+
+    parallel = _subblock(auto, "parallelism")
+    if parallel.get("limit_aware", True) is not False:
+        max_agents = int(parallel.get("max_agents", 4))
+        max_worktrees = int(parallel.get("max_worktrees", 4))
+        reserve = int(parallel.get("reserve_slots", 1))
+        plan.notes.append(
+            "autonomous mode: "
+            f"limit-aware parallelism max_agents={max_agents} max_worktrees={max_worktrees} "
+            f"reserve_slots={reserve}"
+        )
+
+    permissions = config.data.get("permissions", {})
+    devtools = _subblock(auto, "development_tools")
+    if isinstance(permissions, dict) and permissions.get("enabled") is False and devtools.get("allow", list(_AUTONOMOUS_DEFAULT_ALLOW_RULES)):
+        plan.notes.append(
+            "autonomous mode: development tool allow rules not provisioned because permissions.enabled=false"
+        )
+
+
+def _autonomous_allow_rules(config: LoadedConfig, kind: str, plan: InstallPlan) -> list[str]:
+    auto = _autonomous_block(config)
+    if auto is None:
+        return []
+    devtools = _subblock(auto, "development_tools")
+    raw = devtools.get("allow", list(_AUTONOMOUS_DEFAULT_ALLOW_RULES))
+    if not isinstance(raw, list) or not raw:
+        return []
+    from .permissions import HARNESS_RULE_CONTAINERS, HARNESS_RULES_NA
+
+    if kind not in HARNESS_RULE_CONTAINERS:
+        reason = HARNESS_RULES_NA.get(kind, "no verified rule dialect")
+        plan.notes.append(
+            f"autonomous mode: development tool allow rules dropped for harness '{kind}' ({reason})"
+        )
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for entry in raw:
+        s = str(entry)
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
 
 
 def _resolve_permission_rules(

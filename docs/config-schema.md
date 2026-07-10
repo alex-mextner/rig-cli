@@ -61,6 +61,7 @@ agent_hooks: { ... }
 git_hooks: { ... }
 ci: { ... }
 mcp: { ... }
+mode: { ... }                 # GLOBAL operating mode; autonomous review/fix/quorum/escalation policy
 harness: { ... }              # agent harness auto/permission provisioning (auto-mode)
 permissions: { ... }          # per-harness permissions layer (allowlist + deny/ask baselines), default ON
 models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
@@ -372,6 +373,74 @@ use `command: "node"` with `args: ["server.js", "--foo"]`, not
 
 ---
 
+## `mode`
+
+Machine-wide operating policy. This block belongs in the global config
+(`~/.config/rig/config.yaml`), not in a committed repo `rig.yaml`.
+
+```yaml
+mode:
+  name: autonomous             # standard | autonomous
+  autonomous:
+    review_fix:
+      enabled: true
+      max_iterations: 5
+      until: clean             # clean | budget | manual
+    decisions:
+      review_quorum:
+        enabled: true
+        min_iterations: 2
+        min_models: 3
+    escalation:
+      framework_skill: decision-request-discipline
+      require_parallel_worktree_comparison: true
+    parallel_worktree_comparison:
+      enabled: true
+      candidates: 2
+    development_tools:
+      allow:
+        - Bash(dev:*)
+        - Bash(review:*)
+        - Bash(task:*)
+    parallelism:
+      max_agents: 4
+      max_worktrees: 4
+      reserve_slots: 1
+      limit_aware: true
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `name` | enum | `standard` | `standard` keeps normal rig behavior; `autonomous` activates the policy notes and permission-flow additions below |
+| `autonomous.review_fix.enabled` | bool | `true` | enable review/fix iteration policy |
+| `autonomous.review_fix.max_iterations` | int >= 1 | `5` | maximum review/fix iterations before stopping or escalating |
+| `autonomous.review_fix.until` | enum | `clean` | stop condition: clean state, budget exhaustion, or manual stop |
+| `autonomous.decisions.review_quorum.enabled` | bool | `true` | require a multi-model review quorum before treating a decision as settled |
+| `autonomous.decisions.review_quorum.min_iterations` | int >= 1 | `2` | minimum recorded review iterations for a quorum |
+| `autonomous.decisions.review_quorum.min_models` | int >= 2 | `3` | minimum distinct models for a quorum |
+| `autonomous.escalation.framework_skill` | str | `decision-request-discipline` | named behavioral skill agents follow for escalation messages: context, options, recommendation, and explicit ask |
+| `autonomous.escalation.require_parallel_worktree_comparison` | bool | `true` | do not escalate an implementation choice until independent worktree candidates have been compared |
+| `autonomous.parallel_worktree_comparison.enabled` | bool | `true` | enable independent candidate worktrees before escalation |
+| `autonomous.parallel_worktree_comparison.candidates` | int >= 2 | `2` | number of candidate implementations to compare |
+| `autonomous.development_tools.allow` | list[str] | `Bash(dev:*)`, `Bash(review:*)`, `Bash(task:*)` | raw permission allow rules added to supported harness permissions while autonomous mode is active |
+| `autonomous.parallelism.max_agents` | int >= 1 | `4` | maximum concurrent agents |
+| `autonomous.parallelism.max_worktrees` | int >= 1 | `4` | maximum concurrent worktrees |
+| `autonomous.parallelism.reserve_slots` | int >= 0 | `1` | slots held back for urgent/manual work |
+| `autonomous.parallelism.limit_aware` | bool | `true` | agents should respect model, harness, and machine limits when dispatching parallel work |
+
+`mode.name: autonomous` does not create a second executor. It provisions policy through
+existing rig surfaces: `rig apply --dry-run`/`rig config set --global ... --no-apply` show the
+review/fix, quorum, escalation, parallel-comparison, and limit-aware parallelism policy as plan
+notes; `autonomous.development_tools.allow` feeds the existing additive `permissions.allow`
+merge for harnesses with a verified rule dialect. Today these raw `Bash(...)` rules are applied
+only to Claude Code's verified permission-rule dialect; unsupported harnesses get a plan note and
+the rules are skipped rather than translated guessily. The configured `framework_skill` is a
+named behavioral contract for agents, not a callable interface invoked by `rig`: ask only after
+the review quorum and parallel worktree comparison cannot settle the decision, and include
+context, options, a recommendation, and the specific decision requested.
+
+---
+
 ## `harness`
 
 Provisions the **agent harness's auto/permission mode** as part of the reconciler. With a
@@ -512,9 +581,9 @@ NOT add inherently-destructive standalone commands (`rm`, `sudo`, `dd`, `mkfs`, 
 behind a prompt. If you want a narrower grant (e.g. only `git status`/`git log`), set `tools` to a
 custom list and add the specific `Bash(...)` entries by hand in the harness settings.
 
-This is **GLOBAL-only** (the allowlist file is per-machine), like `tg_ctl`/`gitignore` — it is
-never scaffolded into a committed repo `rig.yaml`; declare it in `~/.config/rig/config.yaml` to
-override the tool list.
+The allowlist file itself is per-machine. `permissions` may live in the global config for
+machine-wide defaults, and repo-local `permissions:` remains accepted for compatibility with
+existing committed configs.
 
 ```yaml
 permissions:
@@ -1517,9 +1586,10 @@ there is one emitter and the schema is never maintained in parallel (see "The JS
 - **REPO** options (`skills`, `agent_hooks`, `git_hooks`, `ci`, `mcp`, `harness`, `models`,
   `github`, `agents_md`, `linters`, `project_tools`) are written to the repo's `./rig.yaml` — the
   values the default scaffold commits.
-- **GLOBAL-only** options (`gitignore`, `tg_ctl`, `tmux`) are machine-wide blocks the scaffold
-  never writes into a committed repo file; the wizard writes them to `~/.config/rig/config.yaml`
-  only — it never lands a global-only block in a committed repo `rig.yaml`.
+- **GLOBAL-only** options (`gitignore`, `tg_ctl`, `tmux`, `mode`) are machine-wide blocks the
+  scaffold never writes into a committed repo file; the wizard writes them to
+  `~/.config/rig/config.yaml` only — it never lands a global-only block in a committed repo
+  `rig.yaml`.
 
 `rig config get|set <dot.path>` is the **headless counterpart** (and what non-interactive
 `rig setup` points at). It is a dot-path editor: it reads/edits ONE nested key by dot-notation
@@ -1536,6 +1606,7 @@ rig config get defaults.on_conflict --global     # read the global config instea
 rig config set harness.auto_mode false           # write, then RECONCILE (rig apply engine)
 rig config set ci.items.secret-scan.tier warn    # creates intermediate keys as needed
 rig config set defaults.on_conflict overwrite --global   # edit the global config
+rig config set mode.name autonomous --global     # global-only blocks require --global
 rig config set harness.auto_mode false --no-apply        # write only, print the plan, skip apply
 ```
 
