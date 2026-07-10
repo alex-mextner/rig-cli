@@ -40,12 +40,24 @@ def test_schema_top_level_is_strict_and_complete():
     # every top-level key the validator accepts is a schema property (plus the tolerated `scope`)
     assert config_schema.TOP_LEVEL_KEYS <= props
     assert "scope" in props
+    assert doc["properties"]["mode"]["x-rig-global-only"] is True
 
 
 def test_blocks_without_open_map_are_closed():
     # a fixed-knob block (harness, defaults, github.ruleset, …) must reject an unknown key.
     doc = config_schema.json_schema()
-    for name in ("defaults", "skills", "harness", "permissions", "models", "agents_md", "tmux", "tg_ctl", "project_tools"):
+    for name in (
+        "defaults",
+        "skills",
+        "mode",
+        "harness",
+        "permissions",
+        "models",
+        "agents_md",
+        "tmux",
+        "tg_ctl",
+        "project_tools",
+    ):
         assert doc["properties"][name]["additionalProperties"] is False, f"{name} must be closed"
 
 
@@ -107,6 +119,22 @@ def test_linters_items_schema_enforces_item_shape():
     "block_path, config_keys",
     [
         ("permissions", config._PERMISSIONS_KEYS),
+        ("mode", {"name", "autonomous"}),
+        ("mode.autonomous", {
+            "review_fix",
+            "decisions",
+            "escalation",
+            "parallel_worktree_comparison",
+            "development_tools",
+            "parallelism",
+        }),
+        ("mode.autonomous.review_fix", {"enabled", "max_iterations", "until"}),
+        ("mode.autonomous.decisions", {"review_quorum"}),
+        ("mode.autonomous.decisions.review_quorum", {"enabled", "min_iterations", "min_models"}),
+        ("mode.autonomous.escalation", {"framework_skill", "require_parallel_worktree_comparison"}),
+        ("mode.autonomous.parallel_worktree_comparison", {"enabled", "candidates"}),
+        ("mode.autonomous.development_tools", {"allow"}),
+        ("mode.autonomous.parallelism", {"max_agents", "max_worktrees", "reserve_slots", "limit_aware"}),
         ("tg_ctl", config._TG_CTL_KEYS),
         ("github.ruleset", config._GITHUB_RULESET_KEYS),
         ("tmux", config._TMUX_TOP_KEYS),
@@ -143,6 +171,21 @@ def test_real_validator_flags_unknown_key_and_bad_enum():
     assert list(v.iter_errors({"version": 1, "harness": {"aut_mode": True}})), "typo must be flagged"
     assert list(v.iter_errors({"version": 1, "defaults": {"on_conflict": "nuke"}})), "bad enum must be flagged"
     assert list(v.iter_errors({"version": 1, "bogus": 1})), "unknown top-level key must be flagged"
+    assert list(
+        v.iter_errors(
+            {
+                "version": 1,
+                "mode": {
+                    "name": "autonomous",
+                    "autonomous": {"development_tools": {"allow": ["Bash(dev:*)\n"]}},
+                },
+            }
+        )
+    ), "permission rules with trailing newlines must be flagged"
+    for key in ("allow", "deny", "ask"):
+        assert list(
+            v.iter_errors({"version": 1, "permissions": {key: ["Bash(dev:*)\n"]}})
+        ), f"permissions.{key} rules with trailing newlines must be flagged"
 
 
 def test_schema_json_roundtrips():

@@ -42,10 +42,10 @@ def test_area_registry_covers_every_roadmap_area():
     """Every area the ROADMAP lists must be present in the registry, mapped to the right layer."""
     by_key = {a.key: a for a in AREAS}
     expected_global = {
-        "skills", "agent_hooks", "git_hooks", "gitignore", "mcp", "harness", "tmux",
-        "models", "tg_ctl",
+        "skills", "agent_hooks", "git_hooks", "gitignore", "mcp", "harness", "permissions",
+        "mode", "tmux", "models", "tg_ctl", "tools", "ship_env",
     }
-    expected_repo = {"ci", "ship", "agents_md", "github", "linters", "project_tools"}
+    expected_repo = {"ci", "ship", "ship_delegator", "agents_md", "github", "linters", "project_tools"}
     assert expected_global <= set(by_key)
     assert expected_repo <= set(by_key)
     for k in expected_global:

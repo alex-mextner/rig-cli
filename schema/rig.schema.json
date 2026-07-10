@@ -327,6 +327,174 @@
       },
       "additionalProperties": false
     },
+    "mode": {
+      "type": "object",
+      "description": "machine-wide operating mode; `autonomous` provisions review/fix, quorum, escalation, and parallelism policy.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "operating mode for agent sessions",
+          "enum": [
+            "standard",
+            "autonomous"
+          ],
+          "default": "standard"
+        },
+        "autonomous": {
+          "type": "object",
+          "description": "policy knobs active when mode.name is autonomous.",
+          "properties": {
+            "review_fix": {
+              "type": "object",
+              "description": "review/fix loop policy.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "run review/fix iterations",
+                  "default": true
+                },
+                "max_iterations": {
+                  "type": "integer",
+                  "description": "maximum review/fix iterations before escalation or budget stop",
+                  "default": 5,
+                  "minimum": 1
+                },
+                "until": {
+                  "type": "string",
+                  "description": "loop stop condition",
+                  "enum": [
+                    "clean",
+                    "budget",
+                    "manual"
+                  ],
+                  "default": "clean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "decisions": {
+              "type": "object",
+              "description": "decision-making policy before asking the user.",
+              "properties": {
+                "review_quorum": {
+                  "type": "object",
+                  "description": "multi-model quorum required for decisions.",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "require review quorum for decisions",
+                      "default": true
+                    },
+                    "min_iterations": {
+                      "type": "integer",
+                      "description": "minimum recorded review iterations",
+                      "default": 2,
+                      "minimum": 1
+                    },
+                    "min_models": {
+                      "type": "integer",
+                      "description": "minimum distinct models in the quorum",
+                      "default": 3,
+                      "minimum": 2
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "escalation": {
+              "type": "object",
+              "description": "when and how an agent may escalate to the user.",
+              "properties": {
+                "framework_skill": {
+                  "type": "string",
+                  "description": "skill that defines escalation message behavior",
+                  "default": "decision-request-discipline"
+                },
+                "require_parallel_worktree_comparison": {
+                  "type": "boolean",
+                  "description": "compare independent worktree attempts before escalation",
+                  "default": true
+                }
+              },
+              "additionalProperties": false
+            },
+            "parallel_worktree_comparison": {
+              "type": "object",
+              "description": "parallel worktree comparison before escalation.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "run independent worktree comparisons",
+                  "default": true
+                },
+                "candidates": {
+                  "type": "integer",
+                  "description": "number of independent candidate implementations to compare",
+                  "default": 2,
+                  "minimum": 2
+                }
+              },
+              "additionalProperties": false
+            },
+            "development_tools": {
+              "type": "object",
+              "description": "extra allowlisted development-tool permission flows for autonomous mode.",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "description": "raw permission allow rules to add while in autonomous mode",
+                  "default": [
+                    "Bash(dev:*)",
+                    "Bash(review:*)",
+                    "Bash(task:*)"
+                  ],
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(?!.*[\\r\\n])[A-Za-z0-9_*.-]+(\\(.+\\))?$"
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "parallelism": {
+              "type": "object",
+              "description": "limit-aware parallelism caps.",
+              "properties": {
+                "max_agents": {
+                  "type": "integer",
+                  "description": "maximum concurrent agents",
+                  "default": 4,
+                  "minimum": 1
+                },
+                "max_worktrees": {
+                  "type": "integer",
+                  "description": "maximum concurrent worktrees",
+                  "default": 4,
+                  "minimum": 1
+                },
+                "reserve_slots": {
+                  "type": "integer",
+                  "description": "slots held back for urgent work",
+                  "default": 1,
+                  "minimum": 0
+                },
+                "limit_aware": {
+                  "type": "boolean",
+                  "description": "respect harness/model/rate limits when dispatching",
+                  "default": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "x-rig-global-only": true
+    },
     "harness": {
       "type": "object",
       "description": "the agent harness's auto/permission mode — provisioned, not hand-toggled.",
@@ -424,21 +592,24 @@
           "type": "array",
           "description": "raw permission-rule entries asserted present in the allow list, on TOP of the tool-derived ones",
           "items": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^(?!.*[\\r\\n])[A-Za-z0-9_*.-]+(\\(.+\\))?$"
           }
         },
         "deny": {
           "type": "array",
           "description": "permission-rule entries asserted present in the deny list (REPLACES the baked baseline)",
           "items": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^(?!.*[\\r\\n])[A-Za-z0-9_*.-]+(\\(.+\\))?$"
           }
         },
         "ask": {
           "type": "array",
           "description": "permission-rule entries asserted present in the ask list (REPLACES the baked baseline)",
           "items": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^(?!.*[\\r\\n])[A-Za-z0-9_*.-]+(\\(.+\\))?$"
           }
         },
         "settings_path": {

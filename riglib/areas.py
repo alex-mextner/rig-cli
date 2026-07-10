@@ -70,6 +70,7 @@ AREAS: tuple[Area, ...] = (
     # names both rather than undersell it as auto-mode only.
     Area("harness", "harness auto-mode + hook bridge", GLOBAL, ("harness",)),
     Area("permissions", "harness permissions (allow / deny / ask)", GLOBAL, ("permissions",)),
+    Area("mode", "agent operating mode", GLOBAL, ("mode",)),
     Area("tmux", "tmux config", GLOBAL, ("tmux",)),
     Area("models", "model-freshness cron", GLOBAL, ("models",)),
     Area("tg_ctl", "tg-ctl inbound daemon", GLOBAL, ("tg_ctl",)),

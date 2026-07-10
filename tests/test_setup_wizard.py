@@ -32,7 +32,7 @@ def test_registry_covers_every_status_area():
     cats = {a.category for a in schema.AREAS}
     expected = {
         "skills", "agent_hooks", "git_hooks", "ci", "mcp", "harness", "permissions",
-        "models", "agents_md", "github", "tmux", "gitignore", "tg_ctl", "linters",
+        "mode", "models", "agents_md", "github", "tmux", "gitignore", "tg_ctl", "linters",
         "project_tools",
     }
     assert cats == expected
@@ -41,7 +41,7 @@ def test_registry_covers_every_status_area():
 def test_global_only_categories_route_to_global_not_repo():
     # the footgun guard: a machine-wide, never-scaffolded block must NOT be writable into a
     # committed repo rig.yaml. These are documented global-only.
-    for cat in ("gitignore", "tg_ctl", "tmux", "permissions"):
+    for cat in ("gitignore", "tg_ctl", "tmux", "mode"):
         assert schema.writable_layer_for_category(cat) == schema.GLOBAL
     # harness/models/git_hooks are status-grouped GLOBAL but the scaffold writes them into the
     # committed repo rig.yaml, so an EDIT of their value belongs in the repo file.
@@ -305,7 +305,7 @@ def test_writable_layer_agrees_with_the_scaffold():
     # REPO-writable areas that are default-ON at plan level and genuine repo artifacts, but carry NO
     # scaffolded default content (so the scaffold can't pre-write them): agents_md (a file IN the
     # repo) and linters (config files declared per-repo — there is no sensible default item to seed).
-    _repo_unscaffolded_ok = {"agents_md", "linters"}
+    _repo_unscaffolded_ok = {"agents_md", "linters", "permissions"}
     for area in schema.AREAS:
         if schema.writable_layer_for_category(area.category) == schema.REPO:
             assert area.category in scaffolded or area.category in _repo_unscaffolded_ok, area.category
@@ -315,11 +315,12 @@ def test_writable_layer_agrees_with_the_scaffold():
     # REVERSE guard: every registered category the SCAFFOLD does NOT commit into rig.yaml AND that
     # layers.py groups as GLOBAL must be routed GLOBAL-only — otherwise the wizard would silently
     # write a machine-wide block into a committed repo file (the footgun the routing exists for).
-    # (agents_md is the documented exception: GLOBAL-display is REPO above, but it is a repo file.)
+    # agents_md is a repo file; permissions is still accepted repo-locally for compatibility even
+    # though status displays the reconciled harness settings under GLOBAL.
     for area in schema.AREAS:
         if (
             area.category not in scaffolded
-            and area.category != "agents_md"
+            and area.category not in {"agents_md", "permissions"}
             and layer_for_category(area.category) == schema.GLOBAL
         ):
             assert schema.writable_layer_for_category(area.category) == schema.GLOBAL, area.category
@@ -514,4 +515,3 @@ def test_load_layer_config_empty_file_is_empty_layer(tmp_path):
     p.write_text("", encoding="utf-8")
     assert setup_wizard.load_layer_config(p) == {}
     assert setup_wizard.load_layer_config(tmp_path / "absent.yaml") == {}  # absent → {}
-

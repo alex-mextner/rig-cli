@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -135,6 +134,10 @@ def _dispatch(action: Action, on_conflict: str) -> ActionResult:
 
 
 # ── handlers ────────────────────────────────────────────────────────────────────
+def _do_record_mode(action: Action, on_conflict: str) -> ActionResult:
+    return ActionResult(action, "skipped", f"mode/{action.item}: policy recorded")
+
+
 def _skill_backup_dir(skill_target: Path) -> Path:
     """Where a conflict-backup of an installed skill goes — a sibling ``.rig-backups/`` OUTSIDE
     the scanned skills dir.
@@ -5402,6 +5405,7 @@ def _do_provision_global_excludes(action: Action, on_conflict: str) -> ActionRes
 
 
 _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
+    "record_mode": _do_record_mode,
     "copy_skill": _do_copy_skill,
     "link_skill_harness": _do_link_skill_harness,
     "install_agent_hook": _do_install_agent_hook,
