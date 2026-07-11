@@ -295,7 +295,10 @@ def apply_edit(repo_root: Path, key: str, raw_value: str) -> dict[str, Any]:
     # browser edit must never (re)introduce dead config.
     data.pop("scope", None)
     try:
-        schema.set_path(data, key, value)
+        if option.default is None and value is None:
+            schema.delete_path(data, key)
+        else:
+            schema.set_path(data, key, value)
     except ValueError as exc:  # an existing non-mapping intermediate (e.g. `harness: "a string"`)
         raise EditError(str(exc)) from exc
 
@@ -428,6 +431,14 @@ def _fmt_value(value: Any) -> str:
     return str(value)
 
 
+def _control_value(key: str, value: Any) -> str:
+    """The HTML control value for a committed config value."""
+    option = schema.option_for_key(key)
+    if option is not None and option.kind == schema.KIND_ENUM and option.default is None and value is None:
+        return ""
+    return _fmt_value(value)
+
+
 def _field_control(f: FieldView) -> str:
     """The input control for one field, keyed by kind (bool→toggle, enum→select, else→text)."""
     val = _fmt_value(f.value)
@@ -439,13 +450,19 @@ def _field_control(f: FieldView) -> str:
             f'data-kind="bool"{checked} onchange="edit(this)"><span class="slider"></span></label>'
         )
     if f.kind == schema.KIND_ENUM:
+        if f.default is None:
+            selected = " selected" if f.value is None else ""
+            null_option = f'<option value=""{selected}>(fan-out / unpinned)</option>'
+        else:
+            null_option = ""
         opts = "".join(
             f'<option value="{html.escape(c, quote=True)}"'
             f'{" selected" if c == val else ""}>{html.escape(c)}</option>'
             for c in f.choices
         )
         return (
-            f'<select data-key="{key_attr}" data-kind="enum" onchange="edit(this)">{opts}</select>'
+            f'<select data-key="{key_attr}" data-kind="enum" onchange="edit(this)">'
+            f"{null_option}{opts}</select>"
         )
     input_type = "number" if f.kind == schema.KIND_INT else "text"
     return (
@@ -565,7 +582,7 @@ async function edit(el) {{
     }});
     var data = await r.json();
     if (r.ok && data.ok) {{
-      el.dataset.committed = (kind === 'bool') ? value : data.value;  // new committed state
+      el.dataset.committed = (kind === 'bool') ? value : (data.control_value ?? data.value);  // new committed state
       toast(key + ' = ' + data.value + '  →  ' + data.file, true);
     }} else {{
       revert(el);  // server rejected + rolled back → restore the control to its committed value
@@ -615,6 +632,7 @@ class ConfigWebApp:
             "ok": True,
             "key": result["key"],
             "value": _fmt_value(result["value"]),
+            "control_value": _control_value(result["key"], result["value"]),
             "layer": result["layer"],
             "file": result["file"],
         }

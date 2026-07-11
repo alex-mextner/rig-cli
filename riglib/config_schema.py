@@ -35,18 +35,17 @@ from typing import Any
 from .harness_skills import (
     HARNESS_INSTRUCTION_FILES,
     HARNESS_NATIVE_SKILLS,
-    HARNESS_SKILL_DIRS,
+    HARNESS_SKILL_DIR_KINDS,
 )
 from .project_tools import HAFT_WORKFLOW_MODES
 
 # Every harness kind rig provisions skill/instruction discovery for, listed skills-dir kinds first
 # (claude-code, codex) then native-discovery (opencode) then instruction-file kinds (gemini, pi,
-# commandcode) — a stable, readable order for the published JSON-schema enum. ``dict.fromkeys``
-# DEDUPES because ``codex`` is a member of BOTH the skills-dir and instruction-file families (dual:
-# ~/.codex/skills + ~/.codex/AGENTS.md). Sourced from :mod:`riglib.harness_skills` so the schema
-# enum can never drift from what ``config.validate`` accepts.
+# commandcode) — a stable, readable order for the published JSON-schema enum. Sourced from
+# :mod:`riglib.harness_skills` so the schema enum can never drift from what ``config.validate``
+# accepts.
 _HARNESS_KIND_ENUM: tuple[str, ...] = tuple(
-    dict.fromkeys((*HARNESS_SKILL_DIRS, *HARNESS_NATIVE_SKILLS, *HARNESS_INSTRUCTION_FILES))
+    dict.fromkeys((*HARNESS_SKILL_DIR_KINDS, *HARNESS_NATIVE_SKILLS, *HARNESS_INSTRUCTION_FILES))
 )
 
 # ── the published-schema identity (referenced by editors via `$schema`/`$id`) ─────────
@@ -63,25 +62,29 @@ PERMISSION_RULE_JSON_PATTERN = r"^(?!.*[\r\n])[A-Za-z0-9_*.-]+(\(.+\))?$"
 class Leaf:
     """One scalar/typed key in a block: its JSON type, optional enum, default, and one-line doc.
 
-    ``type`` is a JSON-Schema type name (``boolean``/``string``/``integer``/``array``/``object``).
+    ``type`` is a JSON-Schema type name (``boolean``/``string``/``integer``/``array``/``object``),
+    or a tuple of type names for nullable/union leaves.
     ``enum`` pins the allowed string values; ``minimum`` an integer floor; ``items_type`` the
-    element type of an ``array``; ``items_pattern`` constrains string array entries;
+    element type of an ``array``; ``items_enum`` pins allowed array entries; ``items_pattern``
+    constrains string array entries;
     ``additional_properties_type`` models a string-keyed object map.
     ``default`` is shown in the schema (editors surface it); ``None`` means "no default
     advertised" (omitted from the emitted node).
     """
 
-    type: str
+    type: str | tuple[str, ...]
     doc: str
-    enum: tuple[str, ...] = ()
+    enum: tuple[Any, ...] = ()
     default: Any = None
     minimum: int | None = None
     items_type: str | None = None
+    items_enum: tuple[str, ...] = ()
     items_pattern: str | None = None
     additional_properties_type: str | None = None
 
     def to_node(self) -> dict[str, Any]:
-        node: dict[str, Any] = {"type": self.type, "description": self.doc}
+        node_type: Any = list(self.type) if isinstance(self.type, tuple) else self.type
+        node: dict[str, Any] = {"type": node_type, "description": self.doc}
         if self.enum:
             node["enum"] = list(self.enum)
         if self.default is not None:
@@ -90,6 +93,8 @@ class Leaf:
             node["minimum"] = self.minimum
         if self.type == "array" and self.items_type:
             node["items"] = {"type": self.items_type}
+            if self.items_enum:
+                node["items"]["enum"] = list(self.items_enum)
             if self.items_pattern:
                 node["items"]["pattern"] = self.items_pattern
         if self.type == "object" and self.additional_properties_type:
@@ -218,7 +223,7 @@ _AGENT_HOOKS_BLOCK = Block(
         "target": Leaf("string", "where hook descriptors are written", default="~/.claude/hooks"),
         "target_kind": Leaf(
             "string",
-            "descriptor target kind",
+            "legacy ignored scaffold key; accepted for old configs but not used for rendering",
             enum=("claude-code", "generic"),
         ),
         "all": Leaf("boolean", "install all guard hooks", default=True),
@@ -312,10 +317,21 @@ _HARNESS_BLOCK = Block(
         "kind": Leaf(
             "string",
             "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode; "
-            "instruction-file: codex/gemini/pi/commandcode). The auto/permission-MODE write is "
+            "instruction-file: gemini/pi/commandcode; codex is also instruction-file via AGENTS.md). "
+            "The auto/permission-MODE write is "
             "claude-code-only today; other kinds still get their skill discovery provisioned.",
             enum=_HARNESS_KIND_ENUM,
             default="claude-code",
+        ),
+        "kinds": Leaf(
+            "array",
+            "additional harnesses to provision alongside harness.kind. Use this when one machine "
+            "runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, "
+            "while additional kinds get skill discovery, agent-hook descriptors, and any supported "
+            "hook bridge. If agent_hooks.target pins descriptors to one explicit target, supported "
+            "bridges are registered with a descriptor-dir override.",
+            items_type="string",
+            items_enum=_HARNESS_KIND_ENUM,
         ),
         "auto_mode": Leaf("boolean", "true → auto-accept tool calls; false → interactive", default=True),
         "mode": Leaf("string", "pin the exact permission value (overrides auto_mode map)"),
@@ -340,9 +356,10 @@ _PERMISSIONS_BLOCK = Block(
     leaves={
         "enabled": Leaf("boolean", "provision the harness permissions layer", default=True),
         "kind": Leaf(
-            "string",
-            "which harness's permissions to provision",
-            enum=("claude-code", "opencode"),
+            ("string", "null"),
+            "which harness's permissions to provision; null/absent means fan out to supported "
+            "harness.kind plus harness.kinds",
+            enum=("claude-code", "opencode", None),
         ),
         "tools": Leaf("array", "command names to pre-allow (replaces the default set)", items_type="string"),
         "extra": Leaf("array", "command names to ADD on top of the set", items_type="string"),

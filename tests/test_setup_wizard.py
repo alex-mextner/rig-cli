@@ -70,10 +70,39 @@ def test_coerce_bool_and_int_and_reject_bad():
         schema.coerce(o_int, "lots")
 
 
+def test_coerce_harness_kinds_list():
+    o = schema.option_for_key("harness.kinds")
+    assert o is not None
+    assert o.kind == schema.KIND_LIST
+    assert o.layer == schema.REPO
+    assert schema.coerce(o, "codex, opencode") == ["codex", "opencode"]
+    assert schema.coerce(o, '["codex", "opencode"]') == ["codex", "opencode"]
+    assert schema.coerce(o, "") == []
+    with pytest.raises(ValueError):
+        schema.coerce(o, "[codex, 42]")
+    with pytest.raises(ValueError):
+        schema.coerce(o, "codex, bogus")
+    with pytest.raises(ValueError):
+        schema.coerce(o, '["codex", "bogus"]')
+
+
 def test_effective_value_falls_back_to_default():
     o = schema.option_for_key("skills.enabled")
     assert schema.effective_value(o, {}) is True  # absent → default
     assert schema.effective_value(o, {"skills": {"enabled": False}}) is False
+
+
+def test_permissions_kind_absent_stays_unpinned_for_harness_fanout():
+    o = schema.option_for_key("permissions.kind")
+    assert o is not None
+    assert o.default is None
+    assert schema.effective_value(
+        o,
+        {"harness": {"kind": "claude-code", "kinds": ["opencode"]}, "permissions": {"enabled": True}},
+    ) is None
+    assert schema.effective_value(o, {"permissions": {"kind": "opencode"}}) == "opencode"
+    assert schema.coerce(o, "") is None
+    assert schema.coerce(o, "null") is None
 
 
 def test_effective_value_absent_block_presence_gated_block_shows_off():
@@ -474,6 +503,19 @@ def test_coerce_enum_branch():
     assert schema.coerce(o, "b") == "b"
     with pytest.raises(ValueError):
         schema.coerce(o, "z")
+
+
+def test_coerce_nullable_enum_prefers_real_choice_over_null_token():
+    o = schema.Option(
+        key="example.mode", category="example", kind=schema.KIND_ENUM,
+        default=None, hint="x", choices=("none", "unset", "real"),
+    )
+    assert schema.coerce(o, "none") == "none"
+    assert schema.coerce(o, "unset") == "unset"
+    assert schema.coerce(o, "") is None
+    assert schema.coerce(o, "~") is None
+    with pytest.raises(ValueError):
+        schema.coerce(o, "fan-out")
 
 
 def test_set_path_refuses_to_clobber_a_non_mapping_intermediate():

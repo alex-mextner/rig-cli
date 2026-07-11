@@ -31,9 +31,7 @@ from .actions.runner import (
     _resolve_excludes_target,
     build_hook_descriptor,
     crontab_with_managed,
-    codex_hook_bridge_block,
     codex_hook_bridge_block_bounds,
-    codex_hook_bridge_block_has_table_header,
     codex_hook_bridge_block_malformed,
     codex_hook_bridge_conflict,
     codex_hook_bridge_disabled_features,
@@ -51,6 +49,7 @@ from .actions.runner import (
     hook_bridge_module,
     hook_bridge_settings_file,
     managed_bridge_hook_in_sync,
+    merge_codex_hook_bridge_toml,
     opencode_hook_bridge_plugin_target,
     desired_mcp_server_entry,
     permissions_settings_file,
@@ -1226,9 +1225,46 @@ def _check_opencode_hook_bridge(action: Action, config_file: Path, report: Drift
         _opencode_bridge_exclude_context,
         _opencode_exclude_has_entry,
         _same_link_dest,
+        opencode_hook_bridge_uses_wrapper,
+        opencode_hook_bridge_wrapper_text,
     )
 
-    if not plugin_path.is_symlink():
+    if opencode_hook_bridge_uses_wrapper(action):
+        if not plugin_path.is_file() or plugin_path.is_symlink():
+            if plugin_path.exists() or plugin_path.is_symlink():
+                report.items.append(
+                    DriftItem("modified", "harness", action.item, config_file,
+                              "opencode hook bridge wrapper is not a regular file")
+                )
+            else:
+                report.items.append(
+                    DriftItem("missing", "harness", action.item, config_file,
+                              "opencode hook bridge wrapper not written")
+                )
+        else:
+            try:
+                text = plugin_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                report.items.append(
+                    DriftItem("modified", "harness", action.item, config_file,
+                              f"opencode hook bridge wrapper unreadable: {exc}")
+                )
+            else:
+                if text != opencode_hook_bridge_wrapper_text(action):
+                    report.items.append(
+                        DriftItem("modified", "harness", action.item, config_file,
+                                  "opencode hook bridge wrapper differs from config")
+                    )
+                else:
+                    ctx = _opencode_bridge_exclude_context(plugin_path)
+                    if ctx is not None:
+                        exclude_path, rel_path = ctx
+                        if not _opencode_exclude_has_entry(exclude_path, rel_path):
+                            report.items.append(
+                                DriftItem("missing", "harness", action.item, exclude_path,
+                                          "opencode hook bridge plugin is not git-ignored")
+                            )
+    elif not plugin_path.is_symlink():
         if plugin_path.exists():
             report.items.append(
                 DriftItem("modified", "harness", action.item, config_file,
@@ -1319,13 +1355,19 @@ def _check_codex_hook_bridge(action: Action, config_file: Path, report: DriftRep
                       f"codex_hook_bridge not wired in {config_file}")
         )
         return
-    start, end = bounds
-    current = text[start:end]
-    desired = codex_hook_bridge_block(
-        action,
-        include_table_header=codex_hook_bridge_block_has_table_header(current),
-    )
-    if current != desired:
+    merged, merge_conflict = merge_codex_hook_bridge_toml(text, action)
+    if merge_conflict:
+        report.items.append(
+            DriftItem(
+                "modified",
+                "harness",
+                action.item,
+                config_file,
+                f"{merge_conflict} in {config_file}; rig apply will not overwrite unmanaged Codex hooks TOML",
+            )
+        )
+        return
+    if merged != text:
         report.items.append(
             DriftItem("modified", "harness", action.item, config_file,
                       "codex_hook_bridge TOML block is stale (apply will rewrite)")

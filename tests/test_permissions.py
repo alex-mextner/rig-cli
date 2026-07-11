@@ -312,6 +312,7 @@ def test_validate_permissions_kind_na_and_unknown_rejected():
         validate({"version": 1, "permissions": {"kind": "bogus"}})   # unknown
     validate({"version": 1, "permissions": {"kind": "opencode"}})    # supported
     validate({"version": 1, "permissions": {"kind": "claude-code"}})
+    validate({"version": 1, "permissions": {"kind": None}})          # explicit unpinned/fan-out
 
 
 def test_opencode_drift_object_form(fake_agent_tools, tmp_path):
@@ -555,6 +556,61 @@ def test_harness_kind_cascades_into_permissions_when_no_explicit_kind(fake_agent
     perm = [a for a in build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown").actions
             if a.kind == "provision_permissions"]
     assert perm and perm[0].options["kind"] == "opencode"  # cascaded from harness.kind
+
+
+def test_permissions_settings_path_with_multiple_harnesses_targets_first_supported(
+    fake_agent_tools, tmp_path
+):
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False},
+            "ci": {"enabled": False}, "mcp": {"enabled": False},
+            "git_hooks": {"dispatcher": {"enabled": False}},
+            "harness": {"kind": "claude-code", "kinds": ["opencode"]},
+            "permissions": {"settings_path": str(settings), "tools": ["git"]},
+        },
+        repo_root=repo,
+    )
+
+    plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    perm = [a for a in plan.actions if a.kind == "provision_permissions"]
+
+    assert [a.options["kind"] for a in perm] == ["claude-code"]
+    assert perm[0].target == settings
+    assert any("settings_path override with multiple harnesses" in note for note in plan.notes)
+
+
+def test_permissions_fan_out_to_supported_harness_kinds_by_default(
+    fake_agent_tools, tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    repo = tmp_path / "repo"; repo.mkdir()
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False}, "agent_hooks": {"enabled": False},
+            "ci": {"enabled": False}, "mcp": {"enabled": False},
+            "git_hooks": {"dispatcher": {"enabled": False}},
+            "harness": {"kind": "claude-code", "kinds": ["opencode", "codex"]},
+            "permissions": {"tools": ["git"]},
+        },
+        repo_root=repo,
+    )
+
+    plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    perm = [a for a in plan.actions if a.kind == "provision_permissions"]
+
+    assert [a.options["kind"] for a in perm] == ["claude-code", "opencode"]
+    assert [a.target for a in perm] == [
+        home / ".claude" / "settings.json",
+        home / ".config" / "opencode" / "opencode.json",
+    ]
+    assert any("harness 'codex' has no allowlist" in note for note in plan.notes)
 
 
 def test_disable_never_deletes_an_existing_user_entry(fake_agent_tools, tmp_path):

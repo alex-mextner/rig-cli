@@ -40,6 +40,23 @@ path, rather than silently having no effect. The deliberate pass-through maps ar
 `agent_hooks`, `ci`, `mcp`), and `fragments:` (under `git_hooks.dispatcher`). A bad catalog item
 *name* is caught later as a catalog/unknown-item error (exit `4`), not a schema typo.
 
+## CLI Exit Codes
+
+These stable exit classes are also printed by `rig --help`:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | success |
+| `1` | internal error: an unexpected failure or bug |
+| `2` | invalid config: malformed value, type, or unknown key |
+| `3` | drift: `rig status` found config/disk drift |
+| `4` | unknown item: config names a catalog item that does not exist or was removed |
+| `5` | missing target: config references a path or binary that is gone on disk |
+| `6` | not a git repository: a repo-scoped command was run outside a repo |
+| `7` | repo corrupt: a working checkout's git config is broken |
+| `8` | Codex update failed: candidate failed probes or rollback needed attention |
+| `127` | missing dependency: a required external tool is not installed |
+
 ## Top-level shape
 
 ```yaml
@@ -170,7 +187,7 @@ skills:
 | `enabled` | bool | `true` | install skills at all |
 | `target` | path | `~/.agents/skills` | where SKILL.md dirs are copied |
 | `harness_link` | bool | `true` | also symlink each installed skill into the harness's skill-discovery dir |
-| `harness_skill_dir` | path | per-harness default | where the harness discovers skills (claude-code: `~/.claude/skills`; codex: `~/.codex/skills`). An explicit value forces a directory link even for a native-discovery or instruction-file harness |
+| `harness_skill_dir` | path | per-harness default | where the harness discovers skills (claude-code: `~/.claude/skills`; codex: `~/.codex/skills`). An explicit value pins skill links to that one directory, overriding `harness.kinds` skill-link fan-out, and forces a directory link even for a native-discovery or instruction-file harness |
 | `universal.all` | bool | `true` | enable all universal skills (opt-out) |
 | `universal.disable` / `universal.enable` | list[str] | `[]` | deltas on `all` |
 | `by_type.enable` | list[str] | the detected project type | which `by-type/<kind>` bundles to install whole |
@@ -195,9 +212,10 @@ and harnesses split into three families by *how* they discover skills:
   *discovers natively* instead of a pointless symlink:
   - **opencode** → auto-loads `~/.agents/skills` (and `~/.claude/skills`) natively since ≥1.16
 - **instruction-file harnesses** have **no** per-skill directory; their guidance comes from a
-  single global instruction file that the [`agents_md`](#agents_md) area maintains, not from a
-  symlink. rig links **nothing** for these (it never invents a directory) and `rig status`
-  reports the kind as *N/A — uses `<file>`* so the empty link area is explained, not silent:
+  single global instruction file, not from a symlink. rig links **nothing** for these (it never
+  invents a directory) and `rig status` reports the kind as *N/A — uses `<file>`* so the empty
+  link area is explained, not silent. The [`agents_md`](#agents_md) area is repo-local
+  AGENTS.md/CLAUDE.md provisioning, not a writer for these global files:
   - **gemini** → `~/.gemini/GEMINI.md`
   - **pi** → `~/.config/pi/AGENTS.md`
   - **commandcode** → `~/.commandcode/AGENTS.md`
@@ -232,7 +250,6 @@ and directory *content*, which a discovery symlink has neither of.
 agent_hooks:
   enabled: true
   target: ~/.claude/hooks
-  target_kind: claude-code          # claude-code | generic
   all: true
   worktree_only: true               # enforce the worktree-only workflow in THIS repo (default off)
   orchestrator_only: true           # keep the orchestrator thin in THIS repo (default on)
@@ -254,6 +271,10 @@ per the `agents-hooks/v1` contract.
 When `harness.kind: codex` is active, rig defaults the descriptor target to `~/.codex/hooks`
 unless `agent_hooks.target` / `defaults.hooks_target` is set to a non-default custom path. Claude
 behavior is unchanged: `claude-code` still defaults to `~/.claude/hooks`.
+
+`agent_hooks.target_kind` is a legacy scaffold key accepted for old configs (`claude-code` or
+`generic`) but ignored. Remove it when editing the file; hook targets now come from
+`agent_hooks.target`, `defaults.hooks_target`, and `harness.kind` / `harness.kinds`.
 
 ### Per-repo workflow knobs — `worktree_only` / `orchestrator_only`
 
@@ -455,6 +476,7 @@ are installed in the same apply and catch the dangerous tool calls before the si
 harness:
   enabled: true
   kind: claude-code            # skills-dir: claude-code | codex · native: opencode · instruction-file: gemini | pi | commandcode
+  # kinds: [codex]             # optional additional harnesses to provision alongside kind
   auto_mode: true              # true → auto-accept tool calls; false → interactive prompts (claude-code write only)
   # mode: bypassPermissions    # optional: pin the exact mode value (overrides the auto_mode map)
   # settings_path: .claude/settings.json   # where to write (repo-local default; committed)
@@ -467,6 +489,7 @@ harness:
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the harness setting (set `false` to leave the harness config untouched) |
 | `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`) auto-loads `~/.agents/skills`; instruction-file (`gemini`, `pi`, `commandcode`) get their skill discovery via `AGENTS.md`/`GEMINI.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
+| `kinds` | list | `[]` | additional harnesses to provision alongside `kind`. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, supported hook bridges, and supported permissions allowlists. `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one explicit target; supported bridges stay registered with a descriptor-dir override |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
 | `settings_path` | path | `.claude/settings.json` for Claude auto/mode writes; `~/.codex/config.toml` for the Codex hook bridge; `.opencode/plugins/zz-agent-tools-hook-bridge.js` for the opencode hook bridge | the settings/config file/plugin to converge. If overridden, point it at the harness's native format (JSON for Claude, TOML for Codex, JS plugin for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory containing the native settings/plugin filename |
@@ -520,6 +543,11 @@ bridge with the same `PYTHONPATH`. The merge/symlink is idempotent and preserves
 config; `rig status` reports the bridge as missing/stale drift if a managed hook is absent or
 points at an old checkout. Gemini, Pi, and CommandCode still skip the bridge with a note when
 explicitly enabled.
+
+When `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one custom
+directory, rig still registers the configured supported bridges and passes that descriptor dir to
+the dispatcher. Claude/Codex receive the override in their managed hook command; opencode gets a
+small managed wrapper plugin that sets `OPENCODE_HOOKS_DIR` before delegating to the stock bridge.
 
 For Codex, the bridge also converges global hook feature flags that would make the managed hook
 block inert: `[features] hooks = false`, top-level `features.hooks = false`, and the deprecated
@@ -588,7 +616,7 @@ existing committed configs.
 ```yaml
 permissions:
   enabled: true                # provision the permissions layer (false → leave the harness config alone)
-  # kind: opencode             # target opencode's allowlist (default: follow harness.kind / claude-code)
+  # kind: opencode             # target one harness allowlist explicitly (default: supported harness.kind + harness.kinds)
   # tools: [tg, review, draw, 3d, rig, task, dev, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES the default set
   # extra: [kubectl]           # ADD to the (default or explicit) set
   # disable: [gitleaks]        # drop from rig's desired set (won't ADD it; never removes a live entry)
@@ -603,14 +631,14 @@ permissions:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the permissions layer (set `false` to leave the harness config untouched) |
-| `kind` | `claude-code` \| `opencode` | follows `harness.kind`, else `claude-code` | which harness's permissions to provision. `opencode` is supported here independently of `harness.kind` (whose auto-mode write reserves it); `codex`/`gemini`/`pi` are rejected (N/A) |
+| `kind` | `claude-code` \| `opencode` \| `null` | supported `harness.kind` plus `harness.kinds`, else `claude-code` | which harness's permissions to provision. When absent or `null`, rig fans out to every configured harness kind with a supported additive allowlist and records N/A notes for unsupported kinds. Set `permissions.kind` to target one supported harness explicitly; `codex`/`gemini`/`pi` are rejected (N/A) |
 | `tools` | str[] | the default set | the command names to pre-allow; **replaces** the default set wholesale |
 | `extra` | str[] | `[]` | command names to ADD on top of the (default or explicit) set |
 | `disable` | str[] | `[]` | command names to drop from rig's **desired** set, so rig won't ADD them. NB: this is additive-only — it does NOT delete an entry already in your allowlist (rig never removes the user's entries; that stays your call) |
 | `allow` | str[] | `[]` | RAW permission-rule entries (`Tool` or `Tool(specifier)`, e.g. `WebFetch`, `Bash(kubectl get:*)`, `Read(//tmp/**)`) asserted present in the allow list, on TOP of the tool-derived entries — this is how a hand-grown allowlist is adopted as declared config. claude-code only — see below |
 | `deny` | str[] | the baked deny baseline | rule entries asserted present in the deny list; **replaces** the baseline wholesale (`[]` disables it). claude-code only — see below |
 | `ask` | str[] | the baked ask baseline | rule entries asserted present in the ask list; **replaces** the baseline wholesale (`[]` disables it). claude-code only — see below |
-| `settings_path` | path (JSON) | per-harness default | override the settings file to merge into (default: `~/.claude/settings.json` for claude-code, `~/.config/opencode/opencode.json` for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory |
+| `settings_path` | path (JSON) | per-harness default | override the settings file to merge into (default: `~/.claude/settings.json` for claude-code, `~/.config/opencode/opencode.json` for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory. With multiple harnesses and no explicit `permissions.kind`, one override can only name one file, so rig targets the first supported harness and notes the skipped kinds |
 
 **Default tool set.** Our ecosystem CLIs — `tg`, `review`, `draw`, `3d`, `rig`, `task`, `dev` —
 plus the external tools we lean on: `gh`, `git`, `rg`, `uv`, `bun`, `jq`, `gitleaks`. For
@@ -618,6 +646,11 @@ claude-code, the `dev` entry is written as `Bash(dev:*)`, which is the provision
 permission surface for project-local development workflows. The `dev` implementation lives in
 agent-tools; rig provisions the harness permission for it but does not implement its runtime
 process-safety checks.
+
+**Multi-harness migration note.** When `permissions.kind` is absent or explicitly `null`,
+permissions fan out to every configured harness kind with an additive allowlist implementation
+(`harness.kind` plus `harness.kinds`). Existing configs that want single-harness behavior should
+pin `permissions.kind` to that one harness, such as `claude-code` or `opencode`.
 
 **Baked deny/ask baselines (claude-code, rig-cli#100).** Deliberately conservative and
 word-boundary precise — a deny rule that false-positives on legitimate commands teaches agents
@@ -638,7 +671,7 @@ under `kind: opencode` is dropped with a visible plan note, never guessed at (a 
 rule written as an opencode glob key would be a bogus entry that never matches). The
 tool-derived allowlist (`tools`/`extra`/`disable`) still works for opencode.
 
-**What gets written, per harness (keyed off `harness.kind`).**
+**What gets written, per harness (keyed off `permissions.kind`, else supported `harness.kind` plus `harness.kinds`).**
 
 - **claude-code** — `permissions.allow` in `~/.claude/settings.json` (a JSON array) gains an
   entry per tool in the form `Bash(<tool>:*)` (matching the prefix-glob form CC honors). The
@@ -1624,6 +1657,9 @@ rig config set harness.auto_mode false --no-apply        # write only, print the
   category references, a bad `agent_tools_source`, or any otherwise-unbuildable config). If
   **either** gate rejects the edit, the target file is rolled back to its prior contents and the
   command exits non-zero.
+- Nullable options can be unset with `null`, `none`, `~`, or an empty value. For example,
+  `rig config set permissions.kind null` removes that key and restores the default fan-out
+  behavior.
 - A value that **starts with `-`** (and is not a negative number) needs the `--` separator so
   argparse doesn't read it as a flag: `rig config set k -- -weird`. **Dot paths cannot address a
   key that itself contains a dot** — `<dot.path>` always splits on `.`; every real catalog id is

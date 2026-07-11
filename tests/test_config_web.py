@@ -72,6 +72,42 @@ def test_build_model_reflects_repo_config(tmp_path):
     # the repo file set it false -> the live (effective) value is false, not the registry default
     assert auto.value is False
     assert auto.layer == REPO  # harness writes to the committed repo file
+    kinds = next(f for f in harness.fields if f.key == "harness.kinds")
+    assert kinds.value == []
+    assert kinds.layer == REPO
+
+
+def test_build_model_permissions_kind_absent_is_unpinned_with_harness_fanout(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_repo_config(
+        repo,
+        "version: 1\nharness:\n  kind: claude-code\n  kinds: [opencode]\npermissions:\n  enabled: true\n",
+    )
+
+    model = cw.build_model(repo)
+    permissions = next(a for a in model.areas if a.category == "permissions")
+    kind = next(f for f in permissions.fields if f.key == "permissions.kind")
+
+    assert kind.value is None
+    assert kind.default is None
+    assert kind.layer == REPO
+
+
+def test_apply_edit_permissions_kind_empty_clears_pin(tmp_path, fake_agent_tools):
+    repo = tmp_path / "repo"
+    _editable_repo(
+        repo,
+        fake_agent_tools,
+        "harness:\n  kind: claude-code\n  kinds: [opencode]\npermissions:\n"
+        "  enabled: true\n  kind: claude-code\n",
+    )
+
+    result = cw.apply_edit(repo, "permissions.kind", "")
+
+    assert result["value"] is None
+    data = cfg.read_yaml_file(repo / "rig.yaml")
+    assert "kind" not in data["permissions"]
 
 
 def test_build_model_global_only_field_tagged_global(tmp_path):
@@ -292,6 +328,23 @@ def test_field_control_escapes_text_value():
     assert "&lt;script&gt;" in control
 
 
+def test_enum_control_with_none_default_renders_unpinned_option():
+    f = cw.FieldView(
+        key="permissions.kind",
+        kind="enum",
+        value=None,
+        default=None,
+        hint="permission target",
+        choices=("claude-code", "opencode"),
+        layer=REPO,
+    )
+
+    control = cw._field_control(f)
+
+    assert '<option value="" selected>(fan-out / unpinned)</option>' in control
+    assert '<option value="claude-code"' in control
+
+
 def test_field_row_escapes_hint():
     f = cw.FieldView(
         key="x.y", kind="bool", value=True, default=True,
@@ -314,6 +367,31 @@ def test_app_handle_edit_ok(tmp_path, fake_agent_tools):
     assert body["value"] == "false"
     assert body["layer"] == REPO
     assert cfg.read_yaml_file(repo / "rig.yaml")["harness"]["auto_mode"] is False
+
+
+def test_app_handle_edit_nullable_enum_returns_select_control_value(tmp_path, fake_agent_tools):
+    repo = tmp_path / "repo"
+    _editable_repo(
+        repo,
+        fake_agent_tools,
+        "harness:\n  kind: claude-code\n  kinds: [opencode]\npermissions:\n"
+        "  enabled: true\n  kind: claude-code\n",
+    )
+    app = cw.ConfigWebApp(repo_root=repo)
+
+    code, body = app.handle_edit({"key": "permissions.kind", "value": ""})
+
+    assert code == 200
+    assert body["value"] == "null"
+    assert body["control_value"] == ""
+    data = cfg.read_yaml_file(repo / "rig.yaml")
+    assert "kind" not in data["permissions"]
+
+    code, rejected = app.handle_edit({"key": "permissions.kind", "value": "not-a-harness"})
+
+    assert code == 400
+    assert rejected["ok"] is False
+    assert "kind" not in cfg.read_yaml_file(repo / "rig.yaml")["permissions"]
 
 
 def test_app_handle_edit_rejects_bad_value(tmp_path):

@@ -55,6 +55,16 @@ def test_explicit_config_replaces_repo_layer(tmp_path, monkeypatch):
     assert loaded.data["skills"]["enabled"] is True
 
 
+def test_committed_repo_rig_yaml_loads(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = Path(__file__).resolve().parent.parent
+
+    loaded = config.load(repo)
+
+    assert loaded.primary_config_path == repo / "rig.yaml"
+    assert any(layer.startswith("repo:") for layer in loaded.layers)
+
+
 def test_validate_rejects_unknown_top_key():
     with pytest.raises(config.ConfigError, match="unknown top-level key"):
         config.validate({"version": 1, "bogus": 1})
@@ -205,9 +215,12 @@ def test_open_map_block_fixed_knobs_are_type_checked(doc, schema_path):
     assert ei.value.schema_path == schema_path
 
 
-def test_agent_hooks_target_kind_enum_validated():
-    # the schema declares the enum; the runtime must enforce it too (no layer disagreement).
-    config.validate({"version": 1, "agent_hooks": {"target_kind": "claude-code"}})  # valid
+def test_agent_hooks_target_kind_is_accepted_as_ignored_legacy_key():
+    config.validate({"version": 1, "agent_hooks": {"target_kind": "claude-code"}})
+    config.validate({"version": 1, "agent_hooks": {"target_kind": "generic"}})
+
+
+def test_agent_hooks_target_kind_rejects_bad_legacy_value():
     with pytest.raises(config.ConfigError) as ei:
         config.validate({"version": 1, "agent_hooks": {"target_kind": "bogus"}})
     assert ei.value.schema_path == "agent_hooks.target_kind"
@@ -322,12 +335,22 @@ def test_validate_rejects_unknown_harness_kind():
         config.validate({"version": 1, "harness": {"kind": "bogus-harness"}})
 
 
+def test_validate_rejects_non_string_harness_kind():
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate({"version": 1, "harness": {"kind": ["codex"]}})
+    assert ei.value.schema_path == "harness.kind"
+
+
 def test_validate_accepts_all_supported_harness_kinds():
     # rig-cli#9: every harness rig knows a skill/instruction discovery convention for is now
     # ACCEPTED in harness.kind (skills-dir harnesses claude-code/opencode + instruction-file
     # harnesses codex/gemini/pi/commandcode). Previously opencode (and the rest) were rejected.
     for kind in ("claude-code", "opencode", "codex", "gemini", "pi", "commandcode"):
         config.validate({"version": 1, "harness": {"kind": kind}})
+
+
+def test_validate_accepts_additional_harness_kinds():
+    config.validate({"version": 1, "harness": {"kind": "claude-code", "kinds": ["codex", "opencode"]}})
 
 
 def test_validate_rejects_typo_harness_kind_with_supported_list():

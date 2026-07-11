@@ -32,7 +32,6 @@ skills:
 agent_hooks:
   enabled: true
   target: ~/.claude/hooks
-  target_kind: claude-code
   all: true
 
 # ── Git-hooks — the global dispatcher (secret-scan runs in every repo) ────────────

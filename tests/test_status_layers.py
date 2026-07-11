@@ -406,8 +406,21 @@ def test_help_documents_exit_codes(capsys):
         main(["--help"])
     out = capsys.readouterr().out
     assert "exit codes:" in out
-    assert "4" in out and "unknown item" in out
-    assert "6" in out and "not a git repository" in out
+    expected = (
+        (errors.EXIT_OK, "success"),
+        (errors.EXIT_INTERNAL, "internal error"),
+        (errors.EXIT_CONFIG, "invalid config"),
+        (errors.EXIT_DRIFT, "drift"),
+        (errors.EXIT_UNKNOWN_ITEM, "unknown item"),
+        (errors.EXIT_MISSING_TARGET, "missing target"),
+        (errors.EXIT_NOT_A_REPO, "not a git repository"),
+        (errors.EXIT_REPO_CORRUPT, "repo corrupt"),
+        (errors.EXIT_CODEX_UPDATE, "Codex update failed"),
+        (errors.EXIT_MISSING_DEP, "missing dependency"),
+    )
+    for code, label in expected:
+        assert str(code) in out
+        assert label in out
 
 
 # ── exit-code precedence: a dead target outranks drift ────────────────────────────

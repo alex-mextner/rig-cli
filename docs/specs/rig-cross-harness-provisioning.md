@@ -21,9 +21,9 @@ Two gaps:
    - `~/.config/opencode/skill` (registry value, singular) **does not exist**; opencode
      also has no `skills/` dir. opencode discovers skills natively from `~/.agents/skills`
      (= `skills_target`). The registered symlink target is dead.
-   - codex ships a **native** skills system (`~/.codex/skills/`) and its loader reads
-     `$HOME/.agents/skills` (= `skills_target`). It is mis-classified as instruction-file;
-     it needs zero AGENTS.md skill block.
+   - codex ships a **native** skills system (`~/.codex/skills/`) and also reads
+     `~/.codex/AGENTS.md` as a global instruction file. It does not discover rig's
+     `skills_target` by itself, so rig must link installed skills into `~/.codex/skills`.
    - These two are correctness bugs independent of subagents and ship first.
 
 ## 2. Verified ground truth (this machine, 2026-06-22)
@@ -32,7 +32,7 @@ Two gaps:
 |---|---|---|---|
 | claude-code | `~/.claude/skills` (real) | `~/.claude/agents` (`*.md`, empty) | — |
 | opencode | none (`skill`/`skills` absent) | `~/.config/opencode/agents/` (**plural**, has `read-only-reviewer.md`) | yes (native root) |
-| codex | `~/.codex/skills/` (native) | none (no `~/.codex/agents`) | yes (loader root) |
+| codex | `~/.codex/skills/` (native) | none (no `~/.codex/agents`) | no |
 | gemini | none | `~/.gemini/agents/` (documented, **not present yet**) | no |
 | pi | not installed | by design **none** | reads `.agents/skills` per docs |
 | commandcode | not installed (`~/.commandcode` absent) | none documented | `.agents/skills` back-compat per docs |
@@ -66,17 +66,18 @@ existing skill helpers. `KNOWN_HARNESS_KINDS` stays the union of skills + instru
 families and is unchanged (subagent kinds are a subset of already-known kinds).
 
 ### 3.2 Skills registry corrections (independent of subagents)
-- **codex**: leave its `~/.codex/AGENTS.md` entry as its *instruction file* record, but
-  make skills resolve via `skills_target` natively — emit a "discovers skills natively
-  from `~/.agents/skills`; no link or AGENTS.md block needed" note, NOT an AGENTS.md skill
-  listing. (Keeps the table honest; codex already loads `~/.agents/skills`.)
+- **codex**: leave its `~/.codex/AGENTS.md` entry as its *instruction file* record, and
+  also treat `~/.codex/skills` as a skills-directory harness. rig links installed skills
+  into `~/.codex/skills`; the instruction file and the skill directory are complementary.
 - **opencode**: its native skill root is `~/.agents/skills`. Either (a) drop the dead
   `~/.config/opencode/skill` symlink and emit a "discovers natively" note, or (b) if a
   belt-and-suspenders symlink is kept, fix it to the actually-loaded dir. Default to (a):
   the dead singular target is the smallest, safest fix and matches on-disk reality.
 - General rule introduced: **when `skills_target` IS a harness's native discovery root,
   emit no symlink and record a `discovers from skills_target natively` note** — applies to
-  codex and opencode today, and is the cleanest answer to the "identity symlink?" question.
+  opencode today. If `skills_target` is customized away from that native root, rig links the
+  installed skills back into the native discovery root so the harness still sees them. Codex
+  is not native-discovery; it always gets the `~/.codex/skills` link.
 
 ### 3.3 Subagents catalog category + scanner
 - Add `"subagents"` to `_VALID_CATEGORIES` (`riglib/config.py`) and a schema entry — without

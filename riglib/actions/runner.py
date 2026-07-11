@@ -1000,13 +1000,21 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
     py = str(action.options.get("python", "python3"))
     module = hook_bridge_module(action)
     kind = str(action.options.get("kind", "claude-code"))
+    hooks_dir = action.options.get("hooks_dir")
+    hook_dir_env = {
+        "claude-code": "CC_HOOKS_DIR",
+        "codex": "CODEX_HOOKS_DIR",
+    }.get(kind)
 
     def cmd(event: str) -> str:
         # quote BOTH the lib path and the interpreter: a path with spaces would break the
         # hook, and an unquoted config-supplied `python` would let shell syntax be injected
         # into every hook command. `-m <module>` keeps the run command and the
         # presence-marker in lockstep (rename the module → both change together).
-        return f"PYTHONPATH={shlex.quote(lib_dir)} {shlex.quote(py)} -m {module} {event}"
+        env = [f"PYTHONPATH={shlex.quote(lib_dir)}"]
+        if hooks_dir and hook_dir_env:
+            env.append(f"{hook_dir_env}={shlex.quote(str(hooks_dir))}")
+        return f"{' '.join(env)} {shlex.quote(py)} -m {module} {event}"
 
     if kind == "codex":
         return {
@@ -1062,6 +1070,25 @@ def opencode_hook_bridge_plugin_target(action: Action) -> tuple[Path, Path]:
     module = hook_bridge_module(action)
     dest = Path(str(action.options["lib_dir"])) / module / "plugin.js"
     return plugin_path, dest
+
+
+def opencode_hook_bridge_uses_wrapper(action: Action) -> bool:
+    """True when rig must write a plugin wrapper to pass a custom descriptor dir."""
+    return bool(action.options.get("hooks_dir"))
+
+
+def opencode_hook_bridge_wrapper_text(action: Action) -> str:
+    """The managed opencode wrapper used when descriptors live outside the default hook dir."""
+    _plugin_path, dest = opencode_hook_bridge_plugin_target(action)
+    hooks_dir = action.options.get("hooks_dir")
+    if not hooks_dir:
+        raise AssertionError("opencode wrapper requires hooks_dir; guard with uses_wrapper")
+    return (
+        "// rig-managed opencode hook bridge wrapper. Do not edit.\n"
+        f"process.env.OPENCODE_HOOKS_DIR = {json.dumps(str(hooks_dir))};\n"
+        f"const bridgeModule = await import({json.dumps(dest.resolve().as_uri())});\n"
+        "export const AgentToolsHookBridge = bridgeModule.AgentToolsHookBridge;\n"
+    )
 
 
 def opencode_hook_bridge_exclude_block_text(rel_path: str) -> str:
@@ -1364,7 +1391,7 @@ def _do_register_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
 
 
 def _do_register_opencode_hook_bridge(action: Action, on_conflict: str) -> ActionResult:
-    """Register opencode_hook_bridge by symlinking its auto-loaded plugin."""
+    """Register opencode_hook_bridge by symlinking or wrapping its auto-loaded plugin."""
     plugin_path, dest = opencode_hook_bridge_plugin_target(action)
     if not dest.is_file():
         return ActionResult(action, "error", f"hook_bridge/{action.item}: bridge plugin missing: {dest}")
@@ -1394,6 +1421,49 @@ def _do_register_opencode_hook_bridge(action: Action, on_conflict: str) -> Actio
         final_status = "updated" if status == "skipped" and (legacy_removed or exclude_changed) else status
         final_detail = detail if not notes else f"{detail}; {'; '.join(notes)}"
         return ActionResult(action, final_status, final_detail)
+
+    if opencode_hook_bridge_uses_wrapper(action):
+        desired = opencode_hook_bridge_wrapper_text(action)
+        if plugin_path.is_file() and not plugin_path.is_symlink():
+            try:
+                if plugin_path.read_text(encoding="utf-8") == desired:
+                    return finalize(
+                        "skipped",
+                        f"hook_bridge/{action.item}: opencode plugin wrapper already written → {dest}",
+                    )
+            except OSError as exc:
+                return ActionResult(
+                    action,
+                    "error",
+                    f"hook_bridge/{action.item}: cannot read plugin wrapper {plugin_path}: {exc}",
+                )
+
+        backup_note = ""
+        replaced_existing = plugin_path.exists() or plugin_path.is_symlink()
+        if replaced_existing:
+            if on_conflict == "skip":
+                return ActionResult(
+                    action,
+                    "skipped",
+                    f"hook_bridge/{action.item}: existing opencode plugin at {plugin_path} "
+                    "(on_conflict=skip), left untouched",
+                )
+            if plugin_path.is_symlink():
+                plugin_path.unlink()
+            elif _should_backup(on_conflict):
+                bak = fsutil.backup_path(plugin_path)
+                shutil.move(str(plugin_path), str(bak))
+                backup_note = f" (backed up prior → {bak})"
+            elif plugin_path.is_dir():
+                shutil.rmtree(plugin_path)
+            else:
+                plugin_path.unlink()
+        plugin_path.write_text(desired, encoding="utf-8")
+        status = "backed_up" if backup_note else ("updated" if replaced_existing else "created")
+        return finalize(
+            status,
+            f"hook_bridge/{action.item}: wrote opencode plugin wrapper {plugin_path} → {dest}{backup_note}",
+        )
 
     if plugin_path.is_symlink():
         try:
@@ -1466,14 +1536,17 @@ def _toml_inline(value) -> str:
     raise TypeError(f"unsupported TOML value: {value!r}")
 
 
-def codex_hook_bridge_block(action: Action, *, include_table_header: bool) -> str:
+def codex_hook_bridge_block(
+    action: Action, *, include_table_header: bool, dotted_keys: bool = False
+) -> str:
     """Render the rig-managed Codex TOML hook block."""
     lines = [_CODEX_BRIDGE_BEGIN]
     if include_table_header:
         lines.append("[hooks]")
+    key_prefix = "hooks." if dotted_keys else ""
     for event, pairs in hook_bridge_entries(action).items():
         blocks = [_bridge_block(matcher, command) for matcher, command in pairs]
-        lines.append(f"{event} = {_toml_inline(blocks)}")
+        lines.append(f"{key_prefix}{event} = {_toml_inline(blocks)}")
     lines.append(_CODEX_BRIDGE_END)
     return "\n".join(lines) + "\n"
 
@@ -1503,6 +1576,16 @@ def codex_hook_bridge_block_has_table_header(block: str) -> bool:
         if stripped in (_CODEX_BRIDGE_BEGIN, _CODEX_BRIDGE_END) or not stripped:
             continue
         return stripped == "[hooks]"
+    return False
+
+
+def codex_hook_bridge_block_uses_dotted_keys(block: str) -> bool:
+    """True when the managed block writes top-level ``hooks.<event>`` dotted keys."""
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped in (_CODEX_BRIDGE_BEGIN, _CODEX_BRIDGE_END) or not stripped:
+            continue
+        return stripped.startswith("hooks.")
     return False
 
 
@@ -1717,7 +1800,10 @@ def codex_hook_bridge_conflict(text: str) -> str | None:
             parts = _toml_key_parts(body[1:-1].strip())
             name = ".".join(parts)
             if parts[:1] == ["hooks"] and len(parts) > 1:
-                return f"unmanaged [{name}] table already exists"
+                # [hooks.state] is Codex trust metadata (trusted_hash per hook path), not an
+                # event hook table managed by the bridge.
+                if parts[:2] != ["hooks", "state"]:
+                    return f"unmanaged [{name}] table already exists"
             current_table = name
             in_hooks = parts == ["hooks"]
             continue
@@ -1728,12 +1814,73 @@ def codex_hook_bridge_conflict(text: str) -> str | None:
         if in_hooks and key_parts and key_parts[0] in _CODEX_HOOK_EVENTS:
             return f"unmanaged hooks.{key_parts[0]} already exists"
         if current_table is None and key_parts[:1] == ["hooks"]:
+            if key_parts[:2] == ["hooks", "state"]:
+                if "=" in body:
+                    value_depth = max(0, _toml_value_delta(body.split("=", 1)[1]))
+                continue
             if len(key_parts) > 1 and key_parts[1] in _CODEX_HOOK_EVENTS:
                 return f"unmanaged hooks.{key_parts[1]} already exists"
             return f"unmanaged {'.'.join(key_parts)} uses dotted hooks TOML; cannot safely add a [hooks] table"
         if "=" in body:
             value_depth = max(0, _toml_value_delta(body.split("=", 1)[1]))
     return None
+
+
+def codex_hook_bridge_has_implicit_hooks_table(text: str) -> bool:
+    """True when top-level dotted ``hooks.*`` keys already implicitly declare ``hooks``."""
+    current_table: str | None = None
+    value_depth = 0
+    for line in text.splitlines():
+        body = _toml_code_part(line.strip()).strip()
+        if not body:
+            continue
+        if value_depth > 0:
+            value_depth = max(0, value_depth + _toml_value_delta(body))
+            continue
+        if body.startswith("[[") and body.endswith("]]"):
+            current_table = ".".join(_toml_key_parts(body[2:-2].strip()))
+            continue
+        if body.startswith("[") and body.endswith("]"):
+            current_table = ".".join(_toml_key_parts(body[1:-1].strip()))
+            continue
+        if "=" not in body:
+            continue
+        key, value = body.split("=", 1)
+        value_depth = max(0, _toml_value_delta(value))
+        if current_table is None and _toml_key_parts(key.strip())[:1] == ["hooks"]:
+            return True
+    return False
+
+
+def _toml_first_table_offset(text: str) -> int | None:
+    """Character offset of the first TOML table header outside a multiline inline value."""
+    offset = 0
+    value_depth = 0
+    for line in text.splitlines(keepends=True):
+        body = _toml_code_part(line).strip()
+        if value_depth > 0:
+            value_depth = max(0, value_depth + _toml_value_delta(body))
+        elif body.startswith("[") and body.endswith("]"):
+            return offset
+        elif "=" in body:
+            value_depth = max(0, _toml_value_delta(body.split("=", 1)[1]))
+        offset += len(line)
+    return None
+
+
+def _insert_codex_hook_bridge_block(text: str, block: str, *, before_first_table: bool) -> str:
+    """Insert a managed Codex hook block into top-level TOML text."""
+    if before_first_table:
+        table_offset = _toml_first_table_offset(text)
+        if table_offset is not None:
+            prefix = text[:table_offset].rstrip()
+            suffix = text[table_offset:].lstrip("\n")
+            merged = (prefix + "\n\n" if prefix else "") + block
+            if suffix:
+                merged += "\n" + suffix
+            return merged
+    prefix = text.rstrip()
+    return (prefix + "\n\n" if prefix else "") + block
 
 
 def merge_codex_hook_bridge_toml(existing: str, action: Action) -> tuple[str, str | None]:
@@ -1752,10 +1899,18 @@ def merge_codex_hook_bridge_toml(existing: str, action: Action) -> tuple[str, st
     if bounds is not None:
         start, end = bounds
         current = enabled[start:end]
+        implicit_hooks = codex_hook_bridge_has_implicit_hooks_table(stripped)
         block = codex_hook_bridge_block(
             action,
-            include_table_header=codex_hook_bridge_block_has_table_header(current),
+            include_table_header=(
+                codex_hook_bridge_block_has_table_header(current) and not implicit_hooks
+            ),
+            dotted_keys=implicit_hooks or codex_hook_bridge_block_uses_dotted_keys(current),
         )
+        if implicit_hooks:
+            return _insert_codex_hook_bridge_block(
+                stripped, block, before_first_table=True
+            ), None
         return enabled[:start] + block + enabled[end:], None
     hooks_bounds = _toml_table_bounds(stripped, "hooks")
     if hooks_bounds is not None:
@@ -1767,9 +1922,15 @@ def merge_codex_hook_bridge_toml(existing: str, action: Action) -> tuple[str, st
         if suffix:
             merged += "\n" + suffix
         return merged, None
-    block = codex_hook_bridge_block(action, include_table_header=True)
-    prefix = stripped.rstrip()
-    return (prefix + "\n\n" if prefix else "") + block, None
+    implicit_hooks = codex_hook_bridge_has_implicit_hooks_table(stripped)
+    block = codex_hook_bridge_block(
+        action,
+        include_table_header=not implicit_hooks,
+        dotted_keys=implicit_hooks,
+    )
+    return _insert_codex_hook_bridge_block(
+        stripped, block, before_first_table=implicit_hooks
+    ), None
 
 
 def _do_register_codex_hook_bridge(action: Action, on_conflict: str) -> ActionResult:

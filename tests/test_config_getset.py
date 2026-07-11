@@ -229,6 +229,89 @@ def test_cli_set_scalar_coercion_writes_bool(tmp_path, capsys, fake_agent_tools,
     assert len(_mock_apply) == 1  # reconcile ran
 
 
+def test_cli_set_registered_list_option_writes_list(tmp_path, fake_agent_tools, monkeypatch, _mock_apply):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
+        "harness: {kind: claude-code}\n",
+    )
+
+    rc = main(["config", "set", "harness.kinds", "codex,opencode", "-C", str(repo)])
+
+    assert rc == 0
+    written = config.load(repo)
+    assert written.data["harness"]["kinds"] == ["codex", "opencode"]
+    assert len(_mock_apply) == 1
+
+
+def test_cli_set_registered_list_error_is_clean(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
+        "harness: {kind: claude-code}\n",
+    )
+
+    rc = main(["config", "set", "harness.kinds", "[codex, 42]", "-C", str(repo)])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "expected a list of strings" in captured.out
+    assert "Traceback" not in captured.out
+    assert captured.err == ""
+
+
+def test_cli_set_nullable_registered_option_clears_key(
+    tmp_path, fake_agent_tools, monkeypatch, _mock_apply
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
+        "harness: {kind: claude-code, kinds: [opencode]}\n"
+        "permissions: {enabled: true, kind: claude-code}\n",
+    )
+
+    rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo)])
+
+    assert rc == 0
+    written = config.load(repo)
+    assert "kind" not in written.data["permissions"]
+    assert len(_mock_apply) == 1
+
+
+def test_cli_set_nullable_registered_option_preserves_single_key_block(
+    tmp_path, fake_agent_tools, monkeypatch, _mock_apply
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
+        "harness: {kind: claude-code, kinds: [opencode]}\n"
+        "permissions: {kind: claude-code}\n",
+    )
+
+    rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo)])
+
+    assert rc == 0
+    written = config.load(repo)
+    assert written.data["permissions"] == {}
+    assert len(_mock_apply) == 1
+
+
 @pytest.mark.parametrize(
     "path,value",
     [
