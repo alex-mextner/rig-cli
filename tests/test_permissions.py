@@ -14,7 +14,7 @@ from pathlib import Path
 
 from riglib.actions import run_plan
 from riglib.catalog import Catalog
-from riglib.config import LoadedConfig, validate, ConfigError
+from riglib.config import LoadedConfig, validate, ConfigError, global_config_path, load
 from riglib.drift import detect
 from riglib.permissions import (
     DEFAULT_RULES,
@@ -611,6 +611,39 @@ def test_permissions_fan_out_to_supported_harness_kinds_by_default(
         home / ".config" / "opencode" / "opencode.json",
     ]
     assert any("harness 'codex' has no allowlist" in note for note in plan.notes)
+
+
+def test_permissions_explicit_null_masks_global_pin_and_fans_out(
+    fake_agent_tools, tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    repo = tmp_path / "repo"; repo.mkdir()
+    gpath = global_config_path()
+    gpath.parent.mkdir(parents=True, exist_ok=True)
+    gpath.write_text(
+        "version: 1\npermissions: {enabled: true, kind: claude-code}\n",
+        encoding="utf-8",
+    )
+    (repo / "rig.yaml").write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
+        "harness: {kind: claude-code, kinds: [opencode]}\n"
+        "permissions: {enabled: true, kind: null, tools: [git]}\n",
+        encoding="utf-8",
+    )
+    cfg = load(repo)
+
+    plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    perm = [a for a in plan.actions if a.kind == "provision_permissions"]
+
+    assert [a.options["kind"] for a in perm] == ["claude-code", "opencode"]
+    assert [a.target for a in perm] == [
+        home / ".claude" / "settings.json",
+        home / ".config" / "opencode" / "opencode.json",
+    ]
 
 
 def test_disable_never_deletes_an_existing_user_entry(fake_agent_tools, tmp_path):

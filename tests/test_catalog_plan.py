@@ -246,6 +246,21 @@ def test_xdg_config_home_maps_dispatcher_dir(fake_agent_tools, tmp_path, monkeyp
     assert _expand("~/.config/git", tmp_path) == home / ".config" / "git"
 
 
+def test_expand_user_path_contract(tmp_path, monkeypatch):
+    from riglib.paths import expand_user_path
+
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setenv("ROOT_WITH_TILDE", "~/from-var")
+
+    assert expand_user_path("~/plain") == home / "plain"
+    assert expand_user_path("$ROOT_WITH_TILDE/tool") == home / "from-var" / "tool"
+    assert expand_user_path("~/.config/rig") == xdg / "rig"
+    assert expand_user_path("relative/path") == Path("relative/path")
+
+
 def test_plan_disabled_category(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
     # agents_md, the ship_delegator, every github sub-block (ruleset/merge/ghas/actions/browser),
@@ -416,11 +431,40 @@ def test_plan_codex_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_path,
     assert a.target == Path(os.path.expanduser("~/.codex/config.toml"))
 
 
-def test_plan_codex_surfaces_follow_codex_home(fake_agent_tools, tmp_path, monkeypatch):
+def test_plan_codex_surfaces_ignore_ambient_codex_home(fake_agent_tools, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    ambient_codex_home = tmp_path / "ambient-codex-home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(ambient_codex_home))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "harness": {"kind": "codex", "hook_bridge": {"enabled": True}},
+            "agent_hooks": {"all": True},
+        },
+        tmp_path,
+    )
+
+    plan = build(cfg, cat, project_type="unknown")
+
+    skill_targets = {a.target for a in plan.actions if a.kind == "link_skill_harness"}
+    assert any(str(target).startswith(str(home / ".codex" / "skills")) for target in skill_targets)
+    hook_targets = {a.target for a in plan.actions if a.kind == "install_agent_hook"}
+    assert hook_targets == {home / ".codex" / "hooks"}
+    assert resolve_category_target(cfg, "agent_hooks") == home / ".codex" / "hooks"
+    assert resolve_category_targets(cfg, "agent_hooks") == [home / ".codex" / "hooks"]
+    bridge = _bridge_action(plan)
+    assert bridge is not None
+    assert bridge.target == home / ".codex" / "config.toml"
+
+
+def test_plan_codex_surfaces_follow_explicit_rig_codex_home(fake_agent_tools, tmp_path, monkeypatch):
+    from riglib.actions.runner import hook_bridge_entries
+
     home = tmp_path / "home"
     codex_home = tmp_path / "codex-home"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("RIG_CODEX_HOME", str(codex_home))
     cat = Catalog.scan(str(fake_agent_tools))
     cfg = _cfg(
         {
@@ -441,6 +485,8 @@ def test_plan_codex_surfaces_follow_codex_home(fake_agent_tools, tmp_path, monke
     bridge = _bridge_action(plan)
     assert bridge is not None
     assert bridge.target == codex_home / "config.toml"
+    assert bridge.options["hooks_dir"] == str(codex_home / "hooks")
+    assert "CODEX_HOOKS_DIR=" in str(hook_bridge_entries(bridge))
 
 
 def test_plan_claude_primary_additional_codex_provisions_codex_surfaces(

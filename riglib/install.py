@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 from .harness_skills import HARNESS_SKILL_DIR_KINDS, skill_dir_for
+from .paths import expand_user_path
 
 SKILL_NAME = "rig"
 SKILL_MD = """\
@@ -93,7 +94,7 @@ def _link_into_harness(installed_skill_dir: Path, harness_dir_raw: str) -> None:
     SKILL.md write already succeeded.
     """
     dest = installed_skill_dir.resolve()
-    harness_dir = Path(os.path.expanduser(harness_dir_raw))
+    harness_dir = expand_user_path(harness_dir_raw)
     # no self-link when the agents skill dir IS the harness dir (~/.agents/skills == harness)
     if harness_dir.resolve() == installed_skill_dir.parent.resolve():
         return

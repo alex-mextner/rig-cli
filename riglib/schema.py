@@ -411,41 +411,31 @@ def get_path(data: dict[str, Any], dotted: str) -> Any:
 def set_path(data: dict[str, Any], dotted: str, value: Any) -> None:
     """Set ``dotted`` to ``value`` in a nested dict, creating intermediate mappings as needed.
 
-    Mutates ``data`` in place. A MISSING intermediate (``None`` / absent) is created as an empty
-    mapping. But an intermediate that exists as a NON-mapping (a scalar/list the user authored,
+    Mutates ``data`` in place. A MISSING intermediate is created as an empty mapping. But an
+    intermediate that exists as a NON-mapping (``null``/scalar/list the user authored,
     e.g. ``harness: "TODO"``) is NOT silently clobbered — that would destroy their content before
     validation ever runs. We raise :class:`ValueError` instead, so the wizard surfaces it as a
     "rejected" message and the CLI as a config error, leaving the file untouched.
     """
     parts = dotted.split(".")
+    if not dotted or any(part == "" for part in parts):
+        raise ValueError(f"invalid config path {dotted!r}: empty segment")
     cur = data
     walked: list[str] = []
     for part in parts[:-1]:
         walked.append(part)
-        nxt = cur.get(part)
-        if nxt is None:
+        if part not in cur:
             nxt = {}
             cur[part] = nxt
-        elif not isinstance(nxt, dict):
+        else:
+            nxt = cur[part]
+        if not isinstance(nxt, dict):
             raise ValueError(
                 f"cannot set {dotted!r}: existing value at {'.'.join(walked)!r} is "
                 f"{type(nxt).__name__}, not a mapping — fix it in the config file first"
             )
         cur = nxt
     cur[parts[-1]] = value
-
-
-def delete_path(data: dict[str, Any], dotted: str) -> None:
-    """Delete ``dotted`` from a nested dict if present, preserving parent mappings."""
-    parts = dotted.split(".")
-    cur: Any = data
-    for part in parts[:-1]:
-        if not isinstance(cur, dict) or part not in cur:
-            return
-        cur = cur[part]
-    if not isinstance(cur, dict):
-        return
-    cur.pop(parts[-1], None)
 
 
 # Categories whose plan builder treats an ABSENT top-level block as INACTIVE (it returns early
@@ -554,7 +544,6 @@ __all__ = [
     "writable_layer_for_category",
     "get_path",
     "set_path",
-    "delete_path",
     "effective_value",
     "coerce",
     "json_schema",

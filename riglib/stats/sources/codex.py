@@ -1,7 +1,8 @@
 """Codex CLI log-source parser.
 
 On-disk layout (verified on this machine, 2026-06):
-  ``~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<uuid>.jsonl``
+  ``~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<uuid>.jsonl`` (or the same tree under
+  ``$RIG_CODEX_HOME``)
 Each line is a JSON event with a top-level ISO ``timestamp`` and ``type``. The first line is
 ``type == "session_meta"`` whose ``payload.cwd`` is the session's working directory. Tool
 calls are ``type == "response_item"`` with ``payload.type == "function_call"``, carrying
@@ -19,6 +20,7 @@ import json
 from collections.abc import Iterator
 from pathlib import Path
 
+from ...harness_skills import codex_config_root
 from ..model import ToolInvocation
 from ..taxonomy import categorize
 from ._shellutil import detail_of, extract_command, is_shell_tool, parse_args_dict
@@ -30,7 +32,10 @@ class CodexSource(LogSource):
     name = "codex"
 
     def root(self) -> Path:
-        return self.home / ".codex" / "sessions"
+        # Explicit stats home is a sandbox boundary, so pass it through and let
+        # codex_config_root ignore RIG_CODEX_HOME for that path.
+        home = self.home if self._home_explicit else None
+        return codex_config_root(home) / "sessions"
 
     def iter_invocations(self, *, repos: frozenset[str] | None = None) -> Iterator[ToolInvocation]:
         root = self.root()

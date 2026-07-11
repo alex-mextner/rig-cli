@@ -37,6 +37,7 @@ from .harness_skills import codex_user_path as _codex_user_path
 from .harness_skills import instruction_file_for as _instruction_file_for
 from .harness_skills import native_skills_dir_for as _native_skills_dir_for
 from .harness_skills import skill_dir_for as _skill_dir_for
+from .paths import expand_user_path as _expand_user_path
 from . import project_tools
 
 
@@ -73,7 +74,7 @@ _DEFAULTS_KEY = {
 # ``_HARNESS_SKILL_DIRS`` (imported above) is the skills-DIRECTORY map: a skill copied into
 # ``skills_target`` (default ``~/.agents/skills``) is invisible to a skills-dir harness unless it
 # is also present in that harness's discovery dir (claude-code → ``~/.claude/skills``; codex is
-# resolved dynamically from ``CODEX_HOME``), so rig maintains an idempotent symlink per enabled
+# resolved dynamically from the rig-owned ``RIG_CODEX_HOME`` override), so rig maintains an idempotent symlink per enabled
 # skill into the harness dir for the configured kind. Native-discovery harnesses such as opencode
 # scan the default
 # ``skills_target`` directly; when the user customizes ``skills_target``, rig links back into the
@@ -124,10 +125,7 @@ def _expand(path_str: str, repo_root: Path) -> Path:
     #    installs where XDG-aware tools (the dispatcher runner) actually look;
     #  - ``$VAR``/``${VAR}`` and ``~`` are expanded;
     #  - a relative remainder is anchored at the repo root.
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg and (path_str == "~/.config" or path_str.startswith("~/.config/")):
-        path_str = xdg + path_str[len("~/.config"):]
-    p = Path(os.path.expanduser(os.path.expandvars(path_str)))
+    p = _expand_user_path(path_str)
     if not p.is_absolute():
         p = (repo_root / p).resolve()
     return p
@@ -946,6 +944,8 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
 
 def _permissions_kinds(config: LoadedConfig, p: dict[str, Any]) -> list[str]:
     """Harness kinds whose command allowlist should be provisioned, preserving config order."""
+    # Callers pass the cascaded permissions block. Missing or explicit-null kind means
+    # "unpinned" here; a repo-local null has already masked any global pin before this point.
     if p.get("kind"):
         return [str(p["kind"])]
     return _configured_harness_kinds(config)
@@ -1221,8 +1221,17 @@ def _build_hook_bridge_for_kind(
         "module": module,
         "format": bridge_format,
     }
-    if hooks_dir is not None:
-        options["hooks_dir"] = str(hooks_dir)
+    effective_hooks_dir = hooks_dir
+    if effective_hooks_dir is None and kind == "codex":
+        codex_hooks_dir = _expand(
+            _agent_hooks_target_for_kind("codex") or _HARNESS_AGENT_HOOK_TARGETS["codex"],
+            config.repo_root,
+        )
+        bridge_default_hooks_dir = _expand(_HARNESS_AGENT_HOOK_TARGETS["codex"], config.repo_root)
+        if not _same_dir(codex_hooks_dir, bridge_default_hooks_dir):
+            effective_hooks_dir = codex_hooks_dir
+    if effective_hooks_dir is not None:
+        options["hooks_dir"] = str(effective_hooks_dir)
     if isinstance(bridge_cfg, dict) and bridge_cfg.get("python"):
         options["python"] = str(bridge_cfg["python"])
     has_repo_config_layer = any(layer.startswith(("repo:", "config:")) for layer in config.layers)

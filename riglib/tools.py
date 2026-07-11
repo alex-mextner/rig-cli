@@ -47,10 +47,11 @@ belongs in the GLOBAL layer (``~/.config/rig/config.yaml``), like ``harness``/``
 
 from __future__ import annotations
 
-import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .paths import expand_user_path
 
 # The managed PATH dir each tool's install.sh symlinks the entry into. Matches every shipped
 # install.sh (``BIN="$HOME/.local/bin"``). Overridable per-block via ``tools.target``.
@@ -74,7 +75,7 @@ DEPLOY_SCRIPT = "scripts/deploy.sh"
 
 def _expand(path: str) -> Path:
     """Expand ``~`` and env vars and resolve to an absolute path (no disk access)."""
-    return Path(os.path.expandvars(os.path.expanduser(path)))
+    return expand_user_path(path)
 
 
 @dataclass(frozen=True)

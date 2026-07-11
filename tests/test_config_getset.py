@@ -268,8 +268,8 @@ def test_cli_set_registered_list_error_is_clean(tmp_path, capsys, fake_agent_too
     assert captured.err == ""
 
 
-def test_cli_set_nullable_registered_option_clears_key(
-    tmp_path, fake_agent_tools, monkeypatch, _mock_apply
+def test_cli_set_nullable_registered_option_writes_explicit_null(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply
 ):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     repo = tmp_path / "repo"
@@ -285,15 +285,23 @@ def test_cli_set_nullable_registered_option_clears_key(
     rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo)])
 
     assert rc == 0
+    capsys.readouterr()
     written = config.load(repo)
-    assert "kind" not in written.data["permissions"]
+    assert written.data["permissions"]["kind"] is None
+    assert config.read_yaml_file(repo / "rig.yaml")["permissions"]["kind"] is None
+    assert main(["config", "get", "permissions.kind", "-C", str(repo)]) == 0
+    assert capsys.readouterr().out.strip() == "null"
     assert len(_mock_apply) == 1
 
 
-def test_cli_set_nullable_registered_option_preserves_single_key_block(
+def test_cli_set_nullable_registered_option_overrides_global_pin_with_null(
     tmp_path, fake_agent_tools, monkeypatch, _mock_apply
 ):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _w(
+        config.global_config_path(),
+        "version: 1\npermissions: {enabled: true, kind: claude-code}\n",
+    )
     repo = tmp_path / "repo"
     _w(
         repo / "rig.yaml",
@@ -301,15 +309,35 @@ def test_cli_set_nullable_registered_option_preserves_single_key_block(
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
         "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
         "harness: {kind: claude-code, kinds: [opencode]}\n"
-        "permissions: {kind: claude-code}\n",
+        "permissions: {enabled: true}\n",
     )
 
     rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo)])
 
     assert rc == 0
     written = config.load(repo)
-    assert written.data["permissions"] == {}
+    assert written.data["permissions"]["kind"] is None
+    assert config.read_yaml_file(repo / "rig.yaml")["permissions"]["kind"] is None
     assert len(_mock_apply) == 1
+
+
+def test_cli_set_nullable_rejects_null_intermediate_without_clobber(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    original = (
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "permissions: null\n"
+    )
+    _w(repo / "rig.yaml", original)
+
+    rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo)])
+
+    assert rc == 2
+    assert "not a mapping" in capsys.readouterr().out
+    assert (repo / "rig.yaml").read_text(encoding="utf-8") == original
+    assert len(_mock_apply) == 0
 
 
 @pytest.mark.parametrize(

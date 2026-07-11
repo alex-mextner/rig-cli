@@ -151,7 +151,8 @@ rig stats show --harness claude-code --repo /path/to/repo   # filter by harness 
 ```
 
 **Harnesses parsed:** Claude Code (`~/.claude/projects/<enc>/<session>.jsonl` — the richest
-source), Codex (`~/.codex/sessions/.../rollout-*.jsonl`), Gemini
+source), Codex (`~/.codex/sessions/.../rollout-*.jsonl`, or
+`$RIG_CODEX_HOME/sessions/.../rollout-*.jsonl`), Gemini
 (`~/.gemini/tmp/<hash>/chats/session-*.json`), and opencode
 (`~/.local/share/opencode/storage/`). The supported-harness list is data-driven: each
 parser self-registers, and a harness whose logs aren't on the machine is reported as
@@ -241,7 +242,8 @@ effect, complementing the classifier.
 native config/plugin surfaces, not the descriptor files `agent_hooks` installs, so a bridge is
 required to make the descriptors actually execute (agent-tools#18). The same `harness` block
 therefore registers the matching bridge: Claude Code gets `cc_hook_bridge` in `settings.json`,
-Codex gets `codex_hook_bridge` in `~/.codex/config.toml`, and opencode gets
+Codex gets `codex_hook_bridge` in `~/.codex/config.toml` (or
+`$RIG_CODEX_HOME/config.toml`), and opencode gets
 `opencode_hook_bridge/plugin.js` symlinked into the repo-local
 `.opencode/plugins/zz-agent-tools-hook-bridge.js` ordered plugin path. Without that bridge the
 guards above would be inert files. Set `hook_bridge: { enabled: false }` to opt out.

@@ -25,7 +25,12 @@ from ..model import ToolInvocation
 
 
 class LogSource(ABC):
-    """One harness's reader. Stateless except for the resolved log root."""
+    """One harness's reader. Stateless except for the resolved log root.
+
+    ``_home_explicit`` is True when the caller passed an explicit ``home=``. Sources that
+    honor ambient path environment variables must ignore those variables when it is set,
+    treating the explicit home as a sandbox boundary.
+    """
 
     #: short, stable harness id used everywhere (CLI filter, breakdowns, JSON keys).
     name: str = ""
@@ -33,6 +38,7 @@ class LogSource(ABC):
     def __init__(self, home: Path | None = None) -> None:
         # HOME is resolved at construction so tests can point it at a tmp dir. Everything
         # under the harness root is derived from this, never from a cached absolute path.
+        self._home_explicit = home is not None
         self.home = home or Path(os.path.expanduser("~"))
 
     @abstractmethod

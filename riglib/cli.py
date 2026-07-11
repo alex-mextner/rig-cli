@@ -1724,7 +1724,6 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
     from .layers import GLOBAL
     from .plan import PlanError
     from .schema import coerce as coerce_option
-    from .schema import delete_path
     from .schema import option_for_key, writable_layer_for_category
     from .state import SetupState
 
@@ -1775,10 +1774,7 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
                 raise ConfigError(str(exc), schema_path=args.path) from exc
         else:
             value = coerce_scalar(args.value)
-        if option is not None and option.default is None and value is None:
-            delete_path(data, args.path)
-        else:
-            set_path(data, args.path, value)
+        set_path(data, args.path, value)
         # First gate: schema validation of the WHOLE edited tree (enum/type checks). This
         # catches e.g. harness.auto_mode="yes" before anything touches disk.
         validate(data)

@@ -33,10 +33,9 @@ class OpencodeSource(LogSource):
 
     def _data_home(self) -> Path:
         # Honor XDG_DATA_HOME for REAL runs (it legitimately points outside HOME on a
-        # configured Linux box). We consult os.environ only when ``self.home`` IS the real
-        # process home — i.e. nobody passed a sandbox ``home=`` — so a HOME-isolated test
-        # (which sets a tmp home) is never contaminated by the developer's own XDG var.
-        if self.home == Path(os.path.expanduser("~")):
+        # configured Linux box). We consult os.environ only when no sandbox ``home=`` was
+        # passed, so a HOME-isolated test is never contaminated by the developer's own XDG var.
+        if not self._home_explicit:
             xdg = os.environ.get("XDG_DATA_HOME")
             if xdg:
                 return Path(xdg)

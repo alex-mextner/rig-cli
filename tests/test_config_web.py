@@ -107,7 +107,46 @@ def test_apply_edit_permissions_kind_empty_clears_pin(tmp_path, fake_agent_tools
 
     assert result["value"] is None
     data = cfg.read_yaml_file(repo / "rig.yaml")
-    assert "kind" not in data["permissions"]
+    assert data["permissions"]["kind"] is None
+
+
+def test_apply_edit_permissions_kind_null_overrides_global_pin(tmp_path, fake_agent_tools, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    gpath = cfg.global_config_path()
+    gpath.parent.mkdir(parents=True, exist_ok=True)
+    gpath.write_text(
+        "version: 1\npermissions: {enabled: true, kind: claude-code}\n",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    _editable_repo(
+        repo,
+        fake_agent_tools,
+        "harness:\n  kind: claude-code\n  kinds: [opencode]\npermissions:\n"
+        "  enabled: true\n",
+    )
+
+    result = cw.apply_edit(repo, "permissions.kind", "")
+
+    assert result["value"] is None
+    assert cfg.read_yaml_file(repo / "rig.yaml")["permissions"]["kind"] is None
+    assert cfg.load(repo).data["permissions"]["kind"] is None
+    assert cfg.read_yaml_file(gpath)["permissions"]["kind"] == "claude-code"
+
+
+def test_apply_edit_nullable_rejects_null_intermediate_without_clobber(tmp_path, fake_agent_tools):
+    repo = tmp_path / "repo"
+    original = (
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "permissions: null\n"
+    )
+    _editable_repo(repo, fake_agent_tools)
+    (repo / "rig.yaml").write_text(original, encoding="utf-8")
+
+    with pytest.raises(cw.EditError):
+        cw.apply_edit(repo, "permissions.kind", "")
+
+    assert (repo / "rig.yaml").read_text(encoding="utf-8") == original
 
 
 def test_build_model_global_only_field_tagged_global(tmp_path):
@@ -385,13 +424,13 @@ def test_app_handle_edit_nullable_enum_returns_select_control_value(tmp_path, fa
     assert body["value"] == "null"
     assert body["control_value"] == ""
     data = cfg.read_yaml_file(repo / "rig.yaml")
-    assert "kind" not in data["permissions"]
+    assert data["permissions"]["kind"] is None
 
     code, rejected = app.handle_edit({"key": "permissions.kind", "value": "not-a-harness"})
 
     assert code == 400
     assert rejected["ok"] is False
-    assert "kind" not in cfg.read_yaml_file(repo / "rig.yaml")["permissions"]
+    assert cfg.read_yaml_file(repo / "rig.yaml")["permissions"]["kind"] is None
 
 
 def test_app_handle_edit_rejects_bad_value(tmp_path):

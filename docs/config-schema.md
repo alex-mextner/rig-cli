@@ -150,7 +150,7 @@ defaults:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `skills_target` | path | `~/.agents/skills` | default skills install dir |
-| `hooks_target` | path | `~/.claude/hooks` | default agent-hooks dir; with `harness.kind: codex`, the effective default is `~/.codex/hooks` unless a custom hook descriptor target is configured |
+| `hooks_target` | path | `~/.claude/hooks` | default agent-hooks dir; with `harness.kind: codex`, the effective default is `~/.codex/hooks` (or `$RIG_CODEX_HOME/hooks`) unless a custom hook descriptor target is configured |
 | `ci_target` | path | `.github/workflows` | default CI workflows dir |
 | `mcp_target` | path | `~/.claude/mcp` | default MCP config dir |
 | `on_conflict` | `skip`/`overwrite`/`backup` | `backup` | what `apply` does when a target already exists |
@@ -187,7 +187,7 @@ skills:
 | `enabled` | bool | `true` | install skills at all |
 | `target` | path | `~/.agents/skills` | where SKILL.md dirs are copied |
 | `harness_link` | bool | `true` | also symlink each installed skill into the harness's skill-discovery dir |
-| `harness_skill_dir` | path | per-harness default | where the harness discovers skills (claude-code: `~/.claude/skills`; codex: `~/.codex/skills`). An explicit value pins skill links to that one directory, overriding `harness.kinds` skill-link fan-out, and forces a directory link even for a native-discovery or instruction-file harness |
+| `harness_skill_dir` | path | per-harness default | where the harness discovers skills (claude-code: `~/.claude/skills`; codex: `~/.codex/skills`, or `$RIG_CODEX_HOME/skills`). An explicit value pins skill links to that one directory, overriding `harness.kinds` skill-link fan-out, and forces a directory link even for a native-discovery or instruction-file harness |
 | `universal.all` | bool | `true` | enable all universal skills (opt-out) |
 | `universal.disable` / `universal.enable` | list[str] | `[]` | deltas on `all` |
 | `by_type.enable` | list[str] | the detected project type | which `by-type/<kind>` bundles to install whole |
@@ -204,9 +204,10 @@ and harnesses split into three families by *how* they discover skills:
 - **skills-directory harnesses** enumerate a directory of skill folders. rig makes an
   installed skill discoverable by symlinking `<skill_dir>/<skill> → <target>/<skill>`:
   - **claude-code** → `~/.claude/skills`
-  - **codex** → `~/.codex/skills` (Codex CLI's native skills dir; codex does **not** read
+  - **codex** → `~/.codex/skills` (or `$RIG_CODEX_HOME/skills`; Codex CLI's native skills dir; codex does **not** read
     `~/.agents/skills`, so rig must link here or codex sees no skills). codex is *also* an
-    instruction-file harness (`~/.codex/AGENTS.md`) — the two are complementary.
+    instruction-file harness (`~/.codex/AGENTS.md`, or `$RIG_CODEX_HOME/AGENTS.md`) — the two
+    are complementary.
 - **native-discovery harnesses** auto-load the default `target` (`~/.agents/skills`) directly,
   so a copied skill is already visible and rig links **nothing**. `rig status` reports
   *discovers natively* instead of a pointless symlink:
@@ -269,8 +270,9 @@ The install action always writes an **absolute** `cmd` (rewriting the
 per the `agents-hooks/v1` contract.
 
 When `harness.kind: codex` is active, rig defaults the descriptor target to `~/.codex/hooks`
-unless `agent_hooks.target` / `defaults.hooks_target` is set to a non-default custom path. Claude
-behavior is unchanged: `claude-code` still defaults to `~/.claude/hooks`.
+(or `$RIG_CODEX_HOME/hooks`) unless `agent_hooks.target` / `defaults.hooks_target` is set to a
+non-default custom path. Claude behavior is unchanged: `claude-code` still defaults to
+`~/.claude/hooks`.
 
 `agent_hooks.target_kind` is a legacy scaffold key accepted for old configs (`claude-code` or
 `generic`) but ignored. Remove it when editing the file; hook targets now come from
@@ -492,7 +494,7 @@ harness:
 | `kinds` | list | `[]` | additional harnesses to provision alongside `kind`. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, supported hook bridges, and supported permissions allowlists. `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one explicit target; supported bridges stay registered with a descriptor-dir override |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
-| `settings_path` | path | `.claude/settings.json` for Claude auto/mode writes; `~/.codex/config.toml` for the Codex hook bridge; `.opencode/plugins/zz-agent-tools-hook-bridge.js` for the opencode hook bridge | the settings/config file/plugin to converge. If overridden, point it at the harness's native format (JSON for Claude, TOML for Codex, JS plugin for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory containing the native settings/plugin filename |
+| `settings_path` | path | `.claude/settings.json` for Claude auto/mode writes; `~/.codex/config.toml` (or `$RIG_CODEX_HOME/config.toml`) for the Codex hook bridge; `.opencode/plugins/zz-agent-tools-hook-bridge.js` for the opencode hook bridge | the settings/config file/plugin to converge. If overridden, point it at the harness's native format (JSON for Claude, TOML for Codex, JS plugin for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory containing the native settings/plugin filename |
 | `hook_bridge.enabled` | bool | `true` | wire the harness bridge dispatcher so installed agent-hooks actually fire (`cc_hook_bridge` for Claude, `codex_hook_bridge` for Codex, `opencode_hook_bridge` for opencode) |
 | `hook_bridge.python` | str | `python3` | the Python interpreter the dispatcher command runs under |
 
@@ -522,9 +524,10 @@ enabled), `rig apply` registers the matching dispatcher from `agent-tools/lib`:
 - `kind: claude-code` writes `cc_hook_bridge` into `settings.json`: `PreToolUse` matchers
   `Bash`, `Edit|Write|MultiEdit|NotebookEdit`, and `Agent|Task`; `PostToolUse` matcher
   `Edit|Write|MultiEdit|NotebookEdit`; and `Stop`.
-- `kind: codex` writes `codex_hook_bridge` into `~/.codex/config.toml` (or `settings_path`) as a
-  managed `[hooks]` TOML block: `PreToolUse` matchers `Bash` and `apply_patch`, `PostToolUse`
-  matcher `apply_patch`, and `Stop`. A custom Codex `settings_path` must end in `.toml`.
+- `kind: codex` writes `codex_hook_bridge` into `~/.codex/config.toml` (or
+  `$RIG_CODEX_HOME/config.toml`, or `settings_path`) as a managed `[hooks]` TOML block:
+  `PreToolUse` matchers `Bash` and `apply_patch`, `PostToolUse` matcher `apply_patch`, and
+  `Stop`. A custom Codex `settings_path` must end in `.toml`.
 - `kind: opencode` symlinks `opencode_hook_bridge/plugin.js` into
   `.opencode/plugins/zz-agent-tools-hook-bridge.js` (or `settings_path`) so opencode
   auto-loads it. The repo-local `zz-` path is deliberate: opencode documents global plugins as
@@ -555,7 +558,7 @@ top-level `codex_hooks = false` are reported as drift and rewritten to `true` wh
 is enabled.
 
 Codex `pre-agent` is not wired yet: rig may install `pre-agent` descriptors into `~/.codex/hooks`
-alongside the rest of the selected catalog, but the Codex bridge currently dispatches only
+(or `$RIG_CODEX_HOME/hooks`) alongside the rest of the selected catalog, but the Codex bridge currently dispatches only
 `pre-bash`, `pre-write`, `post-write`, and `stop` via the confirmed Codex hook events above.
 opencode has `task` tool dispatch for `pre-agent`, but no stop-equivalent blocking hook is
 documented, so the opencode bridge does not dispatch `stop`; use Claude Code or Codex for
@@ -679,9 +682,10 @@ tool-derived allowlist (`tools`/`extra`/`disable`) still works for opencode.
 - **opencode** — `permission.bash` in `~/.config/opencode/opencode.json` (a JSON object) gains a
   `"<tool> *": "allow"` entry per tool, only when the key is absent — an existing user
   `"deny"`/`"ask"` is never downgraded.
-- **codex** — **N/A**. `~/.codex/config.toml` has no per-command allowlist rig can additively
-  merge; command execution is gated by `approval_policy`/`sandbox_mode` (coarse) and Starlark
-  `execpolicy` `.rules` files — a separate mechanism. Recorded N/A, never written.
+- **codex** — **N/A**. `~/.codex/config.toml` (or `$RIG_CODEX_HOME/config.toml`) has no
+  per-command allowlist rig can additively merge; command execution is gated by
+  `approval_policy`/`sandbox_mode` (coarse) and Starlark `execpolicy` `.rules` files — a separate
+  mechanism. Recorded N/A, never written.
 - **gemini / pi** — **N/A**. Gemini's `tools.core`/`coreTools` is a *toolset restriction* list,
   not a per-command auto-approve: writing it to pre-allow a command would disable every unlisted
   built-in tool. No safe per-command allowlist exists, so it is recorded N/A, never written.
@@ -1657,9 +1661,13 @@ rig config set harness.auto_mode false --no-apply        # write only, print the
   category references, a bad `agent_tools_source`, or any otherwise-unbuildable config). If
   **either** gate rejects the edit, the target file is rolled back to its prior contents and the
   command exits non-zero.
-- Nullable options can be unset with `null`, `none`, `~`, or an empty value. For example,
-  `rig config set permissions.kind null` removes that key and restores the default fan-out
-  behavior.
+- Nullable options can be set to explicit `null` with `null`, `none`, `~`, or an empty value.
+  For example, `rig config set permissions.kind null` writes `permissions.kind: null` in the
+  owning layer, restoring default fan-out for that repo and masking any global-layer
+  `permissions.kind` pin.
+- A nested edit never clobbers an explicit null parent. If a file contains `permissions: null`,
+  `rig config set permissions.kind null` fails with a "not a mapping" error; make the parent a
+  mapping first.
 - A value that **starts with `-`** (and is not a negative number) needs the `--` separator so
   argparse doesn't read it as a flag: `rig config set k -- -weird`. **Dot paths cannot address a
   key that itself contains a dot** — `<dot.path>` always splits on `.`; every real catalog id is

@@ -524,10 +524,22 @@ def test_set_path_refuses_to_clobber_a_non_mapping_intermediate():
     with pytest.raises(ValueError):
         schema.set_path(data, "harness.auto_mode", False)
     assert data == {"harness": "TODO"}  # untouched
-    # a None / absent intermediate IS created (the normal path)
+    # an explicit null intermediate is user-authored shape, not an absent path to clobber.
+    null_data = {"permissions": None}
+    with pytest.raises(ValueError):
+        schema.set_path(null_data, "permissions.kind", None)
+    assert null_data == {"permissions": None}
+    # an absent intermediate IS created (the normal path)
     fresh: dict = {}
     schema.set_path(fresh, "harness.auto_mode", False)
     assert fresh == {"harness": {"auto_mode": False}}
+
+
+def test_set_path_rejects_empty_segments():
+    with pytest.raises(ValueError, match="empty segment"):
+        schema.set_path({}, "", True)
+    with pytest.raises(ValueError, match="empty segment"):
+        schema.set_path({}, "harness..kind", "codex")
 
 
 def test_wizard_against_malformed_yaml_exits_gracefully(tmp_path):

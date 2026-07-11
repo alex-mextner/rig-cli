@@ -295,11 +295,8 @@ def apply_edit(repo_root: Path, key: str, raw_value: str) -> dict[str, Any]:
     # browser edit must never (re)introduce dead config.
     data.pop("scope", None)
     try:
-        if option.default is None and value is None:
-            schema.delete_path(data, key)
-        else:
-            schema.set_path(data, key, value)
-    except ValueError as exc:  # an existing non-mapping intermediate (e.g. `harness: "a string"`)
+        cfg.set_path(data, key, value)
+    except cfg.ConfigError as exc:  # an existing non-mapping intermediate (e.g. `harness: "a string"`)
         raise EditError(str(exc)) from exc
 
     # GATE 1 — fail-closed schema validation of the whole edited tree before touching disk. A bad

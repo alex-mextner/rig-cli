@@ -59,6 +59,7 @@ from ..github_ruleset import (
     parse_github_remote,
 )
 from ..logging import log_event
+from ..paths import expand_user_path
 from ..plan import Action, InstallPlan
 from .. import project_tools
 from . import fsutil
@@ -1237,7 +1238,7 @@ def _normalized_path_without_following_leaf(path: Path) -> Path:
 
 
 def legacy_opencode_bridge_symlink_path() -> Path:
-    return _expand_user_path(f"~/.config/opencode/plugins/{_LEGACY_OPENCODE_PLUGIN_NAME}")
+    return expand_user_path(f"~/.config/opencode/plugins/{_LEGACY_OPENCODE_PLUGIN_NAME}")
 
 
 def _link_target_path(link_path: Path, target: Path) -> Path:
@@ -5477,30 +5478,14 @@ def _resolve_excludes_target(action: Action) -> tuple[Path, bool, str | None]:
     xdg_default = action.options.get("xdg_default") or "~/.config/git/ignore"
     if isinstance(override, str) and override:
         # explicit override: reconcile in this file; set core.excludesfile when git doesn't match.
-        target = _expand_user_path(override)
+        target = expand_user_path(override)
         needs_set = current != override
         return target, needs_set, (override if needs_set else None)
     if current:
         # respect the user's existing choice — manage the block in their file, touch no git config.
-        return _expand_user_path(current), False, None
+        return expand_user_path(current), False, None
     # unset: point git at the XDG default AND write the block there (clean-machine path).
-    return _expand_user_path(xdg_default), True, xdg_default
-
-
-def _expand_user_path(path_str: str) -> Path:
-    """Expand ``~`` and ``$XDG_CONFIG_HOME`` (for the ``~/.config`` prefix) to a concrete path.
-
-    SYNC: this is the ``~/.config`` → ``$XDG_CONFIG_HOME`` mapping from ``plan._expand`` (keep the
-    two in step). It is duplicated rather than imported because ``plan._expand`` ALSO anchors a
-    relative remainder at the repo root — meaningless for a GLOBAL excludes path (which is always
-    absolute after ``~`` expansion) and would couple this global action to a repo root it does not
-    have. Matching git's XDG-aware read location matters when a test/machine points
-    ``$XDG_CONFIG_HOME`` somewhere non-default.
-    """
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg and (path_str == "~/.config" or path_str.startswith("~/.config/")):
-        path_str = xdg + path_str[len("~/.config"):]
-    return Path(os.path.expanduser(os.path.expandvars(path_str)))
+    return expand_user_path(xdg_default), True, xdg_default
 
 
 def _do_provision_global_excludes(action: Action, on_conflict: str) -> ActionResult:

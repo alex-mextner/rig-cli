@@ -45,9 +45,9 @@ def write_claude_session(home: Path, encoded: str, session: str, cwd: str, event
     (d / f"{session}.jsonl").write_text("\n".join(events) + "\n", encoding="utf-8")
 
 
-def write_codex_session(home: Path, day: tuple[str, str, str], cwd: str, calls: list[dict]) -> None:
+def _write_codex_session(sessions_root: Path, day: tuple[str, str, str], cwd: str, calls: list[dict]) -> None:
     y, m, dd = day
-    d = home / ".codex" / "sessions" / y / m / dd
+    d = sessions_root / y / m / dd
     d.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps({"type": "session_meta", "timestamp": f"{y}-{m}-{dd}T00:00:00Z",
                          "payload": {"cwd": cwd, "id": "s1"}})]
@@ -66,6 +66,14 @@ def write_codex_session(home: Path, day: tuple[str, str, str], cwd: str, calls: 
     (d / f"rollout-{y}-{m}-{dd}T00-00-00-abc.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_codex_session(home: Path, day: tuple[str, str, str], cwd: str, calls: list[dict]) -> None:
+    _write_codex_session(home / ".codex" / "sessions", day, cwd, calls)
+
+
+def write_codex_session_in_root(root: Path, day: tuple[str, str, str], cwd: str, calls: list[dict]) -> None:
+    _write_codex_session(root / "sessions", day, cwd, calls)
+
+
 def write_gemini_session(home: Path, phash: str, repo: str, messages: list[dict]) -> None:
     chats = home / ".gemini" / "tmp" / phash / "chats"
     chats.mkdir(parents=True, exist_ok=True)
@@ -76,9 +84,10 @@ def write_gemini_session(home: Path, phash: str, repo: str, messages: list[dict]
     projects.write_text(json.dumps({"projects": {repo: phash}}), encoding="utf-8")
 
 
-def write_opencode_part(home: Path, session: str, repo: str, tool: str, command: str | None,
-                        start_ms: int) -> None:
-    base = home / ".local" / "share" / "opencode" / "storage"
+def _write_opencode_part_storage(
+    storage: Path, session: str, repo: str, tool: str, command: str | None, start_ms: int
+) -> None:
+    base = storage
     sess_dir = base / "session" / "proj1"
     sess_dir.mkdir(parents=True, exist_ok=True)
     (sess_dir / f"{session}.json").write_text(
@@ -93,6 +102,24 @@ def write_opencode_part(home: Path, session: str, repo: str, tool: str, command:
         json.dumps({"id": f"prt_{start_ms}", "sessionID": session, "type": "tool",
                     "tool": tool, "state": state}), encoding="utf-8"
     )
+
+
+def write_opencode_part(home: Path, session: str, repo: str, tool: str, command: str | None,
+                        start_ms: int) -> None:
+    _write_opencode_part_storage(
+        home / ".local" / "share" / "opencode" / "storage",
+        session,
+        repo,
+        tool,
+        command,
+        start_ms,
+    )
+
+
+def write_opencode_part_in_data_home(
+    data_home: Path, session: str, repo: str, tool: str, command: str | None, start_ms: int
+) -> None:
+    _write_opencode_part_storage(data_home / "opencode" / "storage", session, repo, tool, command, start_ms)
 
 
 # ── taxonomy unit tests ──────────────────────────────────────────────────────────────────
@@ -266,6 +293,131 @@ def test_codex_parser_counts(tmp_path):
     assert all(i.harness == "codex" for i in invs)
 
 
+def test_codex_parser_honors_rig_codex_home_for_real_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("RIG_CODEX_HOME", str(codex_home))
+    write_codex_session_in_root(
+        codex_home, ("2026", "06", "12"), "/Users/ultra/xp/proj",
+        [{"ts": "2026-06-12T09:00:00Z", "name": "exec_command", "cmd": "git status"}],
+    )
+
+    invs, supported, _ = collect(harnesses=["codex"])  # no home= means the default $HOME branch
+
+    assert supported == ["codex"]
+    assert len(invs) == 1
+    assert invs[0].repo == "/Users/ultra/xp/proj"
+
+
+def test_codex_parser_expands_rig_codex_home_tilde(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("RIG_CODEX_HOME", "~/codex-home")
+    write_codex_session_in_root(
+        home / "codex-home", ("2026", "06", "12"), "/Users/ultra/xp/tilde",
+        [{"ts": "2026-06-12T09:00:00Z", "name": "exec_command", "cmd": "git status"}],
+    )
+
+    invs, supported, _ = collect(harnesses=["codex"])
+
+    assert supported == ["codex"]
+    assert [i.repo for i in invs] == ["/Users/ultra/xp/tilde"]
+
+
+def test_codex_parser_expands_rig_codex_home_env_value_tilde(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_ROOT", "~/codex-from-var")
+    monkeypatch.setenv("RIG_CODEX_HOME", "$CODEX_ROOT")
+    write_codex_session_in_root(
+        home / "codex-from-var", ("2026", "06", "12"), "/Users/ultra/xp/env-tilde",
+        [{"ts": "2026-06-12T09:00:00Z", "name": "exec_command", "cmd": "git status"}],
+    )
+
+    invs, supported, _ = collect(harnesses=["codex"])
+
+    assert supported == ["codex"]
+    assert [i.repo for i in invs] == ["/Users/ultra/xp/env-tilde"]
+
+
+def test_codex_parser_expands_rig_codex_home_env_vars(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setenv("RIG_CODEX_HOME", "$XDG_CONFIG_HOME/codex")
+    write_codex_session_in_root(
+        xdg / "codex", ("2026", "06", "12"), "/Users/ultra/xp/env",
+        [{"ts": "2026-06-12T09:00:00Z", "name": "exec_command", "cmd": "git status"}],
+    )
+
+    invs, supported, _ = collect(harnesses=["codex"])
+
+    assert supported == ["codex"]
+    assert [i.repo for i in invs] == ["/Users/ultra/xp/env"]
+
+
+def test_codex_parser_expands_rig_codex_home_xdg_config_prefix(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setenv("RIG_CODEX_HOME", "~/.config/codex")
+    write_codex_session_in_root(
+        xdg / "codex", ("2026", "06", "12"), "/Users/ultra/xp/xdg-prefix",
+        [{"ts": "2026-06-12T09:00:00Z", "name": "exec_command", "cmd": "git status"}],
+    )
+    write_codex_session_in_root(
+        home / ".config" / "codex", ("2026", "06", "12"), "/Users/ultra/xp/wrong-home-prefix",
+        [{"ts": "2026-06-12T09:05:00Z", "name": "exec_command", "cmd": "review"}],
+    )
+
+    invs, supported, _ = collect(harnesses=["codex"])
+
+    assert supported == ["codex"]
+    assert [i.repo for i in invs] == ["/Users/ultra/xp/xdg-prefix"]
+
+
+def test_codex_parser_explicit_home_ignores_rig_codex_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("RIG_CODEX_HOME", str(codex_home))
+    write_codex_session(
+        home, ("2026", "06", "12"), "/Users/ultra/xp/sandbox",
+        [{"ts": "2026-06-12T09:00:00Z", "name": "exec_command", "cmd": "git status"}],
+    )
+    write_codex_session_in_root(
+        codex_home, ("2026", "06", "12"), "/Users/ultra/xp/host",
+        [{"ts": "2026-06-12T09:00:00Z", "name": "exec_command", "cmd": "review"}],
+    )
+
+    invs, supported, _ = collect(home=home, harnesses=["codex"])
+
+    assert supported == ["codex"]
+    assert [i.repo for i in invs] == ["/Users/ultra/xp/sandbox"]
+
+
+def test_codex_parser_ignores_ambient_codex_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    ambient_codex_home = tmp_path / "ambient-codex-home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(ambient_codex_home))
+    monkeypatch.delenv("RIG_CODEX_HOME", raising=False)
+    write_codex_session(
+        home, ("2026", "06", "12"), "/Users/ultra/xp/stable",
+        [{"ts": "2026-06-12T09:00:00Z", "name": "exec_command", "cmd": "git status"}],
+    )
+    write_codex_session_in_root(
+        ambient_codex_home, ("2026", "06", "12"), "/Users/ultra/xp/ambient",
+        [{"ts": "2026-06-12T09:00:00Z", "name": "exec_command", "cmd": "review"}],
+    )
+
+    invs, supported, _ = collect(harnesses=["codex"])
+
+    assert supported == ["codex"]
+    assert [i.repo for i in invs] == ["/Users/ultra/xp/stable"]
+
+
 def test_gemini_parser_counts_and_repo_mapping(tmp_path):
     home = tmp_path / "home"
     write_gemini_session(
@@ -286,6 +438,18 @@ def test_gemini_parser_counts_and_repo_mapping(tmp_path):
     assert agg.by_category["ours"] == 1  # tg
     assert agg.by_category.get("other", 0) == 0  # read_file is a recognized baseline op now
     assert all(i.repo == "/Users/ultra/xp/gem" for i in invs)  # hash mapped to real path
+
+
+def test_opencode_explicit_home_ignores_xdg_data_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-elsewhere"))
+    write_opencode_part(home, "ses_1", "/Users/ultra/xp/oc", "bash", "ls", 1781509838000)
+
+    invs, supported, _ = collect(home=home, harnesses=["opencode"])
+
+    assert supported == ["opencode"]
+    assert len(invs) == 1
+    assert invs[0].repo == "/Users/ultra/xp/oc"
 
 
 def test_gemini_ignores_toolcalls_on_non_gemini_messages(tmp_path):
@@ -323,6 +487,35 @@ def test_opencode_parser_counts(tmp_path):
     assert agg.by_category["ours"] == 1  # bash review
     assert all(i.repo == "/Users/ultra/xp/oc" for i in invs)
     assert all(i.timestamp is not None for i in invs)  # epoch-ms parsed
+
+
+def test_opencode_parser_honors_xdg_data_home_for_real_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    data_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    write_opencode_part_in_data_home(
+        data_home, "ses_xdg", "/Users/ultra/xp/xdg-oc", "bash", "review -C /x", 1781509839000
+    )
+
+    invs, supported, _ = collect(harnesses=["opencode"])
+
+    assert supported == ["opencode"]
+    assert [i.repo for i in invs] == ["/Users/ultra/xp/xdg-oc"]
+
+
+def test_opencode_parser_explicit_home_ignores_xdg_data_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    data_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    write_opencode_part(home, "ses_home", "/Users/ultra/xp/home-oc", "bash", "npm test", 1781509839000)
+    write_opencode_part_in_data_home(
+        data_home, "ses_xdg", "/Users/ultra/xp/xdg-oc", "bash", "review -C /x", 1781509840000
+    )
+
+    invs, supported, _ = collect(home=home, harnesses=["opencode"])
+
+    assert supported == ["opencode"]
+    assert [i.repo for i in invs] == ["/Users/ultra/xp/home-oc"]
 
 
 # ── aggregator: breakdowns + time buckets ────────────────────────────────────────────────

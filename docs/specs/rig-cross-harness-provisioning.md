@@ -21,9 +21,10 @@ Two gaps:
    - `~/.config/opencode/skill` (registry value, singular) **does not exist**; opencode
      also has no `skills/` dir. opencode discovers skills natively from `~/.agents/skills`
      (= `skills_target`). The registered symlink target is dead.
-   - codex ships a **native** skills system (`~/.codex/skills/`) and also reads
-     `~/.codex/AGENTS.md` as a global instruction file. It does not discover rig's
-     `skills_target` by itself, so rig must link installed skills into `~/.codex/skills`.
+   - codex ships a **native** skills system (`~/.codex/skills/`, or
+     `$RIG_CODEX_HOME/skills`) and also reads `~/.codex/AGENTS.md` (or
+     `$RIG_CODEX_HOME/AGENTS.md`) as a global instruction file. It does not discover rig's
+     `skills_target` by itself, so rig must link installed skills into that Codex skills dir.
    - These two are correctness bugs independent of subagents and ship first.
 
 ## 2. Verified ground truth (this machine, 2026-06-22)
@@ -32,7 +33,7 @@ Two gaps:
 |---|---|---|---|
 | claude-code | `~/.claude/skills` (real) | `~/.claude/agents` (`*.md`, empty) | — |
 | opencode | none (`skill`/`skills` absent) | `~/.config/opencode/agents/` (**plural**, has `read-only-reviewer.md`) | yes (native root) |
-| codex | `~/.codex/skills/` (native) | none (no `~/.codex/agents`) | no |
+| codex | `~/.codex/skills/` or `$RIG_CODEX_HOME/skills` (native) | none (no `~/.codex/agents`) | no |
 | gemini | none | `~/.gemini/agents/` (documented, **not present yet**) | no |
 | pi | not installed | by design **none** | reads `.agents/skills` per docs |
 | commandcode | not installed (`~/.commandcode` absent) | none documented | `.agents/skills` back-compat per docs |
@@ -66,9 +67,10 @@ existing skill helpers. `KNOWN_HARNESS_KINDS` stays the union of skills + instru
 families and is unchanged (subagent kinds are a subset of already-known kinds).
 
 ### 3.2 Skills registry corrections (independent of subagents)
-- **codex**: leave its `~/.codex/AGENTS.md` entry as its *instruction file* record, and
-  also treat `~/.codex/skills` as a skills-directory harness. rig links installed skills
-  into `~/.codex/skills`; the instruction file and the skill directory are complementary.
+- **codex**: leave its `~/.codex/AGENTS.md` (or `$RIG_CODEX_HOME/AGENTS.md`) entry as its
+  *instruction file* record, and also treat `~/.codex/skills` (or `$RIG_CODEX_HOME/skills`) as
+  a skills-directory harness. rig links installed skills into the Codex skills dir; the
+  instruction file and the skill directory are complementary.
 - **opencode**: its native skill root is `~/.agents/skills`. Either (a) drop the dead
   `~/.config/opencode/skill` symlink and emit a "discovers natively" note, or (b) if a
   belt-and-suspenders symlink is kept, fix it to the actually-loaded dir. Default to (a):
@@ -77,7 +79,8 @@ families and is unchanged (subagent kinds are a subset of already-known kinds).
   emit no symlink and record a `discovers from skills_target natively` note** — applies to
   opencode today. If `skills_target` is customized away from that native root, rig links the
   installed skills back into the native discovery root so the harness still sees them. Codex
-  is not native-discovery; it always gets the `~/.codex/skills` link.
+  is not native-discovery; it always gets the Codex skills link (`~/.codex/skills` or
+  `$RIG_CODEX_HOME/skills`).
 
 ### 3.3 Subagents catalog category + scanner
 - Add `"subagents"` to `_VALID_CATEGORIES` (`riglib/config.py`) and a schema entry — without
@@ -115,7 +118,7 @@ Five touchpoints, each a sibling of the skills equivalent:
 These have no native subagent dir. v1 behavior: **note-only**, symmetric with how skills
 treat instruction-file harnesses today (skills do NOT auto-inject descriptions into
 AGENTS.md). `_subagent_discovery_note()` returns e.g. `subagents: harness 'codex' has no
-agent-discovery dir — reads ~/.codex/AGENTS.md`. For pi specifically the note states
+agent-discovery dir — reads ~/.codex/AGENTS.md` (or `$RIG_CODEX_HOME/AGENTS.md`). For pi specifically the note states
 "pi omits subagents by design". A generated `<!-- rig:subagents -->` managed block in the
 instruction file is **deferred** (Phase 3) — it is advisory prose only and these harnesses
 can't load a callable agent from it, so capability parity is not 1:1 regardless.
