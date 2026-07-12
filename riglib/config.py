@@ -230,7 +230,7 @@ def repo_config_path(repo_root: Path) -> Path:
 
 
 def split_path(dotted: str) -> list[str]:
-    """Split a dot path into segments, rejecting empties (``a..b``, leading/trailing dot).
+    """Split and normalize a dot path into trimmed segments, rejecting empty segments.
 
     Fail-closed: a malformed path is a :class:`ConfigError`, not a silent no-op — a typo in
     ``rig config set`` must abort before it writes a key the schema can't reach.
@@ -242,6 +242,11 @@ def split_path(dotted: str) -> list[str]:
         # empty segment ("a..b", a leading/trailing dot, or a whitespace-only segment "a. .b")
         raise ConfigError(f"invalid config path {dotted!r}: empty segment")
     return parts
+
+
+def canonical_dot_path(dotted: str) -> str:
+    """Return the trimmed, single-dot-joined canonical form of a config dot path."""
+    return ".".join(split_path(dotted))
 
 
 def get_path(data: dict[str, Any], dotted: str) -> Any:

@@ -456,6 +456,7 @@ def test_plan_codex_surfaces_ignore_ambient_codex_home(fake_agent_tools, tmp_pat
     bridge = _bridge_action(plan)
     assert bridge is not None
     assert bridge.target == home / ".codex" / "config.toml"
+    assert "hooks_dir" not in bridge.options
 
 
 def test_plan_codex_surfaces_follow_explicit_rig_codex_home(fake_agent_tools, tmp_path, monkeypatch):

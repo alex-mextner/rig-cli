@@ -23,6 +23,11 @@ def test_get_path_reads_nested_key():
     assert config.get_path(data, "ci.items.secret-scan.tier") == "block"
 
 
+def test_config_get_path_strips_segments():
+    data = {"harness": {"mode": "auto"}}
+    assert config.get_path(data, " harness . mode ") == "auto"
+
+
 def test_get_path_missing_fails_closed():
     with pytest.raises(config.ConfigError, match="not found"):
         config.get_path({"harness": {}}, "harness.mode")
@@ -48,8 +53,32 @@ def test_set_path_refuses_to_clobber_scalar_intermediate():
 def test_split_path_rejects_empty_segments():
     with pytest.raises(config.ConfigError, match="empty segment"):
         config.split_path("a..b")
+    with pytest.raises(config.ConfigError, match="empty segment"):
+        config.split_path("a. .b")
     with pytest.raises(config.ConfigError, match="empty"):
         config.split_path("")
+
+
+def test_canonical_dot_path_normalizes_segments():
+    assert config.canonical_dot_path(" harness . mode ") == "harness.mode"
+    assert config.canonical_dot_path("harness.mode") == "harness.mode"
+
+
+@pytest.mark.parametrize("path", ["", "harness..mode", "harness. .mode"])
+def test_canonical_dot_path_rejects_empty_segments(path):
+    with pytest.raises(config.ConfigError, match="empty"):
+        config.canonical_dot_path(path)
+
+
+def test_set_path_rejects_empty_segments():
+    with pytest.raises(config.ConfigError, match="empty segment"):
+        config.set_path({}, "a. .b", 1)
+
+
+def test_config_set_path_strips_segments():
+    data: dict = {}
+    config.set_path(data, " harness . mode ", "auto")
+    assert data == {"harness": {"mode": "auto"}}
 
 
 @pytest.mark.parametrize(
@@ -102,6 +131,15 @@ def test_cli_get_nested_key(tmp_path, capsys, monkeypatch):
     repo = tmp_path / "repo"
     _w(repo / "rig.yaml", "version: 1\nharness: {mode: auto, auto_mode: true}\n")
     rc = main(["config", "get", "harness.mode", "-C", str(repo)])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "auto"
+
+
+def test_cli_get_whitespace_wrapped_path_reads_key(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(repo / "rig.yaml", "version: 1\nharness: {mode: auto}\n")
+    rc = main(["config", "get", " harness . mode ", "-C", str(repo)])
     assert rc == 0
     assert capsys.readouterr().out.strip() == "auto"
 
@@ -167,6 +205,17 @@ def test_cli_get_missing_path_fails_closed(tmp_path, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "not found" in captured.err  # diagnostics on stderr, not stdout
     assert captured.out == ""  # stdout stays clean (matters for --json piping)
+
+
+def test_cli_get_malformed_path_error_uses_stderr(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(repo / "rig.yaml", "version: 1\nharness: {mode: auto}\n")
+    rc = main(["config", "get", "harness. .mode", "-C", str(repo)])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "empty segment" in captured.err
 
 
 def test_cli_get_missing_file_fails_closed(tmp_path, capsys, monkeypatch):
@@ -241,6 +290,53 @@ def test_cli_set_registered_list_option_writes_list(tmp_path, fake_agent_tools, 
     )
 
     rc = main(["config", "set", "harness.kinds", "codex,opencode", "-C", str(repo)])
+
+    assert rc == 0
+    written = config.load(repo)
+    assert written.data["harness"]["kinds"] == ["codex", "opencode"]
+    assert len(_mock_apply) == 1
+
+
+def test_cli_set_whitespace_wrapped_path_writes_canonical_key(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
+        "harness: {auto_mode: true}\n",
+    )
+
+    rc = main(["config", "set", " harness . auto_mode ", "false", "-C", str(repo)])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "set harness.auto_mode = false" in captured.out
+    written = config.load(repo)
+    assert written.data["harness"]["auto_mode"] is False
+    text = (repo / "rig.yaml").read_text(encoding="utf-8")
+    assert "harness:" in text
+    assert "auto_mode: false" in text
+    assert len(_mock_apply) == 1
+
+
+def test_cli_set_whitespace_wrapped_registered_option_uses_schema_coercion(
+    tmp_path, fake_agent_tools, monkeypatch, _mock_apply
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
+        "harness: {kind: claude-code}\n",
+    )
+
+    rc = main(["config", "set", " harness . kinds ", "codex,opencode", "-C", str(repo)])
 
     assert rc == 0
     written = config.load(repo)
@@ -370,6 +466,52 @@ def test_cli_set_rejects_global_only_key_without_global_flag(
     assert "use `--global`" in captured.err
     assert path.split(".", 1)[0] not in rig.read_text(encoding="utf-8")
     assert not (tmp_path / "xdg" / "rig" / "config.yaml").exists()
+    assert _mock_apply == []
+
+
+def test_cli_set_rejects_whitespace_wrapped_global_only_key_without_global_flag(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    repo = tmp_path / "repo"
+    rig = repo / "rig.yaml"
+    original = (
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
+    )
+    _w(rig, original)
+
+    rc = main(["config", "set", " gitignore . enabled ", "false", "-C", str(repo)])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "global-only config block" in captured.err
+    assert "use `--global`" in captured.err
+    assert rig.read_text(encoding="utf-8") == original
+    assert not (tmp_path / "xdg" / "rig" / "config.yaml").exists()
+    assert _mock_apply == []
+
+
+def test_cli_set_malformed_path_errors_to_stderr(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    original = (
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
+    )
+    _w(repo / "rig.yaml", original)
+
+    rc = main(["config", "set", "harness. .auto_mode", "false", "-C", str(repo)])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "empty segment" in captured.err
+    assert (repo / "rig.yaml").read_text(encoding="utf-8") == original
     assert _mock_apply == []
 
 
@@ -532,6 +674,26 @@ def test_cli_set_refuses_to_set_removed_scope_key(tmp_path, capsys, fake_agent_t
     assert rc == 2
     assert "removed setting" in capsys.readouterr().err
     assert (repo / "rig.yaml").read_text(encoding="utf-8") == original  # untouched
+    assert len(_mock_apply) == 0
+
+
+def test_cli_set_refuses_to_set_whitespace_wrapped_removed_scope_key(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    original = (
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
+    )
+    _w(repo / "rig.yaml", original)
+
+    rc = main(["config", "set", " scope ", "both", "-C", str(repo)])
+
+    assert rc == 2
+    assert "removed setting" in capsys.readouterr().err
+    assert (repo / "rig.yaml").read_text(encoding="utf-8") == original
     assert len(_mock_apply) == 0
 
 

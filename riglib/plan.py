@@ -1224,11 +1224,13 @@ def _build_hook_bridge_for_kind(
     effective_hooks_dir = hooks_dir
     if effective_hooks_dir is None and kind == "codex":
         codex_hooks_dir = _expand(
-            _agent_hooks_target_for_kind("codex") or _HARNESS_AGENT_HOOK_TARGETS["codex"],
+            _codex_user_path("hooks"),
             config.repo_root,
         )
-        bridge_default_hooks_dir = _expand(_HARNESS_AGENT_HOOK_TARGETS["codex"], config.repo_root)
-        if not _same_dir(codex_hooks_dir, bridge_default_hooks_dir):
+        # _codex_user_path never returns empty for codex; call it directly and keep the baseline
+        # literal ~/.codex/hooks so RIG_CODEX_HOME-driven divergence is detected.
+        baseline_codex_hooks_dir = _expand(_HARNESS_AGENT_HOOK_TARGETS["codex"], config.repo_root)
+        if not _same_dir(codex_hooks_dir, baseline_codex_hooks_dir):
             effective_hooks_dir = codex_hooks_dir
     if effective_hooks_dir is not None:
         options["hooks_dir"] = str(effective_hooks_dir)

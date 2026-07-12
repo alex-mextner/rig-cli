@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from riglib import schema, setup_wizard
+from riglib import config, schema, setup_wizard
 from riglib.cli import main
 
 
@@ -521,12 +521,12 @@ def test_coerce_nullable_enum_prefers_real_choice_over_null_token():
 def test_set_path_refuses_to_clobber_a_non_mapping_intermediate():
     # a user's scalar where a mapping is expected must NOT be silently destroyed.
     data = {"harness": "TODO"}
-    with pytest.raises(ValueError):
+    with pytest.raises(config.ConfigError, match="not a mapping"):
         schema.set_path(data, "harness.auto_mode", False)
     assert data == {"harness": "TODO"}  # untouched
     # an explicit null intermediate is user-authored shape, not an absent path to clobber.
     null_data = {"permissions": None}
-    with pytest.raises(ValueError):
+    with pytest.raises(config.ConfigError, match="not a mapping"):
         schema.set_path(null_data, "permissions.kind", None)
     assert null_data == {"permissions": None}
     # an absent intermediate IS created (the normal path)
@@ -536,10 +536,29 @@ def test_set_path_refuses_to_clobber_a_non_mapping_intermediate():
 
 
 def test_set_path_rejects_empty_segments():
-    with pytest.raises(ValueError, match="empty segment"):
+    with pytest.raises(config.ConfigError, match="empty"):
         schema.set_path({}, "", True)
-    with pytest.raises(ValueError, match="empty segment"):
+    with pytest.raises(config.ConfigError, match="empty segment"):
         schema.set_path({}, "harness..kind", "codex")
+    with pytest.raises(config.ConfigError, match="empty segment"):
+        schema.set_path({}, "harness. .kind", "codex")
+
+
+def test_schema_get_path_strips_segments():
+    data = {"harness": {"kind": "codex"}}
+
+    assert schema.get_path(data, " harness . kind ") == "codex"
+
+
+def test_get_path_rejects_malformed_segments():
+    data = {"harness": {"kind": "codex"}}
+
+    with pytest.raises(config.ConfigError, match="empty"):
+        schema.get_path(data, "")
+    with pytest.raises(config.ConfigError, match="empty segment"):
+        schema.get_path(data, "harness..kind")
+    with pytest.raises(config.ConfigError, match="empty segment"):
+        schema.get_path(data, "harness. .kind")
 
 
 def test_wizard_against_malformed_yaml_exits_gracefully(tmp_path):

@@ -5476,6 +5476,8 @@ def _resolve_excludes_target(action: Action) -> tuple[Path, bool, str | None]:
     current = _git_global("core.excludesfile")
     override = action.options.get("excludesfile")
     xdg_default = action.options.get("xdg_default") or "~/.config/git/ignore"
+    # git resolves core.excludesfile verbatim after its own ~/$VAR expansion; do not repo-root
+    # anchor an override/xdg_default here, or rig would write a different file than git reads.
     if isinstance(override, str) and override:
         # explicit override: reconcile in this file; set core.excludesfile when git doesn't match.
         target = expand_user_path(override)

@@ -32,6 +32,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# Dot-path syntax/traversal lives in config.py; schema adapts absent reads to KeyError_.
+from .config import ConfigError, canonical_dot_path, get_path as _config_get_path
+from .config import set_path as _config_set_path
 from .harness_skills import HARNESS_INSTRUCTION_FILES, HARNESS_NATIVE_SKILLS, HARNESS_SKILL_DIR_KINDS
 from .layers import GLOBAL, REPO, layer_for_category
 
@@ -399,43 +402,23 @@ class KeyError_(KeyError):
 
 
 def get_path(data: dict[str, Any], dotted: str) -> Any:
-    """Read ``dotted`` (e.g. ``harness.auto_mode``) from a nested dict. Raises KeyError_ if absent."""
-    cur: Any = data
-    for part in dotted.split("."):
-        if not isinstance(cur, dict) or part not in cur:
-            raise KeyError_(dotted)
-        cur = cur[part]
-    return cur
+    """Read ``dotted`` from a nested dict. Raises KeyError_ if absent, ConfigError if malformed."""
+    # canonical_dot_path must stay outside the try: malformed paths propagate as ConfigError,
+    # while only absent canonical paths are adapted to KeyError_ for effective_value fallback.
+    config_path = canonical_dot_path(dotted)
+    try:
+        return _config_get_path(data, config_path)
+    except ConfigError as exc:
+        raise KeyError_(config_path) from exc
 
 
 def set_path(data: dict[str, Any], dotted: str, value: Any) -> None:
-    """Set ``dotted`` to ``value`` in a nested dict, creating intermediate mappings as needed.
+    """Delegate to :func:`riglib.config.set_path` for wizard edits.
 
-    Mutates ``data`` in place. A MISSING intermediate is created as an empty mapping. But an
-    intermediate that exists as a NON-mapping (``null``/scalar/list the user authored,
-    e.g. ``harness: "TODO"``) is NOT silently clobbered — that would destroy their content before
-    validation ever runs. We raise :class:`ValueError` instead, so the wizard surfaces it as a
-    "rejected" message and the CLI as a config error, leaving the file untouched.
+    Raises ConfigError on malformed paths or non-mapping intermediates; the wizard catches that as
+    a rejected edit.
     """
-    parts = dotted.split(".")
-    if not dotted or any(part == "" for part in parts):
-        raise ValueError(f"invalid config path {dotted!r}: empty segment")
-    cur = data
-    walked: list[str] = []
-    for part in parts[:-1]:
-        walked.append(part)
-        if part not in cur:
-            nxt = {}
-            cur[part] = nxt
-        else:
-            nxt = cur[part]
-        if not isinstance(nxt, dict):
-            raise ValueError(
-                f"cannot set {dotted!r}: existing value at {'.'.join(walked)!r} is "
-                f"{type(nxt).__name__}, not a mapping — fix it in the config file first"
-            )
-        cur = nxt
-    cur[parts[-1]] = value
+    _config_set_path(data, dotted, value)
 
 
 # Categories whose plan builder treats an ABSENT top-level block as INACTIVE (it returns early

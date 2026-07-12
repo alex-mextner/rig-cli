@@ -208,6 +208,8 @@ and harnesses split into three families by *how* they discover skills:
     `~/.agents/skills`, so rig must link here or codex sees no skills). codex is *also* an
     instruction-file harness (`~/.codex/AGENTS.md`, or `$RIG_CODEX_HOME/AGENTS.md`) — the two
     are complementary.
+    Ambient `CODEX_HOME` is ignored by design; use `RIG_CODEX_HOME` to point rig at a non-default
+    persistent Codex user config root.
 - **native-discovery harnesses** auto-load the default `target` (`~/.agents/skills`) directly,
   so a copied skill is already visible and rig links **nothing**. `rig status` reports
   *discovers natively* instead of a pointless symlink:
@@ -1668,6 +1670,8 @@ rig config set harness.auto_mode false --no-apply        # write only, print the
 - A nested edit never clobbers an explicit null parent. If a file contains `permissions: null`,
   `rig config set permissions.kind null` fails with a "not a mapping" error; make the parent a
   mapping first.
+- Dot paths cannot contain empty segments, including whitespace-only segments: `harness..kind`
+  and `harness. .kind` are rejected. Whitespace around non-empty segments is trimmed.
 - A value that **starts with `-`** (and is not a negative number) needs the `--` separator so
   argparse doesn't read it as a flag: `rig config set k -- -weird`. **Dot paths cannot address a
   key that itself contains a dot** — `<dot.path>` always splits on `.`; every real catalog id is

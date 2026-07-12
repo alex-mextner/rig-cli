@@ -1681,14 +1681,15 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def _cmd_config_get(args: argparse.Namespace) -> int:
-    from .config import ConfigError, get_path
+    from .config import ConfigError, canonical_dot_path, get_path
 
     try:
         target, _repo_root = _config_target(args, need_repo=False)
         data = _read_target_yaml(target)
         if data is None:
             raise ConfigError(f"config file not found: {target}")
-        value = get_path(data, args.path)
+        config_path = canonical_dot_path(args.path)
+        value = get_path(data, config_path)
     except ConfigError as exc:
         # diagnostics go to STDERR so `get --json | jq` keeps a clean stdout (the exit code
         # already signals failure); this matters most for the machine-readable --json path.
@@ -1720,7 +1721,7 @@ def _cmd_config_get(args: argparse.Namespace) -> int:
 def _cmd_config_set(args: argparse.Namespace) -> int:
     from .actions import run_plan
     from .catalog import CatalogError
-    from .config import ConfigError, coerce_scalar, set_path, validate
+    from .config import ConfigError, canonical_dot_path, coerce_scalar, set_path, validate
     from .layers import GLOBAL
     from .plan import PlanError
     from .schema import coerce as coerce_option
@@ -1729,6 +1730,7 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
 
     try:
         target, _repo_root = _config_target(args, need_repo=True)
+        config_path = canonical_dot_path(args.path)
     except ConfigError as exc:
         print(_err(f"error: {exc}"), file=sys.stderr)
         return 2
@@ -1736,7 +1738,7 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         print(_err(f"error: {type(exc).__name__}: {exc}"), file=sys.stderr)
         return 2
 
-    category = args.path.split(".", 1)[0]
+    category = config_path.split(".", 1)[0]
     if not args.is_global and writable_layer_for_category(category) == GLOBAL:
         print(_err(f"error: `{category}` is a global-only config block; use `--global`."), file=sys.stderr)
         print(_dim("  global-only settings are written to ~/.config/rig/config.yaml, never ./rig.yaml."),
@@ -1756,7 +1758,7 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
     # `scope` is a removed key (the cascade is location-based). Refuse to SET it — the
     # recommended editor must never (re)introduce a dead setting, even though the loader still
     # tolerates it in old committed files.
-    if args.path == "scope" or args.path.startswith("scope."):
+    if config_path == "scope" or config_path.startswith("scope."):
         print(_err("error: `scope` is a removed setting — the cascade is by location "
                    "(global vs repo), not a flag. Nothing to set."), file=sys.stderr)
         return 2
@@ -1766,15 +1768,15 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         # drop any legacy `scope` already in the file (mirrors config.load): we re-serialize the
         # whole file, so leaving it would re-emit a key the schema no longer recognizes.
         data.pop("scope", None)
-        option = option_for_key(args.path)
+        option = option_for_key(config_path)
         if option is not None:
             try:
                 value = coerce_option(option, args.value)
             except ValueError as exc:
-                raise ConfigError(str(exc), schema_path=args.path) from exc
+                raise ConfigError(str(exc), schema_path=config_path) from exc
         else:
             value = coerce_scalar(args.value)
-        set_path(data, args.path, value)
+        set_path(data, config_path, value)
         # First gate: schema validation of the WHOLE edited tree (enum/type checks). This
         # catches e.g. harness.auto_mode="yes" before anything touches disk.
         validate(data)
@@ -1848,7 +1850,7 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
             print(_err(f"  WARNING: could not restore {target} — it may contain the rejected edit"))
         return 2
 
-    print(_ok(f"set {args.path} = {_fmt_scalar(value)}  → {target}"))
+    print(_ok(f"set {config_path} = {_fmt_scalar(value)}  → {target}"))
 
     # RECONCILE: a config change only matters once the disk reflects it. Run the SAME apply
     # engine `rig apply` uses (scoped to the repo in front of you — a --global edit still has
