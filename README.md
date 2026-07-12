@@ -60,15 +60,16 @@ Or run straight from a checkout without installing — `uv run bin/rig …` / `p
 | --- | --- |
 | `rig init` | **First-run onboarding.** Scaffold `rig.yaml` and **preview** the agent-tools catalog it would wire in (with opt-out) — the front door for a repo/machine with no config yet. init never applies on its own: a bare `rig init` (no TUI/flags) writes **nothing** (pure preview); `rig init --yes` writes `rig.yaml` (config only); **`rig apply` is what applies it** (or `rig init --yes --apply` to scaffold + apply in one step). |
 | `rig apply` | **Declarative reconcile** (kubectl-style): read `rig.yaml`, compute the diff vs the repo's state, converge, idempotently. The steady-state command you re-run on every machine; hand-edits that drift from the config are surfaced by `rig status`. `--dry-run` previews; `--only skills,ci` scopes. |
-| `rig status` | Detect + report **drift in both directions**, grouped by GLOBAL/REPO layer and by every area rig reconciles (skills, hooks, CI, MCP, symlinks, repo settings, auto-mode, tmux, model cron). |
+| `rig status` | Detect + report **drift in both directions**, grouped by GLOBAL/REPO layer and by every area rig reconciles (skills, all configured agent-hook targets, CI, MCP, symlinks, repo settings, auto-mode, tmux, model cron). |
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
 | `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
 | `rig setup` | **The interactive configuration wizard.** In a terminal it shows what is enabled across every reconciled area, lets you change any option (with an inline hint per option) in the local `rig.yaml` AND the global `~/.config/rig/config.yaml`, then applies. Non-interactive (piped / no TTY) it prints usage for `init`/`apply`/`config get\|set`. |
 | `rig config get\|set` | **The headless counterpart to the wizard** — read/edit ONE nested key by **dot path**, then reconcile. `get <dot.path>` reads one key from the single target file (`./rig.yaml`, or `--global`); `--json` emits the raw value, a subtree prints as YAML. `set <dot.path> <value>` coerces the value conservatively (`true`/`false`/int/float/null; `09`/`1e3`/underscored/Unicode-digit values stay strings), writes it, then runs the **same apply engine** as `rig apply` (full rollback if the write or the catalog-backed plan build fails). `--global` targets `~/.config/rig/config.yaml`; `--no-apply` writes the key and prints the plan only. |
 | `rig config-web` | **The web counterpart to the wizard** — a local browser UI to view + edit the reconciled config. Renders every area with its live effective value (the cascade of the global `~/.config/rig/config.yaml` + the repo `./rig.yaml`), tagged with the layer an edit lands in; a change routes to the **owning layer** and is written by the **same engine** as `rig config set`/the wizard (fail-closed validation, no `rig apply` — you reconcile explicitly). Lifecycle is the shared `agenttools-service` manager: `run` (foreground) / `start` (background daemon) / `status` / `stop` / `enable` (install launchd-macOS / systemd-`--user`-Linux autostart + start) / `disable`. Binds `127.0.0.1` only, with a same-origin (CSRF) + Host (DNS-rebinding) guard. A bare `rig config-web` prints help, never launches. `--port`, `-C <repo>`. **The lifecycle verbs need the `agenttools-service` lib** (an agent-tools nested lib, not on PyPI): `uv pip install --python <rig's interpreter> -e <agent-tools>/lib/agenttools_daemon -e <agent-tools>/lib/agenttools_service` (the `--python` target makes the libs land where rig imports them; the error message prints the exact interpreter path). Without it, `rig --help` and every other command still work; a lifecycle verb fails closed with that install hint. |
 | `rig evolve` | **Project evolution portal.** Serve a local browser UI with a git activity histogram, proportional file treemap, clickable selection, and provider health. The first slice is file-level and read-only; symbol/LSP/provider overlays build on the same API. Lifecycle uses the shared `agenttools-service` verbs: `run` / `start` / `status` / `stop` / `enable` / `disable`. A bare `rig evolve` prints help, never launches. `--port`, `-C <repo>`. |
-| `rig install-skill` | Register the `rig` agent skill so harnesses auto-discover it. |
+| `rig install-skill` | Register the `rig` agent skill so skills-directory harnesses auto-discover it (currently Claude Code and Codex). |
 | `rig stats show` | **Tool-adoption analytics.** Parse the session logs of every agent harness on the machine and report how often each tool is invoked, bucketed into baseline / ours / external-advertised / other — so you can see whether the rig + agent-tools ecosystem is actually being used vs the built-in baseline. `` `--format json|tui|web` ``, breakdowns by repo/harness, a daily trend (the `json` output additionally exposes the weekly series). |
+| `rig codex update` | **Safe Codex updater.** Backs up the current working `codex`, runs the updater (`brew upgrade --cask codex` by default when the selected `codex` is Homebrew-managed), then probes `--version`, `--help`, and `completion zsh` with bounded timeouts. If the candidate hangs or fails, rig restores the last known good binary and reports the failed probe. Override with `--path`, `--backup-dir`, `--probe-timeout`, or pass a custom updater after `--`. |
 
 ### Quick start — `init` then `apply`
 
@@ -95,6 +96,8 @@ of hanging on a wizard nothing can drive. Any explicit signal (`--yes` / `--conf
 
 ```bash
 rig doctor                                    # check deps; rig doctor --yes to install
+rig codex update                              # update Codex safely; roll back on a hung candidate
+rig codex update -- brew reinstall --cask codex  # replace the default updater command
 rig init                                       # no config yet: scaffold rig.yaml + PREVIEW the plan
 rig apply                                      # apply it (and re-apply on every machine, identically)
 rig init --yes --apply                         # or do both in one step (the explicit one-shot)
@@ -148,7 +151,8 @@ rig stats show --harness claude-code --repo /path/to/repo   # filter by harness 
 ```
 
 **Harnesses parsed:** Claude Code (`~/.claude/projects/<enc>/<session>.jsonl` — the richest
-source), Codex (`~/.codex/sessions/.../rollout-*.jsonl`), Gemini
+source), Codex (`~/.codex/sessions/.../rollout-*.jsonl`, or
+`$RIG_CODEX_HOME/sessions/.../rollout-*.jsonl`), Gemini
 (`~/.gemini/tmp/<hash>/chats/session-*.json`), and opencode
 (`~/.local/share/opencode/storage/`). The supported-harness list is data-driven: each
 parser self-registers, and a harness whose logs aren't on the machine is reported as
@@ -215,7 +219,7 @@ so autonomy is part of the reproducible config — not a manual per-machine togg
 ```yaml
 harness:
   enabled: true
-  kind: claude-code          # skills-dir: claude-code|codex · native: opencode · instruction-file: codex|gemini|pi|commandcode
+  kind: claude-code          # skills-dir: claude-code|codex · native: opencode · instruction-file: gemini|pi|commandcode (codex also reads AGENTS.md)
   auto_mode: true            # RECOMMENDED: writes permissions.defaultMode=auto (user scope)
   hook_bridge: { enabled: true }   # wire the agents-hooks/v1 → harness dispatcher (default ON)
 ```
@@ -238,11 +242,14 @@ effect, complementing the classifier.
 native config/plugin surfaces, not the descriptor files `agent_hooks` installs, so a bridge is
 required to make the descriptors actually execute (agent-tools#18). The same `harness` block
 therefore registers the matching bridge: Claude Code gets `cc_hook_bridge` in `settings.json`,
-Codex gets `codex_hook_bridge` in `~/.codex/config.toml`, and opencode gets
+Codex gets `codex_hook_bridge` in `~/.codex/config.toml` (or
+`$RIG_CODEX_HOME/config.toml`), and opencode gets
 `opencode_hook_bridge/plugin.js` symlinked into the repo-local
 `.opencode/plugins/zz-agent-tools-hook-bridge.js` ordered plugin path. Without that bridge the
 guards above would be inert files. Set `hook_bridge: { enabled: false }` to opt out.
-Because that symlink is machine-local, rig also adds it to the repo's `.git/info/exclude`; when
+If `agent_hooks.target` points at a custom descriptor directory, the bridge remains registered
+with that descriptor-dir override; opencode uses a small managed wrapper plugin for this case.
+Because that plugin path is machine-local, rig also adds it to the repo's `.git/info/exclude`; when
 upgrading from the prior global opencode bridge path, rig removes the old managed global symlink
 if it still points at an agent-tools opencode bridge plugin.
 See [`docs/config-schema.md`](docs/config-schema.md) for the full `harness` schema and the

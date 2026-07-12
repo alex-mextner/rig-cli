@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,27 @@ from riglib.catalog import Catalog
 from riglib.config import LoadedConfig
 from riglib.drift import detect
 from riglib.plan import build
+
+
+def test_cc_and_codex_dispatchers_read_custom_hooks_dir_env(fake_agent_tools, tmp_path, monkeypatch):
+    """Bridge commands and dispatcher modules must agree on custom descriptor-dir env names."""
+    lib_dir = fake_agent_tools / "lib"
+    monkeypatch.syspath_prepend(str(lib_dir))
+    monkeypatch.setenv("CC_HOOKS_DIR", str(tmp_path / "cc-hooks"))
+    monkeypatch.setenv("CODEX_HOOKS_DIR", str(tmp_path / "codex-hooks"))
+    for name in (
+        "cc_hook_bridge",
+        "cc_hook_bridge.dispatch",
+        "codex_hook_bridge",
+        "codex_hook_bridge.dispatch",
+    ):
+        sys.modules.pop(name, None)
+
+    from cc_hook_bridge import dispatch as cc_dispatch
+    from codex_hook_bridge import dispatch as codex_dispatch
+
+    assert cc_dispatch.hooks_dir() == tmp_path / "cc-hooks"
+    assert codex_dispatch.hooks_dir() == tmp_path / "codex-hooks"
 
 
 def _full_cfg(repo_root: Path, source: Path) -> LoadedConfig:
@@ -846,19 +869,20 @@ def test_instruction_file_harness_with_explicit_dir_does_link(fake_agent_tools, 
     assert (harness / "naming").resolve() == (repo / "skills-out" / "naming").resolve()
 
 
-@pytest.mark.parametrize("kind", ["opencode"])
-def test_native_discovery_harness_links_nothing_but_notes_autoload(fake_agent_tools, tmp_path, monkeypatch, kind):
-    """A NATIVE-DISCOVERY harness (opencode) auto-loads skills_target, so rig links NOTHING but
-    records WHY — ``rig status`` says "discovers natively", not a silent empty area or a pointless
-    symlink into a dir the harness never reads.
-    """
+def test_native_discovery_harness_links_nothing_when_target_is_native(
+    fake_agent_tools, tmp_path, monkeypatch
+):
+    """A native-discovery harness with the default target needs no harness symlink."""
+    kind = "opencode"
     repo = tmp_path / "repo"
     repo.mkdir()
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     cat = Catalog.scan(str(fake_agent_tools))
-    plan = build(_harness_skill_cfg(repo, fake_agent_tools, kind), cat, project_type="unknown")
+    cfg = _harness_skill_cfg(repo, fake_agent_tools, kind)
+    cfg.data["defaults"].pop("skills_target")
+    plan = build(cfg, cat, project_type="unknown")
     # no harness symlink for a native-discovery harness (it reads skills_target directly)...
     assert not [a for a in plan.actions if a.kind == "link_skill_harness"], f"{kind}: unexpected link"
     # ...but the skill IS still copied to skills_target (which the harness auto-scans)...
@@ -868,6 +892,31 @@ def test_native_discovery_harness_links_nothing_but_notes_autoload(fake_agent_to
     assert kind in notes and "natively" in notes and ".agents/skills" in notes, plan.notes
     report = run_plan(plan)
     assert not report.errors, [r.detail for r in report.errors]
+
+
+def test_native_discovery_harness_custom_target_links_back_to_native_root(
+    fake_agent_tools, tmp_path, monkeypatch
+):
+    """A native-discovery harness still sees skills when skills_target is customized."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cat = Catalog.scan(str(fake_agent_tools))
+
+    plan = build(_harness_skill_cfg(repo, fake_agent_tools, "opencode"), cat, project_type="unknown")
+
+    links = [a for a in plan.actions if a.kind == "link_skill_harness"]
+    assert links
+    assert {a.target for a in links} == {home / ".agents" / "skills" / "naming"}
+    notes = " ".join(plan.notes)
+    assert "opencode" in notes and "skills_target" in notes and "native discovery dir" in notes
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    link = home / ".agents" / "skills" / "naming"
+    assert link.is_symlink()
+    assert link.resolve() == (repo / "skills-out" / "naming").resolve()
 
 
 @pytest.mark.parametrize("kind", ["opencode", "codex", "gemini", "pi", "commandcode"])
@@ -1931,6 +1980,161 @@ def test_opencode_hook_bridge_links_plugin(fake_agent_tools, tmp_path):
     assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
 
 
+def test_opencode_hook_bridge_custom_hook_target_writes_wrapper(fake_agent_tools, tmp_path):
+    """A custom agent_hooks.target keeps the primary opencode bridge wired to that descriptor dir."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    custom_hooks = repo / "custom-hooks"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True, "target": str(custom_hooks)},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "opencode", "auto_mode": True, "hook_bridge": {"enabled": True}},
+        },
+        repo_root=repo,
+        repo_path=repo / "rig.yaml",
+        layers=[f"repo:{repo / 'rig.yaml'}"],
+    )
+    plan = build(cfg, cat, project_type="unknown")
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    assert _bridge_results(report), "no register_hook_bridge action ran"
+    assert plugin.is_file()
+    assert not plugin.is_symlink()
+    text = plugin.read_text(encoding="utf-8")
+    assert f'process.env.OPENCODE_HOOKS_DIR = "{custom_hooks}"' in text
+    assert str((fake_agent_tools / "lib" / "opencode_hook_bridge" / "plugin.js").resolve().as_uri()) in text
+    assert detect(plan).in_sync
+
+
+def test_opencode_hook_bridge_custom_wrapper_drift_is_repaired(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    custom_hooks = repo / "custom-hooks"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True, "target": str(custom_hooks)},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "opencode", "auto_mode": True, "hook_bridge": {"enabled": True}},
+        },
+        repo_root=repo,
+        repo_path=repo / "rig.yaml",
+        layers=[f"repo:{repo / 'rig.yaml'}"],
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    first = run_plan(plan)
+    assert not first.errors, [r.detail for r in first.errors]
+    plugin.write_text("// stale wrapper\n", encoding="utf-8")
+
+    drift = detect(plan)
+
+    assert any(
+        i.item == "hook-bridge"
+        and i.direction == "modified"
+        and "wrapper differs from config" in i.detail
+        for i in drift.items
+    ), [i.detail for i in drift.items]
+
+    second = run_plan(plan)
+
+    assert not second.errors, [r.detail for r in second.errors]
+    assert f'process.env.OPENCODE_HOOKS_DIR = "{custom_hooks}"' in plugin.read_text(encoding="utf-8")
+    assert detect(plan).in_sync
+
+
+def test_opencode_hook_bridge_custom_wrapper_skip_leaves_existing_file(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text("// user-managed plugin\n", encoding="utf-8")
+    custom_hooks = repo / "custom-hooks"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "defaults": {"on_conflict": "skip"},
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True, "target": str(custom_hooks)},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "opencode", "auto_mode": True, "hook_bridge": {"enabled": True}},
+        },
+        repo_root=repo,
+        repo_path=repo / "rig.yaml",
+        layers=[f"repo:{repo / 'rig.yaml'}"],
+    )
+    plan = build(cfg, cat, project_type="unknown")
+
+    report = run_plan(plan)
+
+    res = _bridge_results(report)
+    assert res and all(r.status == "skipped" for r in res), [r.detail for r in res]
+    assert plugin.read_text(encoding="utf-8") == "// user-managed plugin\n"
+    assert not plugin.is_symlink()
+
+
+def test_opencode_hook_bridge_custom_wrapper_is_importable(fake_agent_tools, tmp_path):
+    """The generated wrapper must match the plugin module export contract."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    plugin = repo / ".opencode" / "plugins" / "zz-agent-tools-hook-bridge.js"
+    custom_hooks = repo / "custom-hooks"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True, "target": str(custom_hooks)},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "opencode", "auto_mode": True, "hook_bridge": {"enabled": True}},
+        },
+        repo_root=repo,
+        repo_path=repo / "rig.yaml",
+        layers=[f"repo:{repo / 'rig.yaml'}"],
+    )
+    report = run_plan(build(cfg, cat, project_type="unknown"))
+    assert not report.errors, [r.detail for r in report.errors]
+
+    script = (
+        "const mod = await import(process.argv[1]);\n"
+        "if (typeof mod.AgentToolsHookBridge !== 'function') process.exit(2);\n"
+        "const plugin = await mod.AgentToolsHookBridge();\n"
+        f"if (plugin.hooksDirAtImport !== {json.dumps(str(custom_hooks))}) {{\n"
+        "  console.error(`hooks dir not visible at import: ${plugin.hooksDirAtImport}`);\n"
+        "  process.exit(3);\n"
+        "}\n"
+    )
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", script, plugin.resolve().as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert res.returncode == 0, res.stderr
+
+
 def test_opencode_hook_bridge_default_path_is_repo_local_ignored_and_in_sync(fake_agent_tools, tmp_path):
     """The shipped opencode default is a repo-local ordered plugin symlink that rig git-ignores."""
     repo = tmp_path / "repo"
@@ -2623,7 +2827,7 @@ def test_codex_hook_bridge_and_haft_mcp_second_apply_idempotent(fake_agent_tools
     second = run_plan(plan)
     assert not second.errors, [r.detail for r in second.errors]
     assert settings.read_text(encoding="utf-8") == text
-    assert not any(i.path == settings for i in detect(plan).items), [i.detail for i in detect(plan).items]
+    assert not any(i.target == settings for i in detect(plan).items), [i.detail for i in detect(plan).items]
 
 
 def test_codex_hook_bridge_conflicts_with_existing_hook_event(fake_agent_tools, tmp_path):
@@ -2728,6 +2932,211 @@ def test_codex_hook_bridge_nested_hooks_table_conflict_stays_valid(fake_agent_to
     assert "unmanaged [hooks.foo] table already exists" in res[0].detail
     assert settings.read_text(encoding="utf-8") == original
     assert _read_toml(settings)["hooks"]["foo"]["command"] == "legacy"
+
+
+@pytest.mark.parametrize(
+    ("original", "assert_state"),
+    [
+        (
+            '[hooks.state]\n',
+            lambda data: data["hooks"]["state"] == {},
+        ),
+        (
+            '[hooks.state."/Users/ultra/.codex/hooks.json:stop:0:0"]\ntrusted_hash = "sha256:abc"\n',
+            lambda data: data["hooks"]["state"]["/Users/ultra/.codex/hooks.json:stop:0:0"]["trusted_hash"]
+            == "sha256:abc",
+        ),
+        (
+            'hooks.state."/Users/ultra/.codex/hooks.json:stop:0:0".trusted_hash = "sha256:abc"\n',
+            lambda data: data["hooks"]["state"]["/Users/ultra/.codex/hooks.json:stop:0:0"]["trusted_hash"]
+            == "sha256:abc",
+        ),
+        (
+            'hooks.state."/Users/ultra/.codex/hooks.json:stop:0:0".trusted_hash = "sha256:abc"\n'
+            "[profile.default]\nmodel = \"gpt-5\"\n",
+            lambda data: (
+                data["hooks"]["state"]["/Users/ultra/.codex/hooks.json:stop:0:0"]["trusted_hash"]
+                == "sha256:abc"
+                and data["profile"]["default"]["model"] == "gpt-5"
+            ),
+        ),
+    ],
+)
+def test_codex_hook_bridge_preserves_hooks_state_table(fake_agent_tools, tmp_path, original, assert_state):
+    """Codex hook trust metadata under [hooks.state] is not an event hook and must be preserved."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(original, encoding="utf-8")
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+    res = _bridge_results(report)
+    assert res and res[0].status in {"created", "updated", "backed_up"}, [r.detail for r in res]
+    data = _read_toml(settings)
+    assert_state(data)
+    assert "PreToolUse" in data["hooks"]
+    assert "PostToolUse" in data["hooks"]
+    assert "Stop" in data["hooks"]
+    assert not any(i.target == settings for i in detect(plan).items), [i.detail for i in detect(plan).items]
+
+
+def test_codex_hook_bridge_migrates_existing_managed_block_when_hooks_state_is_dotted(
+    fake_agent_tools, tmp_path
+):
+    """A later Codex dotted hooks.state key must not conflict with an older managed [hooks] block."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+    first = run_plan(plan)
+    assert not first.errors, [r.detail for r in first.errors]
+    managed_table_block = settings.read_text(encoding="utf-8")
+    assert "[hooks]" in managed_table_block
+
+    state_key = 'hooks.state."/Users/ultra/.codex/hooks.json:stop:0:0".trusted_hash = "sha256:abc"\n'
+    settings.write_text(state_key + "\n" + managed_table_block, encoding="utf-8")
+
+    before_migration = detect(plan)
+    assert any(
+        i.item == "hook-bridge"
+        and i.direction == "modified"
+        and "stale" in i.detail
+        for i in before_migration.items
+    ), [i.detail for i in before_migration.items]
+
+    second = run_plan(plan)
+
+    assert not second.errors, [r.detail for r in second.errors]
+    text = settings.read_text(encoding="utf-8")
+    data = _read_toml(settings)
+    assert data["hooks"]["state"]["/Users/ultra/.codex/hooks.json:stop:0:0"]["trusted_hash"] == "sha256:abc"
+    assert "hooks.PreToolUse" in text
+    assert "[hooks]" not in text
+    assert not any(i.target == settings for i in detect(plan).items), [i.detail for i in detect(plan).items]
+
+
+def test_codex_hook_bridge_allows_multiline_hooks_state_dotted_key(fake_agent_tools, tmp_path):
+    """Multiline Codex trust metadata under hooks.state is not an event-hook conflict."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        'hooks.state."/Users/ultra/.codex/hooks.json:stop:0:0".trusted_hashes = [\n'
+        '  "sha256:abc",\n'
+        ']\n',
+        encoding="utf-8",
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    data = _read_toml(settings)
+    state = data["hooks"]["state"]["/Users/ultra/.codex/hooks.json:stop:0:0"]
+    assert state["trusted_hashes"] == ["sha256:abc"]
+    assert "PreToolUse" in data["hooks"]
+    assert not any(i.target == settings for i in detect(plan).items), [i.detail for i in detect(plan).items]
+
+
+def test_codex_hook_bridge_allows_hooks_state_continuation_with_equals(fake_agent_tools, tmp_path):
+    """Continuation lines with '=' inside hooks.state metadata must stay inside the ignored value."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        'hooks.state."/Users/ultra/.codex/hooks.json:stop:0:0".trusted_hashes = [\n'
+        '  "sha256:abc=def",\n'
+        ']\n',
+        encoding="utf-8",
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+
+    report = run_plan(plan)
+
+    assert not report.errors, [r.detail for r in report.errors]
+    data = _read_toml(settings)
+    state = data["hooks"]["state"]["/Users/ultra/.codex/hooks.json:stop:0:0"]
+    assert state["trusted_hashes"] == ["sha256:abc=def"]
+    assert "PreToolUse" in data["hooks"]
+    assert not any(i.target == settings for i in detect(plan).items), [i.detail for i in detect(plan).items]
+
+
+def test_codex_hook_bridge_drift_flags_dotted_block_moved_below_table(fake_agent_tools, tmp_path):
+    """Dotted managed keys must stay before TOML tables or they become table-relative."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".codex" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        'hooks.state."/Users/ultra/.codex/hooks.json:stop:0:0".trusted_hash = "sha256:abc"\n\n'
+        "[profile.default]\n"
+        'model = "gpt-5"\n',
+        encoding="utf-8",
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                    hook_bridge={"enabled": True}),
+        cat,
+        project_type="unknown",
+    )
+    first = run_plan(plan)
+    assert not first.errors, [r.detail for r in first.errors]
+
+    text = settings.read_text(encoding="utf-8")
+    begin = "# >>> rig managed: codex hook bridge"
+    end_marker = "# <<< rig managed: codex hook bridge"
+    start = text.index(begin)
+    end = text.index(end_marker, start) + len(end_marker)
+    if end < len(text) and text[end] == "\n":
+        end += 1
+    block = text[start:end]
+    settings.write_text((text[:start] + text[end:]).rstrip() + "\n\n" + block, encoding="utf-8")
+
+    before_repair = detect(plan)
+
+    assert any(
+        i.item == "hook-bridge"
+        and i.direction == "modified"
+        and "stale" in i.detail
+        for i in before_repair.items
+    ), [i.detail for i in before_repair.items]
+
+    second = run_plan(plan)
+
+    assert not second.errors, [r.detail for r in second.errors]
+    repaired = settings.read_text(encoding="utf-8")
+    assert repaired.index(begin) < repaired.index("[profile.default]")
+    assert not any(i.target == settings for i in detect(plan).items), [i.detail for i in detect(plan).items]
 
 
 def test_codex_hook_bridge_quoted_event_key_conflicts(fake_agent_tools, tmp_path):

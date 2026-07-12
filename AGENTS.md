@@ -82,13 +82,15 @@ when a lifecycle verb actually needs it). The server binds `127.0.0.1` only and 
   The auto/permission-MODE write is claude-code-only today; a kind without a mode-writer
   self-skips with a plan note.
 - **Per-harness skill/instruction discovery is one registry: `riglib/harness_skills.py`.** It
-  maps `harness.kind` → either a skills DIRECTORY (claude-code → `~/.claude/skills`, opencode →
-  `~/.config/opencode/skill`; rig symlinks each skill in via a `link_skill_harness` action) OR a
-  global INSTRUCTION FILE (codex/gemini/pi/commandcode → `AGENTS.md`/`GEMINI.md`; no per-skill
-  dir, so the `agents_md` area carries the guidance and rig records a "uses `<file>`" note). Add
-  a new harness as one entry there — never scatter the path across plan/config/schema. The
-  config schema ACCEPTS every kind in that registry; the runner/drift for the skill symlink are
-  harness-agnostic (they act on the resolved target).
+  maps `harness.kind` to one or more discovery surfaces: skills directories (claude-code →
+  `~/.claude/skills`, codex → `~/.codex/skills`; rig symlinks each skill in via a
+  `link_skill_harness` action), native discovery (opencode auto-loads `~/.agents/skills`, so rig
+  records a note and links nothing when skills install to the default target), and global
+  instruction files (codex/gemini/pi/commandcode → `AGENTS.md`/`GEMINI.md`). Codex is dual:
+  `~/.codex/skills` carries skills and `~/.codex/AGENTS.md` carries global instructions. Add a
+  new harness as one entry there — never scatter the path across plan/config/schema. The config
+  schema ACCEPTS every kind in that registry; the runner/drift for skill links are
+  harness-agnostic (they act on resolved targets).
 - **`rig.yaml` is committed by default.** It is the reproducible source of truth. Do not
   add an "is rig.yaml optional?" flag. Global config lives at `~/.config/rig/config.yaml`;
   per-repo `rig.yaml` overrides it; scope is by location, never a flag.

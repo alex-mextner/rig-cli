@@ -80,7 +80,6 @@ def default_state(
         "agent_hooks": {
             "enabled": True,
             "target": "~/.claude/hooks",
-            "target_kind": "claude-code",
             "all": True,
         },
         "git_hooks": {

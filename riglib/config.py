@@ -65,6 +65,7 @@ _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
 _VALID_TIERS = {"block", "warn"}
 _VALID_ON_ERROR = {"open", "closed"}
+_VALID_LEGACY_AGENT_HOOK_TARGET_KINDS = {"claude-code", "generic"}
 _MCP_ITEM_KEYS = {"enabled", "server", "command", "args", "env"}
 _VALID_TMUX_APPLY = {"import", "block"}
 _VALID_MODE_NAMES = {"standard", "autonomous"}
@@ -229,7 +230,7 @@ def repo_config_path(repo_root: Path) -> Path:
 
 
 def split_path(dotted: str) -> list[str]:
-    """Split a dot path into segments, rejecting empties (``a..b``, leading/trailing dot).
+    """Split and normalize a dot path into trimmed segments, rejecting empty segments.
 
     Fail-closed: a malformed path is a :class:`ConfigError`, not a silent no-op — a typo in
     ``rig config set`` must abort before it writes a key the schema can't reach.
@@ -241,6 +242,11 @@ def split_path(dotted: str) -> list[str]:
         # empty segment ("a..b", a leading/trailing dot, or a whitespace-only segment "a. .b")
         raise ConfigError(f"invalid config path {dotted!r}: empty segment")
     return parts
+
+
+def canonical_dot_path(dotted: str) -> str:
+    """Return the trimmed, single-dot-joined canonical form of a config dot path."""
+    return ".".join(split_path(dotted))
 
 
 def get_path(data: dict[str, Any], dotted: str) -> Any:
@@ -591,29 +597,30 @@ def _validate_ci(ci: dict[str, Any]) -> None:
             )
 
 
-# The logical-point → harness-event mappings agent_hooks supports (the schema declares the same
-# enum). A typo here is rejected so the runtime and an editor agree.
-_VALID_AGENT_HOOK_TARGET_KINDS = {"claude-code", "generic"}
-
-
 def _validate_agent_hooks(ah: dict[str, Any]) -> None:
     _reject_unknown_keys(ah, "agent_hooks")
     _check_bool(ah, "enabled", "agent_hooks.enabled")
     _check_str(ah, "target", "agent_hooks.target")
+    target_kind = ah.get("target_kind")
+    if target_kind is not None:
+        if not isinstance(target_kind, str):
+            raise ConfigError(
+                f"agent_hooks.target_kind must be a string, got {target_kind!r}",
+                schema_path="agent_hooks.target_kind",
+            )
+        if target_kind not in _VALID_LEGACY_AGENT_HOOK_TARGET_KINDS:
+            raise ConfigError(
+                "agent_hooks.target_kind is a legacy ignored key and must be one of "
+                f"{sorted(_VALID_LEGACY_AGENT_HOOK_TARGET_KINDS)}, got {target_kind!r}",
+                fix="remove agent_hooks.target_kind; rig now derives hook targets from harness.kind/kinds",
+                schema_path="agent_hooks.target_kind",
+            )
     _check_bool(ah, "all", "agent_hooks.all")
     # The two per-repo workflow knobs are booleans in the published schema; type-check them
     # here so the strict validator and schema/rig.schema.json agree (else `worktree_only: "no"`
     # would pass the validator but violate the schema). See tests/test_workflow_guard_knobs.py.
     _check_bool(ah, "worktree_only", "agent_hooks.worktree_only")
     _check_bool(ah, "orchestrator_only", "agent_hooks.orchestrator_only")
-    target_kind = ah.get("target_kind")
-    if target_kind is not None and target_kind not in _VALID_AGENT_HOOK_TARGET_KINDS:
-        raise ConfigError(
-            f"agent_hooks.target_kind must be one of {sorted(_VALID_AGENT_HOOK_TARGET_KINDS)}, "
-            f"got {target_kind!r}",
-            fix=f"use one of: {', '.join(sorted(_VALID_AGENT_HOOK_TARGET_KINDS))}",
-            schema_path="agent_hooks.target_kind",
-        )
     items = ah.get("items", {})
     if not isinstance(items, dict):
         raise ConfigError("agent_hooks.items must be a mapping", schema_path="agent_hooks.items")
@@ -779,6 +786,8 @@ def _validate_harness(h: dict[str, Any]) -> None:
         return
     _reject_unknown_keys(h, "harness")
     kind = h.get("kind", "claude-code")
+    if not isinstance(kind, str):
+        raise ConfigError(f"harness.kind must be a string, got {kind!r}", schema_path="harness.kind")
     if kind in _RESERVED_HARNESS_KINDS:
         raise ConfigError(
             f"harness.kind '{kind}' is documented but not implemented in this rig "
@@ -793,6 +802,27 @@ def _validate_harness(h: dict[str, Any]) -> None:
             fix=f"use one of: {', '.join(sorted(_VALID_HARNESS_KINDS))}",
             schema_path="harness.kind",
         )
+    kinds = h.get("kinds")
+    if kinds is not None:
+        if not isinstance(kinds, list) or not all(isinstance(v, str) for v in kinds):
+            raise ConfigError(
+                f"harness.kinds must be a list of strings, got {kinds!r}",
+                schema_path="harness.kinds",
+            )
+        for extra_kind in kinds:
+            if extra_kind in _RESERVED_HARNESS_KINDS:
+                raise ConfigError(
+                    f"harness.kinds entry '{extra_kind}' is documented but not implemented in this rig "
+                    f"(supported: {sorted(_VALID_HARNESS_KINDS)}).",
+                    fix=f"use one of: {', '.join(sorted(_VALID_HARNESS_KINDS))}",
+                    schema_path="harness.kinds",
+                )
+            if extra_kind not in _VALID_HARNESS_KINDS:
+                raise ConfigError(
+                    f"harness.kinds entries must be one of {sorted(_VALID_HARNESS_KINDS)}, got {extra_kind!r}",
+                    fix=f"use one of: {', '.join(sorted(_VALID_HARNESS_KINDS))}",
+                    schema_path="harness.kinds",
+                )
     auto_mode = h.get("auto_mode")
     if auto_mode is not None and not isinstance(auto_mode, bool):
         raise ConfigError(

@@ -32,15 +32,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# Dot-path syntax/traversal lives in config.py; schema adapts absent reads to KeyError_.
+from .config import ConfigError, canonical_dot_path, get_path as _config_get_path
+from .config import set_path as _config_set_path
+from .harness_skills import HARNESS_INSTRUCTION_FILES, HARNESS_NATIVE_SKILLS, HARNESS_SKILL_DIR_KINDS
 from .layers import GLOBAL, REPO, layer_for_category
 
-# The value kinds the wizard knows how to prompt for and coerce. Kept tiny on purpose — a
-# wizard option is a single scalar toggle/value; nested lists/maps are edited in the file.
+# The value kinds the wizard knows how to prompt for and coerce. Kept tiny on purpose.
 KIND_BOOL = "bool"
 KIND_ENUM = "enum"
 KIND_STR = "str"
 KIND_INT = "int"
-_KINDS = {KIND_BOOL, KIND_ENUM, KIND_STR, KIND_INT}
+KIND_LIST = "list"
+_KINDS = {KIND_BOOL, KIND_ENUM, KIND_STR, KIND_INT, KIND_LIST}
+_HARNESS_KIND_CHOICES: tuple[str, ...] = tuple(
+    dict.fromkeys((*HARNESS_SKILL_DIR_KINDS, *HARNESS_NATIVE_SKILLS, *HARNESS_INSTRUCTION_FILES))
+)
 
 # WHERE the wizard/`config set` PERSISTS a category's value. This is DISTINCT from
 # ``layers.layer_for_category`` (which buckets drift for the `rig status` DISPLAY): several
@@ -76,6 +83,8 @@ class Option:
     default: Any
     hint: str
     choices: tuple[str, ...] = field(default_factory=tuple)
+    items_enum: tuple[str, ...] = field(default_factory=tuple)
+    null_tokens: tuple[str, ...] = ("", "null", "none", "~", "unset")
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
@@ -123,8 +132,25 @@ class Area:
         return layer_for_category(self.category)
 
 
-def _opt(key: str, kind: str, default: Any, hint: str, choices: tuple[str, ...] = ()) -> Option:
-    return Option(key=key, category=key.split(".", 1)[0], kind=kind, default=default, hint=hint, choices=choices)
+def _opt(
+    key: str,
+    kind: str,
+    default: Any,
+    hint: str,
+    choices: tuple[str, ...] = (),
+    items_enum: tuple[str, ...] = (),
+    null_tokens: tuple[str, ...] = ("", "null", "none", "~", "unset"),
+) -> Option:
+    return Option(
+        key=key,
+        category=key.split(".", 1)[0],
+        kind=kind,
+        default=default,
+        hint=hint,
+        choices=choices,
+        items_enum=items_enum,
+        null_tokens=null_tokens,
+    )
 
 
 # ── the registry — one Area per reconciled `rig status` row, in status order ──────────────
@@ -199,6 +225,13 @@ AREAS: tuple[Area, ...] = (
             _opt("harness.auto_mode", KIND_BOOL, True,
                  "Auto-accept tool calls (the agent runs autonomously). SAFE because the agent-hook "
                  "guards above catch the dangerous calls first. Off = interactive permission prompts."),
+            _opt("harness.kinds", KIND_LIST, [],
+                 "Additional harnesses to provision alongside harness.kind, comma-separated "
+                 "(e.g. codex,opencode). Additional harnesses get skill discovery, agent-hook "
+                 "descriptors, supported hook bridges, and supported permissions allowlists. If "
+                 "agent_hooks.target pins one explicit descriptor target, supported bridges are "
+                 "registered with a descriptor-dir override.",
+                 items_enum=_HARNESS_KIND_CHOICES),
             _opt("harness.hook_bridge.enabled", KIND_BOOL, True,
                  "Wire the supported harness hook bridge so installed agent-hooks actually FIRE. "
                  "Without it every agent-hook is inert and auto-mode is NOT safe."),
@@ -217,12 +250,14 @@ AREAS: tuple[Area, ...] = (
                  "into the existing lists, never clobbers or removes the user's own entries. Off = "
                  "leave it alone. The target settings file is per-machine; repo-local config is "
                  "still accepted for compatibility."),
-            _opt("permissions.kind", KIND_ENUM, "claude-code",
+            _opt("permissions.kind", KIND_ENUM, None,
                  "Which harness's permissions to provision. opencode is supported for the ALLOWLIST "
-                 "independently of harness.kind (its deny/ask dialect is unverified → N/A); "
-                 "codex/gemini have no additively-mergeable allowlist (N/A). The lists "
+                 "independently of harness.kind (its deny/ask dialect is unverified -> N/A). "
+                 "Absent permissions.kind, rig provisions supported harness.kind plus harness.kinds "
+                 "allowlists; codex/gemini have no additively-mergeable allowlist (N/A). The lists "
                  "(tools/extra/disable, allow/deny/ask) are edited directly in the config file.",
-                 choices=("claude-code", "opencode")),
+                 choices=("claude-code", "opencode"),
+                 null_tokens=("", "null", "none", "~", "unset", "fan-out")),
         ),
     ),
     Area(
@@ -367,40 +402,23 @@ class KeyError_(KeyError):
 
 
 def get_path(data: dict[str, Any], dotted: str) -> Any:
-    """Read ``dotted`` (e.g. ``harness.auto_mode``) from a nested dict. Raises KeyError_ if absent."""
-    cur: Any = data
-    for part in dotted.split("."):
-        if not isinstance(cur, dict) or part not in cur:
-            raise KeyError_(dotted)
-        cur = cur[part]
-    return cur
+    """Read ``dotted`` from a nested dict. Raises KeyError_ if absent, ConfigError if malformed."""
+    # canonical_dot_path must stay outside the try: malformed paths propagate as ConfigError,
+    # while only absent canonical paths are adapted to KeyError_ for effective_value fallback.
+    config_path = canonical_dot_path(dotted)
+    try:
+        return _config_get_path(data, config_path)
+    except ConfigError as exc:
+        raise KeyError_(config_path) from exc
 
 
 def set_path(data: dict[str, Any], dotted: str, value: Any) -> None:
-    """Set ``dotted`` to ``value`` in a nested dict, creating intermediate mappings as needed.
+    """Delegate to :func:`riglib.config.set_path` for wizard edits.
 
-    Mutates ``data`` in place. A MISSING intermediate (``None`` / absent) is created as an empty
-    mapping. But an intermediate that exists as a NON-mapping (a scalar/list the user authored,
-    e.g. ``harness: "TODO"``) is NOT silently clobbered — that would destroy their content before
-    validation ever runs. We raise :class:`ValueError` instead, so the wizard surfaces it as a
-    "rejected" message and the CLI as a config error, leaving the file untouched.
+    Raises ConfigError on malformed paths or non-mapping intermediates; the wizard catches that as
+    a rejected edit.
     """
-    parts = dotted.split(".")
-    cur = data
-    walked: list[str] = []
-    for part in parts[:-1]:
-        walked.append(part)
-        nxt = cur.get(part)
-        if nxt is None:
-            nxt = {}
-            cur[part] = nxt
-        elif not isinstance(nxt, dict):
-            raise ValueError(
-                f"cannot set {dotted!r}: existing value at {'.'.join(walked)!r} is "
-                f"{type(nxt).__name__}, not a mapping — fix it in the config file first"
-            )
-        cur = nxt
-    cur[parts[-1]] = value
+    _config_set_path(data, dotted, value)
 
 
 # Categories whose plan builder treats an ABSENT top-level block as INACTIVE (it returns early
@@ -453,9 +471,33 @@ def coerce(option: Option, raw: str) -> Any:
             raise ValueError(f"{option.key}: expected an integer, got {raw!r}") from None
     if option.kind == KIND_ENUM:
         if raw not in option.choices:
+            if option.default is None and raw.lower() in option.null_tokens:
+                return None
             raise ValueError(f"{option.key}: expected one of {list(option.choices)}, got {raw!r}")
         return raw
+    if option.kind == KIND_LIST:
+        if raw in ("", "[]"):
+            return []
+        if raw.startswith("["):
+            try:
+                import yaml  # lazy, like the rest of the config stack
+
+                value = yaml.safe_load(raw)
+            except yaml.YAMLError as exc:
+                raise ValueError(f"{option.key}: expected a comma-separated list, got {raw!r}") from exc
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ValueError(f"{option.key}: expected a list of strings, got {raw!r}")
+            _validate_list_enum(option, value)
+            return value
+        value = [part.strip() for part in raw.split(",") if part.strip()]
+        _validate_list_enum(option, value)
+        return value
     return raw  # str
+
+
+def _validate_list_enum(option: Option, value: list[str]) -> None:
+    if option.items_enum and any(item not in option.items_enum for item in value):
+        raise ValueError(f"{option.key}: expected entries from {list(option.items_enum)}, got {value!r}")
 
 
 def json_schema() -> dict[str, Any]:

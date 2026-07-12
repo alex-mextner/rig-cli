@@ -18,7 +18,9 @@ from pathlib import Path
 
 import pytest
 
+from riglib import codex_update
 from riglib import drift as driftmod
+from riglib import errors
 from riglib import tools
 from riglib.actions import runner
 from riglib.config import ConfigError, validate
@@ -424,6 +426,497 @@ def test_no_specs_is_skipped(tmp_path):
     )
     res = runner._do_provision_tools(action, "backup")
     assert res.status == "skipped"
+
+
+# ── Codex safe update ─────────────────────────────────────────────────────────────
+def _write_fake_codex(path: Path, version: str) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "case \"${1:-}\" in\n"
+        f"  --version) echo 'codex-cli {version}' ;;\n"
+        "  --help) echo 'Codex CLI help' ;;\n"
+        "  completion) echo '#compdef codex' ;;\n"
+        "  *) echo 'ok' ;;\n"
+        "esac\n"
+    )
+    path.chmod(0o755)
+
+
+def _write_hanging_codex(path: Path) -> None:
+    path.write_text("#!/bin/sh\nsleep 30\n")
+    path.chmod(0o755)
+
+
+def _write_failing_codex(path: Path) -> None:
+    path.write_text("#!/bin/sh\necho 'broken candidate' >&2\nexit 42\n")
+    path.chmod(0o755)
+
+
+def _write_marker_dependent_codex(path: Path, marker: Path, version: str) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        f'test -f "{marker}" || exit 77\n'
+        "case \"${1:-}\" in\n"
+        f"  --version) echo 'codex-cli {version}' ;;\n"
+        "  --help) echo 'Codex CLI help' ;;\n"
+        "  completion) echo '#compdef codex' ;;\n"
+        "  *) echo 'ok' ;;\n"
+        "esac\n"
+    )
+    path.chmod(0o755)
+
+
+def test_safe_codex_update_rolls_back_hanging_candidate(tmp_path):
+    good = tmp_path / "codex-good"
+    hanging = tmp_path / "codex-hangs"
+    live = tmp_path / "bin" / "codex"
+    backup_dir = tmp_path / "backups"
+    live.parent.mkdir()
+    _write_fake_codex(good, "0.142.4")
+    _write_hanging_codex(hanging)
+    live.symlink_to(good)
+
+    update = tmp_path / "replace-with-hang.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"ln -sfn {hanging} {live}\n"
+    )
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=backup_dir,
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "rolled_back", result.message
+    assert live.is_symlink()
+    assert live.resolve() == good
+    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+    assert "timed out" in result.message
+
+
+def test_safe_codex_update_rolls_back_nonzero_candidate(tmp_path):
+    good = tmp_path / "codex-good"
+    failing = tmp_path / "codex-fails"
+    live = tmp_path / "bin" / "codex"
+    live.parent.mkdir()
+    _write_fake_codex(good, "0.142.4")
+    _write_failing_codex(failing)
+    live.symlink_to(good)
+
+    update = tmp_path / "replace-with-failing.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"ln -sfn {failing} {live}\n"
+    )
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "rolled_back", result.message
+    assert live.resolve() == good
+    assert "exited 42" in result.message
+
+
+def test_safe_codex_update_restores_missing_original_symlink_target(tmp_path):
+    good = tmp_path / "caskroom" / "0.142.4" / "codex"
+    hanging = tmp_path / "caskroom" / "0.144.1" / "codex"
+    live = tmp_path / "bin" / "codex"
+    good.parent.mkdir(parents=True)
+    hanging.parent.mkdir(parents=True)
+    live.parent.mkdir()
+    _write_fake_codex(good, "0.142.4")
+    _write_hanging_codex(hanging)
+    live.symlink_to(good)
+
+    update = tmp_path / "remove-old-and-replace-with-hang.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"rm -f {good}\n"
+        f"ln -sfn {hanging} {live}\n"
+    )
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "rolled_back", result.message
+    assert live.resolve() == good
+    assert good.is_file()
+    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+
+
+def test_safe_codex_update_preserves_intermediate_symlink_on_rollback(tmp_path):
+    good = tmp_path / "caskroom" / "0.142.4" / "codex"
+    hanging = tmp_path / "caskroom" / "0.144.1" / "codex"
+    shim = tmp_path / "opt" / "codex"
+    live = tmp_path / "bin" / "codex"
+    good.parent.mkdir(parents=True)
+    hanging.parent.mkdir(parents=True)
+    shim.parent.mkdir(parents=True)
+    live.parent.mkdir()
+    _write_fake_codex(good, "0.142.4")
+    _write_hanging_codex(hanging)
+    shim.symlink_to(good)
+    live.symlink_to(shim)
+
+    update = tmp_path / "remove-old-and-replace-top-link-with-hang.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"rm -f {good}\n"
+        f"ln -sfn {hanging} {live}\n"
+    )
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "rolled_back", result.message
+    assert live.is_symlink()
+    assert live.readlink() == shim
+    assert shim.is_symlink()
+    assert shim.readlink() == good
+    assert good.is_file()
+    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+
+
+def test_safe_codex_update_restores_retargeted_intermediate_symlink(tmp_path):
+    good = tmp_path / "caskroom" / "0.142.4" / "codex"
+    hanging = tmp_path / "caskroom" / "0.144.1" / "codex"
+    shim = tmp_path / "opt" / "codex"
+    live = tmp_path / "bin" / "codex"
+    good.parent.mkdir(parents=True)
+    hanging.parent.mkdir(parents=True)
+    shim.parent.mkdir(parents=True)
+    live.parent.mkdir()
+    _write_fake_codex(good, "0.142.4")
+    _write_hanging_codex(hanging)
+    shim.symlink_to(good)
+    live.symlink_to(shim)
+
+    update = tmp_path / "retarget-intermediate-to-hang.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"ln -sfn {hanging} {shim}\n"
+    )
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "rolled_back", result.message
+    assert live.is_symlink()
+    assert live.readlink() == shim
+    assert shim.is_symlink()
+    assert shim.readlink() == good
+    assert live.resolve() == good
+    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+
+
+def test_safe_codex_update_restores_overwritten_original_symlink_target(tmp_path):
+    good = tmp_path / "caskroom" / "0.142.4" / "codex"
+    live = tmp_path / "bin" / "codex"
+    good.parent.mkdir(parents=True)
+    live.parent.mkdir()
+    _write_fake_codex(good, "0.142.4")
+    live.symlink_to(good)
+
+    update = tmp_path / "overwrite-old-target-with-hang.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"cat > {good} <<'SH'\n"
+        "#!/usr/bin/env bash\n"
+        "sleep 30\n"
+        "SH\n"
+        f"chmod +x {good}\n"
+    )
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "rolled_back", result.message
+    assert live.resolve() == good
+    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+    assert "codex-cli 0.142.4" in good.read_text(encoding="utf-8")
+
+
+def test_safe_codex_update_rolls_back_plain_binary(tmp_path):
+    live = tmp_path / "bin" / "codex"
+    live.parent.mkdir()
+    _write_fake_codex(live, "0.142.4")
+    live.chmod(0o700)
+
+    update = tmp_path / "overwrite-plain-binary-with-hang.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"cat > {live} <<'SH'\n"
+        "#!/usr/bin/env bash\n"
+        "sleep 30\n"
+        "SH\n"
+        f"chmod +x {live}\n"
+    )
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "rolled_back", result.message
+    assert not live.is_symlink()
+    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+    assert live.stat().st_mode & 0o777 == 0o700
+    assert result.backup_path is not None
+    assert result.backup_path.stat().st_mode & 0o777 == 0o700
+
+
+def test_safe_codex_update_errors_when_restored_codex_is_unhealthy(tmp_path):
+    marker = tmp_path / "runtime-marker"
+    good = tmp_path / "codex-good"
+    failing = tmp_path / "codex-failing"
+    live = tmp_path / "bin" / "codex"
+    live.parent.mkdir()
+    marker.write_text("present", encoding="utf-8")
+    _write_marker_dependent_codex(good, marker, "0.142.4")
+    _write_failing_codex(failing)
+    live.symlink_to(good)
+
+    update = tmp_path / "break-runtime-and-replace.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"rm -f {marker}\n"
+        f"ln -sfn {failing} {live}\n"
+    )
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "error"
+    assert "rollback restored files but codex is still unhealthy" in result.message
+    assert result.exit_code == errors.EXIT_CODEX_UPDATE
+
+
+def test_safe_codex_update_reports_current_unhealthy_before_update(tmp_path):
+    live = tmp_path / "bin" / "codex"
+    marker = tmp_path / "update-ran"
+    live.parent.mkdir()
+    _write_hanging_codex(live)
+
+    update = tmp_path / "update.sh"
+    update.write_text(f"#!/usr/bin/env bash\nprintf x > {marker}\n")
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=0.1,
+    )
+
+    assert result.status == "error"
+    assert result.exit_code == errors.EXIT_CODEX_UPDATE
+    assert "current codex is not healthy" in result.message
+    assert not marker.exists()
+
+
+def test_safe_codex_update_reports_rollback_failure(tmp_path, monkeypatch):
+    good = tmp_path / "codex-good"
+    failing = tmp_path / "codex-fails"
+    live = tmp_path / "bin" / "codex"
+    live.parent.mkdir()
+    _write_fake_codex(good, "0.142.4")
+    _write_failing_codex(failing)
+    live.symlink_to(good)
+
+    update = tmp_path / "replace-with-failing.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"ln -sfn {failing} {live}\n"
+    )
+    update.chmod(0o755)
+    monkeypatch.setattr(codex_update, "restore_snapshot", lambda snapshot: "permission denied")
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "error"
+    assert result.exit_code == errors.EXIT_CODEX_UPDATE
+    assert "rollback FAILED: permission denied" in result.message
+
+
+def test_safe_codex_update_reports_backup_failure_before_update(tmp_path):
+    live = tmp_path / "bin" / "codex"
+    backup_file = tmp_path / "backup-file"
+    marker = tmp_path / "update-ran"
+    live.parent.mkdir()
+    _write_fake_codex(live, "0.142.4")
+    backup_file.write_text("not a directory", encoding="utf-8")
+
+    update = tmp_path / "update.sh"
+    update.write_text(f"#!/usr/bin/env bash\nprintf x > {marker}\n")
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=backup_file,
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "error"
+    assert "could not back up current codex" in result.message
+    assert not marker.exists()
+
+
+def test_safe_codex_update_keeps_successful_candidate(tmp_path):
+    old = tmp_path / "codex-old"
+    new = tmp_path / "codex-new"
+    live = tmp_path / "bin" / "codex"
+    live.parent.mkdir()
+    _write_fake_codex(old, "0.142.4")
+    _write_fake_codex(new, "0.144.1")
+    live.symlink_to(old)
+
+    update = tmp_path / "replace-with-new.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"ln -sfn {new} {live}\n"
+    )
+    update.chmod(0o755)
+
+    result = codex_update.safe_update(
+        codex_path=live,
+        update_command=[str(update)],
+        backup_dir=tmp_path / "backups",
+        probe_timeout_s=1.0,
+    )
+
+    assert result.status == "updated", result.message
+    assert live.resolve() == new
+    assert "0.144.1" in result.message
+
+
+def test_default_codex_update_command_uses_brew_only_for_brew_cask_codex(tmp_path, monkeypatch):
+    brew = tmp_path / "homebrew" / "bin" / "brew"
+    brew.parent.mkdir(parents=True)
+    brew.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"${1:-}\" = \"--prefix\" ]; then dirname \"$(dirname \"$0\")\"; exit 0; fi\n"
+        "if [ \"${1:-}\" = \"list\" ]; then exit 0; fi\n",
+        encoding="utf-8",
+    )
+    brew.chmod(0o755)
+    monkeypatch.setattr(codex_update.shutil, "which", lambda name: str(brew) if name == "brew" else None)
+
+    cask_codex = tmp_path / "homebrew" / "Caskroom" / "codex" / "0.144.1" / "codex"
+    brew_codex = tmp_path / "homebrew" / "bin" / "codex"
+    other_codex = tmp_path / "other" / "codex"
+    cask_codex.parent.mkdir(parents=True)
+    brew_codex.symlink_to(cask_codex)
+
+    assert codex_update.default_update_command(brew_codex) == [str(brew), "upgrade", "--cask", "codex"]
+    assert codex_update.default_update_command(other_codex) == [str(other_codex), "update"]
+
+
+def test_default_codex_update_command_does_not_treat_brew_prefix_binary_as_cask(tmp_path, monkeypatch):
+    brew = tmp_path / "homebrew" / "bin" / "brew"
+    codex = tmp_path / "homebrew" / "bin" / "codex"
+    brew.parent.mkdir(parents=True)
+    brew.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"${1:-}\" = \"--prefix\" ]; then dirname \"$(dirname \"$0\")\"; exit 0; fi\n"
+        "if [ \"${1:-}\" = \"list\" ]; then exit 1; fi\n",
+        encoding="utf-8",
+    )
+    brew.chmod(0o755)
+    codex.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(codex_update.shutil, "which", lambda name: str(brew) if name == "brew" else None)
+
+    assert codex_update.default_update_command(codex) == [str(codex), "update"]
+
+
+def test_default_codex_update_command_handles_intel_homebrew_symlink(tmp_path, monkeypatch):
+    prefix = tmp_path / "usr-local"
+    real_brew = prefix / "Homebrew" / "bin" / "brew"
+    brew_link = prefix / "bin" / "brew"
+    cask_codex = prefix / "Caskroom" / "codex" / "0.144.1" / "codex"
+    codex = prefix / "bin" / "codex"
+    real_brew.parent.mkdir(parents=True)
+    brew_link.parent.mkdir(parents=True)
+    cask_codex.parent.mkdir(parents=True)
+    real_brew.write_text(
+        "#!/usr/bin/env bash\n"
+        f"if [ \"${{1:-}}\" = \"--prefix\" ]; then printf '%s\\n' {prefix}; exit 0; fi\n"
+        "if [ \"${1:-}\" = \"list\" ]; then exit 0; fi\n",
+        encoding="utf-8",
+    )
+    real_brew.chmod(0o755)
+    brew_link.symlink_to(real_brew)
+    codex.symlink_to(cask_codex)
+    monkeypatch.setattr(codex_update.shutil, "which", lambda name: str(brew_link) if name == "brew" else None)
+
+    assert codex_update.default_update_command(codex) == [str(brew_link), "upgrade", "--cask", "codex"]
+
+
+def test_run_bounded_returns_after_timeout_with_detached_pipe_holder(tmp_path):
+    script = tmp_path / "detached-pipe-holder.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "python3 -c 'import os, time; os.setsid(); time.sleep(2)' &\n"
+        "sleep 30\n"
+    )
+    script.chmod(0o755)
+
+    result = codex_update.run_bounded([str(script)], timeout_s=0.1)
+
+    assert result.timed_out
 
 
 # ── drift ─────────────────────────────────────────────────────────────────────────────────

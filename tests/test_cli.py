@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from riglib import errors
 from riglib.cli import main
 
 
@@ -20,6 +21,115 @@ def test_no_command_prints_help(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "rig — the dev-environment" in out
+
+
+def test_codex_update_cli_threads_args(capsys, monkeypatch):
+    from pathlib import Path
+
+    from riglib import codex_update
+
+    captured = {}
+
+    def fake_safe_update(**kwargs):
+        captured.update(kwargs)
+        return codex_update.UpdateResult(
+            "updated",
+            "codex healthy after update: codex-cli test",
+            backup_path=Path("/tmp/codex-backup"),
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(codex_update, "safe_update", fake_safe_update)
+
+    rc = main(
+        [
+            "codex",
+            "update",
+            "--path",
+            "/tmp/codex",
+            "--backup-dir",
+            "/tmp/backups",
+            "--probe-timeout",
+            "1.25",
+            "--",
+            "brew",
+            "reinstall",
+            "--cask",
+            "codex",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "codex update: updated" in out
+    assert captured == {
+        "codex_path": "/tmp/codex",
+        "update_command": ["brew", "reinstall", "--cask", "codex"],
+        "backup_dir": "/tmp/backups",
+        "probe_timeout_s": 1.25,
+    }
+
+
+def test_codex_update_cli_returns_nonzero_after_rollback(capsys, monkeypatch):
+    from riglib import codex_update
+
+    monkeypatch.setattr(
+        codex_update,
+        "safe_update",
+        lambda **kwargs: codex_update.UpdateResult(
+            "rolled_back",
+            "candidate failed",
+            exit_code=errors.EXIT_CODEX_UPDATE,
+        ),
+    )
+
+    rc = main(["codex", "update", "--path", "/tmp/codex"])
+
+    out = capsys.readouterr().out
+    assert rc == errors.EXIT_CODEX_UPDATE
+    assert "rolled back" in out
+
+
+def test_codex_update_cli_missing_updater_returns_127(tmp_path, capsys):
+    live = tmp_path / "codex"
+    live.write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"${1:-}\" in\n"
+        "  --version) echo 'codex-cli test' ;;\n"
+        "  --help) echo 'help' ;;\n"
+        "  completion) echo '#compdef codex' ;;\n"
+        "esac\n"
+    )
+    live.chmod(0o755)
+    missing = tmp_path / "missing-updater"
+
+    rc = main(
+        [
+            "codex",
+            "update",
+            "--path",
+            str(live),
+            "--backup-dir",
+            str(tmp_path / "backups"),
+            "--probe-timeout",
+            "0.5",
+            "--",
+            str(missing),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 127
+    assert "update command exited 127" in out
+
+
+def test_codex_update_cli_rejects_nonpositive_probe_timeout(capsys):
+    for value in ("0", "nan", "inf"):
+        rc = main(["codex", "update", "--probe-timeout", value])
+
+        out = capsys.readouterr().out
+        assert rc == 2
+        assert "--probe-timeout must be positive" in out
 
 
 def test_doctor_runs(tmp_path, capsys, monkeypatch):
@@ -969,6 +1079,43 @@ def test_status_scans_empty_ci_target_for_extras(tmp_path, capsys, fake_agent_to
     out = capsys.readouterr().out
     assert "rogue" in out  # disk→config extra surfaced despite no CI actions
     assert rc == 3  # drift detected
+
+
+def test_status_scans_all_harness_agent_hook_targets_for_extras(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    import subprocess
+
+    home = tmp_path / "home"
+    xdg = home / ".config"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    codex_hook = home / ".codex/hooks/rogue-codex.pre-bash.json"
+    opencode_hook = xdg / "opencode/hooks/rogue-opencode.pre-bash.json"
+    codex_hook.parent.mkdir(parents=True)
+    opencode_hook.parent.mkdir(parents=True)
+    codex_hook.write_text("{}", encoding="utf-8")
+    opencode_hook.write_text("{}", encoding="utf-8")
+    (repo / "rig.yaml").write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\n"
+        "agent_hooks: {enabled: true, all: false}\n"
+        "harness: {kind: claude-code, kinds: [codex, opencode]}\n"
+        "ci: {enabled: false}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\n"
+        "permissions: {enabled: false}\n",
+        encoding="utf-8",
+    )
+
+    rc = main(["status", "-C", str(repo)])
+    out = capsys.readouterr().out
+
+    assert rc == 3
+    assert str(codex_hook) in out
+    assert str(opencode_hook) in out
 
 
 def test_apply_refuses_without_config(tmp_path, capsys, fake_agent_tools, monkeypatch):

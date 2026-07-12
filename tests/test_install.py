@@ -16,7 +16,11 @@ def _harness_link(home: Path) -> Path:
     return home / ".claude" / "skills" / SKILL_NAME
 
 
-def test_install_skill_writes_md_and_harness_link(tmp_path, monkeypatch, capsys):
+def _codex_link(home: Path) -> Path:
+    return home / ".codex" / "skills" / SKILL_NAME
+
+
+def test_install_skill_writes_md_and_harness_link(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     rc = install_skill()
@@ -27,6 +31,71 @@ def test_install_skill_writes_md_and_harness_link(tmp_path, monkeypatch, capsys)
     assert link.is_symlink(), "rig skill not symlinked into the harness dir"
     assert link.resolve() == md.parent.resolve()
     assert (link / "SKILL.md").is_file()  # the link resolves to the real skill
+    codex_link = _codex_link(home)
+    assert codex_link.is_symlink(), "rig skill not symlinked into the Codex skill dir"
+    assert codex_link.resolve() == md.parent.resolve()
+
+
+def test_install_skill_ignores_ambient_codex_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    ambient_codex_home = tmp_path / "ambient-codex-home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(ambient_codex_home))
+
+    assert install_skill() == 0
+
+    md = home / ".agents" / "skills" / SKILL_NAME / "SKILL.md"
+    codex_link = _codex_link(home)
+    assert codex_link.is_symlink(), "rig skill not symlinked into the stable Codex user skills dir"
+    assert codex_link.resolve() == md.parent.resolve()
+    assert not (ambient_codex_home / "skills" / SKILL_NAME).exists()
+
+
+def test_install_skill_links_explicit_rig_codex_home_when_set(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("RIG_CODEX_HOME", str(codex_home))
+
+    assert install_skill() == 0
+
+    md = home / ".agents" / "skills" / SKILL_NAME / "SKILL.md"
+    codex_link = codex_home / "skills" / SKILL_NAME
+    assert codex_link.is_symlink(), "rig skill not symlinked into RIG_CODEX_HOME skills dir"
+    assert codex_link.resolve() == md.parent.resolve()
+    assert not _codex_link(home).exists()
+
+
+def test_install_skill_expands_rig_codex_home_env_vars(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setenv("RIG_CODEX_HOME", "$XDG_CONFIG_HOME/codex")
+
+    assert install_skill() == 0
+
+    md = home / ".agents" / "skills" / SKILL_NAME / "SKILL.md"
+    codex_link = xdg / "codex" / "skills" / SKILL_NAME
+    assert codex_link.is_symlink(), "rig skill not symlinked into expanded RIG_CODEX_HOME skills dir"
+    assert codex_link.resolve() == md.parent.resolve()
+    assert not (home / "$XDG_CONFIG_HOME").exists()
+
+
+def test_install_skill_expands_rig_codex_home_xdg_config_prefix(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.setenv("RIG_CODEX_HOME", "~/.config/codex")
+
+    assert install_skill() == 0
+
+    md = home / ".agents" / "skills" / SKILL_NAME / "SKILL.md"
+    codex_link = xdg / "codex" / "skills" / SKILL_NAME
+    assert codex_link.is_symlink(), "rig skill not symlinked into XDG-expanded RIG_CODEX_HOME"
+    assert codex_link.resolve() == md.parent.resolve()
+    assert not (home / ".config" / "codex" / "skills" / SKILL_NAME).exists()
 
 
 def test_install_skill_md_lists_config_command(tmp_path, monkeypatch):
@@ -51,6 +120,7 @@ def test_install_skill_idempotent(tmp_path, monkeypatch, capsys):
     # the link still resolves correctly
     link = _harness_link(home)
     assert link.is_symlink()
+    assert _codex_link(home).is_symlink()
 
 
 def test_install_skill_leaves_real_harness_dir(tmp_path, monkeypatch, capsys):

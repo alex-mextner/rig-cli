@@ -1,18 +1,21 @@
 """install-skill — register the `rig` agent skill so harnesses auto-discover it.
 
 Writes a SKILL.md (Agent Skills standard) into ``~/.agents/skills/rig/`` AND symlinks that
-skill into the harness's discovery dir (claude-code: ``~/.claude/skills``) so Claude Code
-actually lists/loads ``rig`` — a skill in ``~/.agents/skills`` alone is invisible to the
-harness. This is the same harness-link rig maintains for every skill it installs via
+skill into every registered skills-directory harness discovery dir so Claude Code and Codex
+actually list/load ``rig`` — a skill in ``~/.agents/skills`` alone is invisible to those
+harnesses. This is the same harness-link rig maintains for every skill it installs via
 ``apply``; keeping ``install-skill`` consistent means ``rig`` itself is discoverable right
-after ``install.sh``. Idempotent: skips when SKILL.md is current and the link is correct;
-never clobbers a real (non-symlink) dir already at the harness path. Stdlib-only.
+after ``install.sh``. Idempotent: skips when SKILL.md is current and the links are correct;
+never clobbers a real (non-symlink) dir already at a harness path. Stdlib-only.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+
+from .harness_skills import HARNESS_SKILL_DIR_KINDS, skill_dir_for
+from .paths import expand_user_path
 
 SKILL_NAME = "rig"
 SKILL_MD = """\
@@ -70,18 +73,20 @@ def install_skill() -> int:
     else:
         target.write_text(SKILL_MD, encoding="utf-8")
         print(f"rig: wrote skill → {target}")
-    _link_into_harness(skills_dir)
+    _link_into_harnesses(skills_dir)
     return 0
 
 
-# The harness skill-discovery dir for claude-code (mirrors plan._HARNESS_SKILL_DIRS — kept in
-# sync; install-skill is the standalone bootstrap path that runs before any rig.yaml exists,
-# so it can't read a config and just uses the default harness).
-_HARNESS_SKILL_DIR = "~/.claude/skills"
+def _link_into_harnesses(installed_skill_dir: Path) -> None:
+    """Symlink the installed rig skill into every registered skills-dir harness."""
+    for kind in HARNESS_SKILL_DIR_KINDS:
+        harness_dir = skill_dir_for(kind)
+        if harness_dir:
+            _link_into_harness(installed_skill_dir, harness_dir)
 
 
-def _link_into_harness(installed_skill_dir: Path) -> None:
-    """Symlink the installed rig skill into the harness discovery dir (idempotent).
+def _link_into_harness(installed_skill_dir: Path, harness_dir_raw: str) -> None:
+    """Symlink the installed rig skill into one harness discovery dir (idempotent).
 
     Mirrors the ``link_skill_harness`` apply action: a correct symlink is a no-op, a wrong one
     is re-pointed, and a REAL (non-symlink) dir/file already there is left untouched (never
@@ -89,7 +94,7 @@ def _link_into_harness(installed_skill_dir: Path) -> None:
     SKILL.md write already succeeded.
     """
     dest = installed_skill_dir.resolve()
-    harness_dir = Path(os.path.expanduser(_HARNESS_SKILL_DIR))
+    harness_dir = expand_user_path(harness_dir_raw)
     # no self-link when the agents skill dir IS the harness dir (~/.agents/skills == harness)
     if harness_dir.resolve() == installed_skill_dir.parent.resolve():
         return

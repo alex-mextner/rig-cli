@@ -33,8 +33,11 @@ from .github_ghas import GITHUB_GHAS_DEFAULTS
 from .github_merge import GITHUB_MERGE_DEFAULTS
 from .github_ruleset import CI_GATE_CHECK_CONTEXTS, GITHUB_RULESET_DEFAULTS
 from .harness_skills import HARNESS_SKILL_DIRS as _HARNESS_SKILL_DIRS
+from .harness_skills import codex_user_path as _codex_user_path
 from .harness_skills import instruction_file_for as _instruction_file_for
 from .harness_skills import native_skills_dir_for as _native_skills_dir_for
+from .harness_skills import skill_dir_for as _skill_dir_for
+from .paths import expand_user_path as _expand_user_path
 from . import project_tools
 
 
@@ -55,6 +58,7 @@ _BUILTIN_TARGETS = {
     "mcp": "~/.claude/mcp",
 }
 _HARNESS_AGENT_HOOK_TARGETS = {
+    "claude-code": "~/.claude/hooks",
     "codex": "~/.codex/hooks",
     "opencode": "~/.config/opencode/hooks",
 }
@@ -69,14 +73,25 @@ _DEFAULTS_KEY = {
 # Per-harness skill/instruction discovery lives in ONE registry, :mod:`riglib.harness_skills`.
 # ``_HARNESS_SKILL_DIRS`` (imported above) is the skills-DIRECTORY map: a skill copied into
 # ``skills_target`` (default ``~/.agents/skills``) is invisible to a skills-dir harness unless it
-# is also present in that harness's discovery dir (claude-code → ``~/.claude/skills``, opencode →
-# ``~/.config/opencode/skill``), so rig maintains an idempotent symlink per enabled skill into the
-# harness dir for the configured kind. INSTRUCTION-FILE harnesses (codex/gemini/pi/commandcode)
-# have no skills dir — they surface guidance via a global AGENTS.md/GEMINI.md (the ``agents_md``
-# area), so :func:`_resolve_harness_skill_dir` returns None for them and records a status note.
+# is also present in that harness's discovery dir (claude-code → ``~/.claude/skills``; codex is
+# resolved dynamically from the rig-owned ``RIG_CODEX_HOME`` override), so rig maintains an idempotent symlink per enabled
+# skill into the harness dir for the configured kind. Native-discovery harnesses such as opencode
+# scan the default
+# ``skills_target`` directly; when the user customizes ``skills_target``, rig links back into the
+# native root so the harness still sees the installed skills. INSTRUCTION-FILE harnesses
+# (gemini/pi/commandcode) have no skills dir — they surface guidance via a global
+# AGENTS.md/GEMINI.md (the ``agents_md`` area), so the plural skill-dir resolver emits no link
+# for them and records a status note.
 # (The module-level alias name is preserved so ``plan._HARNESS_SKILL_DIRS`` keeps resolving.)
 _DEFAULT_HARNESS_KIND = "claude-code"
 _AUTONOMOUS_DEFAULT_ALLOW_RULES = ("Bash(dev:*)", "Bash(review:*)", "Bash(task:*)")
+
+
+def _agent_hooks_target_for_kind(kind: str) -> str | None:
+    """The unexpanded descriptor dir for a harness kind."""
+    if kind == "codex":
+        return _codex_user_path("hooks")
+    return _HARNESS_AGENT_HOOK_TARGETS.get(kind)
 
 
 @dataclass
@@ -110,10 +125,7 @@ def _expand(path_str: str, repo_root: Path) -> Path:
     #    installs where XDG-aware tools (the dispatcher runner) actually look;
     #  - ``$VAR``/``${VAR}`` and ``~`` are expanded;
     #  - a relative remainder is anchored at the repo root.
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg and (path_str == "~/.config" or path_str.startswith("~/.config/")):
-        path_str = xdg + path_str[len("~/.config"):]
-    p = Path(os.path.expanduser(os.path.expandvars(path_str)))
+    p = _expand_user_path(path_str)
     if not p.is_absolute():
         p = (repo_root / p).resolve()
     return p
@@ -129,19 +141,93 @@ def _resolve_target(config: LoadedConfig, category: str) -> Path:
     return _expand(str(target), config.repo_root)
 
 
-def _resolve_agent_hooks_target(config: LoadedConfig) -> Path:
+def _resolve_primary_agent_hooks_target(config: LoadedConfig) -> Path:
     """Resolve the agent-hooks descriptor dir, defaulting to the active harness when needed."""
     ah = config.category("agent_hooks")
     target = ah.get("target")
-    defaults_target = config.defaults.get(_DEFAULTS_KEY["agent_hooks"])
     kind = _harness_kind_for_skills(config)
-    harness_default = _HARNESS_AGENT_HOOK_TARGETS.get(kind)
-    legacy_default = _BUILTIN_TARGETS["agent_hooks"]
-    if harness_default and (not target or target == legacy_default) and (
-        not defaults_target or defaults_target == legacy_default
-    ):
+    harness_default = _agent_hooks_target_for_kind(kind)
+    target_is_legacy = not target or _is_legacy_hooks_target(config, str(target))
+    if harness_default and target_is_legacy and not _has_custom_hooks_default(config):
         return _expand(harness_default, config.repo_root)
     return _resolve_target(config, "agent_hooks")
+
+
+def _resolve_agent_hooks_target(config: LoadedConfig) -> Path:
+    """Resolve the primary agent-hooks descriptor dir."""
+    return _resolve_agent_hooks_targets(config)[0]
+
+
+def _is_legacy_hooks_target(config: LoadedConfig, raw: str) -> bool:
+    """True when ``raw`` is equivalent to the historical Claude hooks default."""
+    return _same_dir(
+        _expand(raw, config.repo_root),
+        _expand(_BUILTIN_TARGETS["agent_hooks"], config.repo_root),
+    )
+
+
+def _has_custom_hooks_default(config: LoadedConfig) -> bool:
+    """True when defaults.hooks_target is present and not equivalent to the legacy default."""
+    defaults_target = config.defaults.get(_DEFAULTS_KEY["agent_hooks"])
+    if not defaults_target:
+        return False
+    return not _same_dir(
+        _expand(str(defaults_target), config.repo_root),
+        _expand(_BUILTIN_TARGETS["agent_hooks"], config.repo_root),
+    )
+
+
+def _has_custom_hooks_target(config: LoadedConfig) -> bool:
+    """True when agent_hooks.target is present and not equivalent to the legacy default."""
+    target = config.category("agent_hooks").get("target")
+    return bool(target and not _is_legacy_hooks_target(config, str(target)))
+
+
+def _resolve_custom_agent_hooks_target(config: LoadedConfig) -> Path:
+    """Resolve the single custom descriptor target, ignoring scaffolded legacy targets."""
+    if _has_custom_hooks_target(config):
+        return _resolve_target(config, "agent_hooks")
+    defaults_target = config.defaults.get(_DEFAULTS_KEY["agent_hooks"])
+    if defaults_target and _has_custom_hooks_default(config):
+        return _expand(str(defaults_target), config.repo_root)
+    return _resolve_target(config, "agent_hooks")
+
+
+def _resolve_agent_hooks_targets(config: LoadedConfig) -> list[Path]:
+    """Resolve every agent-hook descriptor dir rig should maintain.
+
+    ``agent_hooks.target`` (or a non-legacy ``defaults.hooks_target``) is an explicit single
+    target and keeps the historical behavior. Otherwise rig installs descriptors into every
+    configured harness kind that has a known descriptor directory, so a Claude-primary machine
+    can also keep Codex hooks live via ``harness.kinds: [codex]``.
+    """
+    if _has_custom_hooks_target(config) or _has_custom_hooks_default(config):
+        return [_resolve_custom_agent_hooks_target(config)]
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for kind in _configured_harness_kinds(config):
+        raw = _agent_hooks_target_for_kind(kind)
+        if raw is None:
+            continue
+        target_path = _expand(raw, config.repo_root)
+        if target_path in seen:
+            continue
+        seen.add(target_path)
+        out.append(target_path)
+    if out:
+        return out
+    return [_resolve_primary_agent_hooks_target(config)]
+
+
+def _additional_hook_targets_enabled(config: LoadedConfig) -> bool:
+    """True when hook descriptor targets are allowed to fan out to additional harness kinds."""
+    return not _has_custom_hooks_target(config) and not _has_custom_hooks_default(config)
+
+
+def _hook_bridge_kinds(config: LoadedConfig) -> list[str]:
+    """Harness kinds whose bridge can see installed descriptors."""
+    return _configured_harness_kinds(config)
 
 
 def _same_dir(a: Path, b: Path) -> bool:
@@ -168,11 +254,26 @@ def _harness_kind_for_skills(config: LoadedConfig) -> str:
     return _DEFAULT_HARNESS_KIND
 
 
+def _configured_harness_kinds(config: LoadedConfig) -> list[str]:
+    """Primary harness kind plus any additive ``harness.kinds`` entries, preserving order."""
+    h = config.data.get("harness")
+    if not isinstance(h, dict) or not h:
+        return [_DEFAULT_HARNESS_KIND]
+    primary = str(h.get("kind") or _DEFAULT_HARNESS_KIND)
+    out: list[str] = []
+    for kind in [primary, *(h.get("kinds") or [])]:
+        if not isinstance(kind, str):
+            continue
+        if kind not in out:
+            out.append(kind)
+    return out or [_DEFAULT_HARNESS_KIND]
+
+
 def _resolve_harness_skill_dir(config: LoadedConfig) -> Path | None:
     """Resolve the harness skill-discovery dir to symlink installed skills into.
 
     Returns ``None`` when ``skills.harness_link`` is disabled or the harness kind has no
-    known discovery dir — either an INSTRUCTION-FILE harness (codex/gemini/pi/commandcode,
+    known discovery dir — either an INSTRUCTION-FILE harness (gemini/pi/commandcode,
     which surface skills via AGENTS.md/GEMINI.md, not a symlinked dir) or an unknown kind. We
     never guess a path. An explicit ``skills.harness_skill_dir`` overrides the per-harness
     default (and forces the link even for an instruction-file harness — the user pointed at a
@@ -184,42 +285,84 @@ def _resolve_harness_skill_dir(config: LoadedConfig) -> Path | None:
     raw = sk.get("harness_skill_dir")
     if not raw:
         kind = _harness_kind_for_skills(config)
-        raw = _HARNESS_SKILL_DIRS.get(kind)
+        raw = _skill_dir_for(kind)
         if not raw:
             return None
     return _expand(str(raw), config.repo_root)
 
 
-def _skill_discovery_note(config: LoadedConfig) -> str | None:
+def _resolve_harness_skill_dirs(config: LoadedConfig) -> list[tuple[str, Path]]:
+    """Resolve every harness skill-discovery dir that should receive installed-skill links."""
+    sk = config.category("skills")
+    if sk.get("harness_link") is False:
+        return []
+    raw = sk.get("harness_skill_dir")
+    if raw:
+        return [(_harness_kind_for_skills(config), _expand(str(raw), config.repo_root))]
+
+    out: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    skills_target = _resolve_target(config, "skills")
+    for kind in _configured_harness_kinds(config):
+        raw_dir = _skill_dir_for(kind)
+        if raw_dir is None:
+            native = _native_skills_dir_for(kind)
+            if native is None:
+                continue
+            native_path = _expand(str(native), config.repo_root)
+            if _same_dir(skills_target, native_path):
+                continue
+            path = native_path
+        else:
+            path = _expand(str(raw_dir), config.repo_root)
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append((kind, path))
+    return out
+
+
+def _skill_discovery_notes(config: LoadedConfig) -> list[str]:
     """A status note explaining why no harness skill-link is emitted for an instruction-file
     harness, or ``None`` when one is (skills-dir harness) or linking is disabled / overridden.
 
-    Keeps ``rig status`` honest: a codex/gemini/pi/commandcode config that links no skills isn't a
+    Keeps ``rig status`` honest: a gemini/pi/commandcode config that links no skills isn't a
     silent gap — the note says the kind reads a global AGENTS.md/GEMINI.md instead, so the skill
     content reaches it through the ``agents_md`` area, not a per-skill symlink.
     """
     sk = config.category("skills")
     if sk.get("enabled") is False:
-        return None  # no skills installed at all → nothing to say about their discovery
+        return []  # no skills installed at all → nothing to say about their discovery
     if sk.get("harness_link") is False or sk.get("harness_skill_dir"):
-        return None  # linking off, or an explicit dir override forces a real link → no note
-    kind = _harness_kind_for_skills(config)
-    if kind in _HARNESS_SKILL_DIRS:
-        return None  # skills-dir harness → a link IS emitted, no note needed
-    native = _native_skills_dir_for(kind)
-    if native is not None:
-        return (
-            f"skills: harness '{kind}' auto-loads {native} natively — no per-skill symlink "
-            "needed (skills install to the default skills_target, which it already scans)"
+        return []  # linking off, or an explicit dir override forces a real link → no note
+    notes: list[str] = []
+    skills_target = _resolve_target(config, "skills")
+    for kind in _configured_harness_kinds(config):
+        if _skill_dir_for(kind) is not None:
+            continue  # skills-dir harness → a link IS emitted, no note needed
+        native = _native_skills_dir_for(kind)
+        if native is not None:
+            native_path = _expand(str(native), config.repo_root)
+            if _same_dir(skills_target, native_path):
+                notes.append(
+                    f"skills: harness '{kind}' auto-loads {native} natively — no per-skill symlink "
+                    "needed (skills install to the default skills_target, which it already scans)"
+                )
+            else:
+                notes.append(
+                    f"skills: harness '{kind}' auto-loads {native} natively, but skills_target is "
+                    f"{skills_target}; rig links installed skills into the native discovery dir"
+                )
+            continue
+        instr = _instruction_file_for(kind)
+        if instr is None:
+            continue  # unknown kind → handled by validation; nothing to say here
+        notes.append(
+            f"skills: harness '{kind}' has no skill-discovery dir — it reads a global "
+            f"instruction file ({instr}); rig records that path for status instead of inventing "
+            "a per-skill symlink (set skills.harness_skill_dir to force a directory link)"
         )
-    instr = _instruction_file_for(kind)
-    if instr is None:
-        return None  # unknown kind → handled by validation; nothing to say here
-    return (
-        f"skills: harness '{kind}' has no skill-discovery dir — it reads a global "
-        f"instruction file ({instr}); skills reach it via the agents_md area, not a per-skill "
-        "symlink (set skills.harness_skill_dir to force a directory link)"
-    )
+    return notes
 
 
 def resolve_category_target(config: LoadedConfig, category: str) -> Path | None:
@@ -234,6 +377,14 @@ def resolve_category_target(config: LoadedConfig, category: str) -> Path | None:
     if category == "agent_hooks":
         return _resolve_agent_hooks_target(config)
     return _resolve_target(config, category)
+
+
+def resolve_category_targets(config: LoadedConfig, category: str) -> list[Path]:
+    """Public: all resolved install dirs for categories that can fan out by harness."""
+    if category == "agent_hooks":
+        return list(_resolve_agent_hooks_targets(config))
+    target = resolve_category_target(config, category)
+    return [target] if target is not None else []
 
 
 def _item_enabled(cat_cfg: dict[str, Any], item: Item, *, type_enabled: bool) -> bool:
@@ -386,17 +537,19 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
 
     # ── skills ───────────────────────────────────────────────────────────────────
     skills_target = _resolve_target(config, "skills")
-    harness_link_dir = _resolve_harness_skill_dir(config)
+    harness_link_dirs = _resolve_harness_skill_dirs(config)
     # Whether to emit harness-discovery symlinks: only when a dir is configured AND it is not
     # the install dir itself (no self-link). Compare resolved paths so a HOME symlink or a
     # ``..`` segment that makes the two dirs textually differ but point at the same place is
     # still recognized as the same dir (avoids a spurious self-link → real-dir warning).
-    link_into_harness = harness_link_dir is not None and not _same_dir(harness_link_dir, skills_target)
-    # Instruction-file harness (codex/gemini/pi/commandcode) → no skill-link dir; record WHY so
+    link_dirs = [
+        link_dir
+        for _kind, link_dir in harness_link_dirs
+        if not _same_dir(link_dir, skills_target)
+    ]
+    # Instruction-file harness (gemini/pi/commandcode) → no skill-link dir; record WHY so
     # ``rig status`` shows "uses <AGENTS.md/GEMINI.md>" instead of a silent empty skill-link area.
-    skill_note = _skill_discovery_note(config)
-    if skill_note is not None:
-        plan.notes.append(skill_note)
+    plan.notes.extend(_skill_discovery_notes(config))
     for item in _skills_enabled(config, catalog, project_type):
         installed = skills_target / item.path.name
         plan.actions.append(
@@ -411,14 +564,14 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
         # Make the installed skill discoverable by the harness: symlink it into the harness's
         # skill dir (claude-code: ~/.claude/skills). Without this the skill sits in
         # skills_target but the harness never lists/loads it.
-        if link_into_harness:
+        for link_dir in link_dirs:
             plan.actions.append(
                 Action(
                     kind="link_skill_harness",
                     category="skills",
                     item=item.name,
                     source=installed,  # the installed skill the symlink points at
-                    target=harness_link_dir / item.path.name,
+                    target=link_dir / item.path.name,
                 )
             )
 
@@ -426,26 +579,25 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     ah = config.category("agent_hooks")
     if ah.get("enabled") is not False:
         ah.setdefault("all", True)
-        hooks_target = _resolve_agent_hooks_target(config)
-        target_kind = ah.get("target_kind") or "claude-code"
+        hook_targets = _resolve_agent_hooks_targets(config)
         for item in catalog.by_category("agent_hooks"):
             if _item_enabled(ah, item, type_enabled=False):
                 spec = ah.get("items", {}).get(item.name, {})
-                plan.actions.append(
-                    Action(
-                        kind="install_agent_hook",
-                        category="agent_hooks",
-                        item=item.name,
-                        source=item.path,
-                        target=hooks_target,
-                        options={
-                            "descriptor": item.meta.get("descriptor", ""),
-                            "target_kind": target_kind,
-                            "on_error": spec.get("on_error") if isinstance(spec, dict) else None,
-                            "agent_tools_source": str(catalog.source),
-                        },
+                for hooks_target in hook_targets:
+                    plan.actions.append(
+                        Action(
+                            kind="install_agent_hook",
+                            category="agent_hooks",
+                            item=item.name,
+                            source=item.path,
+                            target=hooks_target,
+                            options={
+                                "descriptor": item.meta.get("descriptor", ""),
+                                "on_error": spec.get("on_error") if isinstance(spec, dict) else None,
+                                "agent_tools_source": str(catalog.source),
+                            },
+                        )
                     )
-                )
 
     # ── git_hooks (dispatcher) ───────────────────────────────────────────────────
     gh = config.category("git_hooks")
@@ -738,49 +890,65 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
     if p.get("enabled") is False:
         return
 
-    # The harness kind to provision for: an explicit `permissions.kind` wins (so opencode can be
-    # targeted INDEPENDENTLY of the auto-mode write, whose `harness.kind` validator rejects opencode
-    # as not-yet-implemented — the allowlist provisioning DOES support it); else follow `harness.kind`
-    # if pinned; else the built-in default (claude-code). One allowlist per harness, since each
-    # harness's settings file is distinct.
-    h = config.data.get("harness")
-    if p.get("kind"):
-        kind = str(p["kind"])
-    elif isinstance(h, dict) and h.get("kind"):
-        kind = str(h["kind"])
-    else:
-        kind = _DEFAULT_HARNESS_KIND
-
-    if not harness_supported(kind):
-        reason = HARNESS_ALLOWLIST_NA.get(kind, "no command-allowlist mechanism")
-        plan.notes.append(f"permissions: skipped — harness '{kind}' has no allowlist to provision ({reason})")
-        return
-
     tools_cfg = p.get("tools")
     tools = resolve_tools(
         list(tools_cfg) if isinstance(tools_cfg, list) else None,
         list(p.get("extra", []) or []) if isinstance(p.get("extra"), list) else [],
         list(p.get("disable", []) or []) if isinstance(p.get("disable"), list) else [],
     )
-    allow_rules, deny_rules, ask_rules = _resolve_permission_rules(p, kind, plan)
-    for entry in _autonomous_allow_rules(config, kind, plan):
-        if entry not in allow_rules:
-            allow_rules.append(entry)
-    spec = HARNESS_ALLOWLISTS[kind]
-    # An explicit settings_path wins (lets a test/odd setup point elsewhere); else the harness's
-    # documented per-machine settings file (the SAME file the auto-mode write targets for CC).
-    settings_path = p.get("settings_path") or spec.settings_path
-    plan.actions.append(
-        Action(
-            kind="provision_permissions",
-            category="permissions",
-            item=kind,
-            source=config.repo_root,  # no carrier in agent-tools; anchor on the repo
-            target=_expand(str(settings_path), config.repo_root),
-            options={"kind": kind, "tools": tools, "allow_rules": allow_rules,
-                     "deny_rules": deny_rules, "ask_rules": ask_rules},
+    kinds = _permissions_kinds(config, p)
+    if p.get("settings_path") and len(kinds) > 1:
+        original = list(kinds)
+        supported = [kind for kind in kinds if harness_supported(kind)]
+        if supported:
+            kinds = [supported[0]]
+            skipped = [kind for kind in original if kind != kinds[0]]
+            plan.notes.append(
+                "permissions: settings_path override with multiple harnesses targets the first "
+                f"supported harness only ({kinds[0]}); skipped {', '.join(skipped)}"
+            )
+
+    for kind in kinds:
+        if not harness_supported(kind):
+            reason = HARNESS_ALLOWLIST_NA.get(kind, "no command-allowlist mechanism")
+            plan.notes.append(
+                f"permissions: skipped — harness '{kind}' has no allowlist to provision ({reason})"
+            )
+            continue
+
+        allow_rules, deny_rules, ask_rules = _resolve_permission_rules(p, kind, plan)
+        for entry in _autonomous_allow_rules(config, kind, plan):
+            if entry not in allow_rules:
+                allow_rules.append(entry)
+        spec = HARNESS_ALLOWLISTS[kind]
+        # An explicit settings_path wins only for the single targeted harness case above; otherwise
+        # each harness uses its own documented per-machine settings file.
+        settings_path = p.get("settings_path") or spec.settings_path
+        plan.actions.append(
+            Action(
+                kind="provision_permissions",
+                category="permissions",
+                item=kind,
+                source=config.repo_root,  # no carrier in agent-tools; anchor on the repo
+                target=_expand(str(settings_path), config.repo_root),
+                options={
+                    "kind": kind,
+                    "tools": tools,
+                    "allow_rules": allow_rules,
+                    "deny_rules": deny_rules,
+                    "ask_rules": ask_rules,
+                },
+            )
         )
-    )
+
+
+def _permissions_kinds(config: LoadedConfig, p: dict[str, Any]) -> list[str]:
+    """Harness kinds whose command allowlist should be provisioned, preserving config order."""
+    # Callers pass the cascaded permissions block. Missing or explicit-null kind means
+    # "unpinned" here; a repo-local null has already masked any global pin before this point.
+    if p.get("kind"):
+        return [str(p["kind"])]
+    return _configured_harness_kinds(config)
 
 
 def _autonomous_block(config: LoadedConfig) -> dict[str, Any] | None:
@@ -839,6 +1007,10 @@ def _build_mode(config: LoadedConfig, plan: InstallPlan) -> None:
         plan.notes.append(
             f"autonomous mode: parallel worktree comparison required before escalation ({candidates} candidates)"
         )
+    plan.notes.append(
+        "autonomous mode: do not interrupt in-flight work for unrelated requests; "
+        "dispatch independent work to parallel subagents/worktrees and keep the current task alive"
+    )
 
     parallel = _subblock(auto, "parallelism")
     if parallel.get("limit_aware", True) is not False:
@@ -940,6 +1112,15 @@ _HOOK_BRIDGE_HARNESSES = {
 }
 
 
+def _hook_bridge_spec_for_kind(kind: str) -> dict[str, str] | None:
+    spec = _HOOK_BRIDGE_HARNESSES.get(kind)
+    if spec is None:
+        return None
+    if kind == "codex":
+        return {**spec, "settings": _codex_user_path("config.toml")}
+    return spec
+
+
 def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) -> None:
     """Plan the agents-hooks/v1 → harness bridge registration, if applicable.
 
@@ -955,9 +1136,35 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
     h = config.data.get("harness")
     if not isinstance(h, dict) or not h or h.get("enabled") is False:
         return
-    kind = str(h.get("kind", _DEFAULT_HARNESS_KIND))
+    ah = config.category("agent_hooks")
+    if ah.get("enabled") is False:
+        plan.notes.append(
+            "hook_bridge: skipped — agent_hooks disabled, so no descriptors to dispatch"
+        )
+        return
+    primary_kind = str(h.get("kind", _DEFAULT_HARNESS_KIND))
+    hooks_dir: Path | None = None
+    if not _additional_hook_targets_enabled(config):
+        hooks_dir = _resolve_agent_hooks_targets(config)[0]
+        plan.notes.append(
+            "hook_bridge: agent_hooks target/default pins one descriptor dir; registering "
+            "configured bridges with that descriptor-dir override"
+        )
+    for kind in _hook_bridge_kinds(config):
+        _build_hook_bridge_for_kind(config, catalog, plan, h, kind, primary_kind, hooks_dir=hooks_dir)
+
+
+def _build_hook_bridge_for_kind(
+    config: LoadedConfig,
+    catalog: Catalog,
+    plan: InstallPlan,
+    h: dict[str, Any],
+    kind: str,
+    primary_kind: str,
+    hooks_dir: Path | None = None,
+) -> None:
     bridge_cfg = h.get("hook_bridge")
-    bridge_spec = _HOOK_BRIDGE_HARNESSES.get(kind)
+    bridge_spec = _hook_bridge_spec_for_kind(kind)
     if bridge_spec is None:
         # Reaching this branch means the harness has skill/instruction discovery but no known
         # hook bridge surface yet (currently gemini/pi/commandcode). If a config EXPLICITLY
@@ -969,14 +1176,6 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
             )
         return
     if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is False:
-        return
-    # No installed descriptors → the bridge would be a no-op carrier. Skip rather than wire
-    # a dispatcher that has nothing to dispatch (and surface why in a note).
-    ah = config.category("agent_hooks")
-    if ah.get("enabled") is False:
-        plan.notes.append(
-            "hook_bridge: skipped — agent_hooks disabled, so no descriptors to dispatch"
-        )
         return
     lib_dir = catalog.source / "lib"
     # Fail-CLOSED: never wire a harness-config command that would error at runtime. The
@@ -998,7 +1197,7 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
             "the runnable dispatcher)"
         )
         return
-    explicit_settings_path = h.get("settings_path")
+    explicit_settings_path = h.get("settings_path") if kind == primary_kind else None
     settings_path = explicit_settings_path or bridge_spec["settings"]
     expected_suffix = {
         "toml": ".toml",
@@ -1022,6 +1221,19 @@ def _build_hook_bridge(config: LoadedConfig, catalog: Catalog, plan: InstallPlan
         "module": module,
         "format": bridge_format,
     }
+    effective_hooks_dir = hooks_dir
+    if effective_hooks_dir is None and kind == "codex":
+        codex_hooks_dir = _expand(
+            _codex_user_path("hooks"),
+            config.repo_root,
+        )
+        # _codex_user_path never returns empty for codex; call it directly and keep the baseline
+        # literal ~/.codex/hooks so RIG_CODEX_HOME-driven divergence is detected.
+        baseline_codex_hooks_dir = _expand(_HARNESS_AGENT_HOOK_TARGETS["codex"], config.repo_root)
+        if not _same_dir(codex_hooks_dir, baseline_codex_hooks_dir):
+            effective_hooks_dir = codex_hooks_dir
+    if effective_hooks_dir is not None:
+        options["hooks_dir"] = str(effective_hooks_dir)
     if isinstance(bridge_cfg, dict) and bridge_cfg.get("python"):
         options["python"] = str(bridge_cfg["python"])
     has_repo_config_layer = any(layer.startswith(("repo:", "config:")) for layer in config.layers)

@@ -166,7 +166,7 @@
         },
         "target_kind": {
           "type": "string",
-          "description": "descriptor target kind",
+          "description": "legacy ignored scaffold key; accepted for old configs but not used for rendering",
           "enum": [
             "claude-code",
             "generic"
@@ -506,7 +506,7 @@
         },
         "kind": {
           "type": "string",
-          "description": "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode; instruction-file: codex/gemini/pi/commandcode). The auto/permission-MODE write is claude-code-only today; other kinds still get their skill discovery provisioned.",
+          "description": "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode; instruction-file: gemini/pi/commandcode; codex is also instruction-file via AGENTS.md). The auto/permission-MODE write is claude-code-only today; other kinds still get their skill discovery provisioned.",
           "enum": [
             "claude-code",
             "codex",
@@ -516,6 +516,21 @@
             "commandcode"
           ],
           "default": "claude-code"
+        },
+        "kinds": {
+          "type": "array",
+          "description": "additional harnesses to provision alongside harness.kind. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, and any supported hook bridge. If agent_hooks.target pins descriptors to one explicit target, supported bridges are registered with a descriptor-dir override.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "codex",
+              "opencode",
+              "gemini",
+              "pi",
+              "commandcode"
+            ]
+          }
         },
         "auto_mode": {
           "type": "boolean",
@@ -560,11 +575,15 @@
           "default": true
         },
         "kind": {
-          "type": "string",
-          "description": "which harness's permissions to provision",
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "which harness's permissions to provision; null/absent means fan out to supported harness.kind plus harness.kinds",
           "enum": [
             "claude-code",
-            "opencode"
+            "opencode",
+            null
           ]
         },
         "tools": {

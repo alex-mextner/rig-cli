@@ -118,6 +118,8 @@ def test_autonomous_mode_adds_plan_notes_and_permission_allow_rules(fake_agent_t
     assert "autonomous mode: review/fix until clean (max 5 iterations)" in notes
     assert "decisions require review quorum (2 iterations across 3 models)" in notes
     assert "parallel worktree comparison required before escalation (2 candidates)" in notes
+    assert "do not interrupt in-flight work for unrelated requests" in notes
+    assert "dispatch independent work to parallel subagents/worktrees" in notes
     assert "limit-aware parallelism max_agents=4 max_worktrees=4 reserve_slots=1" in notes
 
     perm = [a for a in plan.actions if a.kind == "provision_permissions"][0]

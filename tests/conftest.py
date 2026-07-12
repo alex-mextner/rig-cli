@@ -33,6 +33,10 @@ def _isolate_home(monkeypatch, tmp_path):
     # write into their REAL ``$XDG_CONFIG_HOME/git/ignore``. Force it under the isolated home so no
     # test can ever touch a real XDG config dir. Tests that need a specific XDG override it inline.
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    # Codex provisioning honors RIG_CODEX_HOME instead of ambient CODEX_HOME. Clear any host value
+    # suite-wide so default-path assertions stay deterministic; override inline where needed.
+    # Ambient CODEX_HOME is ignored by design, so it needs no suite-wide clear.
+    monkeypatch.delenv("RIG_CODEX_HOME", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -291,7 +295,16 @@ def fake_agent_tools(tmp_path: Path) -> Path:
         root / "lib" / "cc_hook_bridge" / "__main__.py",
         "import sys\nfrom .dispatch import main\nraise SystemExit(main(sys.argv[1:]))\n",
     )
-    _write(root / "lib" / "cc_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
+    _write(
+        root / "lib" / "cc_hook_bridge" / "dispatch.py",
+        "import os\nfrom pathlib import Path\n\n"
+        "def hooks_dir():\n"
+        "    override = os.environ.get('CC_HOOKS_DIR')\n"
+        "    if override:\n"
+        "        return Path(override)\n"
+        "    return Path(os.path.expanduser('~/.claude/hooks'))\n\n"
+        "def main(argv=None):\n    return 0\n",
+    )
 
     # the codex_hook_bridge dispatcher the `harness.hook_bridge` wiring points at for Codex.
     # Keep the fake package shape parallel to cc_hook_bridge so plan tests catch missing
@@ -301,7 +314,16 @@ def fake_agent_tools(tmp_path: Path) -> Path:
         root / "lib" / "codex_hook_bridge" / "__main__.py",
         "import sys\nfrom .dispatch import main\nraise SystemExit(main(sys.argv[1:]))\n",
     )
-    _write(root / "lib" / "codex_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
+    _write(
+        root / "lib" / "codex_hook_bridge" / "dispatch.py",
+        "import os\nfrom pathlib import Path\n\n"
+        "def hooks_dir():\n"
+        "    override = os.environ.get('CODEX_HOOKS_DIR')\n"
+        "    if override:\n"
+        "        return Path(override)\n"
+        "    return Path(os.path.expanduser('~/.codex/hooks'))\n\n"
+        "def main(argv=None):\n    return 0\n",
+    )
 
     # the opencode_hook_bridge dispatcher is loaded by opencode as a JS plugin that shells
     # into the Python bridge package.
@@ -311,6 +333,10 @@ def fake_agent_tools(tmp_path: Path) -> Path:
         "import sys\nfrom .dispatch import main\nraise SystemExit(main(sys.argv[1:]))\n",
     )
     _write(root / "lib" / "opencode_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
-    _write(root / "lib" / "opencode_hook_bridge" / "plugin.js", "export default async function plugin() { return {}; }\n")
+    _write(
+        root / "lib" / "opencode_hook_bridge" / "plugin.js",
+        "const hooksDirAtImport = process.env.OPENCODE_HOOKS_DIR || '';\n"
+        "export const AgentToolsHookBridge = async () => ({ hooksDirAtImport });\n",
+    )
 
     return root

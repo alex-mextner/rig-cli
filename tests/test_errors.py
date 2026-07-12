@@ -28,16 +28,20 @@ def test_exit_codes_are_distinct_and_stable():
         errors.EXIT_UNKNOWN_ITEM,
         errors.EXIT_MISSING_TARGET,
         errors.EXIT_NOT_A_REPO,
+        errors.EXIT_REPO_CORRUPT,
+        errors.EXIT_CODEX_UPDATE,
         errors.EXIT_MISSING_DEP,
     }
     # every class has its OWN code (no collisions)
-    assert len(codes) == 6
+    assert len(codes) == 8
     # pinned values — scripts depend on these; a change here is a breaking change
     assert errors.EXIT_CONFIG == 2
     assert errors.EXIT_DRIFT == 3
     assert errors.EXIT_UNKNOWN_ITEM == 4
     assert errors.EXIT_MISSING_TARGET == 5
     assert errors.EXIT_NOT_A_REPO == 6
+    assert errors.EXIT_REPO_CORRUPT == 7
+    assert errors.EXIT_CODEX_UPDATE == 8
     assert errors.EXIT_MISSING_DEP == 127
 
 

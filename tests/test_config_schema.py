@@ -87,7 +87,16 @@ def test_harness_kind_schema_describes_skill_discovery_modes():
 
     assert "skills-dir: claude-code/codex" in description
     assert "native-discovery: opencode" in description
-    assert "instruction-file: codex/gemini/pi/commandcode" in description
+    assert "instruction-file: gemini/pi/commandcode" in description
+    assert "codex is also instruction-file" in description
+
+
+def test_permissions_kind_schema_accepts_null_for_unpinned_fanout():
+    kind = config_schema.json_schema()["properties"]["permissions"]["properties"]["kind"]
+
+    assert kind["type"] == ["string", "null"]
+    assert kind["enum"] == ["claude-code", "opencode", None]
+    assert "fan out" in kind["description"]
 
 
 def test_mcp_items_schema_enforces_structured_item_shape():
@@ -168,7 +177,11 @@ def test_real_validator_flags_unknown_key_and_bad_enum():
     jsonschema = pytest.importorskip("jsonschema")
     v = jsonschema.Draft7Validator(config_schema.json_schema())
     assert list(v.iter_errors({"version": 1, "harness": {"auto_mode": True}})) == []
+    assert list(v.iter_errors({"version": 1, "agent_hooks": {"target_kind": "claude-code"}})) == []
     assert list(v.iter_errors({"version": 1, "harness": {"aut_mode": True}})), "typo must be flagged"
+    assert list(v.iter_errors({"version": 1, "agent_hooks": {"target_kind": "bogus"}})), \
+        "bad legacy target_kind must match runtime rejection"
+    assert list(v.iter_errors({"version": 1, "harness": {"kinds": ["bogus"]}})), "bad harness kind must be flagged"
     assert list(v.iter_errors({"version": 1, "defaults": {"on_conflict": "nuke"}})), "bad enum must be flagged"
     assert list(v.iter_errors({"version": 1, "bogus": 1})), "unknown top-level key must be flagged"
     assert list(

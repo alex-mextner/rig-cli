@@ -234,7 +234,7 @@ def run_setup(
             # stage + validate the prospective layer doc BEFORE writing — never leave a bad config
             # on disk. The whole read→seed→set→validate is fail-closed on the DOCUMENTED failure
             # modes: a malformed existing layer file (ConfigError from load_layer_config), a
-            # non-mapping intermediate (ValueError from set_path), and a schema violation
+            # non-mapping intermediate (ConfigError from set_path), and a schema violation
             # (ConfigError from validate). Anything else (a registry/validator bug) must propagate
             # to the top-level handler, NOT be mislabeled to the user as a "rejected" bad input.
             try:
@@ -245,7 +245,7 @@ def run_setup(
                     candidate["version"] = 1
                 schema.set_path(candidate, opt.key, value)
                 _validate_layer(candidate)
-            except (ValueError, ConfigError) as exc:
+            except ConfigError as exc:
                 out(f"  rejected: {exc}")
                 continue
             write_layer_config(path, candidate)
