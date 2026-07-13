@@ -862,6 +862,21 @@ def test_autosave_path_env_matches_boot_path_env():
     assert "/home/u/.local/bin" not in p.autosave_path_env.split(":")
 
 
+def test_launch_agents_set_utf8_lang():
+    """CRITICAL: launchd gives no locale; resurrect's save.sh (awk/sed over TAB-delimited data)
+    writes a CORRUPT ~9-byte snapshot under the C locale that then clobbers `last`. Both the boot
+    and autosave plists must inject a UTF-8 LANG so the save (and restore parsing) work. Proven
+    live: no LANG → 9-byte save; LANG=en_US.UTF-8 → a full snapshot."""
+    import plistlib
+
+    p = tmux.build_tmux(repo_home=Path("/home/u"))
+    for body in (p.render_boot_plist(), p.render_autosave_plist()):
+        env = plistlib.loads(body.encode("utf-8"))["EnvironmentVariables"]
+        assert env["LANG"] == "en_US.UTF-8"
+        assert "/opt/homebrew/bin" in env["PATH"].split(":")  # PATH still present
+        assert env["HOME"] == "/home/u"
+
+
 def test_autosave_label_configurable():
     p = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"label": "com.me.tmux-save"})
     assert p.autosave_label == "com.me.tmux-save"

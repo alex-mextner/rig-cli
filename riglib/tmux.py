@@ -267,6 +267,17 @@ class TmuxPlan:
         wrapper and the resurrect save script it calls resolve every tool under launchd."""
         return self.boot_path_env
 
+    def launch_agent_env(self) -> dict[str, str]:
+        """The EnvironmentVariables both tmux LaunchAgents (boot + autosave) inject — ONE source.
+
+        PATH: Homebrew-inclusive (so run-shell hooks + the saver resolve tmux). HOME: the resolved
+        home. LANG: a UTF-8 locale — CRITICAL and easy to miss. launchd hands an agent NO locale;
+        tmux-resurrect's save.sh (and restore parsing) run awk/sed over TAB-delimited data, which
+        under the C locale MANGLE the output → a corrupt ~9-byte snapshot that then clobbers `last`.
+        With a UTF-8 LANG the save is written in full. (Proven live: no LANG → 9 bytes; LANG → 681.)
+        """
+        return {"PATH": self.boot_path_env, "HOME": str(self.home), "LANG": "en_US.UTF-8"}
+
     @property
     def boot_plist_path(self) -> Path:
         return self.home / "Library" / "LaunchAgents" / f"{self.boot_label}.plist"
@@ -730,10 +741,7 @@ fi
         payload = {
             "Label": self.boot_label,
             "ProgramArguments": [str(self.boot_script_path)],
-            "EnvironmentVariables": {
-                "PATH": self.boot_path_env,
-                "HOME": str(self.home),
-            },
+            "EnvironmentVariables": self.launch_agent_env(),
             "RunAtLoad": True,
             "KeepAlive": False,
             "StandardOutPath": str(self.boot_out_log_path),
@@ -846,10 +854,7 @@ fi
         payload = {
             "Label": self.autosave_label,
             "ProgramArguments": [str(self.autosave_script_path)],
-            "EnvironmentVariables": {
-                "PATH": self.autosave_path_env,
-                "HOME": str(self.home),
-            },
+            "EnvironmentVariables": self.launch_agent_env(),
             "StartInterval": self.save_interval * 60,
             "RunAtLoad": True,
             "StandardOutPath": str(self.autosave_out_log_path),
