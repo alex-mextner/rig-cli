@@ -635,6 +635,14 @@ _TMUX_BLOCK = Block(
             doc="a launchd agent that brings tmux up after a reboot.",
             leaves={"enabled": Leaf("boolean", "write + load the boot agent", default=True), "label": Leaf("string", "the launchd agent label", default="ai.hyperide.tmux-boot")},
         ),
+        "autosave": Block(
+            doc="an INDEPENDENT launchd saver (decoupled from continuum's status-right hook); when on, continuum's own autosave is disabled so there is one authoritative saver.",
+            leaves={
+                "enabled": Leaf("boolean", "provision the independent tmux-autosave launchd agent (StartInterval = continuum.save_interval minutes)", default=True),
+                "label": Leaf("string", "the autosave launchd agent label", default="ai.hyperide.tmux-autosave"),
+                "stale_after": Leaf("integer", "minutes: rig doctor/status flags a mature live server whose newest save is older than this", default=45, minimum=1),
+            },
+        ),
         "login_shell": Block(
             doc="restored panes are login shells (source ~/.zprofile/PATH).",
             leaves={"enabled": Leaf("boolean", "set a login-shell default-command", default=True), "shell": Leaf("string", "login shell path ('' → resolve $SHELL)", default="")},

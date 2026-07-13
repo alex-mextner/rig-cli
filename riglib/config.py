@@ -1794,6 +1794,7 @@ _TMUX_TOP_KEYS = {
     "anti_sprawl",
     "boot",
     "login_shell",
+    "autosave",
 }
 _TMUX_SUBKEYS = {
     "resurrect": {"processes", "capture_pane_contents"},
@@ -1803,6 +1804,7 @@ _TMUX_SUBKEYS = {
     "anti_sprawl": {"enabled", "session"},
     "boot": {"enabled", "label"},
     "login_shell": {"enabled", "shell"},
+    "autosave": {"enabled", "label", "stale_after"},
 }
 
 
@@ -1885,12 +1887,25 @@ def _validate_tmux(t: dict[str, Any]) -> None:
                 f"tmux.continuum.save_interval must be an int >= 1, got {interval!r}"
             )
 
-    for sub in ("moshi", "cc_restore", "anti_sprawl", "boot", "login_shell"):
+    for sub in ("moshi", "cc_restore", "anti_sprawl", "boot", "login_shell", "autosave"):
         block = t.get(sub, {})
         if isinstance(block, dict):
             value = block.get("enabled")
             if value is not None and not isinstance(value, bool):
                 raise ConfigError(f"tmux.{sub}.enabled must be a bool, got {value!r}")
+    autosave = t.get("autosave", {})
+    if isinstance(autosave, dict):
+        label = autosave.get("label")
+        if label is not None and not isinstance(label, str):
+            raise ConfigError(f"tmux.autosave.label must be a string, got {label!r}")
+        stale = autosave.get("stale_after")
+        # bool is an int subclass — reject it so `true` can't pose as a minute count.
+        if stale is not None and (
+            isinstance(stale, bool) or not isinstance(stale, int) or stale < 1
+        ):
+            raise ConfigError(
+                f"tmux.autosave.stale_after must be an int >= 1, got {stale!r}"
+            )
     anti = t.get("anti_sprawl", {})
     if isinstance(anti, dict):
         session = anti.get("session")

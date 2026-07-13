@@ -1034,6 +1034,29 @@
           },
           "additionalProperties": false
         },
+        "autosave": {
+          "type": "object",
+          "description": "an INDEPENDENT launchd saver (decoupled from continuum's status-right hook); when on, continuum's own autosave is disabled so there is one authoritative saver.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "provision the independent tmux-autosave launchd agent (StartInterval = continuum.save_interval minutes)",
+              "default": true
+            },
+            "label": {
+              "type": "string",
+              "description": "the autosave launchd agent label",
+              "default": "ai.hyperide.tmux-autosave"
+            },
+            "stale_after": {
+              "type": "integer",
+              "description": "minutes: rig doctor/status flags a mature live server whose newest save is older than this",
+              "default": 45,
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
         "login_shell": {
           "type": "object",
           "description": "restored panes are login shells (source ~/.zprofile/PATH).",

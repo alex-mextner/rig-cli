@@ -1268,6 +1268,13 @@ tmux:
     session: main               # the canonical session name
   boot:
     enabled: true               # a launchd agent that brings tmux up after a macOS reboot
+  autosave:
+    enabled: true               # an INDEPENDENT launchd saver (decoupled from continuum's
+                                # status-right hook); when on, continuum's own autosave is
+                                # disabled (@continuum-save-interval 0) — one authoritative saver
+    label: ai.hyperide.tmux-autosave
+    stale_after: 45             # minutes: the saver logs a WARN + records it in the health file
+                                # when the newest snapshot is older than this after a run
   login_shell:
     enabled: true               # restored panes are LOGIN shells (so ~/.zprofile/PATH is sourced)
     shell: ""                   # "" → resolve the user's $SHELL at apply; else an absolute path
@@ -1290,6 +1297,9 @@ tmux:
 | `anti_sprawl.session` | str | `main` | the one canonical session name |
 | `boot.enabled` | bool | `true` | write a launchd agent (macOS) that runs the boot script after a reboot, and `launchctl load -w` it on apply |
 | `boot.label` | str | `ai.hyperide.tmux-boot` | the launchd agent label (and plist filename stem) |
+| `autosave.enabled` | bool | `true` | provision an **independent** launchd saver (`StartInterval` = `continuum.save_interval` minutes) that calls resurrect `save.sh` directly — decoupled from continuum's fragile status-right hook. When on, rig emits `@continuum-save-interval '0'` so there is exactly **one** authoritative saver (no racing writers over the `last` symlink). The wrapper guards against no-server, empty servers, and a **degenerate save** (a bare boot-time `main` never clobbers a richer prior snapshot), and writes a health-state file + log line so a silent month-long death is impossible. |
+| `autosave.label` | str | `ai.hyperide.tmux-autosave` | the autosave launchd agent label (and plist filename stem) |
+| `autosave.stale_after` | int ≥ 1 | `45` | minutes: after each run the saver logs a `WARN` and records it in the health file when the newest snapshot is older than this (e.g. resurrect deduped an unchanged save) — the observability foundation a future `rig doctor`/`status` check reads |
 | `login_shell.enabled` | bool | `true` | set a **login-shell** `default-command` so restored panes source `~/.zprofile`/PATH (resurrect otherwise restores a non-login shell with a broken env) |
 | `login_shell.shell` | str | `""` | login shell path. `""` resolves the user's `$SHELL` at apply (falling back to `/bin/zsh` then `/bin/sh`); a non-empty override **must be an absolute path** to the shell binary (a relative name or a command-with-args is rejected, so it can't silently produce a broken `default-command`) and is used verbatim. The path is **baked at generation** — NOT a tmux `${SHELL}` reference, because tmux rejects `${VAR:-default}` and would abort the whole config |
 

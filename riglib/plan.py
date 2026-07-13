@@ -1792,6 +1792,7 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
                 "anti_sprawl": dict(t.get("anti_sprawl", {}) or {}),
                 "boot": dict(t.get("boot", {}) or {}),
                 "login_shell": login_shell,
+                "autosave": dict(t.get("autosave", {}) or {}),
             },
         )
         )
