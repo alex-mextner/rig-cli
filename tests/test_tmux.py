@@ -725,6 +725,81 @@ def test_boot_plist_points_at_the_boot_script():
     assert args == [str(p.boot_script_path)]
 
 
+def test_boot_plist_sets_homebrew_inclusive_path():
+    """DEFECT (the reboot RESTORE bug): the launchd agent runs with a minimal PATH
+    (/usr/bin:/bin:/usr/sbin:/sbin) that lacks the Homebrew bin dir. The boot SCRIPT survives it
+    (it calls tmux by absolute path), but the tmux SERVER it spawns INHERITS that PATH, and tmux's
+    own continuum/resurrect hooks run via `run-shell` and call BARE `tmux` → not found → the
+    `@continuum-restore` lookup fails → defaults to `off` → restore is SILENTLY skipped (no
+    sessions come back after a reboot). The plist must inject a Homebrew-inclusive PATH so the
+    server + every run-shell hook child can resolve tmux."""
+    import plistlib
+
+    p = tmux.build_tmux(repo_home=Path("/home/u"))
+    env = plistlib.loads(p.render_boot_plist().encode("utf-8"))["EnvironmentVariables"]
+    path_dirs = env["PATH"].split(":")
+    # the resolved tmux binary's own dir must be on PATH so a bare `tmux` resolves in the hooks.
+    assert str(Path(tmux._resolve_tmux_bin()).parent) in path_dirs
+    assert "/opt/homebrew/bin" in path_dirs
+    assert env["HOME"] == "/home/u"
+
+
+def test_boot_plist_render_is_deterministic_across_separate_plans(monkeypatch):
+    """The real apply→status drift path: apply and status each build a FRESH plan, possibly under
+    a different ambient PATH. The plist must be byte-identical anyway. We build two separate plans
+    while shutil.which returns DIFFERENT answers — resolution is existence-based (the first EXISTING
+    fixed install path wins, ambient-independent), so the rendered plist must not budge.
+
+    HERMETIC: pin ``Path.exists`` so a fixed install path (``/opt/homebrew/bin/tmux``) is the one
+    that exists on ANY host — otherwise a runner with NO tmux at a fallback path would fall through
+    to the (differing) ``shutil.which`` results and this determinism check would flake (codex P1)."""
+    monkeypatch.setattr(tmux.Path, "exists", lambda self: str(self) == "/opt/homebrew/bin/tmux")
+    monkeypatch.setattr(tmux.shutil, "which", lambda name: "/interactive/dir/tmux")
+    apply_render = tmux.build_tmux(repo_home=Path("/home/u")).render_boot_plist()
+    monkeypatch.setattr(tmux.shutil, "which", lambda name: None)  # a minimal-PATH `rig status`
+    status_render = tmux.build_tmux(repo_home=Path("/home/u")).render_boot_plist()
+    assert apply_render == status_render
+    # and the resolved dir is the fixed fallback — shutil.which's differing answers never leak in.
+    import plistlib
+
+    path = plistlib.loads(apply_render.encode("utf-8"))["EnvironmentVariables"]["PATH"]
+    assert "/opt/homebrew/bin" in path.split(":")
+
+
+def test_boot_plist_preserves_key_order_not_sorted():
+    """sort_keys=False is load-bearing: a stable key order keeps re-apply a no-op. Pin it so a
+    refactor that drops it (or reorders the payload) fails here instead of flapping silently."""
+    body = tmux.build_tmux(repo_home=Path("/home/u")).render_boot_plist()
+    assert body.index("<key>Label</key>") < body.index("<key>EnvironmentVariables</key>")
+    assert body.index("<key>PATH</key>") < body.index("<key>HOME</key>")
+    assert body.index("<key>RunAtLoad</key>") < body.index("<key>StandardOutPath</key>")
+
+
+def test_boot_path_env_is_stable_when_tmux_bin_resolution_changes(monkeypatch):
+    """tmux_bin is baked at plan time, so a LATER change to ambient PATH (which would make
+    _resolve_tmux_bin pick a different dir) must NOT change an already-built plan's rendered
+    plist — the determinism contract that avoids apply/status drift flap."""
+    p = tmux.build_tmux(repo_home=Path("/home/u"))
+    before = p.render_boot_plist()
+    monkeypatch.setattr(tmux, "_resolve_tmux_bin", lambda: "/some/other/dir/tmux")
+    assert p.render_boot_plist() == before  # baked field wins; no re-resolution at render time
+
+
+def test_boot_plist_has_logging_paths():
+    """Without StandardOutPath/StandardErrorPath the boot agent is a BLACK BOX: a half-working
+    boot (server up, restore skipped) leaves zero diagnostics. The plist must log both streams
+    into the generated dir alongside the managed scripts."""
+    import plistlib
+
+    p = tmux.build_tmux(repo_home=Path("/home/u"))
+    parsed = plistlib.loads(p.render_boot_plist().encode("utf-8"))
+    assert parsed["StandardOutPath"] == str(p.boot_out_log_path)
+    assert parsed["StandardErrorPath"] == str(p.boot_err_log_path)
+    assert p.boot_out_log_path.parent == p.generated_dir
+    assert p.boot_err_log_path.parent == p.generated_dir
+    assert p.boot_out_log_path.name.endswith(".log")
+
+
 # ── boot script (DEFECT 1: new-session -d loads the conf → continuum restores) ──────────────
 def test_boot_script_creates_a_session_to_load_the_conf():
     """The boot script must `tmux new-session -d` (which loads ~/.tmux.conf → the sourced
