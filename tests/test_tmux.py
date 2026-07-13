@@ -746,14 +746,24 @@ def test_boot_plist_sets_homebrew_inclusive_path():
 
 def test_boot_plist_render_is_deterministic_across_separate_plans(monkeypatch):
     """The real apply→status drift path: apply and status each build a FRESH plan, possibly under
-    a different ambient PATH. The plist must be byte-identical anyway. We simulate that by building
-    two separate plans while shutil.which returns DIFFERENT answers — resolution is existence-based
-    (ambient-independent), so the rendered plist must not budge."""
+    a different ambient PATH. The plist must be byte-identical anyway. We build two separate plans
+    while shutil.which returns DIFFERENT answers — resolution is existence-based (the first EXISTING
+    fixed install path wins, ambient-independent), so the rendered plist must not budge.
+
+    HERMETIC: pin ``Path.exists`` so a fixed install path (``/opt/homebrew/bin/tmux``) is the one
+    that exists on ANY host — otherwise a runner with NO tmux at a fallback path would fall through
+    to the (differing) ``shutil.which`` results and this determinism check would flake (codex P1)."""
+    monkeypatch.setattr(tmux.Path, "exists", lambda self: str(self) == "/opt/homebrew/bin/tmux")
     monkeypatch.setattr(tmux.shutil, "which", lambda name: "/interactive/dir/tmux")
     apply_render = tmux.build_tmux(repo_home=Path("/home/u")).render_boot_plist()
     monkeypatch.setattr(tmux.shutil, "which", lambda name: None)  # a minimal-PATH `rig status`
     status_render = tmux.build_tmux(repo_home=Path("/home/u")).render_boot_plist()
     assert apply_render == status_render
+    # and the resolved dir is the fixed fallback — shutil.which's differing answers never leak in.
+    import plistlib
+
+    path = plistlib.loads(apply_render.encode("utf-8"))["EnvironmentVariables"]["PATH"]
+    assert "/opt/homebrew/bin" in path.split(":")
 
 
 def test_boot_plist_preserves_key_order_not_sorted():
