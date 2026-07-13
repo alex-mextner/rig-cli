@@ -329,8 +329,10 @@ def test_clean_machine_apply_brings_tmux_up_with_config_and_session(tmux_env, mo
     assert ls.returncode == 0, f"`tmux ls` says no server: {ls.stderr or ls.stdout}"
     assert "main" in ls.stdout, ls.stdout
     # the CONFIG was actually loaded by that first session: a rig-set option is live on the server.
-    opt = run(["tmux", "show-options", "-g", "@continuum-save-interval"])
-    assert "15" in opt.stdout, f"config not loaded — continuum option absent: {opt.stdout!r} {opt.stderr!r}"
+    # Use @continuum-restore (stable at 'on') rather than @continuum-save-interval — the latter is
+    # now toggled by the independent-autosave feature (#138 sets it to 0 when the saver owns saving).
+    opt = run(["tmux", "show-options", "-g", "@continuum-restore"])
+    assert "on" in opt.stdout, f"config not loaded — continuum option absent: {opt.stdout!r} {opt.stderr!r}"
     # idempotent: a second boot does NOT create a duplicate session (anti-sprawl at boot).
     run([str(boot_script)])
     ls2 = run(["tmux", "ls"])
