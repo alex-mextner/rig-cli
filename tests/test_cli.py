@@ -1423,3 +1423,19 @@ def test_apply_exit_nonzero_when_verify_fails(tmp_path, capsys, fake_agent_tools
         assert "check(s) FAILED" in out
     finally:
         verify._VERIFIERS.pop("provision_permissions", None)
+
+
+def test_spotlight_sweep_noop_when_disabled(tmp_path, monkeypatch, capsys):
+    # the persistent launchd agent keeps invoking `spotlight-sweep` after a config removal; it must
+    # become a no-op (never write sentinels) once spotlight is disabled/absent — the opt-out contract.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    work = tmp_path / "work"
+    (work / "proj/node_modules").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = repo / "rig.yaml"
+    cfg.write_text(f"version: 1\nspotlight:\n  enabled: false\n  roots:\n    - {work}\n", encoding="utf-8")
+    rc = main(["spotlight-sweep", "-C", str(repo), "--config", str(cfg)])
+    assert rc == 0
+    assert not (work / "proj/node_modules/.metadata_never_index").exists()
+    assert "disabled" in capsys.readouterr().out

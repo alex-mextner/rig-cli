@@ -168,3 +168,28 @@ def test_verify_plan_converts_verifier_exception_to_failure():
         assert "RuntimeError" in report.results[0].evidence
     finally:
         verify._VERIFIERS.pop("provision_boom", None)
+
+
+def test_verify_tg_ctl_uses_gui_domain_check(tmp_path, monkeypatch):
+    # tg_ctl loads in gui/<uid>; the verifier must consult the GUI-domain predicate, not the
+    # legacy `launchctl list`. Prove it: gui-check True but legacy-check False → result is LOADED.
+    from riglib.actions import runner
+
+    monkeypatch.setattr(verify, "_is_darwin", lambda: True)
+    monkeypatch.delenv("RIG_TG_CTL_DRY_RUN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    plist = tmp_path / "Library/LaunchAgents/ai.hyperide.tg-ctl.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("<plist/>", encoding="utf-8")
+    monkeypatch.setattr(runner, "_launchctl_gui_loaded", lambda label: True)
+    monkeypatch.setattr(verify, "_launchctl_loaded", lambda label: False)  # legacy would say NOT loaded
+    action = Action(
+        kind="provision_tg_ctl", category="tg_ctl", item="boot",
+        source=tmp_path, target=Path("ai.hyperide.tg-ctl"),
+        options={"label": "ai.hyperide.tg-ctl"},
+    )
+    plan = InstallPlan()
+    plan.actions.append(action)
+    report = verify.verify_plan(plan)
+    loaded = [r for r in report.results if "loaded" in r.evidence.lower()]
+    assert loaded and loaded[0].passed is True  # gui-domain check won

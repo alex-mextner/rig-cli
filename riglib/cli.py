@@ -633,6 +633,13 @@ def cmd_spotlight_sweep(args: argparse.Namespace) -> int:
     s = loaded.data.get("spotlight")
     if not isinstance(s, dict):
         s = {}
+    # Honor the opt-out/default-off contract: if the config is absent or spotlight is disabled,
+    # this is a NO-OP (the persistent launchd agent keeps invoking us after a config removal — it
+    # must not keep writing sentinels once the user turned the feature off). Same guard as
+    # plan._build_spotlight: an explicit `enabled: true` is required to sweep.
+    if not s.get("enabled"):
+        print("spotlight-sweep: disabled in config (spotlight.enabled is not true) — nothing to do")
+        return 0
     roots = spotlight.resolve_roots(s.get("roots"))
     deny = spotlight.resolve_deny(s.get("deny"), s.get("extra"))
     max_depth = int(s.get("max_depth", spotlight.DEFAULT_MAX_DEPTH))

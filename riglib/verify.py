@@ -157,7 +157,12 @@ def _launchctl_loaded(label: str) -> bool:
 
 
 def _verify_launchd_agent(
-    category: str, item: str, label: str, plist_path: Path, dry_run_var: str
+    category: str,
+    item: str,
+    label: str,
+    plist_path: Path,
+    dry_run_var: str,
+    loaded_check: Callable[[str], bool] | None = None,
 ) -> list[VerifyResult]:
     """Shared launchd check: the plist exists on disk AND the agent is loaded.
 
@@ -165,6 +170,11 @@ def _verify_launchd_agent(
     WHOLE check is a single SKIPPED result — asserting a missing plist there would be a false
     failure. On macOS the plist presence IS a real assertion; the loaded check is skipped only
     when the live activation was suppressed by ``dry_run_var``.
+
+    ``loaded_check`` MUST match the launchd DOMAIN the provisioner loaded the agent into: the
+    default legacy ``launchctl list <label>`` (used by tmux-boot / spotlight, loaded via
+    ``launchctl load``), or the per-user ``gui/<uid>`` predicate for an agent bootstrapped there
+    (tg_ctl). A domain mismatch reports a live agent as "NOT loaded" and fails apply spuriously.
     """
     if not _is_darwin():
         return [VerifyResult(category, item, None, "launchd N/A on non-macOS host")]
@@ -176,7 +186,8 @@ def _verify_launchd_agent(
     if _dry_run(dry_run_var):
         results.append(VerifyResult(category, item, None, f"launchd load check skipped ({dry_run_var} set)"))
         return results
-    loaded = _launchctl_loaded(label)
+    check = loaded_check or _launchctl_loaded
+    loaded = check(label)
     results.append(
         VerifyResult(category, item, loaded, f"launchd agent '{label}' {'loaded' if loaded else 'NOT loaded'}")
     )
@@ -243,12 +254,20 @@ def _verify_tmux(action: Action) -> list[VerifyResult]:
 # ── tg_ctl (retrofit) ────────────────────────────────────────────────────────────────
 @register_verifier("provision_tg_ctl")
 def _verify_tg_ctl(action: Action) -> list[VerifyResult]:
-    """The tg-ctl daemon LaunchAgent plist is present + loaded."""
+    """The tg-ctl daemon LaunchAgent plist is present + loaded in the per-user GUI domain.
+
+    tg_ctl is bootstrapped into ``gui/<uid>`` (not the legacy domain), so its loaded check MUST
+    use that domain's predicate — reusing the runner's ``_launchctl_gui_loaded`` — or a live agent
+    reads as NOT loaded and fails apply.
+    """
+    from .actions.runner import _launchctl_gui_loaded
     from .tg_ctl import DEFAULT_BOOT_LABEL
 
     label = str(action.options.get("label") or DEFAULT_BOOT_LABEL)
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
-    return _verify_launchd_agent("tg_ctl", "boot", label, plist_path, "RIG_TG_CTL_DRY_RUN")
+    return _verify_launchd_agent(
+        "tg_ctl", "boot", label, plist_path, "RIG_TG_CTL_DRY_RUN", loaded_check=_launchctl_gui_loaded
+    )
 
 
 def _read_text(path: Path) -> str:
