@@ -108,6 +108,7 @@ def test_verify_report_summary_counts_states():
 
 
 def test_verify_tg_ctl_checks_plist(tmp_path, monkeypatch):
+    monkeypatch.setattr(verify, "_is_darwin", lambda: True)  # exercise the macOS path on any host
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("RIG_TG_CTL_DRY_RUN", "1")  # skip live launchctl
     action = Action(
