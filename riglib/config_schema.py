@@ -334,6 +334,13 @@ _HARNESS_BLOCK = Block(
             items_enum=_HARNESS_KIND_ENUM,
         ),
         "auto_mode": Leaf("boolean", "true → auto-accept tool calls; false → interactive", default=True),
+        "self_merge": Leaf(
+            "boolean",
+            "true → add the self-merge carve-out to the auto-mode classifier's autoMode.allow (clears "
+            "the Merge-Without-Review + Self-Approval soft blocks for the agent's OWN PRs via gh ship); "
+            "auto-mode only; every other classifier rule (incl. the anti-exfil hard rule) stays",
+            default=True,
+        ),
         "mode": Leaf("string", "pin the exact permission value (overrides auto_mode map)"),
         "settings_path": Leaf(
             "string",

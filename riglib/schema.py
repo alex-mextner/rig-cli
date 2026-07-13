@@ -225,6 +225,13 @@ AREAS: tuple[Area, ...] = (
             _opt("harness.auto_mode", KIND_BOOL, True,
                  "Auto-accept tool calls (the agent runs autonomously). SAFE because the agent-hook "
                  "guards above catch the dangerous calls first. Off = interactive permission prompts."),
+            _opt("harness.self_merge", KIND_BOOL, True,
+                 "Let the agent self-merge a PR it authored in the session's starting repo via "
+                 "`gh ship` (adds a `$defaults`-preserving carve-out to the auto-mode classifier's "
+                 "allow list, clearing the Merge-Without-Review + Self-Approval soft blocks for the "
+                 "agent's OWN PRs). Auto-mode only (the classifier runs only under auto). SAFE — the "
+                 "anti-exfil hard rule, block-raw-pr-merge for OTHER PRs, the review-fix loop and the "
+                 "local CI gate all stay. Off = the agent hits the soft block and asks."),
             _opt("harness.kinds", KIND_LIST, [],
                  "Additional harnesses to provision alongside harness.kind, comma-separated "
                  "(e.g. codex,opencode). Additional harnesses get skill discovery, agent-hook "
