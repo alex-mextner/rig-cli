@@ -2397,6 +2397,11 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
     skipped_conflicts: list[str] = []
 
     # 1) the generated rig.tmux.conf (wholesale, idempotent on identical bytes).
+    # `rig_conf_conflicted` records a DIFFERING generated config left untouched under skip: it may
+    # still carry the OLD nonzero @continuum-save-interval, so bootstrapping the autosave agent
+    # while continuum keeps saving reintroduces the two-writer race — suppress the autosave load
+    # (codex P2), same shape as the plist/script/~/.tmux.conf conflict gates.
+    rig_conf_conflicted = False
     conf_out = fsutil.write_file(plan.rig_conf_path, plan.render_rig_conf(), on_conflict)
     if conf_out.status == "error":
         return ActionResult(action, "error", f"tmux: {conf_out.detail}")
@@ -2409,6 +2414,7 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
         # rig OWNS rig.tmux.conf — a DIFFERING one left untouched under on_conflict=skip is stale
         # (e.g. an upgrade still carrying the old `@continuum-boot 'on'`) → unresolved drift the
         # sourced tmux still uses. Surface it (NOT silently 'already current'), like the scripts.
+        rig_conf_conflicted = True
         skipped_conflicts.append(
             f"{plan.rig_conf_path.name} differs and on_conflict=skip — NOT regenerated; tmux "
             f"still sources the STALE rig config (re-run with backup/overwrite to update it)"
@@ -2556,7 +2562,12 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
         plan,
         boot_load_safe=not (boot_plist_conflicted or boot_script_conflicted or conf_conflicted),
         boot_plist_changed=boot_plist_changed,
-        autosave_load_safe=not (autosave_plist_conflicted or autosave_script_conflicted),
+        # rig_conf_conflicted too: a conflict-skipped STALE rig.tmux.conf may still carry the old
+        # nonzero @continuum-save-interval, so bootstrapping the autosave agent while continuum is
+        # ALSO still saving reintroduces the two-writer race this feature removes (codex P2).
+        autosave_load_safe=not (
+            autosave_plist_conflicted or autosave_script_conflicted or rig_conf_conflicted
+        ),
         autosave_plist_changed=autosave_plist_changed,
     )
     if act_changes:

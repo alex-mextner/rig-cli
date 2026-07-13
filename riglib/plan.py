@@ -16,6 +16,7 @@ An :class:`Action` is a small dataclass describing the change; the *execution* l
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1774,6 +1775,15 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
 
         login_shell["shell"] = resolve_login_shell()
 
+    # The independent autosave agent is macOS-only (a launchd LaunchAgent). On a non-darwin host
+    # we must NOT let the generated rig.tmux.conf disable continuum's own periodic save
+    # (@continuum-save-interval 0) — no independent runner replaces it there, so the user would be
+    # left with NO autosave at all. Force autosave off off-darwin; continuum keeps saving (codex
+    # P1). apply and status run on the SAME machine, so the gated value is consistent (no drift).
+    autosave = dict(t.get("autosave", {}) or {})
+    if sys.platform != "darwin":
+        autosave["enabled"] = False
+
     plan.actions.append(
         Action(
             kind="provision_tmux",
@@ -1792,7 +1802,7 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
                 "anti_sprawl": dict(t.get("anti_sprawl", {}) or {}),
                 "boot": dict(t.get("boot", {}) or {}),
                 "login_shell": login_shell,
-                "autosave": dict(t.get("autosave", {}) or {}),
+                "autosave": autosave,
             },
         )
         )

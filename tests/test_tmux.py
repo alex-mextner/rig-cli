@@ -1507,6 +1507,28 @@ def test_plan_emits_tmux_action(fake_agent_tools, tmp_path):
     assert a.options["apply_mode"] == "import"
 
 
+def test_plan_disables_autosave_off_darwin(fake_agent_tools, tmp_path, monkeypatch):
+    """The autosave LaunchAgent is macOS-only — on a non-darwin host the plan forces
+    autosave.enabled False so the generated config keeps continuum's own save (never disabling it
+    without a replacement runner → the user would lose autosave entirely). codex P1."""
+    import riglib.plan as plan_mod
+
+    monkeypatch.setattr(plan_mod.sys, "platform", "linux")
+    plan = _build({"tmux": {"enabled": True}}, tmp_path, fake_agent_tools)
+    a = [a for a in plan.actions if a.kind == "provision_tmux"][0]
+    assert a.options["autosave"]["enabled"] is False
+
+
+def test_plan_keeps_autosave_on_darwin(fake_agent_tools, tmp_path, monkeypatch):
+    """On darwin the plan does NOT force autosave off — the default (knob absent → on) stands."""
+    import riglib.plan as plan_mod
+
+    monkeypatch.setattr(plan_mod.sys, "platform", "darwin")
+    plan = _build({"tmux": {"enabled": True}}, tmp_path, fake_agent_tools)
+    a = [a for a in plan.actions if a.kind == "provision_tmux"][0]
+    assert a.options["autosave"].get("enabled") is not False
+
+
 def test_plan_provisions_when_enabled_is_null(fake_agent_tools, tmp_path):
     """`enabled: null` is 'not false' → provision (a present-but-empty-ish block opts in)."""
     plan = _build({"tmux": {"enabled": None, "apply": "import"}}, tmp_path, fake_agent_tools)
@@ -2725,6 +2747,24 @@ def test_activation_suppresses_autosave_load_when_plist_conflict_skipped(tmp_pat
     rec = _activation_seams(monkeypatch, autosave_loaded=False)
     runner._do_provision_tmux(a, "skip")
     assert rec["autosave_bootstrap"] == []  # suppressed — stale plist never loaded
+
+
+def test_activation_suppresses_autosave_load_when_rig_conf_conflict_skipped(tmp_path, monkeypatch):
+    """A conflict-skipped rig.tmux.conf may still carry the OLD nonzero @continuum-save-interval;
+    bootstrapping the autosave agent while continuum is also saving = the two-writer race this
+    feature removes. So a stale generated config must also suppress the autosave load (codex P2)."""
+    from riglib.actions import runner
+
+    home = _autosave_activation_home(tmp_path, monkeypatch)
+    a = _tmux_action(home, autosave={"enabled": True})
+    runner._do_provision_tmux(a, "backup")  # everything current
+    # a differing generated rig.tmux.conf at rig's path → conflict-skip on the next apply.
+    (home / ".config" / "rig" / "tmux" / "rig.tmux.conf").write_text(
+        "# stale\nset -g @continuum-save-interval '15'\n", encoding="utf-8"
+    )
+    rec = _activation_seams(monkeypatch, autosave_loaded=False)
+    runner._do_provision_tmux(a, "skip")
+    assert rec["autosave_bootstrap"] == []  # suppressed — stale config could keep continuum saving
 
 
 def test_activation_autosave_bootstrap_failure_is_a_warning(tmp_path, monkeypatch):
