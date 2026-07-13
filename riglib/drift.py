@@ -1471,6 +1471,18 @@ def _check_tmux(action: Action, report: DriftReport) -> None:
                           "(it still starts tmux at login — remove it or re-enable boot)")
             )
 
+        # 3b) the INDEPENDENT autosave plist (#138). Same shape as the boot plist: content-check
+        # when enabled, surface a leftover as a disk→config extra when disabled.
+        if plan.autosave_enabled:
+            _file_drift(report, action, plan.autosave_plist_path, plan.render_autosave_plist(),
+                        "autosave launchd plist")
+        elif plan.autosave_plist_path.is_file():
+            report.items.append(
+                DriftItem("extra", "tmux", action.item, plan.autosave_plist_path,
+                          "autosave launchd plist present but tmux.autosave is disabled "
+                          "(it still saves periodically — remove it or re-enable autosave)")
+            )
+
     # 4) the wiring in ~/.tmux.conf (the managed REGION only — user lines are ignored).
     conf_text = plan.conf_path.read_text(encoding="utf-8") if plan.conf_path.is_file() else ""
     if plan.apply_mode == "block":

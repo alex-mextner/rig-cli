@@ -117,6 +117,20 @@ def test_tmux_boot_label_must_be_string():
     validate({"version": 1, "tmux": {"boot": {"label": "com.me.tmux"}}})
 
 
+def test_tmux_autosave_knobs_validate():
+    # enabled must be bool, label must be str, stale_after must be int >= 1 (bool rejected).
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"autosave": {"enabled": "yes"}}})
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"autosave": {"label": 123}}})
+    for bad in (0, -1, True):
+        with pytest.raises(ConfigError):
+            validate({"version": 1, "tmux": {"autosave": {"stale_after": bad}}})
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"autosave": {"nope": 1}}})  # unknown nested key
+    validate({"version": 1, "tmux": {"autosave": {"enabled": True, "label": "com.me.save", "stale_after": 30}}})
+
+
 def test_tmux_login_shell_block_accepted():
     validate({"version": 1, "tmux": {"login_shell": {"enabled": True, "shell": "/bin/zsh"}}})
     validate({"version": 1, "tmux": {"login_shell": {"enabled": False}}})
@@ -219,7 +233,10 @@ def test_render_continuum_boot_is_always_off():
 
 
 def test_render_save_interval():
-    conf = tmux.build_tmux(repo_home=Path("/home/u"), continuum={"save_interval": 7}).render_rig_conf()
+    # With the independent autosave agent OFF, continuum keeps its own save at save_interval.
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), continuum={"save_interval": 7}, autosave={"enabled": False}
+    ).render_rig_conf()
     assert "set -g @continuum-save-interval '7'" in conf
 
 
@@ -775,6 +792,104 @@ def test_boot_plist_preserves_key_order_not_sorted():
     assert body.index("<key>RunAtLoad</key>") < body.index("<key>StandardOutPath</key>")
 
 
+def test_launch_agent_path_has_no_user_writable_dir():
+    """Sol #138 hardening: a periodic launchd agent must not resolve executables from a
+    user-writable PATH entry (e.g. ~/.local/bin) — an execution-hijack seam. Only fixed system /
+    Homebrew dirs plus the resolved tmux dir."""
+    path = tmux.build_tmux(repo_home=Path("/home/u")).boot_path_env
+    assert "/home/u/.local/bin" not in path.split(":")
+    assert "/opt/homebrew/bin" in path.split(":")
+
+
+# ── independent autosave agent (#138) ─────────────────────────────────────────────────────
+def test_autosave_disables_continuum_own_save():
+    """With the independent saver ON (default), continuum's own status-right autosave is disabled
+    (@continuum-save-interval 0) so there is exactly ONE authoritative saver — no racing writers."""
+    conf = tmux.build_tmux(repo_home=Path("/home/u"), continuum={"save_interval": 15}).render_rig_conf()
+    assert "set -g @continuum-save-interval '0'" in conf
+
+
+def test_autosave_off_leaves_continuum_save_active():
+    """Opt out of the independent saver → continuum keeps its own save at save_interval (legacy)."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), continuum={"save_interval": 9}, autosave={"enabled": False}
+    ).render_rig_conf()
+    assert "set -g @continuum-save-interval '9'" in conf
+
+
+def test_autosave_script_in_managed_scripts_when_enabled():
+    p = tmux.build_tmux(repo_home=Path("/home/u"))
+    assert any(path == p.autosave_script_path for path, _ in p.managed_scripts())
+    off = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"enabled": False})
+    assert all(path != off.autosave_script_path for path, _ in off.managed_scripts())
+
+
+def test_autosave_plist_is_periodic_and_logged():
+    import plistlib
+
+    p = tmux.build_tmux(repo_home=Path("/home/u"), continuum={"save_interval": 15})
+    parsed = plistlib.loads(p.render_autosave_plist().encode("utf-8"))
+    assert parsed["Label"] == "ai.hyperide.tmux-autosave"
+    assert parsed["StartInterval"] == 15 * 60  # StartInterval = save_interval minutes → seconds
+    assert parsed["ProgramArguments"] == [str(p.autosave_script_path)]
+    assert parsed["StandardOutPath"] == str(p.autosave_out_log_path)
+    # Homebrew-inclusive PATH so the wrapper + resurrect save.sh resolve tmux under launchd.
+    assert str(Path(p.tmux_bin).parent) in parsed["EnvironmentVariables"]["PATH"].split(":")
+
+
+def test_autosave_script_guards_and_saves():
+    """The wrapper must: use an absolute tmux path, exit-0 on no server, keep a degenerate-save
+    guard, and call resurrect save.sh. These are the robustness properties #138 turns on."""
+    body = tmux.build_tmux(repo_home=Path("/home/u")).render_autosave_script()
+    assert body.startswith("#!/bin/bash")
+    assert "has-session" in body                    # no-server guard
+    assert "degenerate" in body                     # never clobber a richer prior snapshot
+    assert "tmux-resurrect/scripts/save.sh" in body  # the real saver
+    assert "mkdir \"$LOCK\"" in body                 # single-flight lock
+    assert not body.startswith("#!/usr/bin/env")     # Sol: absolute shebang, not env
+    assert "grep -vFx" in body                       # fixed-string session match (no regex misfire)
+
+
+def test_autosave_stale_after_renders_into_script():
+    body = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"stale_after": 90}).render_autosave_script()
+    assert "STALE_SECS=5400" in body  # 90 minutes → seconds
+
+
+def test_autosave_path_env_matches_boot_path_env():
+    """One source for the launch-agent PATH — the autosave agent reuses the boot agent's."""
+    p = tmux.build_tmux(repo_home=Path("/home/u"))
+    assert p.autosave_path_env == p.boot_path_env
+    assert "/home/u/.local/bin" not in p.autosave_path_env.split(":")
+
+
+def test_launch_agents_set_utf8_lang():
+    """CRITICAL: launchd gives no locale; resurrect's save.sh (awk/sed over TAB-delimited data)
+    writes a CORRUPT ~9-byte snapshot under the C locale that then clobbers `last`. Both the boot
+    and autosave plists must inject a UTF-8 LANG so the save (and restore parsing) work. Proven
+    live: no LANG → 9-byte save; LANG=en_US.UTF-8 → a full snapshot."""
+    import plistlib
+
+    p = tmux.build_tmux(repo_home=Path("/home/u"))
+    for body in (p.render_boot_plist(), p.render_autosave_plist()):
+        env = plistlib.loads(body.encode("utf-8"))["EnvironmentVariables"]
+        assert env["LANG"] == "en_US.UTF-8"
+        assert "/opt/homebrew/bin" in env["PATH"].split(":")  # PATH still present
+        assert env["HOME"] == "/home/u"
+
+
+def test_autosave_label_configurable():
+    p = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"label": "com.me.tmux-save"})
+    assert p.autosave_label == "com.me.tmux-save"
+    assert p.autosave_plist_path.name == "com.me.tmux-save.plist"
+    assert "com.me.tmux-save" in p.render_autosave_plist()
+
+
+def test_autosave_plist_render_is_deterministic():
+    p = tmux.build_tmux(repo_home=Path("/home/u"))
+    assert p.render_autosave_plist() == p.render_autosave_plist()
+    assert p.render_autosave_script() == p.render_autosave_script()
+
+
 def test_boot_path_env_is_stable_when_tmux_bin_resolution_changes(monkeypatch):
     """tmux_bin is baked at plan time, so a LATER change to ambient PATH (which would make
     _resolve_tmux_bin pick a different dir) must NOT change an already-built plan's rendered
@@ -894,6 +1009,7 @@ def test_null_nested_knobs_normalize_to_default():
         continuum={"save_interval": None, "restore": None, "boot": None},
         cc_restore={"enabled": None}, moshi={"enabled": None},
         anti_sprawl={"enabled": None, "session": None}, boot={"enabled": None, "label": None},
+        autosave={"enabled": False},  # keep continuum's own save so save_interval-default is visible
     )
     conf = p.render_rig_conf()
     assert f"@continuum-save-interval '{tmux.DEFAULT_SAVE_INTERVAL}'" in conf
@@ -1389,6 +1505,28 @@ def test_plan_emits_tmux_action(fake_agent_tools, tmp_path):
     a = acts[0]
     assert a.category == "tmux" and a.item == "config"
     assert a.options["apply_mode"] == "import"
+
+
+def test_plan_disables_autosave_off_darwin(fake_agent_tools, tmp_path, monkeypatch):
+    """The autosave LaunchAgent is macOS-only — on a non-darwin host the plan forces
+    autosave.enabled False so the generated config keeps continuum's own save (never disabling it
+    without a replacement runner → the user would lose autosave entirely). codex P1."""
+    import riglib.plan as plan_mod
+
+    monkeypatch.setattr(plan_mod.sys, "platform", "linux")
+    plan = _build({"tmux": {"enabled": True}}, tmp_path, fake_agent_tools)
+    a = [a for a in plan.actions if a.kind == "provision_tmux"][0]
+    assert a.options["autosave"]["enabled"] is False
+
+
+def test_plan_keeps_autosave_on_darwin(fake_agent_tools, tmp_path, monkeypatch):
+    """On darwin the plan does NOT force autosave off — the default (knob absent → on) stands."""
+    import riglib.plan as plan_mod
+
+    monkeypatch.setattr(plan_mod.sys, "platform", "darwin")
+    plan = _build({"tmux": {"enabled": True}}, tmp_path, fake_agent_tools)
+    a = [a for a in plan.actions if a.kind == "provision_tmux"][0]
+    assert a.options["autosave"].get("enabled") is not False
 
 
 def test_plan_provisions_when_enabled_is_null(fake_agent_tools, tmp_path):
@@ -2006,6 +2144,61 @@ def test_apply_skips_boot_plist_off_darwin(tmp_path, monkeypatch):
     assert not (home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-boot.plist").exists()
 
 
+def test_apply_writes_autosave_plist_and_script_on_darwin(tmp_path, monkeypatch):
+    """The independent autosave agent (#138): apply writes the launchd plist AND the wrapper
+    script (executable), and continuum's own save is disabled in the generated conf."""
+    import os as _os
+    import sys as _sys
+
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    runner._do_provision_tmux(_tmux_action(home, autosave={"enabled": True}), "backup")
+    plist = home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-autosave.plist"
+    script = home / ".config" / "rig" / "tmux" / "tmux-autosave.sh"
+    assert plist.is_file() and script.is_file()
+    assert _os.access(script, _os.X_OK)  # the launchd agent runs it by path
+    conf = (home / ".config" / "rig" / "tmux" / "rig.tmux.conf").read_text()
+    assert "set -g @continuum-save-interval '0'" in conf  # one authoritative saver
+
+
+def test_apply_omits_autosave_when_disabled(tmp_path, monkeypatch):
+    import sys as _sys
+
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    runner._do_provision_tmux(_tmux_action(home, autosave={"enabled": False}), "backup")
+    assert not (home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-autosave.plist").exists()
+    assert not (home / ".config" / "rig" / "tmux" / "tmux-autosave.sh").exists()
+
+
+def test_drift_tmux_autosave_plist(tmp_path, monkeypatch):
+    import sys as _sys
+
+    from riglib.actions import runner
+    from riglib.drift import detect
+    from riglib.plan import InstallPlan
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    a = _tmux_action(home, autosave={"enabled": True})
+    runner._do_provision_tmux(a, "backup")
+    _stage_live_tmux_state(home)
+    assert not [d for d in detect(InstallPlan(actions=[a])).items if d.category == "tmux"]
+    (home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-autosave.plist").unlink()
+    drift = [d for d in detect(InstallPlan(actions=[a])).items if d.category == "tmux"]
+    assert any("autosave launchd plist" in d.detail and d.direction == "missing" for d in drift)
+
+
 def test_apply_resolves_unexpanded_tilde_conf_path(tmp_path, monkeypatch):
     """The plan→action→runner path with an UNEXPANDED ~/.tmux.conf must resolve against HOME."""
     from riglib.actions import runner
@@ -2336,16 +2529,18 @@ def test_apply_surfaces_generated_file_backups(tmp_path, monkeypatch):
 
 
 # ── DEFECTS 1/4/5/6: live activation (plugins, resurrect dir, first save, launchctl, cleanup) ──
-def _activation_seams(monkeypatch, *, plugins_present=False, launchctl_loaded=False):
+def _activation_seams(monkeypatch, *, plugins_present=False, launchctl_loaded=False, autosave_loaded=True):
     """Stub the live seams an activation touches and return a record of the calls made.
 
     Records git clones, launchctl verbs, tmux `resurrect save` runs, and continuum boot-cleanup
     runs — so a test can assert WHICH side effects an activation performed without any real
-    network / daemon / tmux-server access.
+    network / daemon / tmux-server access. ``autosave_loaded`` defaults True so the independent
+    autosave agent (#138) is a steady-state no-op unless a test opts to see its first bootstrap.
     """
     from riglib.actions import runner
 
-    rec = {"clones": [], "launchctl": [], "load_w": [], "saves": 0, "cleanups": 0}
+    rec = {"clones": [], "launchctl": [], "load_w": [], "saves": 0, "cleanups": 0,
+           "autosave_bootstrap": [], "autosave_bootout": []}
 
     def _clone(repo, dest):
         rec["clones"].append((repo, str(dest)))
@@ -2366,6 +2561,10 @@ def _activation_seams(monkeypatch, *, plugins_present=False, launchctl_loaded=Fa
     monkeypatch.setattr(runner, "_launchctl_loaded", lambda label: launchctl_loaded)
     monkeypatch.setattr(runner, "_tmux_resurrect_save", lambda plan: rec.update(saves=rec["saves"] + 1) or 0)
     monkeypatch.setattr(runner, "_clean_stale_continuum_boot", _cleanup)
+    # the independent autosave agent (#138) uses the gui-domain launchctl verbs.
+    monkeypatch.setattr(runner, "_launchctl_gui_loaded", lambda label: autosave_loaded)
+    monkeypatch.setattr(runner, "_launchctl_bootstrap", lambda p: rec["autosave_bootstrap"].append(str(p)) or 0)
+    monkeypatch.setattr(runner, "_launchctl_bootout", lambda p: rec["autosave_bootout"].append(str(p)) or 0)
     return rec
 
 
@@ -2459,6 +2658,137 @@ def test_activation_launchctl_loads_the_boot_agent_with_w(tmp_path, monkeypatch)
     # token — see the helper's docstring for why it is separate from the 2-arg _launchctl).
     plist = str(home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-boot.plist")
     assert rec["load_w"] == [plist], rec["load_w"]
+
+
+def test_activation_bootstraps_autosave_agent(tmp_path, monkeypatch):
+    """The independent autosave agent (#138) is a stateless periodic daemon → activation loads it
+    NOW (gui-domain bootstrap) so autosave starts immediately, even for the current server —
+    unlike the boot agent which only fires at the next login. Not-loaded → bootstrap."""
+    import sys as _sys
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    rec = _activation_seams(monkeypatch, autosave_loaded=False)  # not yet loaded → first bootstrap
+    runner._do_provision_tmux(_tmux_action(home, autosave={"enabled": True}), "backup")
+    plist = str(home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-autosave.plist")
+    assert rec["autosave_bootstrap"] == [plist], rec["autosave_bootstrap"]
+
+
+def _autosave_activation_home(tmp_path, monkeypatch):
+    import sys as _sys
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "darwin")
+    monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    return home
+
+
+def test_activation_reloads_autosave_when_plist_changed_and_loaded(tmp_path, monkeypatch):
+    """Loaded already + the plist was (re)written this apply → bootout THEN bootstrap (refresh)."""
+    from riglib.actions import runner
+
+    home = _autosave_activation_home(tmp_path, monkeypatch)
+    rec = _activation_seams(monkeypatch, autosave_loaded=True)  # already loaded
+    # first apply writes the plist (a change) → since loaded, it must reload (bootout+bootstrap).
+    runner._do_provision_tmux(_tmux_action(home, autosave={"enabled": True}), "backup")
+    plist = str(home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-autosave.plist")
+    assert rec["autosave_bootout"] == [plist]
+    assert rec["autosave_bootstrap"] == [plist]
+
+
+def test_activation_autosave_steady_state_is_noop(tmp_path, monkeypatch):
+    """Loaded + the plist unchanged (a second apply) → neither bootout nor bootstrap is called."""
+    from riglib.actions import runner
+
+    home = _autosave_activation_home(tmp_path, monkeypatch)
+    a = _tmux_action(home, autosave={"enabled": True})
+    _activation_seams(monkeypatch, autosave_loaded=True)
+    runner._do_provision_tmux(a, "backup")  # first apply writes + reloads
+    rec = _activation_seams(monkeypatch, autosave_loaded=True)  # fresh recorder for the 2nd apply
+    runner._do_provision_tmux(a, "backup")  # plist identical now → no launchctl churn
+    assert rec["autosave_bootout"] == [] and rec["autosave_bootstrap"] == []
+
+
+def test_activation_suppresses_autosave_load_when_script_conflict_skipped(tmp_path, monkeypatch):
+    """A differing tmux-autosave.sh under on_conflict=skip (stale/unmanaged) suppresses the load —
+    we never bootstrap an agent whose wrapper script rig didn't write."""
+    from riglib.actions import runner
+
+    home = _autosave_activation_home(tmp_path, monkeypatch)
+    a = _tmux_action(home, autosave={"enabled": True})
+    runner._do_provision_tmux(a, "backup")  # everything current
+    # a user-owned foreign wrapper at rig's path → conflict-skip on the next apply.
+    (home / ".config" / "rig" / "tmux" / "tmux-autosave.sh").write_text("# foreign\n", encoding="utf-8")
+    rec = _activation_seams(monkeypatch, autosave_loaded=False)
+    runner._do_provision_tmux(a, "skip")
+    assert rec["autosave_bootstrap"] == []  # suppressed — stale wrapper never loaded
+
+
+def test_activation_suppresses_autosave_load_when_plist_conflict_skipped(tmp_path, monkeypatch):
+    """A differing autosave PLIST under on_conflict=skip suppresses the load (autosave_plist_conflicted
+    → autosave_load_safe False), same as a conflict-skipped script."""
+    from riglib.actions import runner
+
+    home = _autosave_activation_home(tmp_path, monkeypatch)
+    a = _tmux_action(home, autosave={"enabled": True})
+    runner._do_provision_tmux(a, "backup")  # everything current
+    # a differing plist at rig's path → conflict-skip on the next apply.
+    (home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-autosave.plist").write_text(
+        "<plist>foreign</plist>", encoding="utf-8"
+    )
+    rec = _activation_seams(monkeypatch, autosave_loaded=False)
+    runner._do_provision_tmux(a, "skip")
+    assert rec["autosave_bootstrap"] == []  # suppressed — stale plist never loaded
+
+
+def test_activation_suppresses_autosave_load_when_rig_conf_conflict_skipped(tmp_path, monkeypatch):
+    """A conflict-skipped rig.tmux.conf may still carry the OLD nonzero @continuum-save-interval;
+    bootstrapping the autosave agent while continuum is also saving = the two-writer race this
+    feature removes. So a stale generated config must also suppress the autosave load (codex P2)."""
+    from riglib.actions import runner
+
+    home = _autosave_activation_home(tmp_path, monkeypatch)
+    a = _tmux_action(home, autosave={"enabled": True})
+    runner._do_provision_tmux(a, "backup")  # everything current
+    # a differing generated rig.tmux.conf at rig's path → conflict-skip on the next apply.
+    (home / ".config" / "rig" / "tmux" / "rig.tmux.conf").write_text(
+        "# stale\nset -g @continuum-save-interval '15'\n", encoding="utf-8"
+    )
+    rec = _activation_seams(monkeypatch, autosave_loaded=False)
+    runner._do_provision_tmux(a, "skip")
+    assert rec["autosave_bootstrap"] == []  # suppressed — stale config could keep continuum saving
+
+
+def test_activation_autosave_bootstrap_failure_is_a_warning(tmp_path, monkeypatch):
+    """A non-zero `launchctl bootstrap` is surfaced as a warning, never a silent success."""
+    from riglib.actions import runner
+
+    home = _autosave_activation_home(tmp_path, monkeypatch)
+    rec = _activation_seams(monkeypatch, autosave_loaded=False)
+    monkeypatch.setattr(runner, "_launchctl_bootstrap", lambda p: rec["autosave_bootstrap"].append(str(p)) or 1)
+    res = runner._do_provision_tmux(_tmux_action(home, autosave={"enabled": True}), "backup")
+    assert "autosave agent NOT loaded" in res.detail
+
+
+def test_apply_skips_autosave_plist_off_darwin(tmp_path, monkeypatch):
+    import sys as _sys
+
+    from riglib.actions import runner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(_sys, "platform", "linux")
+    runner._do_provision_tmux(_tmux_action(home, autosave={"enabled": True}), "backup")
+    assert not (home / "Library" / "LaunchAgents" / "ai.hyperide.tmux-autosave.plist").exists()
 
 
 def test_activation_takes_a_first_resurrect_save(tmp_path, monkeypatch):

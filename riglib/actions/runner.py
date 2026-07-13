@@ -2338,6 +2338,7 @@ def tmux_plan_from_action(action: Action):
         anti_sprawl=dict(opts.get("anti_sprawl", {}) or {}),
         boot=dict(opts.get("boot", {}) or {}),
         login_shell=dict(opts.get("login_shell", {}) or {}),
+        autosave=dict(opts.get("autosave", {}) or {}),
     )
 
 
@@ -2396,6 +2397,11 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
     skipped_conflicts: list[str] = []
 
     # 1) the generated rig.tmux.conf (wholesale, idempotent on identical bytes).
+    # `rig_conf_conflicted` records a DIFFERING generated config left untouched under skip: it may
+    # still carry the OLD nonzero @continuum-save-interval, so bootstrapping the autosave agent
+    # while continuum keeps saving reintroduces the two-writer race — suppress the autosave load
+    # (codex P2), same shape as the plist/script/~/.tmux.conf conflict gates.
+    rig_conf_conflicted = False
     conf_out = fsutil.write_file(plan.rig_conf_path, plan.render_rig_conf(), on_conflict)
     if conf_out.status == "error":
         return ActionResult(action, "error", f"tmux: {conf_out.detail}")
@@ -2408,6 +2414,7 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
         # rig OWNS rig.tmux.conf — a DIFFERING one left untouched under on_conflict=skip is stale
         # (e.g. an upgrade still carrying the old `@continuum-boot 'on'`) → unresolved drift the
         # sourced tmux still uses. Surface it (NOT silently 'already current'), like the scripts.
+        rig_conf_conflicted = True
         skipped_conflicts.append(
             f"{plan.rig_conf_path.name} differs and on_conflict=skip — NOT regenerated; tmux "
             f"still sources the STALE rig config (re-run with backup/overwrite to update it)"
@@ -2420,6 +2427,7 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
     # the launchd agent runs points at THIS script, so loading the agent would run a stale boot
     # script — suppress the load in that case too (review P1), like the plist/conf conflicts below.
     boot_script_conflicted = False
+    autosave_script_conflicted = False
     for path, body in plan.managed_scripts():
         out = fsutil.write_file(path, body, on_conflict)
         if out.status == "error":
@@ -2443,6 +2451,8 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
         if conflict_skip:
             if path == plan.boot_script_path:
                 boot_script_conflicted = True
+            if path == plan.autosave_script_path:
+                autosave_script_conflicted = True
             # a pre-existing DIFFERING file at rig's script path was left untouched under
             # on_conflict=skip — but the generated config wires a resurrect hook at this path, so
             # resurrect would run the user's/stale file. SURFACE it in the detail, but do NOT set
@@ -2476,6 +2486,30 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
             skipped_conflicts.append(
                 f"{plan.boot_plist_path.name} differs and on_conflict=skip — NOT updated "
                 f"(re-run with backup/overwrite to refresh the boot plist)"
+            )
+
+    # 3b) the INDEPENDENT autosave launchd plist (#138) — a periodic saver decoupled from
+    # continuum's status-right hook. Unlike the boot plist, this one is (re)loaded during
+    # activation (it is a stateless periodic daemon, safe to bootstrap — no live session rides
+    # on it). A conflict-skipped plist suppresses the load, same as the boot plist.
+    autosave_plist_conflicted = False
+    autosave_plist_changed = False
+    if plan.autosave_enabled and sys.platform == "darwin":
+        plan.autosave_plist_path.parent.mkdir(parents=True, exist_ok=True)
+        as_out = fsutil.write_file(plan.autosave_plist_path, plan.render_autosave_plist(), on_conflict)
+        if as_out.status == "error":
+            return ActionResult(action, "error", f"tmux: {as_out.detail}")
+        if as_out.backup:
+            extra_backups.append(as_out.backup)
+        if as_out.status != "skipped":
+            changed = True
+            autosave_plist_changed = True
+            details.append(f"wrote autosave plist {plan.autosave_plist_path.name}")
+        elif not as_out.detail.startswith("identical"):
+            autosave_plist_conflicted = True
+            skipped_conflicts.append(
+                f"{plan.autosave_plist_path.name} differs and on_conflict=skip — NOT updated "
+                f"(re-run with backup/overwrite to refresh the autosave plist)"
             )
 
     # 4) ~/.tmux.conf — migrate (back up an inline-settings original) then wire the managed region.
@@ -2528,6 +2562,13 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
         plan,
         boot_load_safe=not (boot_plist_conflicted or boot_script_conflicted or conf_conflicted),
         boot_plist_changed=boot_plist_changed,
+        # rig_conf_conflicted too: a conflict-skipped STALE rig.tmux.conf may still carry the old
+        # nonzero @continuum-save-interval, so bootstrapping the autosave agent while continuum is
+        # ALSO still saving reintroduces the two-writer race this feature removes (codex P2).
+        autosave_load_safe=not (
+            autosave_plist_conflicted or autosave_script_conflicted or rig_conf_conflicted
+        ),
+        autosave_plist_changed=autosave_plist_changed,
     )
     if act_changes:
         changed = True
@@ -2558,7 +2599,12 @@ def _do_provision_tmux(action: Action, on_conflict: str) -> ActionResult:
 
 
 def _tmux_activate(
-    plan, *, boot_load_safe: bool = True, boot_plist_changed: bool = False
+    plan,
+    *,
+    boot_load_safe: bool = True,
+    boot_plist_changed: bool = False,
+    autosave_load_safe: bool = True,
+    autosave_plist_changed: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Bring the rig-managed tmux LIVE on this machine (DEFECTS 1/4/5/6).
 
@@ -2579,11 +2625,20 @@ def _tmux_activate(
     agent every run (re-spawning a ``main`` session on the live server) and a transient load failure
     can't disable a working unchanged agent (review findings).
 
+    ``autosave_load_safe`` / ``autosave_plist_changed`` (caller-supplied): the exact same
+    conflict-skip-suppression and only-reload-when-changed contract as the boot pair, applied to the
+    INDEPENDENT autosave agent (#138). The boot agent uses the LEGACY ``launchctl load -w`` (it is a
+    login-fired ``RunAtLoad`` job whose established pattern is the load-w path); the autosave agent
+    uses the MODERN gui-domain ``bootstrap``/``bootout`` (matching the stateless-daemon pattern
+    ``tg_ctl`` uses) because it must (re)load NOW to start saving the current server without a reboot.
+
     Steps, each idempotent and non-fatal (a clean machine must end up FULLY working with zero
     manual steps; a partial/offline machine degrades, never aborts the whole apply):
 
       4) create ``~/.tmux/resurrect`` so resurrect can write its ``tmux_resurrect_*.txt``
          snapshot (absent dir = no snapshot ever written = nothing to restore on reboot).
+      1b) on macOS, gui-domain ``bootstrap`` the INDEPENDENT autosave agent so periodic saving
+         starts immediately (it saves even a server started under a bad PATH — no reboot needed).
       6) clone the canonical tmux plugins (tpm + resurrect + continuum) into ``~/.tmux/plugins``
          if MISSING (default branch, one-shot, never auto-upgraded — see tmux.PLUGINS' trust
          contract), so the ``@plugin`` declarations actually resolve on a clean machine.
@@ -2680,6 +2735,36 @@ def _tmux_activate(
         else:
             # already loaded + safe + unchanged → rig's boot is in place (steady-state re-apply).
             rig_boot_active = True
+
+    # 1b) bootstrap the INDEPENDENT autosave agent (#138). Unlike the boot agent (RunAtLoad once at
+    # login), this is a stateless periodic daemon — safe to (re)load NOW (like tg_ctl / the models
+    # schedule): no live user session rides on it, and loading it makes autosave start immediately
+    # (it saves even the CURRENT server, no reboot needed). Uses the modern gui-domain
+    # bootstrap/bootout. Suppressed when the plist/script was conflict-skipped (stale).
+    if plan.autosave_enabled and sys.platform == "darwin" and plan.autosave_plist_path.is_file():
+        pstr = str(plan.autosave_plist_path)
+        if not autosave_load_safe:
+            warnings.append(
+                "autosave agent NOT loaded — its plist or script was conflict-skipped (stale); "
+                "re-run with on_conflict=backup/overwrite to load it"
+            )
+        elif not _launchctl_gui_loaded(plan.autosave_label):
+            rc = _launchctl_bootstrap(pstr)
+            if rc != 0:
+                warnings.append(f"autosave agent NOT loaded (launchctl bootstrap rc={rc})")
+            else:
+                changes.append(f"bootstrapped autosave agent {plan.autosave_plist_path.name}")
+        elif autosave_plist_changed:
+            _launchctl_bootout(pstr)
+            rc = _launchctl_bootstrap(pstr)
+            if rc != 0:
+                warnings.append(
+                    f"autosave agent reload FAILED (launchctl rc={rc}); re-run `rig apply` or "
+                    f"`launchctl bootstrap {_gui_domain()} {pstr}`"
+                )
+            else:
+                changes.append(f"reloaded autosave agent {plan.autosave_plist_path.name} (plist changed)")
+        # already loaded + unchanged → steady-state no-op.
 
     # 5) clean continuum's stale macOS boot (Login Items + old Tmux.Start agent) — macOS only, only
     # when rig owns boot (don't remove the user's own autostart if they opted out of rig boot), AND

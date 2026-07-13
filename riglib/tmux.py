@@ -131,15 +131,29 @@ BOOT_NAME = "tmux-boot.sh"
 # a black box — a half-working boot (server up but restore silently skipped) leaves no trace.
 BOOT_OUT_LOG_NAME = "tmux-boot.out.log"
 BOOT_ERR_LOG_NAME = "tmux-boot.err.log"
-# A Homebrew-inclusive PATH for the boot agent. launchd hands a GUI agent a minimal PATH
-# (/usr/bin:/bin:/usr/sbin:/sbin) with NO Homebrew bin dir. The boot script survives that (it
-# runs tmux by absolute path), but the tmux SERVER it spawns inherits this PATH, and tmux's
-# continuum/resurrect hooks run via `run-shell` and call BARE `tmux` — not found → the
-# `@continuum-restore` option lookup fails, defaults to `off`, and restore is silently skipped.
-# Injecting this PATH into the plist's EnvironmentVariables makes the server + every hook child
-# resolve tmux, so continuum-restore actually fires on a cold boot. `{tmux_dir}` is the resolved
-# tmux binary's own directory (correct on Apple-silicon AND Intel brew, not a blind hard-code).
-_BOOT_PATH_TEMPLATE = "{tmux_dir}:/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# The independent autosave LaunchAgent (#138) — a periodic saver DECOUPLED from continuum's
+# status-right hook. It calls resurrect `save.sh` directly under a controlled PATH, so autosave
+# survives a bad-PATH server, a wiped status-right, and a tpm re-init — the fragile chain that let
+# autosave silently die for a month. When it is on, continuum's own autosave is disabled
+# (@continuum-save-interval 0) so there is exactly ONE authoritative saver (no racing writers).
+AUTOSAVE_NAME = "tmux-autosave.sh"
+AUTOSAVE_HEALTH_NAME = "tmux-autosave-health.json"
+AUTOSAVE_OUT_LOG_NAME = "tmux-autosave.out.log"
+AUTOSAVE_ERR_LOG_NAME = "tmux-autosave.err.log"
+DEFAULT_AUTOSAVE_LABEL = "ai.hyperide.tmux-autosave"
+DEFAULT_STALE_AFTER = 45  # minutes: doctor/status flags a mature live server with no fresher save.
+
+# A Homebrew-inclusive PATH for the tmux LaunchAgents (boot + autosave). launchd hands a GUI agent
+# a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) with NO Homebrew bin dir. The boot script survives
+# that (it runs tmux by absolute path), but the tmux SERVER it spawns inherits this PATH, and
+# tmux's continuum/resurrect hooks run via `run-shell` and call BARE `tmux` — not found → the
+# `@continuum-restore` lookup fails, defaults to `off`, and restore is silently skipped. Injecting
+# this PATH into the plist's EnvironmentVariables makes the server + every hook child resolve tmux.
+# `{tmux_dir}` is the resolved tmux binary's own directory (correct on Apple-silicon AND Intel
+# brew). No user-writable dir (e.g. ~/.local/bin) is included — a periodic launchd agent must not
+# resolve executables from a user-writable PATH entry (execution-hijack seam, Sol #138).
+_LAUNCH_AGENT_PATH_TEMPLATE = "{tmux_dir}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # The base backup suffix for the migrated ~/.tmux.conf. The runner writes a UNIQUE timestamped
 # backup (`.rig-bak-<UTC>`) on every migrating apply (see runner._timestamped_backup_path), so a
@@ -179,6 +193,10 @@ class TmuxPlan:
     # would bake a different dir across invocations → permanent drift flap (same determinism
     # contract as login_shell — resolve at plan time, from a stable source).
     tmux_bin: str
+    # ── independent autosave agent (#138) ────────────────────────────────────────────
+    autosave_enabled: bool
+    autosave_label: str
+    autosave_stale_after: int  # minutes; the freshness threshold rig doctor/status checks.
 
     # ── resolved artifact paths ──────────────────────────────────────────────────────
     @property
@@ -218,7 +236,47 @@ class TmuxPlan:
             scripts.append((self.attach_path, self.render_attach_script()))
         if self.boot_enabled:
             scripts.append((self.boot_script_path, self.render_boot_script()))
+        if self.autosave_enabled:
+            scripts.append((self.autosave_script_path, self.render_autosave_script()))
         return scripts
+
+    # ── independent autosave agent (#138) resolved paths ──────────────────────────────
+    @property
+    def autosave_script_path(self) -> Path:
+        return self.generated_dir / AUTOSAVE_NAME
+
+    @property
+    def autosave_health_path(self) -> Path:
+        return self.generated_dir / AUTOSAVE_HEALTH_NAME
+
+    @property
+    def autosave_out_log_path(self) -> Path:
+        return self.generated_dir / AUTOSAVE_OUT_LOG_NAME
+
+    @property
+    def autosave_err_log_path(self) -> Path:
+        return self.generated_dir / AUTOSAVE_ERR_LOG_NAME
+
+    @property
+    def autosave_plist_path(self) -> Path:
+        return self.home / "Library" / "LaunchAgents" / f"{self.autosave_label}.plist"
+
+    @property
+    def autosave_path_env(self) -> str:
+        """Same Homebrew-inclusive, no-user-writable PATH as the boot agent (one source) — so the
+        wrapper and the resurrect save script it calls resolve every tool under launchd."""
+        return self.boot_path_env
+
+    def launch_agent_env(self) -> dict[str, str]:
+        """The EnvironmentVariables both tmux LaunchAgents (boot + autosave) inject — ONE source.
+
+        PATH: Homebrew-inclusive (so run-shell hooks + the saver resolve tmux). HOME: the resolved
+        home. LANG: a UTF-8 locale — CRITICAL and easy to miss. launchd hands an agent NO locale;
+        tmux-resurrect's save.sh (and restore parsing) run awk/sed over TAB-delimited data, which
+        under the C locale MANGLE the output → a corrupt ~9-byte snapshot that then clobbers `last`.
+        With a UTF-8 LANG the save is written in full. (Proven live: no LANG → 9 bytes; LANG → 681.)
+        """
+        return {"PATH": self.boot_path_env, "HOME": str(self.home), "LANG": "en_US.UTF-8"}
 
     @property
     def boot_plist_path(self) -> Path:
@@ -238,8 +296,7 @@ class TmuxPlan:
         hooks (running under the tmux server's inherited env) can resolve a BARE ``tmux`` — without
         it continuum-restore silently no-ops under launchd's minimal PATH. See _BOOT_PATH_TEMPLATE.
         """
-        tmux_dir = str(Path(self.tmux_bin).parent)
-        return _BOOT_PATH_TEMPLATE.format(tmux_dir=tmux_dir, home=str(self.home))
+        return _LAUNCH_AGENT_PATH_TEMPLATE.format(tmux_dir=str(Path(self.tmux_bin).parent))
 
     @property
     def backup_path(self) -> Path:
@@ -286,7 +343,12 @@ class TmuxPlan:
         # the option (omitting it would let the stale inline `'on'` win, and drift wouldn't see it).
         out.append(f"set -g @resurrect-capture-pane-contents '{'on' if self.capture_pane_contents else 'off'}'")
         out.append(f"set -g @continuum-restore '{'on' if self.continuum_restore else 'off'}'")
-        out.append(f"set -g @continuum-save-interval '{self.save_interval}'")
+        # When the INDEPENDENT autosave agent (#138) owns saving, disable continuum's own
+        # status-right autosave (interval 0) so there is exactly ONE authoritative saver — no
+        # racing writers fighting over the `last` symlink / resurrect's lock. continuum still
+        # RESTORES on boot; only its (fragile, status-right-driven) SAVE is turned off.
+        effective_interval = 0 if self.autosave_enabled else self.save_interval
+        out.append(f"set -g @continuum-save-interval '{effective_interval}'")
         # DEFECT 3 (the reboot bug): resurrect restores panes with a NON-login shell
         # (its `default-command ''`), so ~/.zprofile (PATH, etc.) is NOT sourced → restored panes
         # have a broken env. Set a LOGIN-shell default-command so every (new AND restored) pane
@@ -679,14 +741,124 @@ fi
         payload = {
             "Label": self.boot_label,
             "ProgramArguments": [str(self.boot_script_path)],
-            "EnvironmentVariables": {
-                "PATH": self.boot_path_env,
-                "HOME": str(self.home),
-            },
+            "EnvironmentVariables": self.launch_agent_env(),
             "RunAtLoad": True,
             "KeepAlive": False,
             "StandardOutPath": str(self.boot_out_log_path),
             "StandardErrorPath": str(self.boot_err_log_path),
+        }
+        return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
+
+    # ── the independent autosave agent (#138) ─────────────────────────────────────────
+    def render_autosave_script(self) -> str:
+        """The wrapper the autosave LaunchAgent runs every interval — an INDEPENDENT saver that
+        does NOT depend on continuum's status-right hook (the fragile chain that silently died).
+
+        Robustness (brainstorm #138 / Sol): absolute tmux path (never trust PATH even here), an own
+        single-flight lock, no-server → clean exit, require >=1 real pane, a DEGENERATE-SAVE GUARD
+        (a bare boot-time ``main`` never clobbers a richer prior snapshot), post-save validation,
+        and a health-state file + one log line so a silent month-long death becomes impossible.
+        """
+        tmux_q = shlex.quote(self.tmux_bin)
+        session_q = shlex.quote(self.anti_sprawl_session)
+        health_q = shlex.quote(str(self.autosave_health_path))
+        lock_q = shlex.quote(str(self.generated_dir / ".tmux-autosave.lock"))
+        stale_secs = self.autosave_stale_after * 60
+        return f"""#!/bin/bash
+# rig-managed: INDEPENDENT tmux autosave — GENERATED by rig from rig.yaml. Do not hand-edit.
+# Runs every interval via the launchd agent. Decoupled from continuum's status-right hook so a
+# bad-PATH server / wiped status-right / tpm re-init can't silently disable autosave (#138).
+set -uo pipefail
+TMUX_BIN={tmux_q}
+SESSION={session_q}
+HEALTH={health_q}
+LOCK={lock_q}
+SAVE="$HOME/.tmux/plugins/tmux-resurrect/scripts/save.sh"
+STALE_SECS={stale_secs}
+
+# Resolve the resurrect dir EXACTLY as tmux-resurrect's helpers.sh does — honor an explicit
+# @resurrect-dir option, else the legacy `~/.tmux/resurrect`-if-it-exists quirk, else XDG — so we
+# read the prior snapshot and look for the newly-written one in the SAME dir resurrect uses. (A
+# naive XDG-only guess reads the wrong dir on a machine that has a legacy ~/.tmux/resurrect.)
+resolve_rdir() {{
+  local opt
+  opt=$("$TMUX_BIN" show-option -gqv @resurrect-dir 2>/dev/null || true)
+  if [ -n "$opt" ]; then printf '%s' "${{opt/#\\~/$HOME}}"; return; fi
+  if [ -d "$HOME/.tmux/resurrect" ]; then printf '%s' "$HOME/.tmux/resurrect"; return; fi
+  printf '%s' "${{XDG_DATA_HOME:-$HOME/.local/share}}/tmux/resurrect"
+}}
+
+now() {{ date -u +%Y-%m-%dT%H:%M:%SZ; }}
+log() {{ printf '%s %s\\n' "$(now)" "$*"; }}
+# JSON-escape backslash + double-quote so a snapshot name / error string can't break the health
+# file a future `rig doctor` parses.
+json_esc() {{ local s="$1"; s="${{s//\\\\/\\\\\\\\}}"; s="${{s//\\"/\\\\\\"}}"; printf '%s' "$s"; }}
+health() {{ printf '{{"ts":"%s","result":"%s","detail":"%s"}}\\n' "$(now)" "$1" "$(json_esc "$2")" > "$HEALTH.tmp" 2>/dev/null && mv "$HEALTH.tmp" "$HEALTH" 2>/dev/null || true; }}
+# grep -c already prints a count (0 when none); on exit>0 (missing file) fall back to 0 WITHOUT
+# letting grep's own "0" line through — `grep -c || echo 0` would print two lines and break the
+# integer test that reads this.
+count_lines() {{ local n; n=$("$@" 2>/dev/null | wc -l | tr -d ' '); printf '%s' "${{n:-0}}"; }}
+count_panes() {{ local n; n=$(grep -c '^pane' "$1" 2>/dev/null); printf '%s' "${{n:-0}}"; }}
+
+# single-flight: mkdir is an atomic lock (portable, no flock dependency).
+if ! mkdir "$LOCK" 2>/dev/null; then log "busy: lock held, skipping"; health busy "lock held"; exit 0; fi
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
+# no server → nothing to save (a cold boot with no tmux yet is NORMAL, not an error).
+if ! "$TMUX_BIN" has-session 2>/dev/null; then log "no server, nothing to save"; health inactive "no server"; exit 0; fi
+
+RDIR=$(resolve_rdir)
+mkdir -p "$RDIR" 2>/dev/null || true
+
+panes=$(count_lines "$TMUX_BIN" list-panes -a)
+sessions=$(count_lines "$TMUX_BIN" list-sessions)
+if [ "${{panes:-0}}" -lt 1 ] || [ "${{sessions:-0}}" -lt 1 ]; then log "empty server, skip"; health skip "no panes"; exit 0; fi
+
+# DEGENERATE-SAVE GUARD: a boot-time server with ONLY the synthetic anti-sprawl session and a
+# single pane must NOT overwrite a richer prior snapshot (e.g. the month-old real layout).
+# -Fx: match the session name as a FIXED whole line (a name with regex metachars can't misfire).
+non_canon=$("$TMUX_BIN" list-sessions -F '#{{session_name}}' 2>/dev/null | grep -vFx "$SESSION" | wc -l | tr -d ' ')
+prev_panes=0
+if [ -e "$RDIR/last" ]; then prev_panes=$(count_panes "$RDIR/last"); fi
+if [ "${{non_canon:-0}}" -eq 0 ] && [ "${{panes:-0}}" -le 1 ] && [ "${{prev_panes:-0}}" -gt "${{panes:-0}}" ]; then
+  log "degenerate: only bare '$SESSION' ($panes pane) vs richer prior ($prev_panes) — NOT saving"
+  health skip "degenerate-guard"
+  exit 0
+fi
+
+# do the save via resurrect's own script (absolute path); the plist PATH already resolves tmux.
+if [ ! -x "$SAVE" ]; then log "ERROR resurrect save.sh missing at $SAVE"; health error "save.sh missing"; exit 1; fi
+"$SAVE" quiet || log "WARN resurrect save.sh exited $? — checking for a snapshot anyway"
+newest=$(ls -t "$RDIR"/tmux_resurrect_*.txt 2>/dev/null | head -1)
+if [ -n "$newest" ] && [ -s "$newest" ]; then
+  age=$(( $(date +%s) - $(stat -f %m "$newest" 2>/dev/null || stat -c %Y "$newest" 2>/dev/null || echo 0) ))
+  if [ "$age" -gt "$STALE_SECS" ]; then log "WARN saved but newest snapshot age ${{age}}s > ${{STALE_SECS}}s"; fi
+  log "saved $(basename "$newest") panes=$panes sessions=$sessions"
+  health ok "$(basename "$newest")"
+else
+  log "ERROR save produced no snapshot file"; health error "no file written"; exit 1
+fi
+"""
+
+    def render_autosave_plist(self) -> str:
+        """The launchd agent that runs the autosave wrapper every ``save_interval`` minutes.
+
+        Independent control plane (brainstorm #138): ``StartInterval`` fires regardless of tmux's
+        status rendering; ``EnvironmentVariables.PATH`` is Homebrew-inclusive so the wrapper +
+        resurrect ``save.sh`` resolve every tool; ``StandardOut/ErrPath`` make failures visible.
+        Unlike the boot agent (``RunAtLoad`` once at login), this one runs periodically for the
+        life of the session, so it also saves a server that came up under a bad PATH.
+        """
+        import plistlib
+
+        payload = {
+            "Label": self.autosave_label,
+            "ProgramArguments": [str(self.autosave_script_path)],
+            "EnvironmentVariables": self.launch_agent_env(),
+            "StartInterval": self.save_interval * 60,
+            "RunAtLoad": True,
+            "StandardOutPath": str(self.autosave_out_log_path),
+            "StandardErrorPath": str(self.autosave_err_log_path),
         }
         return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
 
@@ -773,6 +945,7 @@ def build_tmux(
     anti_sprawl: dict | None = None,
     boot: dict | None = None,
     login_shell: dict | None = None,
+    autosave: dict | None = None,
 ) -> TmuxPlan:
     """Resolve the desired :class:`TmuxPlan` from the (already-validated) tmux config block.
 
@@ -789,6 +962,7 @@ def build_tmux(
     anti_sprawl = anti_sprawl or {}
     boot = boot or {}
     login_shell = login_shell or {}
+    autosave = autosave or {}
 
     def _expand(p: str | Path) -> Path:
         s = str(p)
@@ -833,6 +1007,9 @@ def build_tmux(
         login_shell=str(_knob(login_shell, "shell", "")),
         # Resolve tmux ONCE here (plan time) so every render is deterministic across invocations.
         tmux_bin=_resolve_tmux_bin(),
+        autosave_enabled=bool(_knob(autosave, "enabled", True)),
+        autosave_label=str(_knob(autosave, "label", DEFAULT_AUTOSAVE_LABEL)),
+        autosave_stale_after=int(_knob(autosave, "stale_after", DEFAULT_STALE_AFTER)),
     )
 
 
