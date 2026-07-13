@@ -1077,6 +1077,50 @@
       },
       "additionalProperties": false
     },
+    "spotlight": {
+      "type": "object",
+      "description": "macOS Spotlight-exclude: drop .metadata_never_index into dependency/build dirs + a launchd re-sweep agent.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the Spotlight-exclude sweep + agent (opt-in, macOS)",
+          "default": false
+        },
+        "roots": {
+          "type": "array",
+          "description": "dev roots to sweep (default ~/work, ~/xp)",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "type": "array",
+          "description": "dependency/build dir basenames to exclude (REPLACES the default set)",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extra": {
+          "type": "array",
+          "description": "extra dir basenames to exclude (ADDS to the default set)",
+          "items": {
+            "type": "string"
+          }
+        },
+        "label": {
+          "type": "string",
+          "description": "the launchd agent label",
+          "default": "ai.hyperide.spotlight-exclude"
+        },
+        "max_depth": {
+          "type": "integer",
+          "description": "walk-depth cap below each root",
+          "default": 8,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "tools": {
       "type": "object",
       "description": "the personal CLI tool ecosystem (tg/review/task/draw/…) rig installs + advertises at apply, by running each tool's own install.sh. rig also keeps a provisioned checkout FRESH: if a tool repo ships scripts/deploy.sh, apply runs it (ff-only git pull) even when already installed — opt-in per tool, non-fatal. Default OFF (opt-in): list tools under items. A per-MACHINE concern — belongs in the GLOBAL layer, not a committed rig.yaml.",

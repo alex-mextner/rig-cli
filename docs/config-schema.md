@@ -1497,6 +1497,61 @@ reconciles. Shown in the **global** section of status (not the repo section).
 
 ---
 
+## `spotlight`
+
+Keeps **macOS Spotlight** (`mds_stores`) from indexing **dependency/build dirs** — the gigabytes of
+`node_modules` / `dist` / `target` / `.venv` junk that otherwise get re-scanned after every reboot,
+thrashing the machine. The mechanism is the universal, per-directory opt-out macOS honors: an empty
+sentinel file named **`.metadata_never_index`** in a directory tells Spotlight to skip that
+directory's contents — no global Search-Privacy list, and crucially **not** `mdutil -i off` (which
+would kill Spotlight wholesale; rig never does that). rig sweeps the configured dev roots dropping
+the sentinel into every matched dir, and installs a **launchd re-sweep agent** (RunAtLoad + a daily
+`StartCalendarInterval`, with StandardOut/ErrorPath logging) so **new** projects are covered without
+any manual step. This is **GLOBAL, macOS-only, opt-in config** — it belongs in the global rig layer
+(`~/.config/rig/config.yaml`) and is **default OFF** (a `spotlight:` block with `enabled: true`
+turns it on). On a non-macOS host the sweep still drops sentinels but no launchd agent is written.
+
+```yaml
+spotlight:
+  enabled: true                 # provision the sweep + re-sweep agent (default OFF; opt-in, macOS)
+  # roots:                      # dev roots to sweep (default: ~/work, ~/xp)
+  #   - ~/work
+  #   - ~/xp
+  # deny:                       # REPLACE the default excluded dir basenames (node_modules/dist/…)
+  #   - node_modules
+  # extra:                      # ADD extra excluded dir basenames on top of the default set
+  #   - .cache
+  # label: ai.hyperide.spotlight-exclude   # the launchd agent label
+  # max_depth: 8                # walk-depth cap below each root
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | provision the sweep + launchd re-sweep agent (opt-in, macOS) |
+| `roots` | list[str] | `["~/work", "~/xp"]` | dev roots swept for dependency/build dirs |
+| `deny` | list[str] | *(the built-in set)* | dir **basenames** excluded; a non-empty list **REPLACES** the default set |
+| `extra` | list[str] | *(none)* | dir basenames **added** to the default set |
+| `label` | str | `ai.hyperide.spotlight-exclude` | the launchd agent Label / plist filename stem |
+| `max_depth` | int | `8` | walk-depth cap below each root (matched dirs are pruned, never descended) |
+
+The default `deny` set covers frontend AND backend: `node_modules`, `dist`, `build`, `.next`, `out`,
+`coverage`, `.turbo`, `.nuxt`, `.svelte-kit`, `.parcel-cache`, `.cache`, `target`, `.cargo`, `.venv`,
+`venv`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `vendor`, `.gradle`,
+`DerivedData`. The walk **prunes** a matched dir (it never descends into a `node_modules` it just
+sentinelled) and never forces a full-volume reindex — the sentinels take effect as Spotlight
+re-crawls (a forced reindex would be the opposite of the goal).
+
+**The re-sweep agent.** `rig apply` writes `~/Library/LaunchAgents/<label>.plist` and
+`launchctl load`s it. The plist runs `rig spotlight-sweep` (the same sweep, headless) at login and
+daily. `RIG_SPOTLIGHT_DRY_RUN=1` writes the plist but skips the live `launchctl load` (used by
+tests/CI). `rig spotlight-sweep` is also runnable by hand to re-cover new dirs immediately.
+
+**Verification.** After `rig apply`/`rig init`, the post-apply **verify** framework confirms a
+sample of matched dirs carry the sentinel AND the launchd agent is loaded (see the verify note at
+the top of this doc's companion — every provisioner declares its own check).
+
+---
+
 ## `tools`
 
 rig's **primary purpose**: install + advertise the **personal CLI ecosystem** — `tg`, `review`,

@@ -249,6 +249,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("install-skill", help="register the rig agent skill with harnesses")
 
+    # `spotlight-sweep` runs the Spotlight-exclude sweep once (the command the launchd re-sweep
+    # agent invokes). It reads the merged `spotlight:` config and drops .metadata_never_index into
+    # dependency/build dirs under the configured roots. Idempotent; no launchd mutation.
+    ss = sub.add_parser(
+        "spotlight-sweep",
+        help="drop .metadata_never_index into dependency/build dirs under the configured roots (macOS Spotlight-exclude)",
+    )
+    ss.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
+    ss.add_argument("--config", help="config file (default: ./rig.yaml + global)")
+
     # `setup` IS the interactive wizard (not an alias for init/apply): in a TTY it shows what is
     # enabled across every reconciled area, edits the local rig.yaml AND the global config, then
     # applies; with no TTY it prints USAGE for init/apply/config (it never runs a half-wizard).
@@ -412,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         "config": cmd_config,
         "schema": cmd_schema,
         "install-skill": cmd_install_skill,
+        "spotlight-sweep": cmd_spotlight_sweep,
         "setup": cmd_setup_wizard,  # setup = the interactive config wizard (distinct from init)
         "config-web": cmd_config_web,  # web UI over the config engine; lifecycle via agenttools-service
         "evolve": cmd_evolve,  # project evolution portal; lifecycle via agenttools-service
@@ -578,7 +589,69 @@ def _print_results(report) -> None:
     print(_bold(f"\nSummary: {summary}"))
 
 
+def _run_and_print_verify(plan, applied=None) -> bool:
+    """Run the post-apply verify framework over ``plan`` and print each check. Returns ok/not-ok.
+
+    Runs only checks for provisioners actually in the plan. Skipped checks (non-macOS / dry-run
+    launchd) never fail the result — only a real FALSE does. This is the prove-it-worked step:
+    every provisioner that declares a verify() is confirmed to have taken effect.
+    """
+    from .verify import verify_plan
+
+    report = verify_plan(plan, applied)
+    if not report.results:
+        return True
+    icon = {"pass": _ok("✔"), "FAIL": _err("✗"), "skipped": _dim("·")}
+    print(_bold("\nVerify:"))
+    for r in report.results:
+        print(f"  {icon.get(r.state, '?')} {r.category}/{r.item}: {r.evidence}")
+    summary = ", ".join(f"{k}={v}" for k, v in sorted(report.summary().items()))
+    print(_bold(f"Verify summary: {summary}"))
+    if not report.ok:
+        print(_err(f"verify: {len(report.failures)} check(s) FAILED — provisioned artifact did not take effect"))
+    return report.ok
+
+
 # ── commands ──────────────────────────────────────────────────────────────────────
+def cmd_spotlight_sweep(args: argparse.Namespace) -> int:
+    """Run the Spotlight-exclude sweep once (the launchd re-sweep agent's command).
+
+    Reads the merged ``spotlight:`` config, resolves roots + denylist, and drops the sentinel into
+    every matched dependency/build dir. Idempotent; touches no launchd state. Exit 0 on success.
+    Deliberately NOT gated by ``RIG_SPOTLIGHT_DRY_RUN`` (unlike the apply-time provisioner): this
+    command IS the sweep — a dry-run of it would be a no-op.
+    """
+    from . import spotlight
+    from .config import ConfigError, load
+
+    try:
+        env_root, explicit = _sweep_config_context(args)
+        loaded = load(env_root, explicit_config=explicit, include_repo=True)
+    except ConfigError as exc:
+        print(_err_block(exc))
+        return 2
+    s = loaded.data.get("spotlight")
+    if not isinstance(s, dict):
+        s = {}
+    roots = spotlight.resolve_roots(s.get("roots"))
+    deny = spotlight.resolve_deny(s.get("deny"), s.get("extra"))
+    max_depth = int(s.get("max_depth", spotlight.DEFAULT_MAX_DEPTH))
+    result = spotlight.perform_sweep(roots, deny, max_depth)
+    print(f"spotlight-sweep: {result.summary()}")
+    for missing in result.roots_missing:
+        print(_dim(f"  (root not present: {missing})"))
+    return 0
+
+
+def _sweep_config_context(args: argparse.Namespace) -> tuple[Path, Path | None]:
+    """Resolve (repo_root, explicit_config) for the sweep, reusing the shared config-context helpers."""
+    from .detect import detect_environment
+
+    env = detect_environment(Path(args.cwd).resolve())
+    explicit = _resolve_explicit_config(env, getattr(args, "config", None))
+    return env.repo_root, explicit
+
+
 def cmd_codex(args: argparse.Namespace) -> int:
     if not getattr(args, "codex_command", None):
         args._codex_parser.print_help()
@@ -875,7 +948,8 @@ def _setup_headless(args: argparse.Namespace, *, use_default: bool) -> int:
         print(_bold(f"\nApplying {len(plan)} action(s)  [on_conflict={plan.on_conflict}]…"))
         report = run_plan(plan)
         _print_results(report)
-        return 1 if report.errors else 0
+        verify_ok = _run_and_print_verify(plan, report.results)
+        return 1 if (report.errors or not verify_ok) else 0
 
     # default: the plan is a PREVIEW of `rig apply` — init only scaffolds the config.
     _print_plan(plan, full=getattr(args, "plan", False), preview=True)
@@ -934,7 +1008,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return 0
     report = run_plan(plan)
     _print_results(report)
-    return 1 if report.errors else 0
+    verify_ok = _run_and_print_verify(plan, report.results)
+    return 1 if (report.errors or not verify_ok) else 0
 
 
 def _harness_settings_paths(plan) -> list[Path]:

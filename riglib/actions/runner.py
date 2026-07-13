@@ -5552,6 +5552,65 @@ def _do_provision_global_excludes(action: Action, on_conflict: str) -> ActionRes
     return ActionResult(action, "created" if r.state == "create" else "updated", f"gitignore: {'; '.join(notes)}")
 
 
+def _spotlight_dry_run() -> bool:
+    """Honor RIG_SPOTLIGHT_DRY_RUN — drop sentinels + write the plist but DON'T ``launchctl load``.
+
+    For CI / containers / smoke where a real ``launchctl load`` (a per-user daemon mutation HOME
+    can't redirect) is unwanted. Mirrors ``RIG_SCHEDULE_DRY_RUN`` / ``RIG_TMUX_DRY_RUN``.
+    """
+    return os.environ.get("RIG_SPOTLIGHT_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+
+
+def _do_provision_spotlight(action: Action, on_conflict: str) -> ActionResult:
+    """Sweep the dev roots dropping ``.metadata_never_index`` + install the periodic re-sweep agent.
+
+    Two steps: (1) run the shared sweep (idempotent — a dir that already has the sentinel is left
+    alone); (2) on macOS, write + ``launchctl load`` the daily/RunAtLoad re-sweep LaunchAgent (with
+    StandardOut/ErrorPath logging). ``RIG_SPOTLIGHT_DRY_RUN`` writes the plist but skips the live
+    load. The sweep NEVER forces a full-volume reindex — the sentinels take effect as Spotlight
+    re-crawls, which is the whole point (a forced reindex would be the opposite of the goal).
+    """
+    from .. import spotlight
+
+    opts = action.options
+    roots, deny, max_depth = spotlight.sweep_args_from_options(opts)
+    label = str(opts.get("label") or spotlight.DEFAULT_BOOT_LABEL)
+    sweep_cmd = tuple(str(a) for a in opts.get("sweep_cmd", spotlight.default_sweep_cmd()))
+
+    result = spotlight.perform_sweep(roots, deny, max_depth)
+    notes = [f"spotlight: sweep {result.summary()}"]
+
+    plan = spotlight.build_spotlight(
+        roots=roots, deny=deny, sweep_cmd=sweep_cmd, label=label, max_depth=max_depth
+    )
+    if sys.platform != "darwin" or plan.plist_path is None:
+        return ActionResult(action, "created" if result.created else "skipped",
+                            f"{'; '.join(notes)} (non-macOS: no launchd agent)")
+
+    plist_path = plan.plist_path
+    desired = plan.plist_xml()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    already = plist_path.is_file()
+    current = plist_path.read_text(encoding="utf-8") if already else ""
+    if already and current == desired and _launchctl_loaded(label):
+        notes.append(f"launchd agent '{label}' already loaded ({plist_path})")
+        return ActionResult(action, "created" if result.created else "skipped", "; ".join(notes))
+    out = fsutil.write_file(plist_path, desired, on_conflict)
+    if out.status == "skipped" and already and current != desired:
+        notes.append(f"launchd plist {plist_path} differs but on_conflict=skip — left unchanged")
+        return ActionResult(action, "skipped", "; ".join(notes))
+    if _spotlight_dry_run():
+        notes.append(f"wrote plist {plist_path} (RIG_SPOTLIGHT_DRY_RUN — skipped launchctl load)")
+        return ActionResult(action, "created", "; ".join(notes), out.backup)
+    _launchctl("unload", str(plist_path))
+    rc = _launchctl("load", str(plist_path))
+    if rc != 0:
+        notes.append(f"wrote {plist_path} but `launchctl load` failed (rc={rc})")
+        return ActionResult(action, "error", "; ".join(notes), out.backup)
+    notes.append(f"launchd agent '{label}' loaded → daily {plan.human_time} ({plist_path})")
+    return ActionResult(action, "created", "; ".join(notes), out.backup)
+
+
 _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "record_mode": _do_record_mode,
     "copy_skill": _do_copy_skill,
@@ -5575,6 +5634,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_github_browser": _do_provision_github_browser,
     "provision_tmux": _do_provision_tmux,
     "provision_global_excludes": _do_provision_global_excludes,
+    "provision_spotlight": _do_provision_spotlight,
     "provision_tools": _do_provision_tools,
     "provision_tg_ctl": _do_provision_tg_ctl,
 }

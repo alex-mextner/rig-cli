@@ -59,7 +59,7 @@ _HARNESS_KIND_CHOICES: tuple[str, ...] = tuple(
 # ``mode`` (machine-wide agent policy).
 # Routing a GLOBAL-only value into a committed repo rig.yaml is the footgun this map prevents.
 # A category absent here defaults to REPO (the conservative "it lives in the committed file").
-_GLOBAL_ONLY_CATEGORIES = {"gitignore", "tg_ctl", "tmux", "mode"}
+_GLOBAL_ONLY_CATEGORIES = {"gitignore", "spotlight", "tg_ctl", "tmux", "mode"}
 
 
 def writable_layer_for_category(category: str) -> str:
@@ -333,6 +333,16 @@ AREAS: tuple[Area, ...] = (
             _opt("gitignore.enabled", KIND_BOOL, True,
                  "Maintain the managed block in the GLOBAL excludes file so **/.claude/worktrees/ is "
                  "ignored in every repo, with zero per-repo commits. GLOBAL-only — never written to a repo rig.yaml."),
+        ),
+    ),
+    Area(
+        "spotlight", "Spotlight-exclude sweep (macOS)",
+        "Drop .metadata_never_index into dependency/build dirs so Spotlight skips node_modules/dist/etc, plus a launchd re-sweep agent.",
+        (
+            _opt("spotlight.enabled", KIND_BOOL, False,
+                 "Sweep the dev roots dropping .metadata_never_index into node_modules/dist-like dirs, "
+                 "and install a daily launchd re-sweep for new projects. Opt-in, macOS-only. "
+                 "GLOBAL-only — never written to a repo rig.yaml."),
         ),
     ),
     Area(

@@ -64,6 +64,7 @@ AREAS: tuple[Area, ...] = (
     Area("agent_hooks", "agent-hooks (v1 descriptors)", GLOBAL, ("agent_hooks",)),
     Area("git_hooks", "git-hooks dispatcher", GLOBAL, ("git_hooks",)),
     Area("gitignore", "global gitignore excludes", GLOBAL, ("gitignore",)),
+    Area("spotlight", "Spotlight-exclude sweep + agent (macOS)", GLOBAL, ("spotlight",)),
     Area("mcp", "MCP servers", GLOBAL, ("mcp",)),
     # the harness area spans both the auto/permission-mode write AND the cc-hook-bridge wiring —
     # both emit category="harness" (plan.py: apply_harness + register_hook_bridge), so the label
