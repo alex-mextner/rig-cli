@@ -127,6 +127,19 @@ RIG_CONF_NAME = "rig.tmux.conf"
 # continuum-restore never fires). This script does `tmux new-session -d` (which loads the conf
 # → the sourced rig.tmux.conf → continuum → restore) so a cold boot actually comes up restored.
 BOOT_NAME = "tmux-boot.sh"
+# The boot agent's stdout/stderr logs (in the generated dir). Without these the launchd agent is
+# a black box — a half-working boot (server up but restore silently skipped) leaves no trace.
+BOOT_OUT_LOG_NAME = "tmux-boot.out.log"
+BOOT_ERR_LOG_NAME = "tmux-boot.err.log"
+# A Homebrew-inclusive PATH for the boot agent. launchd hands a GUI agent a minimal PATH
+# (/usr/bin:/bin:/usr/sbin:/sbin) with NO Homebrew bin dir. The boot script survives that (it
+# runs tmux by absolute path), but the tmux SERVER it spawns inherits this PATH, and tmux's
+# continuum/resurrect hooks run via `run-shell` and call BARE `tmux` — not found → the
+# `@continuum-restore` option lookup fails, defaults to `off`, and restore is silently skipped.
+# Injecting this PATH into the plist's EnvironmentVariables makes the server + every hook child
+# resolve tmux, so continuum-restore actually fires on a cold boot. `{tmux_dir}` is the resolved
+# tmux binary's own directory (correct on Apple-silicon AND Intel brew, not a blind hard-code).
+_BOOT_PATH_TEMPLATE = "{tmux_dir}:/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # The base backup suffix for the migrated ~/.tmux.conf. The runner writes a UNIQUE timestamped
 # backup (`.rig-bak-<UTC>`) on every migrating apply (see runner._timestamped_backup_path), so a
@@ -159,6 +172,13 @@ class TmuxPlan:
     boot_label: str
     login_shell_enabled: bool
     login_shell: str  # "" → resolve $SHELL at config-eval time in the shell; else a literal path
+    # The tmux binary, resolved ONCE at plan time (build_tmux). Baked here — NOT re-resolved per
+    # render — so `rig apply` and `rig status` (each a fresh plan, possibly under a different
+    # ambient PATH: an interactive shell vs a launchd/cron-spawned status with a minimal PATH)
+    # produce byte-identical boot artifacts. Re-resolving in render_boot_script/boot_path_env
+    # would bake a different dir across invocations → permanent drift flap (same determinism
+    # contract as login_shell — resolve at plan time, from a stable source).
+    tmux_bin: str
 
     # ── resolved artifact paths ──────────────────────────────────────────────────────
     @property
@@ -203,6 +223,23 @@ class TmuxPlan:
     @property
     def boot_plist_path(self) -> Path:
         return self.home / "Library" / "LaunchAgents" / f"{self.boot_label}.plist"
+
+    @property
+    def boot_out_log_path(self) -> Path:
+        return self.generated_dir / BOOT_OUT_LOG_NAME
+
+    @property
+    def boot_err_log_path(self) -> Path:
+        return self.generated_dir / BOOT_ERR_LOG_NAME
+
+    @property
+    def boot_path_env(self) -> str:
+        """Homebrew-inclusive PATH for the boot plist so tmux's continuum/resurrect run-shell
+        hooks (running under the tmux server's inherited env) can resolve a BARE ``tmux`` — without
+        it continuum-restore silently no-ops under launchd's minimal PATH. See _BOOT_PATH_TEMPLATE.
+        """
+        tmux_dir = str(Path(self.tmux_bin).parent)
+        return _BOOT_PATH_TEMPLATE.format(tmux_dir=tmux_dir, home=str(self.home))
 
     @property
     def backup_path(self) -> Path:
@@ -591,7 +628,7 @@ fi
         restored INTO the server. Idempotent: if the canonical session already exists (a warm
         login), it does nothing rather than spawn a duplicate (anti-sprawl at boot).
         """
-        tmux_bin = _resolve_tmux_bin()
+        tmux_bin = self.tmux_bin  # baked at plan time — deterministic across apply/status renders.
         session = shlex.quote(self.anti_sprawl_session)
         # A non-default conf must be passed via `-f` (tmux only auto-loads ~/.tmux.conf), else the
         # boot session starts WITHOUT the managed config → continuum/resurrect never set → no
@@ -626,17 +663,32 @@ fi
         continuum-restore never fires). The script does ``tmux new-session -d`` to load the conf
         and trigger the restore. ``KeepAlive`` is false — we only need it to fire once at login;
         ``rig apply`` ``launchctl load -w``s it so it is enabled across reboots.
+
+        DEFECT (the reboot RESTORE bug): ``EnvironmentVariables.PATH`` is Homebrew-inclusive. A GUI
+        launchd agent otherwise runs with a minimal PATH (``/usr/bin:/bin:/usr/sbin:/sbin``) that
+        the tmux SERVER inherits; tmux's continuum/resurrect ``run-shell`` hooks then call BARE
+        ``tmux`` (not found) → the ``@continuum-restore`` lookup fails → defaults ``off`` → restore
+        SILENTLY skipped. ``StandardOutPath``/``StandardErrorPath`` end the black box: a
+        half-working boot (server up, restore skipped) now leaves a diagnosable log.
         """
         # plistlib gives idiomatic, escape-safe XML (no hand-rolled string concat / injection).
+        # sort_keys=False keeps Label first for readability (both settings render deterministically);
+        # it mirrors tg_ctl's plist so the two managed LaunchAgents read the same shape.
         import plistlib
 
         payload = {
             "Label": self.boot_label,
             "ProgramArguments": [str(self.boot_script_path)],
+            "EnvironmentVariables": {
+                "PATH": self.boot_path_env,
+                "HOME": str(self.home),
+            },
             "RunAtLoad": True,
             "KeepAlive": False,
+            "StandardOutPath": str(self.boot_out_log_path),
+            "StandardErrorPath": str(self.boot_err_log_path),
         }
-        return plistlib.dumps(payload, fmt=plistlib.FMT_XML).decode("utf-8")
+        return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
 
 
 def _resurrect_token(name: str) -> str:
@@ -689,16 +741,22 @@ def resolve_login_shell() -> str:
 
 
 def _resolve_tmux_bin() -> str:
-    """The tmux binary path for the boot plist: prefer PATH, else the first existing common
-    location (Intel /usr/local, Apple-silicon /opt/homebrew, system /usr/bin) — never a blind
-    Apple-silicon hard-code that points at nothing on an Intel/Linux box (codex P2). Falls back
-    to the Apple-silicon path only if none exist (so the plist is still well-formed)."""
-    found = shutil.which("tmux")
-    if found:
-        return found
+    """The tmux binary path for the boot artifacts, resolved from a STABLE, ambient-independent
+    source so ``rig apply`` and ``rig status`` (each a fresh plan, possibly under a different
+    PATH: an interactive shell vs a launchd/cron ``rig status`` with a minimal PATH) resolve the
+    SAME path — no drift flap (the determinism contract ``resolve_login_shell`` also honors).
+
+    The first EXISTING of the fixed common install locations (Apple-silicon /opt/homebrew, Intel
+    /usr/local, system /usr/bin) wins — file existence is invocation-independent, unlike
+    ``shutil.which`` which follows the volatile ambient PATH. ``shutil.which`` is only the LAST
+    resort (a non-standard install dir), and the first fallback path is the final backstop so the
+    plist is always well-formed (never a blind hard-code that points at nothing)."""
     for cand in _TMUX_FALLBACK_PATHS:
         if Path(cand).exists():
             return cand
+    found = shutil.which("tmux")
+    if found:
+        return found
     return _TMUX_FALLBACK_PATHS[0]
 
 
@@ -773,6 +831,8 @@ def build_tmux(
         # An explicit shell override is used verbatim; "" means "resolve $SHELL in the shell at
         # pane-spawn time" (the safe default — the login server inherits the user's $SHELL).
         login_shell=str(_knob(login_shell, "shell", "")),
+        # Resolve tmux ONCE here (plan time) so every render is deterministic across invocations.
+        tmux_bin=_resolve_tmux_bin(),
     )
 
 
