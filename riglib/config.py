@@ -53,6 +53,7 @@ _VALID_TOP_KEYS = {
     "github",
     "tmux",
     "gitignore",
+    "spotlight",
     "tools",
     "tg_ctl",
     "ship_delegator",
@@ -568,6 +569,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_github(data.get("github", {}))
     _validate_tmux(data.get("tmux", {}))
     _validate_gitignore(data.get("gitignore", {}))
+    _validate_spotlight(data.get("spotlight", {}))
     _validate_tools(data.get("tools", {}))
     _validate_tg_ctl(data.get("tg_ctl", {}))
     _validate_ship_delegator(data.get("ship_delegator", {}))
@@ -1575,6 +1577,41 @@ def _validate_gitignore(gi: dict[str, Any]) -> None:
                     f"gitignore.entries may not contain a rig-managed marker line, got {e!r}",
                     schema_path="gitignore.entries",
                 )
+
+
+def _validate_spotlight(s: dict[str, Any]) -> None:
+    """Validate the ``spotlight`` block — the macOS Spotlight-exclude sweep + periodic agent.
+
+    GLOBAL (machine-wide) config: rig drops ``.metadata_never_index`` into dependency/build dirs
+    under the configured dev roots and installs a launchd re-sweep agent. Default **OFF** (opt-in,
+    macOS-specific): an absent/empty block is a no-op. Fail-closed on a non-mapping block, a
+    non-bool ``enabled``, an unknown key, non-string-list ``roots``/``deny``/``extra``, a
+    non-string ``label``, and a non-positive-int ``max_depth``.
+    """
+    if not isinstance(s, dict):
+        raise ConfigError("spotlight must be a mapping", schema_path="spotlight")
+    if not s:
+        return
+    _reject_unknown_keys(s, "spotlight")
+    enabled = s.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"spotlight.enabled must be a bool, got {enabled!r}", schema_path="spotlight.enabled")
+    for key in ("roots", "deny", "extra"):
+        val = s.get(key)
+        if val is not None and (not isinstance(val, list) or not all(isinstance(e, str) for e in val)):
+            raise ConfigError(
+                f"spotlight.{key} must be a list of strings, got {val!r}",
+                schema_path=f"spotlight.{key}",
+            )
+    label = s.get("label")
+    if label is not None and not isinstance(label, str):
+        raise ConfigError(f"spotlight.label must be a string, got {label!r}", schema_path="spotlight.label")
+    max_depth = s.get("max_depth")
+    if max_depth is not None and (isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1):
+        raise ConfigError(
+            f"spotlight.max_depth must be a positive int, got {max_depth!r}",
+            schema_path="spotlight.max_depth",
+        )
 
 
 # The ruleset knobs that are plain booleans (typo + type guard). Listed once so the

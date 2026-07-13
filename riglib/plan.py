@@ -98,7 +98,7 @@ def _agent_hooks_target_for_kind(kind: str) -> str | None:
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_project_tool | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_project_tool | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes | provision_spotlight
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -775,6 +775,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
 
     # ── gitignore (rig-managed block in the GLOBAL git excludes file) ──────────────
     _build_global_excludes(config, plan)
+
+    # ── spotlight (macOS: keep Spotlight from indexing dependency/build dirs) ───────
+    _build_spotlight(config, plan)
 
     # ── tools (the personal CLI ecosystem: tg/review/task/draw/…) ──────────────────
     _build_tools(config, plan)
@@ -1792,6 +1795,52 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
             },
         )
         )
+
+
+def _build_spotlight(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the macOS Spotlight-exclude provisioning, if a ``spotlight`` block enables it.
+
+    Default **OFF** (opt-in, macOS-specific — like ``tmux``/``tools``): an ABSENT, empty, or
+    ``enabled: false`` block emits NO action, so ``rig apply`` on Linux / a non-opted machine
+    never sweeps the filesystem. Alex enables it in the GLOBAL config. It is a per-MACHINE concern
+    (the dev roots on this box), so the block lives in the GLOBAL layer.
+
+    Emits ONE idempotent ``provision_spotlight`` action carrying the resolved roots + denylist +
+    launchd knobs. The runner drops ``.metadata_never_index`` into every matched dir and writes +
+    loads the periodic re-sweep LaunchAgent. The sweep argv is resolved HERE (the current
+    interpreter + ``-m riglib``) so the committed plan is explicit about what launchd runs.
+    """
+    from . import spotlight
+
+    s = config.data.get("spotlight")
+    if s is None or not isinstance(s, dict):
+        return
+    # Default OFF (opt-in): unlike tmux (present-block = opt-in), spotlight requires an EXPLICIT
+    # `enabled: true`. An absent OR empty `spotlight: {}` block provisions nothing — matching the
+    # schema default (`enabled: false`) and the docs, so a stray empty block never sweeps the FS.
+    if not s.get("enabled"):
+        return
+
+    roots = spotlight.resolve_roots(s.get("roots"))
+    deny = spotlight.resolve_deny(s.get("deny"), s.get("extra"))
+    label = str(s.get("label") or spotlight.DEFAULT_BOOT_LABEL)
+    max_depth = int(s.get("max_depth", spotlight.DEFAULT_MAX_DEPTH))
+    plan.actions.append(
+        Action(
+            kind="provision_spotlight",
+            category="spotlight",
+            item="exclude",
+            source=config.repo_root,  # no carrier in agent-tools; rig owns the sweep
+            target=Path(label),  # the launchd label — runner resolves the real plist under HOME
+            options={
+                "roots": [str(r) for r in roots],
+                "deny": sorted(deny),
+                "label": label,
+                "max_depth": max_depth,
+                "sweep_cmd": list(spotlight.default_sweep_cmd()),
+            },
+        )
+    )
 
 
 def _build_project_tools(config: LoadedConfig, plan: InstallPlan) -> None:

@@ -651,6 +651,18 @@ _GITIGNORE_BLOCK = Block(
     },
 )
 
+_SPOTLIGHT_BLOCK = Block(
+    doc="macOS Spotlight-exclude: drop .metadata_never_index into dependency/build dirs + a launchd re-sweep agent.",
+    leaves={
+        "enabled": Leaf("boolean", "provision the Spotlight-exclude sweep + agent (opt-in, macOS)", default=False),
+        "roots": Leaf("array", "dev roots to sweep (default ~/work, ~/xp)", items_type="string"),
+        "deny": Leaf("array", "dependency/build dir basenames to exclude (REPLACES the default set)", items_type="string"),
+        "extra": Leaf("array", "extra dir basenames to exclude (ADDS to the default set)", items_type="string"),
+        "label": Leaf("string", "the launchd agent label", default="ai.hyperide.spotlight-exclude"),
+        "max_depth": Leaf("integer", "walk-depth cap below each root", default=8, minimum=1),
+    },
+)
+
 _SHIP_DELEGATOR_BLOCK = Block(
     doc="a per-repo .claude/scripts/pr-ship.sh delegator so `gh ship` works in this repo (ignored in .git/info/exclude).",
     leaves={
@@ -805,6 +817,7 @@ BLOCKS: dict[str, Block] = {
     "github": _GITHUB_BLOCK,
     "tmux": _TMUX_BLOCK,
     "gitignore": _GITIGNORE_BLOCK,
+    "spotlight": _SPOTLIGHT_BLOCK,
     "tools": _TOOLS_BLOCK,
     "tg_ctl": _TG_CTL_BLOCK,
     "ship_delegator": _SHIP_DELEGATOR_BLOCK,

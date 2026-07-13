@@ -401,3 +401,39 @@ def test_validate_rejects_non_bool_harness_link():
 def test_validate_rejects_non_string_harness_skill_dir():
     with pytest.raises(config.ConfigError, match="harness_skill_dir"):
         config.validate({"version": 1, "skills": {"harness_skill_dir": 42}})
+
+
+def test_validate_spotlight_accepts_valid():
+    config.validate({"version": 1, "spotlight": {"enabled": True, "roots": ["~/work"],
+                                                 "deny": ["node_modules"], "extra": ["foo"],
+                                                 "label": "x", "max_depth": 4}})
+    config.validate({"version": 1, "spotlight": {}})  # empty block is a no-op
+
+
+def test_validate_spotlight_rejects_unknown_key():
+    with pytest.raises(config.ConfigError, match="unknown spotlight key"):
+        config.validate({"version": 1, "spotlight": {"bogus": 1}})
+
+
+def test_validate_spotlight_rejects_non_bool_enabled():
+    with pytest.raises(config.ConfigError, match="spotlight.enabled must be a bool"):
+        config.validate({"version": 1, "spotlight": {"enabled": "yes"}})
+
+
+def test_validate_spotlight_rejects_non_string_list_roots():
+    with pytest.raises(config.ConfigError, match="spotlight.roots must be a list of strings"):
+        config.validate({"version": 1, "spotlight": {"roots": [1, 2]}})
+    with pytest.raises(config.ConfigError, match="spotlight.deny must be a list of strings"):
+        config.validate({"version": 1, "spotlight": {"deny": "node_modules"}})
+
+
+def test_validate_spotlight_rejects_bad_max_depth():
+    with pytest.raises(config.ConfigError, match="spotlight.max_depth must be a positive int"):
+        config.validate({"version": 1, "spotlight": {"max_depth": 0}})
+    with pytest.raises(config.ConfigError, match="spotlight.max_depth must be a positive int"):
+        config.validate({"version": 1, "spotlight": {"max_depth": True}})  # bool guard
+
+
+def test_validate_spotlight_rejects_non_string_label():
+    with pytest.raises(config.ConfigError, match="spotlight.label must be a string"):
+        config.validate({"version": 1, "spotlight": {"label": 5}})

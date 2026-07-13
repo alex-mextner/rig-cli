@@ -37,6 +37,7 @@ _CATEGORY_LAYER = {
     "models": GLOBAL,
     "git_hooks": GLOBAL,
     "gitignore": GLOBAL,
+    "spotlight": GLOBAL,
     "tmux": GLOBAL,
     "tg_ctl": GLOBAL,
     "tools": GLOBAL,

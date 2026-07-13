@@ -32,8 +32,8 @@ def test_registry_covers_every_status_area():
     cats = {a.category for a in schema.AREAS}
     expected = {
         "skills", "agent_hooks", "git_hooks", "ci", "mcp", "harness", "permissions",
-        "mode", "models", "agents_md", "github", "tmux", "gitignore", "tg_ctl", "linters",
-        "project_tools",
+        "mode", "models", "agents_md", "github", "tmux", "gitignore", "spotlight", "tg_ctl",
+        "linters", "project_tools",
     }
     assert cats == expected
 

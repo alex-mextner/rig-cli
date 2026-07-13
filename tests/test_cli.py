@@ -1360,3 +1360,82 @@ def test_version_ignores_adjacent_host_pyproject(monkeypatch):
     monkeypatch.setattr(_version, "_version_from_pyproject", lambda: None)
     monkeypatch.setattr(_version, "_dist_version", lambda _name: "0.5.0")
     assert _version.resolve_version() == "0.5.0"
+
+
+def test_spotlight_sweep_command_drops_sentinels(tmp_path, monkeypatch, capsys):
+    # `rig spotlight-sweep` (the launchd job's command) reads the merged spotlight config and
+    # drops .metadata_never_index into matched dirs under the configured roots.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    work = tmp_path / "work"
+    (work / "proj/node_modules").mkdir(parents=True)
+    (work / "proj/dist").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = repo / "rig.yaml"
+    cfg.write_text(
+        f"version: 1\nspotlight:\n  enabled: true\n  roots:\n    - {work}\n", encoding="utf-8"
+    )
+    rc = main(["spotlight-sweep", "-C", str(repo), "--config", str(cfg)])
+    assert rc == 0
+    assert (work / "proj/node_modules/.metadata_never_index").is_file()
+    assert (work / "proj/dist/.metadata_never_index").is_file()
+    assert "spotlight-sweep:" in capsys.readouterr().out
+
+
+def test_spotlight_sweep_bare_help(capsys):
+    import pytest
+
+    # a bare invocation with -h prints help and exits 0 (argparse).
+    with pytest.raises(SystemExit) as exc:
+        main(["spotlight-sweep", "-h"])
+    assert exc.value.code == 0
+
+
+def test_apply_exit_nonzero_when_verify_fails(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    # a verify FAILURE (a provisioned artifact that did not take effect) flips the apply exit code
+    # to non-zero even when every install action itself succeeded.
+    from riglib import verify
+
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = repo / "rig.yaml"
+    cfg.write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\n"
+        "ci: {enabled: false}\nmcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n",
+        encoding="utf-8",
+    )
+
+    @verify.register_verifier("provision_permissions")
+    def _always_fail(action):
+        return [verify.VerifyResult("permissions", "test", False, "forced failure for test")]
+
+    try:
+        rc = main(["apply", "-C", str(repo), "--config", str(cfg)])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "forced failure for test" in out
+        assert "check(s) FAILED" in out
+    finally:
+        verify._VERIFIERS.pop("provision_permissions", None)
+
+
+def test_spotlight_sweep_noop_when_disabled(tmp_path, monkeypatch, capsys):
+    # the persistent launchd agent keeps invoking `spotlight-sweep` after a config removal; it must
+    # become a no-op (never write sentinels) once spotlight is disabled/absent — the opt-out contract.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    work = tmp_path / "work"
+    (work / "proj/node_modules").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = repo / "rig.yaml"
+    cfg.write_text(f"version: 1\nspotlight:\n  enabled: false\n  roots:\n    - {work}\n", encoding="utf-8")
+    rc = main(["spotlight-sweep", "-C", str(repo), "--config", str(cfg)])
+    assert rc == 0
+    assert not (work / "proj/node_modules/.metadata_never_index").exists()
+    assert "disabled" in capsys.readouterr().out
