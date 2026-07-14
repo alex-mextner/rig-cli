@@ -877,6 +877,125 @@ def test_launch_agents_set_utf8_lang():
         assert env["HOME"] == "/home/u"
 
 
+# ── autosave freshness healthcheck (the observability half of #138) ─────────────────────────
+# The month-long silent death happened because NOBODY owned the question "is the newest save
+# fresh?". `assess_autosave_freshness` gives that question an owner: it reads the health-state
+# file the wrapper atomically rewrites EVERY run (result=ok|skip|inactive|…) and flags a live
+# saver whose last run is older than `stale_after`. It keys off the HEALTH FILE mtime — not the
+# snapshot mtime — on purpose: resurrect deletes a byte-identical snapshot, so a healthy quiescent
+# server can legitimately have an OLD snapshot but the agent still ran (and refreshed health) on
+# schedule. A stale health file means the AGENT stopped running — the exact failure to surface.
+def test_autosave_freshness_ok_when_health_is_recent():
+    p = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"stale_after": 45})
+    h = tmux.assess_autosave_freshness(p, now_epoch=1000.0, health_mtime=1000.0 - 10 * 60, health_result="ok")
+    assert h.state == "ok"
+    assert "10m ago" in h.detail
+
+
+def test_autosave_freshness_stale_when_health_older_than_threshold():
+    p = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"stale_after": 45})
+    now = 60_000.0
+    health_mtime = now - 60 * 60  # last run 60 minutes ago — past the 45-minute threshold
+    h = tmux.assess_autosave_freshness(p, now_epoch=now, health_mtime=health_mtime, health_result="ok")
+    assert h.state == "stale"
+    assert "60m" in h.detail and "45m" in h.detail  # age and the crossed threshold
+
+
+def test_autosave_freshness_missing_health_flags_agent_not_running():
+    p = tmux.build_tmux(repo_home=Path("/home/u"))
+    h = tmux.assess_autosave_freshness(p, now_epoch=1000.0, health_mtime=None)
+    assert h.state == "missing"
+
+
+def test_autosave_freshness_disabled_when_saver_off():
+    p = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"enabled": False})
+    h = tmux.assess_autosave_freshness(p, now_epoch=1000.0, health_mtime=None)
+    assert h.state == "disabled"
+
+
+def _tmux_autosave_status_line(monkeypatch, tmp_path, *, autosave=None, health=None, age_min=0, installed=True):
+    """Render the `rig status` autosave-freshness line for a one-action tmux plan. Simulates an
+    INSTALLED agent (its plist on disk) unless `installed=False`, and writes an optional health file
+    (aged `age_min` minutes) into the generated dir the printer reads."""
+    import json
+    import os as _os
+    import time as _time
+
+    from riglib import cli
+    from riglib.actions.runner import tmux_plan_from_action
+    from riglib.plan import Action, InstallPlan
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    gen = tmp_path / ".config" / "rig" / "tmux"
+    gen.mkdir(parents=True)
+    opts = {
+        "generated_dir": str(gen),
+        "conf_path": str(tmp_path / ".tmux.conf"),
+        "autosave": {} if autosave is None else autosave,
+    }
+    action = Action(kind="provision_tmux", category="tmux", item="config",
+                    source=tmp_path, target=tmp_path / ".tmux.conf", options=opts)
+    plan = InstallPlan(actions=[action])
+    if installed:  # the launchd plist on disk = the agent is provisioned here
+        tplan = tmux_plan_from_action(action)
+        tplan.autosave_plist_path.parent.mkdir(parents=True, exist_ok=True)
+        tplan.autosave_plist_path.write_text("<plist/>", encoding="utf-8")
+    if health is not None:
+        hp = gen / tmux.AUTOSAVE_HEALTH_NAME
+        # a str is written VERBATIM (to exercise corrupt / non-object JSON); a dict is serialized.
+        hp.write_text(health if isinstance(health, str) else json.dumps(health), encoding="utf-8")
+        if age_min:
+            when = _time.time() - age_min * 60
+            _os.utime(hp, (when, when))
+    captured: list[str] = []
+    monkeypatch.setattr("builtins.print", lambda *a, **k: captured.append(" ".join(str(x) for x in a)))
+    cli._print_tmux_autosave_status(plan)
+    return "\n".join(captured)
+
+
+def test_status_autosave_line_fresh_when_health_recent(monkeypatch, tmp_path):
+    line = _tmux_autosave_status_line(monkeypatch, tmp_path, health={"result": "ok"}, age_min=5)
+    assert "fresh" in line and "autosave agent" in line
+
+
+def test_status_autosave_line_stale_when_health_old(monkeypatch, tmp_path):
+    line = _tmux_autosave_status_line(
+        monkeypatch, tmp_path, autosave={"stale_after": 45}, health={"result": "ok"}, age_min=90
+    )
+    assert "STALE" in line
+
+
+def test_status_autosave_line_missing_when_no_health(monkeypatch, tmp_path):
+    line = _tmux_autosave_status_line(monkeypatch, tmp_path, health=None)
+    assert "no health record" in line
+
+
+def test_status_autosave_line_silent_when_disabled(monkeypatch, tmp_path):
+    line = _tmux_autosave_status_line(monkeypatch, tmp_path, autosave={"enabled": False})
+    assert line == ""
+
+
+def test_status_autosave_line_silent_when_agent_not_installed(monkeypatch, tmp_path):
+    """No plist on disk = the agent was never applied here (or off darwin). Don't nag about
+    freshness on every `rig status` when there is nothing installed to be fresh."""
+    line = _tmux_autosave_status_line(monkeypatch, tmp_path, health=None, installed=False)
+    assert line == ""
+
+
+def test_status_autosave_line_missing_when_health_corrupt(monkeypatch, tmp_path):
+    """A corrupt (unparseable) health file is the exact silent-corruption case this feature exists
+    to surface — it must read as 'no health record', never crash."""
+    line = _tmux_autosave_status_line(monkeypatch, tmp_path, health="not-json{")
+    assert "no health record" in line
+
+
+def test_status_autosave_line_non_dict_health_suppresses_result_note(monkeypatch, tmp_path):
+    """Valid JSON that isn't an object (a partial/garbled write) → freshness still assessed from the
+    file mtime, but the `result=` note is suppressed (never printed as `result=None`)."""
+    line = _tmux_autosave_status_line(monkeypatch, tmp_path, health="[1, 2]", age_min=5)
+    assert "fresh" in line and "result=" not in line
+
+
 def test_autosave_label_configurable():
     p = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"label": "com.me.tmux-save"})
     assert p.autosave_label == "com.me.tmux-save"

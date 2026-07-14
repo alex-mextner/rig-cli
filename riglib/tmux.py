@@ -53,6 +53,7 @@ import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 # The managed-block sentinels (fallback "block" apply mode). rig replaces ONLY the text
 # between these markers — conda-init style — so a re-apply never disturbs the user's lines.
@@ -861,6 +862,65 @@ fi
             "StandardErrorPath": str(self.autosave_err_log_path),
         }
         return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
+
+
+@dataclass(frozen=True)
+class AutosaveHealth:
+    """The freshness verdict for the independent autosave agent (#138).
+
+    ``state`` is one of:
+    - ``"disabled"`` — the independent saver is off (nothing to check).
+    - ``"ok"`` — the saver ran within ``stale_after`` (the agent is alive on its timer).
+    - ``"stale"`` — the saver's LAST run is older than ``stale_after``. This is the exact signal
+      that was missing during the month-long death: the agent stopped firing → the health file
+      froze. ``rig status`` surfaces it so a silent death becomes a visible one within one interval.
+    - ``"missing"`` — no health record on disk. The agent has never run (a fresh apply that hasn't
+      loaded it yet, a non-darwin box) OR it never got far enough to write one.
+    """
+
+    state: Literal["disabled", "ok", "stale", "missing"]
+    detail: str
+
+
+def assess_autosave_freshness(
+    plan: TmuxPlan,
+    *,
+    now_epoch: float,
+    health_mtime: float | None,
+    health_result: str | None = None,
+) -> AutosaveHealth:
+    """Pure freshness verdict for the autosave agent — the I/O (statting the health file) is the
+    caller's, so this stays hermetically testable.
+
+    Keys off the HEALTH-FILE mtime, NOT the newest snapshot's: the wrapper atomically rewrites the
+    health file on EVERY run (result=ok|skip|inactive|busy|error), so its mtime tracks "did the
+    agent fire", which is the thing that died. Snapshot mtime is a red herring — resurrect deletes a
+    byte-identical snapshot, so a healthy quiescent server legitimately has an old snapshot while the
+    agent is perfectly alive (Sol #138). Threshold is ``plan.autosave_stale_after`` minutes.
+
+    Caveat (documented, not alerted-on here): launchd's ``StartInterval`` does not fire while the
+    machine is asleep, so right after a long sleep the health file can read stale for one interval.
+    The default 45-minute threshold (3× the 15-minute cadence) absorbs that; a human reading ``rig
+    status`` right after wake seeing one stale line is acceptable over missing a real death.
+    """
+    if not plan.autosave_enabled:
+        return AutosaveHealth("disabled", "independent saver off (tmux.autosave.enabled=false)")
+    stale_after = plan.autosave_stale_after
+    if health_mtime is None:
+        return AutosaveHealth(
+            "missing",
+            "no autosave health record yet — the agent has not run "
+            f"(fresh apply not loaded, or off darwin); expected {plan.autosave_health_path.name}",
+        )
+    age_min = max(0, int((now_epoch - health_mtime) // 60))
+    if age_min > stale_after:
+        return AutosaveHealth(
+            "stale",
+            f"last autosave run {age_min}m ago (> {stale_after}m threshold) — the saver may not be "
+            f"running; check {plan.autosave_err_log_path.name}",
+        )
+    result_note = f", result={health_result}" if health_result else ""
+    return AutosaveHealth("ok", f"last run {age_min}m ago{result_note}")
 
 
 def _resurrect_token(name: str) -> str:

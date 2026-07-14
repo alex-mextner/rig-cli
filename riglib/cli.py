@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import math
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -1296,6 +1298,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     # boot label / unsupported-off-darwin state). Printed under the summary as its detail.
     _print_schedule_status(plan, report)
     _print_tg_ctl_status(plan, report)
+    _print_tmux_autosave_status(plan)
 
     # missing-target: a hook command in the harness settings.json that points at a file gone
     # from disk (the dead-rtk-hook case) surfaces PROACTIVELY here, before it bites at runtime
@@ -1547,6 +1550,65 @@ def _print_tg_ctl_status(plan, report) -> None:
         drifted = [d for d in report.items if d.category == "tg_ctl" and d.direction != "extra"]
         state = _warn(f"drifted ({drifted[0].detail})") if drifted else _ok("installed")
     print(f"\n  [GLOBAL] tg-ctl inbound daemon: {state}  " + _dim(f"(launchd boot agent, '{tg.boot_label}')"))
+
+
+def _print_tmux_autosave_status(plan) -> None:
+    """Report the independent tmux autosave agent's FRESHNESS (the observability half of #138).
+
+    This is an ADVISORY runtime-health line, NOT config↔disk drift: a stale save is not something
+    ``rig apply`` converges (the plist/script may be byte-perfect while the agent silently stopped
+    firing), so it is surfaced here — printed under the area summary like the schedule / tg-ctl
+    detail lines — and deliberately does NOT change the status exit code. It gives an OWNER to the
+    question "is the newest save fresh?" that went unanswered for the month-long silent death.
+
+    Reads the health-state file the wrapper atomically rewrites every run; ``assess_autosave_freshness``
+    turns its mtime into a verdict. Silent when the saver isn't in the plan (no tmux action) or is
+    disabled — no noise for repos that don't manage tmux persistence.
+    """
+    from riglib.actions.runner import tmux_plan_from_action
+    from riglib.tmux import assess_autosave_freshness
+
+    tmux_actions = [a for a in plan.actions if a.kind == "provision_tmux"]
+    if not tmux_actions:
+        return
+    tplan = tmux_plan_from_action(tmux_actions[0])
+    if not tplan.autosave_enabled:
+        return  # nothing to report; the disabled-plist leftover (if any) is already drift
+    # Only assess freshness where the agent is actually INSTALLED (its launchd plist is on disk).
+    # On a machine that never applied tmux — or off darwin, where the plist is never written —
+    # there is nothing to be fresh, so stay silent instead of nagging "no health record" on every
+    # `rig status`. Once installed, a MISSING health record is a real signal (installed but never ran).
+    if not tplan.autosave_plist_path.is_file():
+        return
+    health_path = tplan.autosave_health_path
+    health_mtime: float | None = None
+    health_result: str | None = None
+    if health_path.is_file():
+        try:
+            health_mtime = health_path.stat().st_mtime
+            data = json.loads(health_path.read_text(encoding="utf-8"))
+            # a dict WITHOUT a "result" key (or "result": null) must stay None, not the string
+            # "None" — str(None) is truthy and would print a confusing `result=None` note on the
+            # exact corrupt/partial-write path this feature exists to surface.
+            raw_result = data.get("result") if isinstance(data, dict) else None
+            health_result = str(raw_result) if raw_result is not None else None
+        except (OSError, ValueError):
+            health_mtime = None  # unreadable/corrupt → treat as missing (flag it)
+    verdict = assess_autosave_freshness(
+        tplan, now_epoch=time.time(), health_mtime=health_mtime, health_result=health_result
+    )
+    # `disabled` is filtered upstream (the autosave_enabled early-return), so it never reaches here;
+    # map the reachable states explicitly and fail closed on anything unforeseen rather than silently
+    # mislabel a future/leaked state as "no health record".
+    if verdict.state == "ok":
+        state = _ok(f"fresh ({verdict.detail})")
+    elif verdict.state == "stale":
+        state = _warn(f"STALE ({verdict.detail})")
+    elif verdict.state == "missing":
+        state = _warn(f"no health record ({verdict.detail})")
+    else:
+        raise AssertionError(f"unhandled autosave freshness state: {verdict.state!r}")
+    print(f"\n  tmux autosave agent: {state}  " + _dim(f"('{tplan.autosave_label}')"))
 
 
 def _print_dep_statuses(report) -> None:
