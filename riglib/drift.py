@@ -1445,14 +1445,20 @@ def _check_spotlight(action: Action, report: DriftReport) -> None:
     roots, deny, max_depth = spotlight.sweep_args_from_options(opts)
     label = str(opts.get("label") or spotlight.DEFAULT_BOOT_LABEL)
 
-    # 1) sentinel coverage — sample matched dirs; any lacking the sentinel means the sweep is stale.
-    sample = spotlight.iter_target_dirs(roots, deny, max_depth)[:spotlight.SAMPLE_LIMIT]
-    uncovered = [d for d in sample if not spotlight.has_sentinel(d)]
+    # 1) sentinel coverage — DRIFT scans the FULL matched set, not verify's bounded first-N sample.
+    # `iter_target_dirs` already walks the whole tree and returns every matched dir (the dominant
+    # cost, unavoidable here), so checking each for the sentinel is only one extra stat per dir —
+    # cheap. Sampling the head (verify's post-apply spot-check) would miss a NEW project that sorts
+    # past the sample ~(1 - N/total) of the time, defeating drift's stated purpose ("a new project
+    # appeared since the last sweep → missing"): the fresh uncovered dir must be caught wherever it
+    # lands in the walk order, not only when it happens to fall in the first N.
+    targets = spotlight.iter_target_dirs(roots, deny, max_depth)
+    uncovered = [d for d in targets if not spotlight.has_sentinel(d)]
     if uncovered:
         report.items.append(
             DriftItem(
                 "missing", "spotlight", action.item, uncovered[0],
-                f"{len(uncovered)}/{len(sample)} sampled dependency/build dirs lack "
+                f"{len(uncovered)}/{len(targets)} dependency/build dirs lack "
                 f"{spotlight.SENTINEL_NAME} — run `rig apply` (or `rig spotlight-sweep`) to re-cover",
             )
         )

@@ -224,6 +224,29 @@ def test_drift_spotlight_missing_sentinel(tmp_path, monkeypatch):
     assert any(d.direction == "missing" and spotlight.SENTINEL_NAME in d.detail for d in drift)
 
 
+def test_drift_spotlight_scans_full_set_not_just_sample(tmp_path, monkeypatch):
+    """Drift must catch an uncovered project even when it sorts PAST the first SAMPLE_LIMIT dirs.
+
+    Verify's post-apply spot-check samples the head of the matched list; reusing that bound for
+    drift would silently miss a freshly-added project whenever it lands beyond the sample —
+    defeating the check's stated purpose. This pins the fresh dir at the tail of a >SAMPLE_LIMIT
+    list so the old first-N slice would have skipped it.
+    """
+    action, root, _home = _spotlight_darwin_applied(tmp_path, monkeypatch)
+    covered = []
+    for i in range(spotlight.SAMPLE_LIMIT + 5):
+        d = root / f"covered{i:03d}/node_modules"
+        d.mkdir(parents=True)
+        spotlight.sentinel_path(d).touch()  # already covered
+        covered.append(d)
+    fresh = root / "zzz_fresh/node_modules"
+    fresh.mkdir(parents=True)  # a new project appeared, no sentinel — must be flagged
+    # Deterministic order: the uncovered dir is LAST, beyond the first-N window the old code sampled.
+    monkeypatch.setattr(spotlight, "iter_target_dirs", lambda *a, **k: [*covered, fresh])
+    drift = _spotlight_drift(action)
+    assert any(d.direction == "missing" and spotlight.SENTINEL_NAME in d.detail for d in drift)
+
+
 def test_drift_spotlight_missing_plist(tmp_path, monkeypatch):
     """The launchd re-sweep agent plist vanishing is drift (new projects would stop being covered)."""
     action, _root, home = _spotlight_darwin_applied(tmp_path, monkeypatch)
