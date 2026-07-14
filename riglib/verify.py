@@ -78,11 +78,6 @@ class VerifyReport:
 Verifier = Callable[[Action], list[VerifyResult]]
 _VERIFIERS: dict[str, Verifier] = {}
 
-# How many matched dirs the spotlight verifier samples for the sentinel — keeps the verify read
-# cheap on a huge tree (a full stat of every node_modules would be slow and pointless).
-_VERIFY_SAMPLE_LIMIT = 20
-
-
 def register_verifier(kind: str) -> Callable[[Verifier], Verifier]:
     """Register a verifier for an action ``kind``. One decorator = full framework participation."""
 
@@ -205,7 +200,7 @@ def _verify_spotlight(action: Action) -> list[VerifyResult]:
     results: list[VerifyResult] = []
 
     matched = spotlight.iter_target_dirs(roots, deny, max_depth)
-    sample = matched[:_VERIFY_SAMPLE_LIMIT]
+    sample = matched[:spotlight.SAMPLE_LIMIT]
     if not sample:
         results.append(
             VerifyResult("spotlight", "sweep", None, "no dependency/build dirs found under roots (nothing to sample)")

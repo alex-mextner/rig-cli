@@ -116,6 +116,13 @@ def _isolate_scheduler(monkeypatch):
     # phantom drift in e2e tests. Neutralize the drift check suite-wide too (the dedicated
     # test_tg_ctl.py restores the real one). Symmetric with the provisioner stub.
     monkeypatch.setattr(driftmod, "_check_tg_ctl", lambda action, report: None)
+    # spotlight: is default-OFF, so no default e2e plan emits a provision_spotlight action. But a
+    # test that DOES enable a spotlight: block on a macOS dev box would otherwise (1) shell out to
+    # the real `launchctl load` on apply and (2) have its drift check probe the real launchctl for
+    # the loaded agent — a phantom "not loaded" once the stubbed launchctl below returns False.
+    # RIG_SPOTLIGHT_DRY_RUN=1 makes the plist write run (and stay assertable) while skipping the
+    # live load AND the drift loaded-probe. Symmetric with RIG_TMUX_DRY_RUN in _isolate_tmux_activation.
+    monkeypatch.setenv("RIG_SPOTLIGHT_DRY_RUN", "1")
 
     for mod in (runner, driftmod):
         monkeypatch.setattr(mod, "_launchctl", lambda verb, arg: 0, raising=False)
