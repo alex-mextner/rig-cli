@@ -160,6 +160,150 @@ def test_do_provision_spotlight_launchctl_load_failure_is_error(tmp_path, monkey
     assert (root / "proj/node_modules/.metadata_never_index").is_file()
 
 
+def _spotlight_action(root: Path, label: str = "ai.hyperide.spotlight-exclude") -> Action:
+    return Action(
+        kind="provision_spotlight", category="spotlight", item="exclude",
+        source=root, target=Path(label),
+        options={
+            "roots": [str(root)],
+            "deny": sorted(spotlight.DEFAULT_DENY),
+            "label": label,
+            "max_depth": 8,
+            "sweep_cmd": ["/usr/bin/python3", "-m", "riglib", "spotlight-sweep"],
+        },
+    )
+
+
+def _apply_spotlight(root: Path, home: Path, monkeypatch) -> Action:
+    """Apply the provisioner (dry-run launchd) so sentinels + plist land, and return the action."""
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("RIG_SPOTLIGHT_DRY_RUN", "1")  # write plist, skip live launchctl
+    action = _spotlight_action(root)
+    _do_provision_spotlight(action, "backup")
+    return action
+
+
+def _spotlight_darwin_applied(tmp_path, monkeypatch, platform: str = "darwin") -> tuple[Action, Path, Path]:
+    """Pin the platform, build a project tree, apply (sentinels + plist), pin ``Path.home``.
+
+    The shared preamble of the spotlight drift tests — returns (action, root, home) so each test
+    only writes its own perturbation + assertion. ``platform`` pins ``sys.platform`` at BOTH apply
+    and detect time (``"linux"`` exercises the non-darwin no-plist path on every host).
+    """
+    import sys
+
+    monkeypatch.setattr(sys, "platform", platform)
+    root = tmp_path / "work"
+    _make_tree(root)
+    home = tmp_path / "home"
+    home.mkdir()
+    action = _apply_spotlight(root, home, monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return action, root, home
+
+
+def _spotlight_drift(action: Action) -> list:
+    from riglib.drift import detect
+    from riglib.plan import InstallPlan
+
+    return [d for d in detect(InstallPlan(actions=[action])).items if d.category == "spotlight"]
+
+
+def test_drift_spotlight_in_sync_after_apply(tmp_path, monkeypatch):
+    """Right after apply, `rig status` sees NO spotlight drift (sentinels + plist match config)."""
+    action, _root, _home = _spotlight_darwin_applied(tmp_path, monkeypatch)
+    assert not _spotlight_drift(action)
+
+
+def test_drift_spotlight_missing_sentinel(tmp_path, monkeypatch):
+    """A matched dir that lost its sentinel (or a new project appeared) is surfaced as drift."""
+    action, root, _home = _spotlight_darwin_applied(tmp_path, monkeypatch)
+    # a fresh project appears without a sentinel (simulates a new checkout after the last sweep)
+    (root / "fresh/node_modules").mkdir(parents=True)
+    drift = _spotlight_drift(action)
+    assert any(d.direction == "missing" and spotlight.SENTINEL_NAME in d.detail for d in drift)
+
+
+def test_drift_spotlight_scans_full_set_not_just_sample(tmp_path, monkeypatch):
+    """Drift must catch an uncovered project even when it sorts PAST the first SAMPLE_LIMIT dirs.
+
+    Verify's post-apply spot-check samples the head of the matched list; reusing that bound for
+    drift would silently miss a freshly-added project whenever it lands beyond the sample —
+    defeating the check's stated purpose. This pins the fresh dir at the tail of a >SAMPLE_LIMIT
+    list so the old first-N slice would have skipped it.
+    """
+    action, root, _home = _spotlight_darwin_applied(tmp_path, monkeypatch)
+    covered = []
+    for i in range(spotlight.SAMPLE_LIMIT + 5):
+        d = root / f"covered{i:03d}/node_modules"
+        d.mkdir(parents=True)
+        spotlight.sentinel_path(d).touch()  # already covered
+        covered.append(d)
+    fresh = root / "zzz_fresh/node_modules"
+    fresh.mkdir(parents=True)  # a new project appeared, no sentinel — must be flagged
+    # Deterministic order: the uncovered dir is LAST, beyond the first-N window the old code sampled.
+    monkeypatch.setattr(spotlight, "iter_target_dirs", lambda *a, **k: [*covered, fresh])
+    drift = _spotlight_drift(action)
+    assert any(d.direction == "missing" and spotlight.SENTINEL_NAME in d.detail for d in drift)
+
+
+def test_drift_spotlight_missing_plist(tmp_path, monkeypatch):
+    """The launchd re-sweep agent plist vanishing is drift (new projects would stop being covered)."""
+    action, _root, home = _spotlight_darwin_applied(tmp_path, monkeypatch)
+    plist = home / "Library/LaunchAgents/ai.hyperide.spotlight-exclude.plist"
+    assert plist.is_file()
+    plist.unlink()
+    drift = _spotlight_drift(action)
+    assert any(d.direction == "missing" and "plist" in d.detail for d in drift)
+
+
+def test_drift_spotlight_modified_plist(tmp_path, monkeypatch):
+    """A hand-edited re-sweep plist (drifted schedule/argv) is surfaced as modified."""
+    action, _root, home = _spotlight_darwin_applied(tmp_path, monkeypatch)
+    plist = home / "Library/LaunchAgents/ai.hyperide.spotlight-exclude.plist"
+    plist.write_text("<plist>tampered</plist>", encoding="utf-8")
+    drift = _spotlight_drift(action)
+    assert any(d.direction == "modified" for d in drift)
+
+
+def test_drift_spotlight_agent_not_loaded(tmp_path, monkeypatch):
+    """With a correct plist on disk but the launchd agent NOT loaded (real load path, not dry-run),
+    status flags 'not loaded' — the branch every other drift test short-circuits via dry-run."""
+    from riglib import drift as driftmod
+
+    action, _root, home = _spotlight_darwin_applied(tmp_path, monkeypatch)
+    plist = home / "Library/LaunchAgents/ai.hyperide.spotlight-exclude.plist"
+    assert plist.is_file()  # plist matches config; only the loaded-state differs
+    monkeypatch.delenv("RIG_SPOTLIGHT_DRY_RUN", raising=False)  # exercise the live loaded-probe
+    # explicit here (the autouse fixture already stubs this False) — this is the one test whose
+    # branch depends on the loaded-probe outcome, so pin it locally rather than rely on the fixture.
+    monkeypatch.setattr(driftmod, "_launchctl_loaded", lambda label: False)
+    drift = _spotlight_drift(action)
+    assert any(d.direction == "missing" and "not loaded" in d.detail for d in drift)
+
+
+def test_drift_spotlight_modified_and_not_loaded_both_surface(tmp_path, monkeypatch):
+    """A content-drifted plist whose agent is ALSO not loaded surfaces BOTH facts — the modified
+    check must not short-circuit the (independent) loaded probe."""
+    from riglib import drift as driftmod
+
+    action, _root, home = _spotlight_darwin_applied(tmp_path, monkeypatch)
+    plist = home / "Library/LaunchAgents/ai.hyperide.spotlight-exclude.plist"
+    plist.write_text("<plist>tampered</plist>", encoding="utf-8")  # content drift
+    monkeypatch.delenv("RIG_SPOTLIGHT_DRY_RUN", raising=False)  # exercise the live loaded-probe
+    monkeypatch.setattr(driftmod, "_launchctl_loaded", lambda label: False)
+    drift = _spotlight_drift(action)
+    assert any(d.direction == "modified" for d in drift)
+    assert any(d.direction == "missing" and "not loaded" in d.detail for d in drift)
+
+
+def test_drift_spotlight_skipped_on_non_darwin(tmp_path, monkeypatch):
+    """On a non-macOS host the provisioner writes no plist, so status must NOT flag a phantom one."""
+    action, _root, _home = _spotlight_darwin_applied(tmp_path, monkeypatch, platform="linux")
+    # sentinels are present (sweep is cross-platform), and there is no launchd plist to miss.
+    assert not [d for d in _spotlight_drift(action) if "plist" in d.detail]
+
+
 def test_iter_target_dirs_respects_max_depth_boundary(tmp_path):
     # a matched dir exactly AT the cap is excluded; one level shallower is found — guards the
     # off-by-one in `len(here.parts) - root_depth >= max_depth`.

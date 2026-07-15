@@ -77,6 +77,11 @@ DEFAULT_MINUTE = 30
 # guards a pathological deep tree from wedging the sweep.
 DEFAULT_MAX_DEPTH = 8
 
+# How many matched dirs the read-back consumers (verify + drift) SAMPLE for the sentinel — a full
+# stat of every node_modules on a huge tree would be slow and pointless. One source of truth so a
+# future bump propagates to both the post-apply verifier and the `rig status` drift check.
+SAMPLE_LIMIT = 20
+
 
 @dataclass(frozen=True)
 class SweepResult:

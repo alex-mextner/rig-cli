@@ -1560,6 +1560,14 @@ tests/CI). `rig spotlight-sweep` is also runnable by hand to re-cover new dirs i
 sample of matched dirs carry the sentinel AND the launchd agent is loaded (see the verify note at
 the top of this doc's companion — every provisioner declares its own check).
 
+**Drift.** `rig status` reports Spotlight-exclude drift: a sample of matched dependency/build dirs
+lacking the sentinel (a new project appeared since the last sweep → `missing`), and — on macOS —
+the launchd re-sweep plist being absent, hand-modified, or not loaded. Remediation differs by
+surface: `rig spotlight-sweep` re-covers only the missing **sentinels** (it touches no launchd
+state); `rig apply` reconverges **both** — it re-sweeps AND rewrites/reloads the launchd plist. The
+sentinel-coverage check runs cross-platform; the launchd surface is macOS-only (no plist is written
+elsewhere).
+
 ---
 
 ## `tools`

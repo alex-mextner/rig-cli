@@ -27,6 +27,7 @@ from .actions.runner import (
     _launchctl_gui_loaded,
     _launchctl_loaded,
     _read_crontab,
+    _spotlight_dry_run,
     _tmux_dry_run,
     _resolve_excludes_target,
     build_hook_descriptor,
@@ -176,6 +177,8 @@ def detect(
             _check_tools(action, report)
         elif action.kind == "provision_tg_ctl":
             _check_tg_ctl(action, report)
+        elif action.kind == "provision_spotlight":
+            _check_spotlight(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -1414,6 +1417,84 @@ def _check_schedule(action: Action, report: DriftReport) -> None:
     elif crontab_with_managed(current, sched.label, desired_pair) is not None:
         report.items.append(
             DriftItem("modified", "models", action.item, action.target, "crontab schedule differs from configured time/checker")
+        )
+
+
+def _check_spotlight(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured Spotlight-exclude state and disk.
+
+    All independent facts accumulate (a drifted sentinel, a drifted plist, AND an unloaded agent
+    are each surfaced): an ABSENT plist is the only short-circuit — you can't probe the loaded
+    state of a plist that isn't there. A content-drifted plist still reports its load state.
+
+    missing  — a SAMPLE of matched dependency/build dirs lacks the ``.metadata_never_index``
+               sentinel (a new project appeared since the last sweep, or one was hand-deleted) →
+               ``rig apply`` / ``rig spotlight-sweep`` re-covers it. On macOS the launchd re-sweep
+               plist is absent, or (when live) its agent is not loaded.
+    modified — the launchd re-sweep plist on disk differs from the configured schedule/argv.
+
+    Cross-platform: the sentinel sweep is cross-platform, so its coverage is checked everywhere; the
+    launchd plist only exists on macOS (the runner writes none elsewhere), so the plist surface is
+    macOS-only — asserting a missing plist on Linux would be a false positive. The launchd
+    ``loaded`` probe is skipped under ``RIG_SPOTLIGHT_DRY_RUN`` (mirrors verify), so the hermetic
+    suite never shells out to the real ``launchctl``.
+    """
+    from . import spotlight
+
+    opts = action.options
+    roots, deny, max_depth = spotlight.sweep_args_from_options(opts)
+    label = str(opts.get("label") or spotlight.DEFAULT_BOOT_LABEL)
+
+    # 1) sentinel coverage — DRIFT scans the FULL matched set, not verify's bounded first-N sample.
+    # `iter_target_dirs` already walks the whole tree and returns every matched dir (the dominant
+    # cost, unavoidable here), so checking each for the sentinel is only one extra stat per dir —
+    # cheap. Sampling the head (verify's post-apply spot-check) would miss a NEW project that sorts
+    # past the sample ~(1 - N/total) of the time, defeating drift's stated purpose ("a new project
+    # appeared since the last sweep → missing"): the fresh uncovered dir must be caught wherever it
+    # lands in the walk order, not only when it happens to fall in the first N.
+    targets = spotlight.iter_target_dirs(roots, deny, max_depth)
+    uncovered = [d for d in targets if not spotlight.has_sentinel(d)]
+    if uncovered:
+        report.items.append(
+            DriftItem(
+                "missing", "spotlight", action.item, uncovered[0],
+                f"{len(uncovered)}/{len(targets)} dependency/build dirs lack "
+                f"{spotlight.SENTINEL_NAME} — run `rig apply` (or `rig spotlight-sweep`) to re-cover",
+            )
+        )
+
+    # 2) the launchd re-sweep agent (macOS only — no plist is written on other hosts).
+    if not _on_darwin():
+        return
+    sweep_cmd = tuple(str(a) for a in opts.get("sweep_cmd", spotlight.default_sweep_cmd()))
+    plan = spotlight.build_spotlight(
+        roots=roots, deny=deny, sweep_cmd=sweep_cmd, label=label, max_depth=max_depth
+    )
+    plist = plan.plist_path
+    if plist is None or not plist.is_file():
+        report.items.append(
+            DriftItem("missing", "spotlight", action.item, plist or action.target,
+                      "launchd re-sweep plist not installed (new projects would stop being covered)")
+        )
+        return
+    try:
+        current = plist.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        report.items.append(
+            DriftItem("modified", "spotlight", action.item, plist,
+                      f"launchd re-sweep plist unreadable — apply rewrites it ({type(exc).__name__})")
+        )
+        return
+    if current != plan.plist_xml():
+        report.items.append(
+            DriftItem("modified", "spotlight", action.item, plist,
+                      "launchd re-sweep plist differs from configured schedule/argv")
+        )
+        # do NOT return — a content-drifted plist can ALSO be unloaded; both are true, surface both.
+    if not _spotlight_dry_run() and not _launchctl_loaded(label):
+        report.items.append(
+            DriftItem("missing", "spotlight", action.item, plist,
+                      f"launchd re-sweep agent '{label}' not loaded")
         )
 
 
