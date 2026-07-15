@@ -855,6 +855,34 @@ def test_autosave_stale_after_renders_into_script():
     assert "STALE_SECS=5400" in body  # 90 minutes → seconds
 
 
+def test_autosave_script_reads_mtime_gnu_form_first():
+    """The snapshot-mtime read must try `stat -c %Y` (GNU) BEFORE `stat -f %m` (BSD). Under a
+    BSD-first chain, GNU `stat -f %m FILE` prints FILE's filesystem block ('File: ...') to STDOUT
+    and exits non-zero, so the leaked text lands in the `$(( ))` arithmetic and blows up with
+    `File: unbound variable` under `set -u`. GNU-first keeps the failing form stdout-clean on both
+    platforms — the exact bug that reddened the launchd-minimal-PATH e2e."""
+    body = tmux.build_tmux(repo_home=Path("/home/u")).render_autosave_script()
+    gnu = body.index("stat -c %Y")
+    bsd = body.index("stat -f %m")
+    assert gnu < bsd, "GNU `stat -c %Y` must precede BSD `stat -f %m`"
+    # the mtime is validated numeric before it feeds `$(( ))` — no leaked text can reach arithmetic
+    assert "case \"$mtime\" in" in body
+
+
+def test_autosave_script_is_valid_bash_under_nounset():
+    """`bash -n` (syntax check) the rendered wrapper — it runs under `set -u`, so a stray unbound
+    reference or broken arithmetic is a real runtime failure, not a lint nit."""
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is None:  # no bash on PATH (unlikely in CI) → nothing to syntax-check
+        pytest.skip("bash not available")
+    body = tmux.build_tmux(repo_home=Path("/home/u")).render_autosave_script()
+    proc = subprocess.run([bash, "-n"], input=body, text=True, capture_output=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_autosave_path_env_matches_boot_path_env():
     """One source for the launch-agent PATH — the autosave agent reuses the boot agent's."""
     p = tmux.build_tmux(repo_home=Path("/home/u"))

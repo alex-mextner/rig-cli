@@ -832,7 +832,16 @@ if [ ! -x "$SAVE" ]; then log "ERROR resurrect save.sh missing at $SAVE"; health
 "$SAVE" quiet || log "WARN resurrect save.sh exited $? — checking for a snapshot anyway"
 newest=$(ls -t "$RDIR"/tmux_resurrect_*.txt 2>/dev/null | head -1)
 if [ -n "$newest" ] && [ -s "$newest" ]; then
-  age=$(( $(date +%s) - $(stat -f %m "$newest" 2>/dev/null || stat -c %Y "$newest" 2>/dev/null || echo 0) ))
+  # mtime: try `stat -c %Y` (GNU) FIRST, `stat -f %m` (BSD/macOS) as the fallback — the form that
+  # fails on THIS platform must fail CLEANLY. GNU `stat -f %m FILE` treats `%m` as a missing file
+  # but FILE as a valid one: it prints FILE's filesystem block (`  File: "..."`) to STDOUT and still
+  # exits non-zero, so a BSD-first `||` chain concatenates that block with the fallback's number and
+  # feeds `File:` into `$(( ))` → `File: unbound variable` under `set -u`. GNU-first fixes it: on
+  # Linux the first form succeeds (no fallback); on macOS `stat -c` errors to stderr only (no stdout
+  # leak) and the BSD form runs. The numeric guard is belt-and-braces against any future leak.
+  mtime=$(stat -c %Y "$newest" 2>/dev/null || stat -f %m "$newest" 2>/dev/null || echo 0)
+  case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
+  age=$(( $(date +%s) - mtime ))
   if [ "$age" -gt "$STALE_SECS" ]; then log "WARN saved but newest snapshot age ${{age}}s > ${{STALE_SECS}}s"; fi
   log "saved $(basename "$newest") panes=$panes sessions=$sessions"
   health ok "$(basename "$newest")"
