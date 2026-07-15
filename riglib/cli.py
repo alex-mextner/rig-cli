@@ -1604,6 +1604,8 @@ def _print_tmux_autosave_status(plan) -> None:
         state = _ok(f"fresh ({verdict.detail})")
     elif verdict.state == "stale":
         state = _warn(f"STALE ({verdict.detail})")
+    elif verdict.state == "unhealthy":
+        state = _warn(f"UNHEALTHY ({verdict.detail})")
     elif verdict.state == "missing":
         state = _warn(f"no health record ({verdict.detail})")
     else:

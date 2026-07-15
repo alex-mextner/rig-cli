@@ -876,10 +876,27 @@ class AutosaveHealth:
       froze. ``rig status`` surfaces it so a silent death becomes a visible one within one interval.
     - ``"missing"`` — no health record on disk. The agent has never run (a fresh apply that hasn't
       loaded it yet, a non-darwin box) OR it never got far enough to write one.
+    - ``"unhealthy"`` — the agent IS firing on its timer (health mtime is fresh) but its LAST run
+      could not save: ``result=error`` (``save.sh`` missing / no snapshot written), ``result=busy``
+      (a lock it could not take), or any OTHER non-benign result. The timer is alive but the save is
+      broken — a green "ok" here would hide exactly that, so it is surfaced as a warning.
+
+    ``"stale"`` OUTRANKS ``"unhealthy"``: a record older than the threshold reports ``stale`` even
+    when its ``result`` is a failure, because a frozen health file means the agent stopped firing
+    ENTIRELY (the more severe, root failure) — the last-run outcome is moot once the timer is dead.
     """
 
-    state: Literal["disabled", "ok", "stale", "missing"]
+    state: Literal["disabled", "ok", "stale", "missing", "unhealthy"]
     detail: str
+
+
+# Health-file ``result`` values that are HEALTHY: ``ok`` (saved) plus ``skip``/``inactive``
+# ("nothing to save" — no server / empty server / degenerate-guard). A fresh record whose result
+# is NOT in this set (``error``, ``busy``, or any unrecognised value) is treated as ``unhealthy``,
+# so an allowlist keeps the check fail-closed: a future/garbled result surfaces as a warning rather
+# than a false green. A record with NO result key (partial/non-object write) stays healthy — its
+# absence is handled by the caller, not this set.
+_AUTOSAVE_BENIGN_RESULTS = frozenset({"ok", "skip", "inactive"})
 
 
 def assess_autosave_freshness(
@@ -918,6 +935,15 @@ def assess_autosave_freshness(
             "stale",
             f"last autosave run {age_min}m ago (> {stale_after}m threshold) — the saver may not be "
             f"running; check {plan.autosave_err_log_path.name}",
+        )
+    # Reached only when the record is FRESH (not stale) — so `stale` already outranks a failed
+    # result. A present, non-benign result here means the timer fired but the save is broken: do not
+    # paint that green. A missing result (None) stays healthy.
+    if health_result is not None and health_result not in _AUTOSAVE_BENIGN_RESULTS:
+        return AutosaveHealth(
+            "unhealthy",
+            f"last run {age_min}m ago but could not save (result={health_result}) — "
+            f"check {plan.autosave_err_log_path.name}",
         )
     result_note = f", result={health_result}" if health_result else ""
     return AutosaveHealth("ok", f"last run {age_min}m ago{result_note}")

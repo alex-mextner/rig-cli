@@ -901,6 +901,42 @@ def test_autosave_freshness_stale_when_health_older_than_threshold():
     assert "60m" in h.detail and "45m" in h.detail  # age and the crossed threshold
 
 
+@pytest.mark.parametrize("bad", ["error", "busy", "some-future-result"])
+def test_autosave_freshness_unhealthy_when_recent_run_failed_to_save(bad):
+    """A FRESH health mtime with a non-benign result (error/busy, or any unrecognised value)
+    means the agent is firing but cannot save — that must NOT read as `ok` (the exact false-green
+    the healthcheck exists to avoid). Allowlisting the benign set keeps this fail-closed."""
+    p = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"stale_after": 45})
+    h = tmux.assess_autosave_freshness(
+        p, now_epoch=1000.0, health_mtime=1000.0 - 5 * 60, health_result=bad
+    )
+    assert h.state == "unhealthy"
+    assert bad in h.detail
+
+
+@pytest.mark.parametrize("benign", ["ok", "skip", "inactive", None])
+def test_autosave_freshness_ok_for_benign_results(benign):
+    """`ok` and the "nothing to save" outcomes (`skip`/`inactive`) — and an ABSENT result (None,
+    a partial/non-object write) — are healthy, not failures: stay `ok`."""
+    p = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"stale_after": 45})
+    h = tmux.assess_autosave_freshness(
+        p, now_epoch=1000.0, health_mtime=1000.0 - 5 * 60, health_result=benign
+    )
+    assert h.state == "ok"
+
+
+def test_autosave_freshness_stale_outranks_failed_result():
+    """A record OLDER than the threshold reports `stale` even when its result is a failure — a
+    frozen health file (agent stopped firing entirely) is the more severe, root failure, and the
+    last-run outcome is moot once the timer is dead."""
+    p = tmux.build_tmux(repo_home=Path("/home/u"), autosave={"stale_after": 45})
+    now = 60_000.0
+    h = tmux.assess_autosave_freshness(
+        p, now_epoch=now, health_mtime=now - 60 * 60, health_result="error"
+    )
+    assert h.state == "stale"
+
+
 def test_autosave_freshness_missing_health_flags_agent_not_running():
     p = tmux.build_tmux(repo_home=Path("/home/u"))
     h = tmux.assess_autosave_freshness(p, now_epoch=1000.0, health_mtime=None)
@@ -963,6 +999,15 @@ def test_status_autosave_line_stale_when_health_old(monkeypatch, tmp_path):
         monkeypatch, tmp_path, autosave={"stale_after": 45}, health={"result": "ok"}, age_min=90
     )
     assert "STALE" in line
+
+
+def test_status_autosave_line_unhealthy_when_recent_run_failed(monkeypatch, tmp_path):
+    """A fresh health record whose last run failed (result=error) renders a WARNING line, not a
+    green `fresh` — a live timer with a broken save must be visible in `rig status`."""
+    line = _tmux_autosave_status_line(
+        monkeypatch, tmp_path, health={"result": "error"}, age_min=5
+    )
+    assert "UNHEALTHY" in line and "could not save" in line
 
 
 def test_status_autosave_line_missing_when_no_health(monkeypatch, tmp_path):
