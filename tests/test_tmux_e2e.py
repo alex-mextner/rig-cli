@@ -48,10 +48,13 @@ Invariants
 
 from __future__ import annotations
 
+import json
 import os
+import plistlib
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 import socket
@@ -535,6 +538,96 @@ def test_resurrect_writes_a_real_snapshot(tmux_env, monkeypatch):
     assert r.returncode == 0, f"resurrect save failed: {r.stderr}"
     snaps = list(resurrect_dir.glob("tmux_resurrect_*.txt"))
     assert snaps, f"no resurrect snapshot written in {resurrect_dir}"
+
+
+# ── THE launchd-minimal-PATH regression guard (the exact root cause of the month-long death) ──
+# The month-long silent death: the tmux SERVER (and every `run-shell`/`#()` hook child) inherits
+# launchd's minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin — NO /opt/homebrew/bin), so continuum's
+# BARE `tmux` calls fail and autosave never arms. EVERY prior fix stayed invisible because the
+# existing e2e runs the artifacts under the HARNESS's FULL PATH (which includes /opt/homebrew/bin),
+# so the bug could not reproduce (brainstorm 2026-07-13: Fable + Sol, unanimous). These two tests
+# close that acceptance hole for the INDEPENDENT autosave saver (#138): they run the generated
+# wrapper under `env -i` + EXACTLY the rendered plist's EnvironmentVariables — the real launchd
+# trust boundary — and prove (positive) it still resolves tmux and writes a valid snapshot, and
+# (negative, darwin-only) that STRIPPING the plist's PATH injection reproduces the exact failure,
+# so the positive assertion is not vacuously green.
+def _start_rich_session(run) -> None:
+    """Bring a private-socket server up with a non-degenerate layout (a session with a second
+    window) so the wrapper's degenerate-save guard does NOT skip — we want a REAL snapshot."""
+    run(["tmux", "new-session", "-d", "-s", "main", "tail -f /dev/null"])
+    run(["tmux", "new-window", "-t", "main", "tail -f /dev/null"])
+
+
+def _plist_env(home) -> dict[str, str]:
+    """The EnvironmentVariables the autosave LaunchAgent's plist injects — the ONLY environment
+    launchd hands the agent. Built from the SAME renderer apply uses (Path.home is monkeypatched to
+    the throwaway home, and _resolve_tmux_bin to the shim, so the plist PATH leads with the shim
+    dir → bare tmux resolves to the private socket, never the dev's default server)."""
+    plan = tmod.build_tmux(repo_home=home)
+    return plistlib.loads(plan.render_autosave_plist().encode("utf-8"))["EnvironmentVariables"]
+
+
+@_requires_tmux_e2e
+def test_autosave_wrapper_saves_under_launchd_minimal_env(tmux_env, monkeypatch):
+    """POSITIVE regression guard: the independent autosave wrapper, launched with `env -i` plus
+    ONLY the rendered plist's EnvironmentVariables (the real launchd env — a minimal PATH the
+    plist makes Homebrew-inclusive, HOME, a UTF-8 LANG), still resolves tmux from inside resurrect's
+    BARE-`tmux` save.sh and writes a valid snapshot + a health record. This is the exact scenario
+    every prior fix's test could not reproduce (it ran under the harness's full PATH)."""
+    home, socket, run = tmux_env
+    _apply_with_real_plugins(home, monkeypatch)
+    gen = home / ".config" / "rig" / "tmux"
+    wrapper = gen / "tmux-autosave.sh"
+    assert wrapper.is_file() and os.access(wrapper, os.X_OK), "autosave wrapper not generated"
+
+    _start_rich_session(run)
+
+    env = _plist_env(home)
+    # `env -i` = a CLEAN slate; only the plist keys survive — precisely what launchd gives the agent.
+    r = subprocess.run(
+        ["env", "-i", f"PATH={env['PATH']}", f"HOME={env['HOME']}", f"LANG={env['LANG']}", str(wrapper)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == 0, f"wrapper failed under launchd-minimal env: rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+
+    resurrect_dir = home / ".tmux" / "resurrect"
+    snaps = list(resurrect_dir.glob("tmux_resurrect_*.txt"))
+    assert snaps, f"no snapshot written under launchd-minimal env (the month-long-death scenario): {r.stdout}"
+    # a real (non-degenerate) snapshot: resurrect records the panes we started.
+    assert any(s.stat().st_size > 0 for s in snaps), "snapshot is empty (locale/PATH corruption?)"
+    # the health record proves the saver reported success — the observability half of #138.
+    health = gen / "tmux-autosave-health.json"
+    assert health.is_file(), "wrapper wrote no health record"
+    assert json.loads(health.read_text())["result"] == "ok", health.read_text()
+
+
+@_requires_tmux_e2e
+@pytest.mark.skipif(sys.platform != "darwin", reason="the launchd-minimal-PATH bug is macOS-specific; on Linux tmux lives in /usr/bin (inside the minimal PATH), so this negative control can't isolate")
+def test_autosave_wrapper_fails_without_plist_path_injection(tmux_env, monkeypatch):
+    """NEGATIVE teeth-check (darwin-only): strip the plist's PATH injection — run the SAME wrapper
+    under the RAW launchd-minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin, no Homebrew) — and the save
+    MUST fail exactly as it did for a month: resurrect's bare `tmux` is unresolvable, so no snapshot
+    is written and the wrapper records a failure. This proves the positive test above is not
+    vacuously green (the plist PATH injection is load-bearing). On macOS /usr/bin has no tmux, so
+    the wrapper's absolute TMUX_BIN passes the guard but resurrect's own bare `tmux` cannot."""
+    home, socket, run = tmux_env
+    _apply_with_real_plugins(home, monkeypatch)
+    gen = home / ".config" / "rig" / "tmux"
+    wrapper = gen / "tmux-autosave.sh"
+    _start_rich_session(run)
+
+    r = subprocess.run(
+        ["env", "-i", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", f"HOME={home}", "LANG=en_US.UTF-8", str(wrapper)],
+        capture_output=True, text=True, timeout=30,
+    )
+    resurrect_dir = home / ".tmux" / "resurrect"
+    snaps = list(resurrect_dir.glob("tmux_resurrect_*.txt"))
+    # the whole point: WITHOUT the Homebrew PATH injection, no valid snapshot lands.
+    assert not snaps or all(s.stat().st_size == 0 for s in snaps), (
+        f"a snapshot WAS written under the raw minimal PATH — the negative control is broken "
+        f"(is tmux resolvable in /usr/bin here?): rc={r.returncode} snaps={snaps}"
+    )
+    assert r.returncode != 0, f"wrapper unexpectedly succeeded under the raw minimal PATH: {r.stdout}"
 
 
 @_requires_tmux

@@ -53,6 +53,7 @@ import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 # The managed-block sentinels (fallback "block" apply mode). rig replaces ONLY the text
 # between these markers — conda-init style — so a re-apply never disturbs the user's lines.
@@ -831,7 +832,16 @@ if [ ! -x "$SAVE" ]; then log "ERROR resurrect save.sh missing at $SAVE"; health
 "$SAVE" quiet || log "WARN resurrect save.sh exited $? — checking for a snapshot anyway"
 newest=$(ls -t "$RDIR"/tmux_resurrect_*.txt 2>/dev/null | head -1)
 if [ -n "$newest" ] && [ -s "$newest" ]; then
-  age=$(( $(date +%s) - $(stat -f %m "$newest" 2>/dev/null || stat -c %Y "$newest" 2>/dev/null || echo 0) ))
+  # mtime: try `stat -c %Y` (GNU) FIRST, `stat -f %m` (BSD/macOS) as the fallback — the form that
+  # fails on THIS platform must fail CLEANLY. GNU `stat -f %m FILE` treats `%m` as a missing file
+  # but FILE as a valid one: it prints FILE's filesystem block (`  File: "..."`) to STDOUT and still
+  # exits non-zero, so a BSD-first `||` chain concatenates that block with the fallback's number and
+  # feeds `File:` into `$(( ))` → `File: unbound variable` under `set -u`. GNU-first fixes it: on
+  # Linux the first form succeeds (no fallback); on macOS `stat -c` errors to stderr only (no stdout
+  # leak) and the BSD form runs. The numeric guard is belt-and-braces against any future leak.
+  mtime=$(stat -c %Y "$newest" 2>/dev/null || stat -f %m "$newest" 2>/dev/null || echo 0)
+  case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
+  age=$(( $(date +%s) - mtime ))
   if [ "$age" -gt "$STALE_SECS" ]; then log "WARN saved but newest snapshot age ${{age}}s > ${{STALE_SECS}}s"; fi
   log "saved $(basename "$newest") panes=$panes sessions=$sessions"
   health ok "$(basename "$newest")"
@@ -861,6 +871,91 @@ fi
             "StandardErrorPath": str(self.autosave_err_log_path),
         }
         return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
+
+
+@dataclass(frozen=True)
+class AutosaveHealth:
+    """The freshness verdict for the independent autosave agent (#138).
+
+    ``state`` is one of:
+    - ``"disabled"`` — the independent saver is off (nothing to check).
+    - ``"ok"`` — the saver ran within ``stale_after`` (the agent is alive on its timer).
+    - ``"stale"`` — the saver's LAST run is older than ``stale_after``. This is the exact signal
+      that was missing during the month-long death: the agent stopped firing → the health file
+      froze. ``rig status`` surfaces it so a silent death becomes a visible one within one interval.
+    - ``"missing"`` — no health record on disk. The agent has never run (a fresh apply that hasn't
+      loaded it yet, a non-darwin box) OR it never got far enough to write one.
+    - ``"unhealthy"`` — the agent IS firing on its timer (health mtime is fresh) but its LAST run
+      could not save: ``result=error`` (``save.sh`` missing / no snapshot written), ``result=busy``
+      (a lock it could not take), or any OTHER non-benign result. The timer is alive but the save is
+      broken — a green "ok" here would hide exactly that, so it is surfaced as a warning.
+
+    ``"stale"`` OUTRANKS ``"unhealthy"``: a record older than the threshold reports ``stale`` even
+    when its ``result`` is a failure, because a frozen health file means the agent stopped firing
+    ENTIRELY (the more severe, root failure) — the last-run outcome is moot once the timer is dead.
+    """
+
+    state: Literal["disabled", "ok", "stale", "missing", "unhealthy"]
+    detail: str
+
+
+# Health-file ``result`` values that are HEALTHY: ``ok`` (saved) plus ``skip``/``inactive``
+# ("nothing to save" — no server / empty server / degenerate-guard). A fresh record whose result
+# is NOT in this set (``error``, ``busy``, or any unrecognised value) is treated as ``unhealthy``,
+# so an allowlist keeps the check fail-closed: a future/garbled result surfaces as a warning rather
+# than a false green. A record with NO result key (partial/non-object write) stays healthy — its
+# absence is handled by the caller, not this set.
+_AUTOSAVE_BENIGN_RESULTS = frozenset({"ok", "skip", "inactive"})
+
+
+def assess_autosave_freshness(
+    plan: TmuxPlan,
+    *,
+    now_epoch: float,
+    health_mtime: float | None,
+    health_result: str | None = None,
+) -> AutosaveHealth:
+    """Pure freshness verdict for the autosave agent — the I/O (statting the health file) is the
+    caller's, so this stays hermetically testable.
+
+    Keys off the HEALTH-FILE mtime, NOT the newest snapshot's: the wrapper atomically rewrites the
+    health file on EVERY run (result=ok|skip|inactive|busy|error), so its mtime tracks "did the
+    agent fire", which is the thing that died. Snapshot mtime is a red herring — resurrect deletes a
+    byte-identical snapshot, so a healthy quiescent server legitimately has an old snapshot while the
+    agent is perfectly alive (Sol #138). Threshold is ``plan.autosave_stale_after`` minutes.
+
+    Caveat (documented, not alerted-on here): launchd's ``StartInterval`` does not fire while the
+    machine is asleep, so right after a long sleep the health file can read stale for one interval.
+    The default 45-minute threshold (3× the 15-minute cadence) absorbs that; a human reading ``rig
+    status`` right after wake seeing one stale line is acceptable over missing a real death.
+    """
+    if not plan.autosave_enabled:
+        return AutosaveHealth("disabled", "independent saver off (tmux.autosave.enabled=false)")
+    stale_after = plan.autosave_stale_after
+    if health_mtime is None:
+        return AutosaveHealth(
+            "missing",
+            "no autosave health record yet — the agent has not run "
+            f"(fresh apply not loaded, or off darwin); expected {plan.autosave_health_path.name}",
+        )
+    age_min = max(0, int((now_epoch - health_mtime) // 60))
+    if age_min > stale_after:
+        return AutosaveHealth(
+            "stale",
+            f"last autosave run {age_min}m ago (> {stale_after}m threshold) — the saver may not be "
+            f"running; check {plan.autosave_err_log_path.name}",
+        )
+    # Reached only when the record is FRESH (not stale) — so `stale` already outranks a failed
+    # result. A present, non-benign result here means the timer fired but the save is broken: do not
+    # paint that green. A missing result (None) stays healthy.
+    if health_result is not None and health_result not in _AUTOSAVE_BENIGN_RESULTS:
+        return AutosaveHealth(
+            "unhealthy",
+            f"last run {age_min}m ago but could not save (result={health_result}) — "
+            f"check {plan.autosave_err_log_path.name}",
+        )
+    result_note = f", result={health_result}" if health_result else ""
+    return AutosaveHealth("ok", f"last run {age_min}m ago{result_note}")
 
 
 def _resurrect_token(name: str) -> str:

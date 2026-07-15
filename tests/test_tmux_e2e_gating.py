@@ -70,6 +70,11 @@ _NETWORK_TEST_NAMES = frozenset({
     "test_cc_save_detects_the_versioned_binary_install",
     "test_cc_restore_relaunches_claude_resume_into_fresh_shell",
     "test_resurrect_writes_a_real_snapshot",
+    # the launchd-minimal-PATH regression guard (#138): both apply real plugins (network) and run
+    # the saver under `env -i` + the plist env. The negative control is additionally darwin-gated
+    # in-body, but the network gate is what this pin tracks.
+    "test_autosave_wrapper_saves_under_launchd_minimal_env",
+    "test_autosave_wrapper_fails_without_plist_path_injection",
 })
 # Intentionally-ungated hermetic tests (none today). A new pure-introspection test that needs
 # neither tmux nor network goes HERE — the explicit escape hatch the exhaustive check (4) demands,
