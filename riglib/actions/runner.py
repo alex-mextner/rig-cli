@@ -731,6 +731,97 @@ def _ensure_self_merge_allow(data: dict) -> bool:
     return True
 
 
+# The permissions.allow entries that actually unblock `gh ship` for a self-merge. The natural-language
+# ``autoMode.allow`` carve-out above clears the SEMANTIC soft blocks (Merge-Without-Review /
+# Self-Approval), but the top-level auto-mode Bash permission gate vetoes `gh ship` BEFORE the
+# classifier ever judges the merge — and that gate is bypassed ONLY by an explicit
+# ``permissions.allow`` rule. So self-merge needs BOTH: the Bash-gate allow rules here (the hard
+# unblock) and the carve-out above (the soft-block clearance). The ``Bash(gh pr merge:*)`` DENY (owned
+# by provision_permissions) stays intact — ship.sh runs `gh pr merge` as a child process, not a gated
+# tool call, so `gh ship` remains the ONLY merge path; we whitelist that gate, not a raw merge.
+# ``SELF_MERGE_PERMISSIONS_ALLOW`` is PUBLIC (no underscore): drift.py and the tests import it as the
+# shared "what rig writes" constant so apply and status can never diverge.
+_PERMISSIONS_SECTION = "permissions"
+_PERMISSIONS_ALLOW_KEY = "allow"
+SELF_MERGE_PERMISSIONS_ALLOW: tuple[str, ...] = (
+    "Bash(gh ship:*)",
+    "Bash(*/pr-ship.sh:*)",
+    "Bash(*/ship.sh:*)",
+)
+
+
+def self_merge_permissions_present(data: dict) -> bool:
+    """True when EVERY self-merge ship rule is already in ``permissions.allow`` (shared with drift).
+
+    Guards its own precondition like :func:`self_merge_allow_present`: a non-dict ``data`` or a
+    mis-shaped ``permissions``/``allow`` node yields ``False`` rather than raising.
+    """
+    if not isinstance(data, dict):
+        return False
+    block = data.get(_PERMISSIONS_SECTION)
+    if not isinstance(block, dict):
+        return False
+    lst = block.get(_PERMISSIONS_ALLOW_KEY)
+    if not isinstance(lst, list):
+        return False
+    return all(rule in lst for rule in SELF_MERGE_PERMISSIONS_ALLOW)
+
+
+def self_merge_permissions_addable(data: dict) -> bool:
+    """True when a self-merge apply WOULD add ship rules — mirrors :func:`_ensure_self_merge_permissions`.
+
+    Distinguishes ABSENT (apply seeds it → addable) from MALFORMED (a non-dict ``permissions`` or a
+    non-list ``allow`` → apply leaves it, ``provision_permissions`` reports the shape → NOT addable).
+    Drift uses this instead of ``not self_merge_permissions_present`` so a malformed file does not
+    get a second, inaccurately-worded 'ship rules absent' row on top of the shape-drift one.
+    """
+    if not isinstance(data, dict):
+        return False
+    perms = data.get(_PERMISSIONS_SECTION)
+    if perms is None:
+        return True  # apply seeds the section
+    if not isinstance(perms, dict):
+        return False  # malformed section — surfaced by the mode-key/permissions shape check
+    lst = perms.get(_PERMISSIONS_ALLOW_KEY)
+    if lst is None:
+        return True  # apply seeds the list
+    if not isinstance(lst, list):
+        return False  # malformed allow — surfaced by provision_permissions' fail-closed shape check
+    return any(rule not in lst for rule in SELF_MERGE_PERMISSIONS_ALLOW)
+
+
+def _ensure_self_merge_permissions(data: dict) -> bool:
+    """Additively ensure ``permissions.allow`` carries the ship rules. Returns True if it changed.
+
+    SELF-TARGETS the ``permissions`` section directly (creating it if absent) rather than the harness
+    action's mode section — the ship rules always live under ``permissions.allow``, and
+    :func:`self_merge_permissions_present` (drift) reads exactly there, so apply and status can never
+    diverge even if the mode key ever moves out of ``permissions``. Never clobbers: every existing
+    allow entry is kept, only the MISSING ship rules are appended (a re-apply is a no-op).
+
+    A MALFORMED ``permissions`` section or ``allow`` list (present but wrong type) is LEFT UNTOUCHED
+    and we return ``False`` — unlike the autoMode helper we never overwrite it. ``apply_harness`` runs
+    before ``provision_permissions``, whose fail-closed shape validation is the authoritative place to
+    reject a mis-shaped list; silently replacing it here would destroy the user's value AND mask that
+    error. Only an ABSENT section/list is created.
+    """
+    perms = data.get(_PERMISSIONS_SECTION)
+    if perms is None:
+        perms = {}
+        data[_PERMISSIONS_SECTION] = perms
+    elif not isinstance(perms, dict):
+        return False  # malformed section — the mode-key path / provision_permissions surfaces this
+    lst = perms.get(_PERMISSIONS_ALLOW_KEY)
+    if lst is not None and not isinstance(lst, list):
+        return False  # malformed — leave it for provision_permissions to fail-close on
+    lst = lst if isinstance(lst, list) else []
+    added = [rule for rule in SELF_MERGE_PERMISSIONS_ALLOW if rule not in lst]
+    if not added:
+        return False
+    perms[_PERMISSIONS_ALLOW_KEY] = [*lst, *added]
+    return True
+
+
 # mode_status values that mean "the auto/permission-mode key needs no write" (already correct, or
 # left untouched under on_conflict=skip). The additive carve-out can still change the file.
 _MODE_KEY_UNCHANGED = (None, "kept")
@@ -791,14 +882,18 @@ def _load_harness_json(
 
 
 def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
-    """Merge the harness auto/permission mode + self-merge carve-out into the settings JSON.
+    """Merge the harness auto/permission mode + self-merge unblock into the settings JSON.
 
-    Reconciles two managed things in the one file, both idempotent and additive-safe:
+    Reconciles three managed things in the one file, all idempotent and additive-safe:
     - ``permissions.defaultMode`` (the auto/permission mode) — a DIFFERENT prior value is backed
       up before converging under ``on_conflict=backup`` (skip leaves it; overwrite replaces w/o a
       backup).
-    - ``autoMode.allow`` (the self-merge carve-out, only when ``options['self_merge']`` is set —
-      i.e. auto-mode) — APPENDED once, never clobbering the user's own entries or sibling sections.
+    - ``permissions.allow`` (the self-merge ship rules — ``Bash(gh ship:*)`` etc., only when
+      ``options['self_merge']`` is set) — the HARD unblock that clears the auto-mode Bash permission
+      gate so `gh ship` runs. APPENDED, never clobbering the user's own entries or the sibling
+      ``permissions.deny`` (the ``Bash(gh pr merge:*)`` deny stays: `gh ship` is still the only path).
+    - ``autoMode.allow`` (the self-merge natural-language carve-out, same ``self_merge`` gate) — the
+      SOFT-block clearance (Merge-Without-Review / Self-Approval), APPENDED once.
     Every other setting in the file is preserved.
     """
     (section, key), value = desired_harness_value(action)
@@ -813,12 +908,13 @@ def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
     sect = data.get(section, {})
     if not isinstance(sect, dict):
         return ActionResult(action, "error", f"harness/{action.item}: '{section}' is not an object in {config_file}")
-
-    carveout_added = _ensure_self_merge_allow(data) if action.options.get("self_merge") else False
+    # bind the section live so an additive ``permissions.allow`` append persists even when the
+    # mode-key write below is a no-op (an unbound ``sect`` copy would drop the ship rules).
+    data[section] = sect
 
     current = sect.get(key)
     # mode_status: what the mode key write is — None (already correct), "kept" (conflict left under
-    # skip), or a write status. The additive carve-out never triggers a backup.
+    # skip), or a write status. The additive carve-out/ship-rules never trigger a backup.
     mode_status: str | None
     if current == value:
         mode_status = None
@@ -827,8 +923,22 @@ def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
     else:
         mode_status = "created" if current is None else ("backed_up" if on_conflict == "backup" else "updated")
 
-    if not _mode_key_written(mode_status) and not carveout_added:
-        return ActionResult(action, "skipped", _harness_noop_detail(action, section, key, value))
+    self_merge = bool(action.options.get("self_merge"))
+    # The defaultMode this apply LEAVES on disk: the value we write, or the prior value kept under skip.
+    resulting_mode = current if mode_status == "kept" else value
+    # SOFT-block carve-out (autoMode.allow) + HARD Bash-gate unblock (permissions.allow ship rules), both
+    # self-targeting their own section off ``data`` (not the mode ``sect``) so writer and drift readers
+    # agree regardless of where the mode key lives. The carve-out is INERT without auto (the classifier
+    # only runs then) → safe whenever self_merge is configured. The ship rules are ACTIVE in EVERY mode,
+    # so write them ONLY when the RESULTING mode equals the declared auto value: a skip that left an
+    # interactive defaultMode must not pre-approve `gh ship` (codex #159 P2). Gating on ``value`` (not a
+    # literal "auto") keeps the writer symmetric with drift's ``current == value`` reader.
+    carveout_added = _ensure_self_merge_allow(data) if self_merge else False
+    perms_added = _ensure_self_merge_permissions(data) if (self_merge and resulting_mode == value) else False
+    extra_changed = carveout_added or perms_added
+
+    if not _mode_key_written(mode_status) and not extra_changed:
+        return ActionResult(action, "skipped", _harness_noop_detail(action, section, key, value, data))
 
     if mode_status == "backed_up" and backup_note == "":
         bak = fsutil.backup_path(config_file)
@@ -837,40 +947,59 @@ def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
 
     if _mode_key_written(mode_status):
         sect[key] = value
-        data[section] = sect
 
     config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    # a carve-out-only write (mode key None/"kept") still changed the file → report "updated".
+    # a carve-out/ship-rule-only write (mode key None/"kept") still changed the file → report "updated".
     status = mode_status if _mode_key_written(mode_status) else "updated"
     return ActionResult(
         action, status,
-        _harness_write_detail(action, (section, key), value, mode_status, carveout_added, config_file, backup_note),
+        _harness_write_detail(
+            action, (section, key), value, mode_status, carveout_added, perms_added, config_file, backup_note
+        ),
     )
 
 
-def _harness_noop_detail(action: Action, section: str, key: str, value: str) -> str:
-    """The 'nothing changed' detail — notes the carve-out presence when self-merge is configured."""
+def _harness_noop_detail(action: Action, section: str, key: str, value: str, data: dict) -> str:
+    """The 'nothing changed' detail — notes which self-merge pieces are ACTUALLY present.
+
+    Reads live state (not just the config intent) so a malformed ``permissions.allow`` — which
+    :func:`_ensure_self_merge_permissions` deliberately left untouched — is not misreported as
+    'ship rules present'."""
     detail = f"harness/{action.item}: {section}.{key} already '{value}'"
     if action.options.get("self_merge"):
-        detail += "; self-merge carve-out present"
+        present = []
+        if self_merge_permissions_present(data):
+            present.append("ship rules")
+        if self_merge_allow_present(data):
+            present.append("carve-out")
+        if present:
+            detail += f"; self-merge {' + '.join(present)} present"
     return detail
+
+
+def _self_merge_write_note(carveout_added: bool, perms_added: bool) -> str:
+    """The ``; self-merge …`` suffix describing which self-merge pieces this write added."""
+    added = []
+    if perms_added:
+        added.append(f"{_PERMISSIONS_SECTION}.{_PERMISSIONS_ALLOW_KEY} ship rules")
+    if carveout_added:
+        added.append(f"{_AUTO_MODE_SECTION}.{_AUTO_MODE_ALLOW_KEY} carve-out")
+    return f"; self-merge {' + '.join(added)} added" if added else ""
 
 
 def _harness_write_detail(
     action: Action, mode_key: tuple[str, str], value: str,
-    mode_status: str | None, carveout_added: bool, config_file: Path, backup_note: str,
+    mode_status: str | None, carveout_added: bool, perms_added: bool, config_file: Path, backup_note: str,
 ) -> str:
-    """Describe what the write did — the mode key and/or the additive self-merge carve-out."""
+    """Describe what the write did — the mode key and/or the additive self-merge ship rules/carve-out."""
     section, key = mode_key
+    self_merge_note = _self_merge_write_note(carveout_added, perms_added)
     if not _mode_key_written(mode_status):
         left = " (mode key left, on_conflict=skip)" if mode_status == "kept" else ""
-        return (
-            f"harness/{action.item}: self-merge carve-out added to "
-            f"{_AUTO_MODE_SECTION}.{_AUTO_MODE_ALLOW_KEY}{left} in {config_file}{backup_note}"
-        )
+        note = self_merge_note.lstrip("; ") or "self-merge provisioning"
+        return f"harness/{action.item}: {note}{left} in {config_file}{backup_note}"
     auto = "auto-mode ON" if action.options.get("auto_mode") else "interactive"
-    carve = "; self-merge carve-out added" if carveout_added else ""
-    return f"harness/{action.item}: {section}.{key} → '{value}' ({auto}){carve} in {config_file}{backup_note}"
+    return f"harness/{action.item}: {section}.{key} → '{value}' ({auto}){self_merge_note} in {config_file}{backup_note}"
 
 
 # ── permission-allowlist provisioning (claude-code permissions.allow / opencode permission.bash) ──

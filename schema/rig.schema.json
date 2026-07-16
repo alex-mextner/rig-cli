@@ -539,7 +539,7 @@
         },
         "self_merge": {
           "type": "boolean",
-          "description": "true → add the self-merge carve-out to the auto-mode classifier's autoMode.allow (clears the Merge-Without-Review + Self-Approval soft blocks for the agent's OWN PRs via gh ship); auto-mode only; every other classifier rule (incl. the anti-exfil hard rule) stays",
+          "description": "true → add the ship allow rules (Bash(gh ship:*), Bash(*/pr-ship.sh:*), Bash(*/ship.sh:*)) to permissions.allow so the auto-mode Bash gate stops vetoing gh ship, PLUS the natural-language carve-out to autoMode.allow (clears the Merge-Without-Review + Self-Approval soft blocks for the agent's OWN PRs); auto-mode only; the Bash(gh pr merge:*) deny and every other classifier rule (incl. the anti-exfil hard rule) stay",
           "default": true
         },
         "mode": {

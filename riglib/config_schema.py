@@ -336,9 +336,11 @@ _HARNESS_BLOCK = Block(
         "auto_mode": Leaf("boolean", "true → auto-accept tool calls; false → interactive", default=True),
         "self_merge": Leaf(
             "boolean",
-            "true → add the self-merge carve-out to the auto-mode classifier's autoMode.allow (clears "
-            "the Merge-Without-Review + Self-Approval soft blocks for the agent's OWN PRs via gh ship); "
-            "auto-mode only; every other classifier rule (incl. the anti-exfil hard rule) stays",
+            "true → add the ship allow rules (Bash(gh ship:*), Bash(*/pr-ship.sh:*), Bash(*/ship.sh:*)) "
+            "to permissions.allow so the auto-mode Bash gate stops vetoing gh ship, PLUS the "
+            "natural-language carve-out to autoMode.allow (clears the Merge-Without-Review + "
+            "Self-Approval soft blocks for the agent's OWN PRs); auto-mode only; the Bash(gh pr merge:*) "
+            "deny and every other classifier rule (incl. the anti-exfil hard rule) stay",
             default=True,
         ),
         "mode": Leaf("string", "pin the exact permission value (overrides auto_mode map)"),
