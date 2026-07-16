@@ -68,6 +68,8 @@ from .actions.runner import (
     transient_ship_root_skip_reason,
     schedule_plan_from_action,
     self_merge_allow_present,
+    self_merge_permissions_addable,
+    SELF_MERGE_PERMISSIONS_ALLOW,
     skill_harness_link_target,
     tg_ctl_plan_from_action,
     tmux_plan_from_action,
@@ -121,6 +123,15 @@ def detect(
     declared_ci_dirs: dict[Path, set[str]] = {d: set() for d in (scan_ci_dirs or [])}
     declared_mcp: dict[Path, set[str]] = {f: set() for f in (scan_mcp_files or [])}
     declared_hook_dirs: dict[Path, set[str]] = {d: set() for d in (scan_hook_dirs or [])}
+    # settings files an active self-merge harness action writes the ship rules into. The permissions
+    # extras check suppresses those rig-owned rules as "extras" ONLY for these files — so a
+    # self_merge:false plan (or a permissions action targeting a DIFFERENT file) still reports stray
+    # ship rules as drift-extras, keeping two-way drift honest (codex review).
+    self_merge_files = {
+        harness_settings_file(a)
+        for a in plan.actions
+        if a.kind == "apply_harness" and a.options.get("self_merge")
+    }
 
     for action in plan.actions:
         if action.kind == "copy_skill":
@@ -147,7 +158,7 @@ def detect(
         elif action.kind == "apply_harness":
             _check_harness(action, report)
         elif action.kind == "provision_permissions":
-            _check_permissions(action, report)
+            _check_permissions(action, report, self_merge_owned=permissions_settings_file(action) in self_merge_files)
         elif action.kind == "register_hook_bridge":
             _check_hook_bridge(action, report)
         elif action.kind == "provision_schedule":
@@ -1006,20 +1017,34 @@ def _check_harness(action: Action, report: DriftReport) -> None:
                 f"{section}.{key} is '{current}', config declares '{value}'",
             )
         )
-    # the self-merge carve-out is a second managed thing in the same file (auto-mode only). Skip
-    # it for a non-dict root — the mode-key path above already reported that file, and a second
-    # row for the same malformed file would just be noise.
-    if action.options.get("self_merge") and isinstance(data, dict) and not self_merge_allow_present(data):
-        report.items.append(
-            DriftItem(
-                "missing", "harness", action.item, config_file,
-                "self-merge carve-out absent from autoMode.allow (config declares self_merge)",
+    # the self-merge provisioning is two more managed things in the same file (auto-mode only): the
+    # HARD ``permissions.allow`` ship rules and the SOFT ``autoMode.allow`` carve-out. Skip both for
+    # a non-dict root — the mode-key path above already reported that file, and a second row for the
+    # same malformed file would just be noise.
+    if action.options.get("self_merge") and isinstance(data, dict):
+        # `addable` (not `not present`) so a MALFORMED permissions.allow — already reported as a
+        # shape `modified` by the permissions check — doesn't also get an inaccurate 'absent' row.
+        if self_merge_permissions_addable(data):
+            report.items.append(
+                DriftItem(
+                    "missing", "harness", action.item, config_file,
+                    "self-merge ship rules absent from permissions.allow (config declares self_merge)",
+                )
             )
-        )
+        if not self_merge_allow_present(data):
+            report.items.append(
+                DriftItem(
+                    "missing", "harness", action.item, config_file,
+                    "self-merge carve-out absent from autoMode.allow (config declares self_merge)",
+                )
+            )
 
 
-def _check_permissions(action: Action, report: DriftReport) -> None:
+def _check_permissions(action: Action, report: DriftReport, *, self_merge_owned: bool = False) -> None:
     """Flag drift between the configured permissions layer and the harness settings file.
+
+    ``self_merge_owned`` is True when an active self-merge harness action writes the ship rules into
+    THIS same settings file — only then are those rig-owned rules suppressed from the allow extras.
 
     One action spans EVERY container rig manages (rig-cli#100): the allow list plus, for
     claude-code, the deny/ask rule baselines. Per container:
@@ -1079,7 +1104,7 @@ def _check_permissions(action: Action, report: DriftReport) -> None:
             report.items.append(DriftItem("modified", "permissions", action.item, config_file, err))
         return
     for ps, node in resolved:
-        _check_permission_entries(action, ps, node, config_file, report)
+        _check_permission_entries(action, ps, node, config_file, report, self_merge_owned=self_merge_owned)
 
 
 def _resolve_permission_container(data: dict, ps) -> tuple[object, str | None]:
@@ -1111,7 +1136,9 @@ def _resolve_permission_container(data: dict, ps) -> tuple[object, str | None]:
     return node, None
 
 
-def _check_permission_entries(action: Action, ps, node, config_file: Path, report: DriftReport) -> None:
+def _check_permission_entries(
+    action: Action, ps, node, config_file: Path, report: DriftReport, *, self_merge_owned: bool = False
+) -> None:
     """Per-entry drift for ONE well-shaped container — missing/modified for the desired entries,
     then the user's extras (see :func:`_report_permission_extras` for the reporting shape)."""
     dotted = ".".join(ps.key_path)
@@ -1135,7 +1162,14 @@ def _check_permission_entries(action: Action, ps, node, config_file: Path, repor
                     DriftItem("missing", "permissions", action.item, config_file,
                               f"'{entry}' not in {dotted} (apply adds it)")
                 )
-        _report_permission_extras(action, ps, [e for e in present_list if e not in desired], config_file, report)
+        extras = [e for e in present_list if e not in desired]
+        if ps.role == "allow" and self_merge_owned:
+            # the self-merge ship rules are rig-owned (written by apply_harness into THIS file under
+            # an active self_merge) — not user cruft, so don't count them as "beyond the baseline"
+            # extras. Only suppressed when a self-merge action actually owns this file: a stray ship
+            # rule under self_merge:false (or in a different permissions target) still reports.
+            extras = [e for e in extras if e not in SELF_MERGE_PERMISSIONS_ALLOW]
+        _report_permission_extras(action, ps, extras, config_file, report)
         return
     existing = node if isinstance(node, dict) else {}
     for entry in ps.entries:
