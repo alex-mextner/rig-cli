@@ -81,9 +81,14 @@ BASELINE_ALIASES: dict[str, str] = {
 # that the log doesn't carry — and it's a knob the CTO can drop here if it ever skews a real
 # number. ``dev`` is also generic (devbox/devcontainer-style commands can exist), but it is the
 # permissioned agent-tools development surface; count it here so adoption stats follow the same
-# default command surface rig provisions. The remaining five names are unambiguous to this
-# ecosystem.
-OUR_CLIS: frozenset[str] = frozenset({"rig", "review", "tg", "draw", "3d", "task", "dev"})
+# default command surface rig provisions. ``pm`` (pm-cli) and ``research`` (research-cli) are the
+# read-only ecosystem coordinators rig also pre-allows; count them here so adoption stats track the
+# full provisioned surface. ``pm`` shares ``dev``'s generic-name caveat (a ``pm`` alias/other tool
+# could exist on some machine and be miscounted as ours) — the same accepted tradeoff, a knob the
+# CTO can drop here if it ever skews a real number. The remaining names are unambiguous.
+OUR_CLIS: frozenset[str] = frozenset(
+    {"rig", "review", "tg", "draw", "3d", "task", "dev", "pm", "research"}
+)
 
 # ── OUR MCP servers (the `mcp__<server>__<tool>` prefix) ───────────────────────────────
 OUR_MCP_SERVERS: frozenset[str] = frozenset({"review"})

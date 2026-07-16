@@ -36,13 +36,21 @@ _DESTRUCTIVE_RAW_COMMANDS = ("rm", "sudo", "dd", "kill", "killall", "pkill", "sh
 
 # ── the harness module (registry + renderers) ─────────────────────────────────────
 def test_default_tools_cover_ecosystem_and_external():
-    for t in ("tg", "review", "draw", "3d", "rig", "task", "dev"):  # our CLIs
+    for t in ("tg", "review", "draw", "3d", "rig", "task", "dev", "pm", "research"):  # our CLIs
         assert t in DEFAULT_TOOLS
     for t in ("gh", "git", "rg", "uv", "bun", "jq", "gitleaks"):  # safe external dev tools
         assert t in DEFAULT_TOOLS
     # NOTHING destructive is blanket-allowed
     for t in _DESTRUCTIVE_RAW_COMMANDS:
         assert t not in DEFAULT_TOOLS
+
+
+def test_default_claude_code_allowlist_includes_pm_and_research():
+    # the read-only ecosystem coordinators (pm-cli, research-cli) are pre-allowed by default,
+    # rendered as the claude-code prefix-glob entry — mirroring the `dev` grant.
+    entries = desired_entries("claude-code", resolve_tools(None, None, None))
+    assert "Bash(pm:*)" in entries
+    assert "Bash(research:*)" in entries
 
 
 def test_resolve_tools_replace_add_remove_and_dedup():
