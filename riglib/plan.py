@@ -99,7 +99,7 @@ def _agent_hooks_target_for_kind(kind: str) -> str | None:
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | provision_execpolicy | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_project_tool | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes | provision_spotlight
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | provision_execpolicy | provision_pi_extension | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_project_tool | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes | provision_spotlight
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -823,7 +823,7 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
 
     # ── permissions (per-harness command allowlist) ───────────────────────────────
     _build_mode(config, plan)
-    _build_permissions(config, plan)
+    _build_permissions(config, catalog, plan)
     _build_execpolicy(config, plan)
 
     # ── hook bridge (make agents-hooks/v1 descriptors FIRE in the harness) ─────────
@@ -954,7 +954,7 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
     )
 
 
-def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
+def _build_permissions(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) -> None:
     """Plan the per-harness permissions provisioning (allow + deny/ask), unless ``enabled: false``.
 
     Default **ON** (like ``agents_md``/``github``/``tg_ctl``): an ABSENT or empty ``permissions:``
@@ -1008,16 +1008,20 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
 
     for kind in kinds:
         if not harness_supported(kind):
-            # No config-array allowlist to merge — but the effect is still delivered by other
-            # surfaces, so describe what IS achieved rather than a bare "skipped". codex: safe-command
-            # allow + coarse deny via the execpolicy .rules block (planned separately below) plus
-            # flag-position denies via the PreToolUse hook bridge. gemini/pi: N/A (no mechanism).
+            # No config-array allowlist to merge — but the effect may still be delivered by other
+            # surfaces, so describe what IS achieved rather than a bare "skipped" where possible.
+            # codex: safe-command allow + coarse deny via the execpolicy .rules block (planned
+            # separately below) plus flag-position denies via the PreToolUse hook bridge. pi gets
+            # its permission belt via a provisioned EXTENSION instead of a config allowlist — no
+            # longer a silent N/A skip. gemini/others with neither mechanism: N/A.
             if execpolicy_supported(kind):
                 plan.notes.append(
                     f"permissions: harness '{kind}' has no config allowlist — safe-command allow + "
                     "coarse deny are provisioned via the execpolicy .rules block, and flag-position "
                     "denies via the PreToolUse hook bridge"
                 )
+            elif _build_pi_extension(config, catalog, kind, p, plan):
+                continue
             else:
                 reason = HARNESS_ALLOWLIST_NA.get(kind, "no command-allowlist mechanism")
                 plan.notes.append(
@@ -1114,6 +1118,52 @@ def _build_execpolicy(config: LoadedConfig, plan: InstallPlan) -> None:
                 options={"kind": kind, "tools": tools},
             )
         )
+
+
+def _build_pi_extension(
+    config: LoadedConfig, catalog: Catalog, kind: str, p: dict[str, Any], plan: InstallPlan
+) -> bool:
+    """Emit the pi ``permission-guard`` extension provisioning, if ``kind`` uses that path.
+
+    Returns True when it handled ``kind`` (an action was emitted OR a note explains why it could
+    not), so the caller skips the generic N/A note. pi's permissions are delivered by installing
+    the extension into pi's ``extensions/`` dir and writing the rig-owned policy file it reads —
+    the SAME baseline (deny gh-pr-merge / force-push / --no-verify / sudo-rm / screencapture; ask
+    pkill / killall / git reset --hard) the claude-code allowlist encodes, in the extension's
+    flag-anywhere dialect. Idempotent + backup-on-conflict + drift are handled in the runner.
+    """
+    from .harness_skills import pi_user_path
+    from .permissions import harness_permission_extension, pi_policy_document
+
+    ext_name = harness_permission_extension(kind)
+    if ext_name is None:
+        return False
+    item = catalog.get("pi_extensions", ext_name)
+    if item is None:
+        plan.notes.append(
+            f"permissions: harness '{kind}' extension '{ext_name}' not found in the agent-tools "
+            "catalog (pi-extensions/); permission enforcement NOT provisioned"
+        )
+        return True
+    install_dir = _expand(pi_user_path(f"extensions/{ext_name}"), config.repo_root)
+    policy_file = _expand(pi_user_path("rig-permission-policy.json"), config.repo_root)
+    policy = pi_policy_document()
+    plan.actions.append(
+        Action(
+            kind="provision_pi_extension",
+            category="permissions",
+            item=kind,
+            source=item.path,
+            target=install_dir,
+            options={
+                "kind": kind,
+                "extension": ext_name,
+                "policy_file": str(policy_file),
+                "policy": policy,
+            },
+        )
+    )
+    return True
 
 
 def _permissions_kinds(config: LoadedConfig, p: dict[str, Any]) -> list[str]:

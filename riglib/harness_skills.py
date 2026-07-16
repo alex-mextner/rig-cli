@@ -95,8 +95,13 @@ HARNESS_NATIVE_SKILLS: dict[str, str] = {
 # links each skill into Codex's skills dir (the skill mechanism) and records the global instruction
 # file path for status notes. Skills-dir membership takes precedence for the link decision, so no
 # "uses AGENTS.md instead of skills" note is emitted for codex.
+#
+# NOTE: ``pi`` reads its global ``AGENTS.md`` from its agent config root ``~/.pi/agent`` (override
+# ``PI_CODING_AGENT_DIR``) — NOT ``~/.config/pi`` (verified against the pi docs, 2026-07). Resolved
+# dynamically in :func:`instruction_file_for` so the ``PI_CODING_AGENT_DIR`` override is honored,
+# mirroring how codex resolves through ``RIG_CODEX_HOME``.
 HARNESS_INSTRUCTION_FILES: dict[str, str] = {
-    "pi": "~/.config/pi/AGENTS.md",
+    "pi": "~/.pi/agent/AGENTS.md",
     "commandcode": "~/.commandcode/AGENTS.md",
 }
 
@@ -146,6 +151,21 @@ def codex_user_path(name: str) -> str:
     return f"{codex_home().rstrip('/')}/{name.lstrip('/')}"
 
 
+def pi_agent_dir() -> str:
+    """pi's agent config root — ``PI_CODING_AGENT_DIR`` override, else ``~/.pi/agent``.
+
+    This is the base dir pi resolves everything against (extensions/, AGENTS.md, and the
+    rig-written permission policy). Honoring the env var means rig installs where pi actually
+    looks, mirroring :func:`codex_home` / ``RIG_CODEX_HOME``. Unexpanded — callers expand.
+    """
+    return os.environ.get("PI_CODING_AGENT_DIR") or "~/.pi/agent"
+
+
+def pi_user_path(name: str) -> str:
+    """Return an unexpanded path under pi's agent config root."""
+    return f"{pi_agent_dir().rstrip('/')}/{name.lstrip('/')}"
+
+
 def skill_dir_for(kind: str) -> str | None:
     """The harness skill-discovery dir to symlink installed skills into, or ``None`` for a
     native-discovery / instruction-file / unknown kind. Unexpanded — callers expand."""
@@ -170,6 +190,8 @@ def instruction_file_for(kind: str) -> str | None:
     native / unknown kind). Used to render the "N/A — uses <file>" status note. Unexpanded."""
     if kind == "codex":
         return codex_user_path("AGENTS.md")
+    if kind == "pi":
+        return pi_user_path("AGENTS.md")
     return HARNESS_INSTRUCTION_FILES.get(kind)
 
 

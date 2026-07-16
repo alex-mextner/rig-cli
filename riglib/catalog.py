@@ -18,6 +18,7 @@ agent-tools on-disk layout this scanner understands::
     ci/<name>/{workflow.yml,*.sh}               → category "ci"
     git-hooks/{global-dispatcher,pre-commit,…}  → category "git_hooks"
     mcp/<name>/README.md                        → category "mcp"
+    pi-extensions/<name>/index.ts               → category "pi_extensions"
 
 Stdlib-only: no yaml import here — SKILL.md frontmatter is parsed with a tiny hand-rolled
 reader (the ``description:`` line only), so the catalog has no dependency cost.
@@ -154,6 +155,7 @@ class Catalog:
         cat._scan_ci()
         cat._scan_git_hooks()
         cat._scan_mcp()
+        cat._scan_pi_extensions()
         return cat
 
     # ── scanners ────────────────────────────────────────────────────────────────
@@ -304,6 +306,31 @@ class Catalog:
                 Item(
                     name=d.name,
                     category="mcp",
+                    group="",
+                    description=_first_line(d / "README.md"),
+                    path=d,
+                    default_enabled=False,
+                )
+            )
+
+    def _scan_pi_extensions(self) -> None:
+        """Discover pi coding-agent extensions (``pi-extensions/<name>/index.ts``).
+
+        pi ships no built-in permission system; a rig-provisioned extension is the parity
+        mechanism. An extension dir is valid only if it carries an ``index.ts`` entry point (the
+        shape pi auto-loads). The carrier ``path`` is the whole dir — the runner copies it into
+        pi's ``extensions/`` dir. Off by default (only provisioned when the harness kind is pi).
+        """
+        pe = self.source / "pi-extensions"
+        if not pe.is_dir():
+            return
+        for d in sorted(p for p in pe.iterdir() if p.is_dir()):
+            if not (d / "index.ts").is_file():
+                continue
+            self.items.append(
+                Item(
+                    name=d.name,
+                    category="pi_extensions",
                     group="",
                     description=_first_line(d / "README.md"),
                     path=d,
