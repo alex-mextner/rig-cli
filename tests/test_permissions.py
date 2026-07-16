@@ -299,9 +299,19 @@ def test_opencode_default_on_apply_writes_default_set(fake_agent_tools, tmp_path
 
     assert not report.errors, [r.detail for r in report.errors]
     bash = json.loads(settings.read_text(encoding="utf-8"))["permission"]["bash"]
-    assert bash == {f"{tool} *": "allow" for tool in DEFAULT_TOOLS}
-    for raw_command in _DESTRUCTIVE_RAW_COMMANDS:
-        assert f"{raw_command} *" not in bash
+    # allow keys for every tool …
+    for tool in DEFAULT_TOOLS:
+        assert bash[f"{tool} *"] == "allow"
+    # … plus the baked opencode-dialect deny/ask baseline folded into the SAME permission.bash
+    # object (values "deny"/"ask"), emitted AFTER the allow keys (last-match-wins ordering).
+    from riglib.permissions import OPENCODE_ASK_RULES, OPENCODE_DENY_RULES
+
+    for key in OPENCODE_DENY_RULES:
+        assert bash[key] == "deny"
+    for key in OPENCODE_ASK_RULES:
+        assert bash[key] == "ask"
+    keys = list(bash)
+    assert keys.index(f"{DEFAULT_TOOLS[0]} *") < keys.index(OPENCODE_DENY_RULES[0])  # allow before deny
     assert not [d for d in detect(plan).items if d.category == "permissions"]
 
 
@@ -621,7 +631,15 @@ def test_permissions_fan_out_to_supported_harness_kinds_by_default(
         home / ".claude" / "settings.json",
         home / ".config" / "opencode" / "opencode.json",
     ]
-    assert any("harness 'codex' has no allowlist" in note for note in plan.notes)
+    # codex has no config allowlist → the note describes the achieved effect (execpolicy + hook
+    # bridge), not a bare "skipped"; and rig plans a provision_execpolicy action for it.
+    assert any(
+        "harness 'codex' has no config allowlist" in note and "execpolicy" in note
+        for note in plan.notes
+    )
+    execp = [a for a in plan.actions if a.kind == "provision_execpolicy"]
+    assert [a.options["kind"] for a in execp] == ["codex"]
+    assert execp[0].target == home / ".codex" / "rules" / "rig-managed.rules"
 
 
 def test_permissions_explicit_null_masks_global_pin_and_fans_out(
@@ -782,9 +800,12 @@ def test_resolve_rules_default_override_dedup_unknown():
     # dedup, first-seen order preserved
     assert resolve_rules("claude-code", "deny", ["Bash(a:*)", "Bash(a:*)", "Bash(b:*)"]) == \
         ["Bash(a:*)", "Bash(b:*)"]
-    # a kind with no verified rule containers has NO baked rules
-    assert resolve_rules("opencode", "deny", None) == []
-    assert "opencode" not in HARNESS_RULE_CONTAINERS and "claude-code" in HARNESS_RULE_CONTAINERS
+    # opencode now has a VERIFIED rule dialect → its own baked baseline
+    assert resolve_rules("opencode", "deny", None) == list(DEFAULT_RULES["opencode"]["deny"])
+    assert resolve_rules("opencode", "ask", None) == list(DEFAULT_RULES["opencode"]["ask"])
+    assert "opencode" in HARNESS_RULE_CONTAINERS and "claude-code" in HARNESS_RULE_CONTAINERS
+    # a kind with NO rule containers at all still has none
+    assert resolve_rules("codex", "deny", None) == []
 
 
 def test_validate_rule_lists():
@@ -821,23 +842,30 @@ def test_plan_carries_rule_options_defaults_and_overrides(fake_agent_tools, tmp_
     assert opts2["allow_rules"] == ["WebFetch"]
 
 
-def test_plan_opencode_drops_rules_with_note(fake_agent_tools, tmp_path):
-    # opencode has NO verified rule dialect (its permission.bash glob keys are a DIFFERENT syntax
-    # from claude-code rule strings) → rig plans no raw allow/deny/ask entries for it; a config
-    # that explicitly asked for them gets a visible plan note, never a silent drop — and never a
-    # claude-shaped string written as a bogus opencode glob key.
+def test_plan_opencode_uses_baked_baseline_and_drops_claude_dialect_config(fake_agent_tools, tmp_path):
+    # opencode's user-facing permissions.allow/deny/ask config lists are claude-code dialect
+    # (Bash(...) specifiers). rig does NOT adopt them as opencode glob keys (they would never
+    # match); it drops them with a visible plan note and uses its BAKED opencode-dialect deny/ask
+    # baseline instead. The raw allow config is dropped too (no claude-shaped glob key leaks in).
+    from riglib.permissions import OPENCODE_ASK_RULES, OPENCODE_DENY_RULES
+
     repo = tmp_path / "repo"; repo.mkdir()
     settings = repo / "opencode.json"
     cat = Catalog.scan(str(fake_agent_tools))
     plan = build(_opencode_cfg(repo, fake_agent_tools, settings, tools=["git"],
                                deny=["Bash(x:*)"], allow=["WebFetch"]), cat, project_type="unknown")
     opts = [a for a in plan.actions if a.kind == "provision_permissions"][0].options
-    assert opts["deny_rules"] == [] and opts["ask_rules"] == [] and opts["allow_rules"] == []
+    assert opts["allow_rules"] == []
+    assert opts["deny_rules"] == list(OPENCODE_DENY_RULES)
+    assert opts["ask_rules"] == list(OPENCODE_ASK_RULES)
     note = [n for n in plan.notes if "dropped" in n]
     assert note and "allow" in note[0] and "deny" in note[0] and "opencode" in note[0]
     # …and the raw WebFetch entry must NOT leak into the opencode container on apply
     report = run_plan(plan)
     assert not report.errors
+    bash = json.loads(settings.read_text(encoding="utf-8"))["permission"]["bash"]
+    assert "WebFetch" not in bash and "Bash(x:*)" not in bash
+    assert bash["gh pr merge*"] == "deny"
     bash = json.loads(settings.read_text(encoding="utf-8"))["permission"]["bash"]
     assert "WebFetch" not in bash and "git *" in bash
     # …and with no raw lists configured there is no noise note
@@ -974,3 +1002,54 @@ def test_apply_tolerates_and_drift_flags_nonstring_array_entries(fake_agent_tool
     assert "Bash(gh:*)" in allow                          # …and the merge still landed
     mod = [d for d in detect(plan).by_direction("modified") if d.category == "permissions"]
     assert any("non-string" in d.detail and "permissions.allow" in d.detail for d in mod)
+
+
+# ── opencode deny/ask via permission.bash (object form, last-match ordering) ─────────
+def test_opencode_deny_ask_written_after_user_catch_all(fake_agent_tools, tmp_path):
+    """opencode is last-match-wins, so rig's deny/ask keys MUST land AFTER a user ``"*"`` catch-all
+    (and after rig's own allow keys) or the catch-all would win over a deny."""
+    from riglib.permissions import OPENCODE_ASK_RULES, OPENCODE_DENY_RULES
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "opencode.json"
+    settings.write_text(json.dumps({"permission": {"bash": {"*": "allow"}}}), encoding="utf-8")
+    plan = build(_opencode_cfg(repo, fake_agent_tools, settings, tools=["gh"]),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    assert not run_plan(plan).errors
+    bash = json.loads(settings.read_text(encoding="utf-8"))["permission"]["bash"]
+    keys = list(bash)
+    assert keys[0] == "*"                       # user catch-all preserved AND still first
+    assert bash["gh *"] == "allow"
+    for d in OPENCODE_DENY_RULES:
+        assert bash[d] == "deny"
+        assert keys.index(d) > keys.index("*")      # deny after the catch-all → last-match-wins
+        assert keys.index(d) > keys.index("gh *")   # …and after rig's allow keys
+    for a in OPENCODE_ASK_RULES:
+        assert bash[a] == "ask"
+
+
+def test_opencode_deny_ask_drift_missing_then_converged_and_extras_once(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "opencode.json"
+    settings.write_text("{}", encoding="utf-8")  # file exists but empty → per-entry missing fires
+    plan = build(_opencode_cfg(repo, fake_agent_tools, settings, tools=["gh"]),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    missing = [d for d in detect(plan).by_direction("missing") if d.category == "permissions"]
+    assert any("gh pr merge*" in d.detail and "permission.bash" in d.detail for d in missing)
+    # apply converges; a rig-written deny key must NOT surface as an allow "extra"
+    assert not run_plan(plan).errors
+    assert not [d for d in detect(plan).items if d.category == "permissions"]
+    # a genuine user extra in the shared object is reported EXACTLY ONCE (not once per role)
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    data["permission"]["bash"]["frobnicate *"] = "allow"
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    extras = [d for d in detect(plan).by_direction("extra") if d.category == "permissions"]
+    assert len(extras) == 1 and "beyond the rig-managed baseline" in extras[0].detail
+
+
+def test_opencode_force_push_deny_over_blocks_force_with_lease_documented():
+    # documented fidelity gap: opencode `*` has no word boundary, so the force-push deny also
+    # matches --force-with-lease (which claude-code's word-boundary matcher excludes).
+    from riglib.permissions import OPENCODE_DENY_RULES
+
+    assert "git push*--force*" in OPENCODE_DENY_RULES

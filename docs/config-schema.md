@@ -705,12 +705,33 @@ flag — the `block-no-verify` agent-hook remains the authoritative argv-level g
 `Bash(sudo rm:*)`, and `Bash(screencapture:*)` (screenshots go through Playwright/CDP). Ask
 (prompt, don't block): `Bash(pkill:*)`, `Bash(killall:*)`, `Bash(git reset --hard:*)` +
 `Bash(git reset * --hard *)` + `Bash(git reset * --hard)`. The full annotated list lives in
-`riglib/permissions.py`. For **opencode** the raw `allow`/`deny`/`ask` lists are **N/A**: its
-`permission.bash` object accepts deny/ask values, but its glob-key dialect is a DIFFERENT syntax
-from claude-code rule strings and is unverified for multi-word rules — a configured raw list
-under `kind: opencode` is dropped with a visible plan note, never guessed at (a claude-shaped
-rule written as an opencode glob key would be a bogus entry that never matches). The
-tool-derived allowlist (`tools`/`extra`/`disable`) still works for opencode.
+`riglib/permissions.py`.
+
+**Baked deny/ask baselines (opencode).** opencode now gets its OWN deny/ask baseline written into
+the `permission.bash` object (values `"deny"`/`"ask"`), hand-written in opencode's glob dialect
+(`*` = zero-or-more chars, `?` = one char, **last matching key wins**). Deny: `"gh pr merge*"`,
+`"git push*--force*"`, `"git push -f*"`, `"git commit --no-verify*"`, `"sudo rm*"`,
+`"screencapture*"`. Ask: `"pkill*"`, `"killall*"`, `"git reset*--hard*"`. rig emits these AFTER
+the allow keys so they sit past any broad `"*"`/allow (last-match-wins ordering discipline). Two
+deliberate **fidelity gaps**, documented: (1) opencode `*` has NO word boundary, so
+`"git push*--force*"` also matches `--force-with-lease` (the safe force) that the claude-code
+word-boundary matcher excludes — the precise flag-position guard stays in the opencode PreToolUse
+plugin bridge (same split as claude-code); (2) the user-facing `allow`/`deny`/`ask` config lists
+are claude-code dialect (`Bash(...)` specifiers), so under `kind: opencode` a configured raw list
+is **dropped with a visible plan note** and the baked opencode-dialect baseline is used instead (a
+claude-shaped rule written as an opencode glob key would never match). The tool-derived allowlist
+(`tools`/`extra`/`disable`) works for opencode as before.
+
+**codex execpolicy (allow + coarse deny).** codex has no config allowlist, so rig writes a
+marker-delimited managed block of Starlark `prefix_rule(...)` lines into
+`~/.codex/rules/rig-managed.rules` (codex auto-scans `~/.codex/rules/*.rules` at startup — no
+`config.toml` reference needed). The resolved tool set becomes `decision="allow"` prefix rules; a
+MINIMAL coarse deny (`gh pr merge`, `sudo rm`, `screencapture`) becomes `decision="forbidden"`.
+**Fidelity gap:** `prefix_rule` matches a leading-token prefix, so a coarse `["git","push"]`
+forbidden would over-block ALL pushes — the coarse deny is therefore kept to unambiguous
+full-command bans only, and every flag-position guard stays in the PreToolUse hook bridge (same
+split as claude-code). The block is idempotent, backup-noted, preserves any lines outside its
+markers, and `rig status` surfaces it as `missing`/`modified` drift.
 
 **What gets written, per harness (keyed off `permissions.kind`, else supported `harness.kind` plus `harness.kinds`).**
 
@@ -718,12 +739,13 @@ tool-derived allowlist (`tools`/`extra`/`disable`) still works for opencode.
   entry per tool in the form `Bash(<tool>:*)` (matching the prefix-glob form CC honors). The
   array is merged additively + deduped; every other entry survives.
 - **opencode** — `permission.bash` in `~/.config/opencode/opencode.json` (a JSON object) gains a
-  `"<tool> *": "allow"` entry per tool, only when the key is absent — an existing user
-  `"deny"`/`"ask"` is never downgraded.
-- **codex** — **N/A**. `~/.codex/config.toml` (or `$RIG_CODEX_HOME/config.toml`) has no
-  per-command allowlist rig can additively merge; command execution is gated by
-  `approval_policy`/`sandbox_mode` (coarse) and Starlark `execpolicy` `.rules` files — a separate
-  mechanism. Recorded N/A, never written.
+  `"<tool> *": "allow"` entry per tool, plus the baked deny/ask baseline (`"<glob>": "deny"`/`"ask"`),
+  only when the key is absent — an existing user `"deny"`/`"ask"` is never downgraded. deny/ask keys
+  are emitted after the allow keys (last-match-wins ordering).
+- **codex** — the command allowlist is **N/A** in `config.toml`, but the allow + coarse-deny effect
+  IS delivered: rig writes a managed `prefix_rule(...)` block into `~/.codex/rules/rig-managed.rules`
+  (a `provision_execpolicy` action; codex auto-scans that dir at startup). Flag-position denies stay
+  in the PreToolUse hook bridge.
 - **pi** — **N/A**. No documented per-command auto-approve allowlist that leaves the toolset
   intact, so it is recorded N/A, never written.
 

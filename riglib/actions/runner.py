@@ -1108,12 +1108,16 @@ def desired_permission_specs(action: Action) -> list[PermissionSpec]:
     # emit the deny/ask specs whenever the kind HAS the container — even with EMPTY entries
     # (config `deny: []`): rig still manages the container, so a previously-applied baseline
     # left on disk shows up as per-entry extras instead of silently vanishing from status
-    # (codex review finding, rig-cli#100).
+    # (codex review finding, rig-cli#100). The container SHAPE is per-harness (claude-code: two
+    # dedicated arrays; opencode: the shared permission.bash object, values "deny"/"ask") — read it
+    # off the RuleContainer so the merge writes the right shape. Allow is emitted FIRST so opencode's
+    # denies land AFTER the allow keys in the object (last-match-wins ordering discipline).
     for role in ("deny", "ask"):
-        if role not in containers:
+        rc = containers.get(role)
+        if rc is None:
             continue
         rules = [str(r) for r in action.options.get(f"{role}_rules", []) or []]
-        specs.append(PermissionSpec(role, containers[role], "array", tuple(rules), None))
+        specs.append(PermissionSpec(role, rc.key_path, rc.container, tuple(rules), rc.value))
     return specs
 
 
@@ -1245,6 +1249,12 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
         bak = fsutil.backup_path(config_file)
         shutil.copy2(str(config_file), str(bak))
         backup_note = f" (backed up prior → {bak})"
+    # NEVER pass sort_keys=True here: opencode is last-match-wins, so its deny/ask keys in
+    # permission.bash MUST serialize AFTER the allow keys / any user catch-all. Sorting (or otherwise
+    # rebuilding the object) would silently reorder deny before allow and turn every deny into a
+    # no-op — with no test failure unless the order assertion in test_opencode_deny_ask_written_
+    # after_user_catch_all stays. Insertion order (the additive merge appends missing keys) is the
+    # invariant; json.dumps preserves dict order, so leave it be.
     config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     # "backed_up" when we preserved a prior copy; else "updated" if the file pre-existed (we merged
     # entries into it), or "created" if we wrote it fresh. Don't report "created" for a file we
@@ -1254,6 +1264,139 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
         action, status,
         f"permissions/{action.item}: added {', '.join(added_per_container)} in {config_file}{backup_note}",
     )
+
+
+# ── codex execpolicy .rules provisioning (~/.codex/rules/rig-managed.rules) ────────────────────
+# codex auto-scans ~/.codex/rules/*.rules (Starlark) at startup. rig owns a MARKER-DELIMITED block
+# of prefix_rule(...) lines in a DEDICATED rig-managed.rules file: safe-command `allow` (the resolved
+# tool set) + a minimal coarse `forbidden` deny (see riglib.permissions). The block is spliced with
+# the SAME offset machinery the global-excludes / ship-delegator managed blocks use (a SYNC family:
+# _find_marker_lines + collapse-to-one), so a re-apply is a byte-identical no-op and any lines a user
+# put OUTSIDE the markers are preserved verbatim.
+EXECPOLICY_BEGIN_MARKER = "# >>> rig-managed execpolicy (do not edit) >>>"
+EXECPOLICY_END_MARKER = "# <<< rig-managed execpolicy (do not edit) <<<"
+EXECPOLICY_BLOCK_COMMENT = (
+    "# rig provisions safe-command allow + coarse deny prefix_rules here. Flag-position guards "
+    "(force-push, --no-verify anywhere) live in the PreToolUse hook bridge."
+)
+
+
+def execpolicy_rules_file(action: Action) -> Path:
+    """The .rules file a ``provision_execpolicy`` action targets (shared by apply + drift)."""
+    return action.target
+
+
+def execpolicy_block_text(action: Action) -> str:
+    """The exact marker-delimited block rig owns for this action (no trailing newline).
+
+    Single source of truth shared by the install handler and drift, so both agree byte-for-byte.
+    The block is the begin marker, a fixed explanatory comment, one ``prefix_rule(...)`` line per
+    resolved rule (allow tools then coarse deny — via :func:`riglib.permissions.execpolicy_rule_lines`),
+    then the end marker.
+    """
+    from ..permissions import execpolicy_rule_lines
+
+    kind = str(action.options.get("kind", "codex"))
+    tools = [str(t) for t in action.options.get("tools", [])]
+    lines = execpolicy_rule_lines(kind, tools)
+    return "\n".join([EXECPOLICY_BEGIN_MARKER, EXECPOLICY_BLOCK_COMMENT, *lines, EXECPOLICY_END_MARKER])
+
+
+def _do_provision_execpolicy(action: Action, on_conflict: str) -> ActionResult:
+    """Reconcile rig's managed execpolicy block into the codex .rules file — idempotent, additive.
+
+    Mirrors the global-excludes reconcile: append the block to a file that lacks it (creating the
+    file/dirs), collapse any duplicated managed regions to ONE correct block in place, or no-op a
+    correct single block. Every line OUTSIDE the markers is preserved verbatim. An unbalanced /
+    misordered marker pair is a hard error rig refuses to guess at. ``on_conflict=backup`` keeps a
+    timestamped copy before a rewrite; ``skip`` leaves a drifted block untouched (drift stays visible).
+    """
+    desired = execpolicy_block_text(action)
+    path = execpolicy_rules_file(action)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not path.exists():
+        path.write_text(desired + "\n", encoding="utf-8")
+        return ActionResult(action, "created", f"execpolicy/{action.item}: wrote {path}")
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError as exc:
+        return ActionResult(action, "error", f"execpolicy/{action.item}: cannot read {path}: {exc}")
+
+    new_content, state, detail = _splice_managed_block(
+        content, desired, EXECPOLICY_BEGIN_MARKER, EXECPOLICY_END_MARKER
+    )
+    if state == "conflict":
+        return ActionResult(action, "error", f"execpolicy/{action.item}: {detail}")
+    if state == "ok":
+        return ActionResult(action, "skipped", f"execpolicy/{action.item}: already current in {path}")
+    # ``create`` = the file has no managed block yet → APPEND it (additive, never touches the user's
+    # own lines), exactly like the fresh-file branch above; ``on_conflict`` does NOT gate an additive
+    # add (mirrors the global-excludes / ship-delegator appenders — else a user who pre-seeded the
+    # file would get NO deny baseline under ``skip`` while a clean machine does). Only ``update``
+    # REWRITES an existing managed block, so only that honors ``skip`` (leave the drift) / ``backup``.
+    backup_note = ""
+    if state == "update":
+        if on_conflict == "skip":
+            return ActionResult(
+                action, "skipped",
+                f"execpolicy/{action.item}: {path} block differs but on_conflict=skip — left unchanged (drift NOT reconciled)",
+            )
+        if _should_backup(on_conflict):
+            bak = fsutil.backup_path(path)
+            shutil.copy2(str(path), str(bak))
+            backup_note = f" (backed up prior → {bak})"
+    path.write_text(new_content, encoding="utf-8")
+    status = "backed_up" if backup_note else "updated"
+    verb = "appended block to" if state == "create" else "reconciled block in"
+    return ActionResult(action, status, f"execpolicy/{action.item}: {verb} {path}{backup_note}")
+
+
+def _splice_managed_block(
+    content: str, desired: str, begin_marker: str, end_marker: str
+) -> tuple[str, str, str]:
+    """Splice ``desired`` into ``content`` between the markers — returns ``(new_content, state, detail)``.
+
+    ``state`` is ``ok`` (already exactly one correct block — ``new_content`` is unused),
+    ``create``/``update`` (``new_content`` is the reconciled file), or ``conflict`` (unbalanced /
+    misordered markers — ``detail`` says why, ``new_content`` unused). Every line OUTSIDE the managed
+    region survives byte-for-byte; duplicated managed regions collapse to one. SYNC family with
+    :func:`resolve_global_excludes` / :func:`_reconcile_ship_exclude` (same offset machinery)."""
+    begins = _find_marker_lines(content, begin_marker)
+    ends = _find_marker_lines(content, end_marker)
+    if len(begins) != len(ends) or (ends and not begins):
+        return "", "conflict", "unbalanced rig-managed execpolicy markers — reconcile by hand, then re-run"
+    if not begins:
+        body = content.rstrip("\n")
+        sep = "\n\n" if body else ""
+        return f"{body}{sep}{desired}\n", "create", ""
+    markers = sorted([(b[0], b[1], "begin") for b in begins] + [(e[0], e[1], "end") for e in ends])
+    pairs: list[tuple[int, int]] = []
+    expect = "begin"
+    pending = -1
+    for start, line_end, kind in markers:
+        if kind != expect:
+            return "", "conflict", "misordered/nested rig-managed execpolicy markers — reconcile by hand, then re-run"
+        if kind == "begin":
+            pending = start
+            expect = "end"
+        else:
+            pairs.append((pending, line_end))
+            expect = "begin"
+    if len(pairs) == 1 and content[pairs[0][0] : pairs[0][1]] == desired:
+        return "", "ok", ""
+    out: list[str] = []
+    cursor = 0
+    for idx, (r_start, r_end) in enumerate(pairs):
+        out.append(content[cursor:r_start])
+        if idx == 0:
+            out.append(desired)
+        elif content[r_end : r_end + 1] == "\n":
+            r_end += 1
+        cursor = r_end
+    out.append(content[cursor:])
+    return "".join(out), "update", ""
 
 
 # ── agents-hooks/v1 → harness bridge registration ───────────────────────────────────
@@ -6101,6 +6244,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "register_mcp": _do_register_mcp,
     "apply_harness": _do_apply_harness,
     "provision_permissions": _do_provision_permissions,
+    "provision_execpolicy": _do_provision_execpolicy,
     "register_hook_bridge": _do_register_hook_bridge,
     "provision_schedule": _do_provision_schedule,
     "provision_agents_symlink": _do_provision_agents_symlink,
