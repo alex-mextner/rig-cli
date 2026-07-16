@@ -180,6 +180,23 @@ def test_runner_backs_up_conflicting_policy(tmp_path, fake_agent_tools, monkeypa
 
 
 # ── drift ─────────────────────────────────────────────────────────────────────────
+def test_runner_double_backup_surfaces_both_restore_paths(tmp_path, fake_agent_tools, monkeypatch):
+    # when BOTH the extension dir and the policy file conflict, ActionResult carries one structured
+    # backup slot — but neither restore path is lost: both appear in the result detail string.
+    plan = _build_pi_plan(tmp_path, fake_agent_tools, monkeypatch)
+    piroot = tmp_path / "piroot"
+    ext_dir = piroot / "extensions" / "permission-guard"
+    ext_dir.mkdir(parents=True, exist_ok=True)
+    (ext_dir / "index.ts").write_text("stale extension\n")  # differs from source → will back up
+    policy_file = piroot / "rig-permission-policy.json"
+    policy_file.write_text('{"stale":true}\n')  # differs from desired → will back up
+    report = run_plan(plan)  # on_conflict=backup
+    result = report.results[0]
+    assert result.status == "backed_up", result.detail
+    # both backups referenced in the detail (each WriteOutcome.detail carries its own path)
+    assert result.detail.count("backed up prior") == 2, result.detail
+
+
 def test_drift_missing_before_apply(tmp_path, fake_agent_tools, monkeypatch):
     plan = _build_pi_plan(tmp_path, fake_agent_tools, monkeypatch)
     report = detect(plan)
