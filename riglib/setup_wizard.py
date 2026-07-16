@@ -259,7 +259,7 @@ def run_setup(
     except (EOFError, KeyboardInterrupt):
         out("")
         if pending_apply:
-            out("  aborted — changes already saved to config; run `rig apply` to converge.")
+            out("  aborted — changes already saved to config; run `rig apply commit` to converge.")
         else:
             out("  aborted — no changes made.")
         return 0
@@ -268,7 +268,7 @@ def run_setup(
     if want_apply:
         return apply_fn(repo_root)
     if pending_apply:
-        out("  changes saved to config; run `rig apply` to converge.")
+        out("  changes saved to config; run `rig apply commit` to converge.")
     return 0
 
 

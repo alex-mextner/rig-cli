@@ -225,7 +225,7 @@ class SetupState:
         # rules `rig apply` enforces. `rig validate`/`rig schema` keep the file in sync.
         header = (
             "# yaml-language-server: $schema=schema/rig.schema.json\n"
-            "# rig.yaml — declarative setup for this repo, applied by `rig apply`.\n"
+            "# rig.yaml — declarative setup for this repo, applied by `rig apply commit`.\n"
             "# COMMITTED BY DEFAULT: this file is the reproducible source of truth.\n"
             "# Global defaults live at ~/.config/rig/config.yaml; this file overrides them.\n"
             "# See: rig status (drift), rig apply (converge). Schema: docs/config-schema.md\n\n"

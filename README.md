@@ -58,8 +58,8 @@ Or run straight from a checkout without installing — `uv run bin/rig …` / `p
 
 | Command | One-line |
 | --- | --- |
-| `rig init` | **First-run onboarding.** Scaffold `rig.yaml` and **preview** the agent-tools catalog it would wire in (with opt-out) — the front door for a repo/machine with no config yet. init never applies on its own: a bare `rig init` (no TUI/flags) writes **nothing** (pure preview); `rig init --yes` writes `rig.yaml` (config only); **`rig apply` is what applies it** (or `rig init --yes --apply` to scaffold + apply in one step). |
-| `rig apply` | **Declarative reconcile** (kubectl-style): read `rig.yaml`, compute the diff vs the repo's state, converge, idempotently. The steady-state command you re-run on every machine; hand-edits that drift from the config are surfaced by `rig status`. `--dry-run` previews; `--only skills,ci` scopes. |
+| `rig init` | **First-run onboarding.** Scaffold `rig.yaml` and **preview** the agent-tools catalog it would wire in (with opt-out) — the front door for a repo/machine with no config yet. init never applies on its own: a bare `rig init` (no TUI/flags) writes **nothing** (pure preview); `rig init --yes` writes `rig.yaml` (config only); **`rig apply commit` is what applies it** (or `rig init --yes --apply` to scaffold + apply in one step). |
+| `rig apply` | **Declarative reconcile** (kubectl-style): read `rig.yaml`, compute the diff vs the repo's state, converge, idempotently. **Preview-by-default:** a bare `rig apply` is an alias for `rig apply info` — it prints the plan and **mutates nothing**; **`rig apply commit`** actually executes it (with per-phase progress and a `✓ applied N (C changed, M unchanged)` completion line). The steady-state command you re-run on every machine; hand-edits that drift from the config are surfaced by `rig status`. `--dry-run` previews; `--only skills,ci` scopes; `-v` lists already-in-sync no-ops; a bare `rig apply --yes` executes (automation back-compat). |
 | `rig status` | Detect + report **drift in both directions**, grouped by GLOBAL/REPO layer and by every area rig reconciles (skills, all configured agent-hook targets, CI, MCP, symlinks, repo settings, auto-mode, tmux, model cron). |
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
 | `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
@@ -75,37 +75,41 @@ Or run straight from a checkout without installing — `uv run bin/rig …` / `p
 
 There are two commands, and they are **not** the same thing: `rig init` is first-run
 onboarding (no config yet → scaffold one + **preview** the catalog it would wire in);
-`rig apply` is what actually applies — the steady-state reconcile (config exists → converge the
-disk to it). You run `init` once to scaffold + review the plan, then `apply` to apply (and
-`apply` forever after). The default rig.yaml `init` writes provisions **auto-mode** (the agent
+`rig apply` is the steady-state reconcile (config exists → converge the disk to it), and it too
+is **preview-by-default** — a bare `rig apply` prints the plan and applies nothing; `rig apply
+commit` is what actually executes. You run `init` once to scaffold + review the plan, then `rig
+apply commit` to apply (and re-apply forever after; `rig apply` alone to re-preview). The default
+rig.yaml `init` writes provisions **auto-mode** (the agent
 runs autonomously with minimum babysitting) — recommended on by default, *and safe because the
 agent-hook guards are applied alongside it.*
 
 **`init` does NOT apply by default — that is deliberate.** A bare `rig init` with no TUI and no
 flags writes **nothing** and applies **nothing**; it prints a non-destructive PREVIEW of the plan
 and how to proceed (it should never "do a bunch of things" with no instruction). `rig init --yes`
-scaffolds `rig.yaml` (config only — still nothing applied), then you run `rig apply`. To do both
-in one step, use `rig init --yes --apply` (the explicit one-shot).
+scaffolds `rig.yaml` (config only — still nothing applied), then you run `rig apply commit`. To do
+both in one step, use `rig init --yes --apply` (the explicit one-shot).
 
 **How `init` decides its mode (TTY + flags).** A bare `rig init` runs the interactive TUI wizard
 (with Export-config-only vs Apply buttons) **whenever there is a TTY** — `textual` ships WITH rig
 as a core dependency, so the wizard is always available; no install step. With no TTY (piped / CI
 / agent), or with `--no-tui` / `RIG_NO_TUI=1`, it falls back to the non-destructive PREVIEW instead
 of hanging on a wizard nothing can drive. Any explicit signal (`--yes` / `--config … --yes` /
-`--apply`) is non-interactive. (`rig apply` is never interactive — it has no wizard.)
+`--apply`) is non-interactive. (`rig apply` is never interactive — it has no wizard; `rig apply
+commit` executes headlessly.)
 
 ```bash
 rig doctor                                    # check deps; rig doctor --yes to install
 rig codex update                              # update Codex safely; roll back on a hung candidate
 rig codex update -- brew reinstall --cask codex  # replace the default updater command
 rig init                                       # no config yet: scaffold rig.yaml + PREVIEW the plan
-rig apply                                      # apply it (and re-apply on every machine, identically)
-rig init --yes --apply                         # or do both in one step (the explicit one-shot)
+rig apply                                      # PREVIEW what apply would do (mutates nothing)
+rig apply commit                               # execute it (and re-apply on every machine, identically)
+rig init --yes --apply                         # or scaffold + apply in one step (the explicit one-shot)
 rig status                                     # later: has the repo drifted from rig.yaml?
 rig setup                                      # interactive wizard: see + change every area, then apply
 ```
 
-To edit the config before applying: `rig export -o rig.yaml`, tweak it, then `rig apply`.
+To edit the config before applying: `rig export -o rig.yaml`, tweak it, then `rig apply commit`.
 
 **`rig setup` — the interactive config wizard.** In a terminal it shows what is enabled across
 every reconciled area (the `rig status` rows), lets you toggle/change any option in the local
@@ -120,7 +124,7 @@ Headless / agent path (no TUI):
 
 ```bash
 rig init --yes                                 # scaffold rig.yaml (config only; nothing applied)
-rig apply                                      # apply it; re-apply identically on every machine
+rig apply commit                               # apply it; re-apply identically on every machine
 # or, the explicit one-shot:
 rig init --yes --apply                         # scaffold rig.yaml AND apply in one step
 ```

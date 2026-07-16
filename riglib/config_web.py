@@ -553,7 +553,7 @@ def build_html(model: ConfigModel) -> str:
 <p class="sub">view + edit the reconciled rig config · repo <code>{html.escape(str(model.repo_root))}</code><br>
 repo <code>{html.escape(str(model.repo_path))}</code> ({repo_state}) ·
 global <code>{html.escape(str(model.global_path))}</code> ({global_state})<br>
-edits route to the owning layer; reconcile with <code>rig apply</code></p>
+edits route to the owning layer; reconcile with <code>rig apply commit</code></p>
 {sections}
 <div id="toast"></div>
 <script>

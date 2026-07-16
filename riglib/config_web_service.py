@@ -248,7 +248,7 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> argparse.Argument
         description=(
             "Serve a local web UI to view and edit the reconciled rig config (the cascade of the "
             "global ~/.config/rig/config.yaml + the repo ./rig.yaml). Edits route to the owning "
-            "layer, exactly like `rig config set` / the wizard; reconcile with `rig apply`. "
+            "layer, exactly like `rig config set` / the wizard; reconcile with `rig apply commit`. "
             "Lifecycle is the shared agenttools-service manager (identical run/start/stop/status/"
             "enable/disable to every ecosystem service); OS autostart is launchd (macOS) / systemd "
             "--user (Linux). A bare `rig config-web` with no verb prints this help, never launches."

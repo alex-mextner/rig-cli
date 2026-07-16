@@ -329,7 +329,7 @@ def test_status_area_summary_in_sync_area_marked(tmp_path, capsys, fake_agent_to
         encoding="utf-8",
     )
     # drive an apply first so the ship gate lands on disk, making it in-sync for status
-    apply_rc = main(["apply", "-C", str(repo)])
+    apply_rc = main(["apply", "commit", "-C", str(repo)])
     assert apply_rc == 0, "apply must succeed for the ship gate to actually land on disk"
     capsys.readouterr()  # drain apply output
     main(["status", "-C", str(repo)])
@@ -446,7 +446,7 @@ def test_status_area_summary_partial_drift_reports_only_drifting_items(
         encoding="utf-8",
     )
     # apply (all 3 skills land in sync), then DELETE one skill's installed copy so ONLY it drifts.
-    assert main(["apply", "-C", str(repo)]) == 0
+    assert main(["apply", "commit", "-C", str(repo)]) == 0
     capsys.readouterr()
     import os as _os
     import shutil
@@ -572,7 +572,7 @@ def test_status_area_summary_counts_modified_items(tmp_path, capsys, fake_agent_
     )
     # apply all 3 skills in sync (harness_link off → exactly one copy action per skill, no link
     # rows), then OVERWRITE one installed skill's content so it drifts as "modified", not missing.
-    assert main(["apply", "-C", str(repo)]) == 0
+    assert main(["apply", "commit", "-C", str(repo)]) == 0
     capsys.readouterr()
     import os as _os
 
@@ -610,7 +610,7 @@ def test_status_area_summary_gitignore_in_sync_after_apply(tmp_path, capsys, fak
         f"gitignore: {{enabled: true, excludesfile: {excludes}}}\n",
         encoding="utf-8",
     )
-    assert main(["apply", "-C", str(repo)]) == 0
+    assert main(["apply", "commit", "-C", str(repo)]) == 0
     capsys.readouterr()
     main(["status", "-C", str(repo)])
     out = capsys.readouterr().out

@@ -282,7 +282,7 @@ def test_apply_config_repo_rigyaml_with_mode_is_rejected(tmp_path, fake_agent_to
         encoding="utf-8",
     )
 
-    rc = main(["apply", "-C", str(repo), "--config", "rig.yaml"])
+    rc = main(["apply", "commit", "-C", str(repo), "--config", "rig.yaml"])
 
     assert rc == 2
     assert "mode is a global-only config block" in capsys.readouterr().out

@@ -671,7 +671,7 @@ def test_init_yes_scaffolds_without_applying(tmp_path, capsys, fake_agent_tools,
     assert "NOTHING applied" in out
     # PREVIEW: the plan is explicitly not applied, and points at `rig apply`
     assert "PREVIEW of `rig apply`" in out
-    assert "run `rig apply`" in out
+    assert "run `rig apply commit`" in out
     # not applied: no skills installed into the (isolated) HOME
     assert not (tmp_path / "home" / ".agents" / "skills").exists()
 
@@ -918,7 +918,7 @@ def test_init_dryrun_over_existing_config_previews_that_config(tmp_path, capsys,
     assert "PREVIEW of `rig apply`" in out
     assert "skills/" not in out  # existing config disables skills → not the default scaffold
     assert "already exists" in out
-    assert "run `rig apply`" in out
+    assert "run `rig apply commit`" in out
     assert (repo / "rig.yaml").read_text() == original  # untouched
 
 
@@ -941,7 +941,7 @@ def test_init_config_is_repo_yaml_reports_no_write(tmp_path, capsys, fake_agent_
     assert rc == 0
     assert "Nothing written (rig.yaml already in place)" in out
     assert "scaffolded" not in out  # never claim a write that didn't happen
-    assert "run `rig apply`" in out
+    assert "run `rig apply commit`" in out
 
 
 def _mk_plan(n_skills: int, n_hooks: int = 0):
@@ -1440,7 +1440,7 @@ def test_apply_exit_nonzero_when_verify_fails(tmp_path, capsys, fake_agent_tools
         return [verify.VerifyResult("permissions", "test", False, "forced failure for test")]
 
     try:
-        rc = main(["apply", "-C", str(repo), "--config", str(cfg)])
+        rc = main(["apply", "commit", "-C", str(repo), "--config", str(cfg)])
         out = capsys.readouterr().out
         assert rc == 1
         assert "forced failure for test" in out

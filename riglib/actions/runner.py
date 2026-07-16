@@ -101,13 +101,21 @@ def run_plan(
     *,
     dry_run: bool = False,
     progress: Callable[[ActionResult], None] | None = None,
+    on_start: Callable[[Action], None] | None = None,
 ) -> ApplyReport:
-    """Execute (or dry-run) every action in the plan. Returns the collected report."""
+    """Execute (or dry-run) every action in the plan. Returns the collected report.
+
+    ``on_start(action)`` fires BEFORE each action dispatches (so a caller can show a slow phase as
+    in-flight — silence during a hung runner ≠ hang); ``progress(result)`` fires AFTER it
+    completes. Both are optional and best-effort in caller code.
+    """
     # Fresh auth-gate state per run: a new apply re-notifies + re-waits for a missing login (the user
     # may have logged in since), but WITHIN this run the per-action gate dedups (no ~5× push/wait).
     reset_auth_gate()
     report = ApplyReport()
     for action in plan.actions:
+        if on_start is not None and not dry_run:
+            on_start(action)
         if dry_run:
             res = ActionResult(action, "planned", action.describe())
         else:
@@ -2996,7 +3004,7 @@ def _tmux_activate(
             if rc != 0:
                 warnings.append(
                     f"boot agent reload FAILED (launchctl rc={rc}) — it may be left unloaded; "
-                    f"re-run `rig apply` or `launchctl load -w {plan.boot_plist_path}`"
+                    f"re-run `rig apply commit` or `launchctl load -w {plan.boot_plist_path}`"
                 )
             else:
                 changes.append(f"reloaded boot agent {plan.boot_plist_path.name} (plist changed)")
@@ -3028,7 +3036,7 @@ def _tmux_activate(
             rc = _launchctl_bootstrap(pstr)
             if rc != 0:
                 warnings.append(
-                    f"autosave agent reload FAILED (launchctl rc={rc}); re-run `rig apply` or "
+                    f"autosave agent reload FAILED (launchctl rc={rc}); re-run `rig apply commit` or "
                     f"`launchctl bootstrap {_gui_domain()} {pstr}`"
                 )
             else:
@@ -4071,7 +4079,7 @@ def transient_ship_root_skip_reason(canonical_ship: Path) -> str | None:
             f"refused to pin the machine-level agent-tools pointer at a transient checkout ({root}) "
             f"— left {ship_env_file_path()} unchanged; it would vanish on tempdir cleanup and break "
             "`gh ship` machine-wide. Set agent_tools_source to a durable checkout "
-            "(e.g. ~/xp/agent-tools) and re-run `rig apply`."
+            "(e.g. ~/xp/agent-tools) and re-run `rig apply commit`."
         )
     return None
 

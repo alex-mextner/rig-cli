@@ -362,11 +362,12 @@ _ASSERT_SCRIPT = textwrap.dedent(
     pass "agents-hooks -> CC bridge wired (cc_hook_bridge in PreToolUse)"
 
     # ── (3) IDEMPOTENT RE-APPLY ──────────────────────────────────────────────────────
-    # `rig apply` is non-interactive by design (no `--yes`/wizard — only `rig init` prompts), so it
-    # never blocks on the container's missing TTY. Capture WITHOUT `|| true` so the exit code is
-    # real (recorded via $?), but guard the assignment so a non-zero apply does not trip `set -e`
-    # and abort before the diagnostics below.
-    out2="$(rig apply -C "$REPO" --config "$REPO/rig.yaml" 2>&1)" && apply_rc=0 || apply_rc=$?
+    # `rig apply commit` is the EXECUTE subcommand (a bare `rig apply` is preview-only). It is
+    # non-interactive by design (no `--yes`/wizard — only `rig init` prompts), so it never blocks
+    # on the container's missing TTY. Capture WITHOUT `|| true` so the exit code is real (recorded
+    # via $?), but guard the assignment so a non-zero apply does not trip `set -e` and abort before
+    # the diagnostics below.
+    out2="$(rig apply commit -C "$REPO" --config "$REPO/rig.yaml" 2>&1)" && apply_rc=0 || apply_rc=$?
     if [ "$apply_rc" -ne 0 ]; then
       printf '%s\\n' "$out2" >&2
       fail "second apply exited non-zero (rc=$apply_rc)"
