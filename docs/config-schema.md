@@ -482,6 +482,7 @@ harness:
   kind: claude-code            # skills-dir: claude-code | codex · native: opencode · instruction-file: gemini | pi | commandcode
   # kinds: [codex]             # optional additional harnesses to provision alongside kind
   auto_mode: true              # true → auto-accept tool calls; false → interactive prompts (claude-code write only)
+  self_merge: true             # auto-mode carve-out: let the agent self-merge its OWN PRs via gh ship
   # mode: bypassPermissions    # optional: pin the exact mode value (overrides the auto_mode map)
   # settings_path: .claude/settings.json   # where to write (repo-local default; committed)
   hook_bridge:                 # wire the agents-hooks/v1 → harness dispatcher (default ON)
@@ -495,6 +496,7 @@ harness:
 | `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`) auto-loads `~/.agents/skills`; instruction-file (`gemini`, `pi`, `commandcode`) get their skill discovery via `AGENTS.md`/`GEMINI.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
 | `kinds` | list | `[]` | additional harnesses to provision alongside `kind`. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, supported hook bridges, and supported permissions allowlists. `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one explicit target; supported bridges stay registered with a descriptor-dir override |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
+| `self_merge` | bool | `true` | auto-mode classifier carve-out. `true` appends a `$defaults`-preserving entry to `autoMode.allow` that clears the Merge-Without-Review + Self-Approval soft blocks for the agent's OWN PRs (self-merge via `gh ship`). Effective only under auto-mode (the classifier runs only then); inert otherwise. Every other classifier rule — notably the anti-exfil hard rule — stays |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
 | `settings_path` | path | `.claude/settings.json` for Claude auto/mode writes; `~/.codex/config.toml` (or `$RIG_CODEX_HOME/config.toml`) for the Codex hook bridge; `.opencode/plugins/zz-agent-tools-hook-bridge.js` for the opencode hook bridge | the settings/config file/plugin to converge. If overridden, point it at the harness's native format (JSON for Claude, TOML for Codex, JS plugin for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory containing the native settings/plugin filename |
 | `hook_bridge.enabled` | bool | `true` | wire the harness bridge dispatcher so installed agent-hooks actually fire (`cc_hook_bridge` for Claude, `codex_hook_bridge` for Codex, `opencode_hook_bridge` for opencode) |
@@ -507,6 +509,22 @@ other setting in the file is preserved. The write is **idempotent** (a re-apply 
 same value is a no-op) and **backup-noted** (a differing prior value is backed up per
 `defaults.on_conflict` before converging). `rig status` reports drift if the on-disk value
 no longer matches the config.
+
+**Self-merge carve-out (`self_merge`, auto-mode only).** When `auto_mode` resolves to the
+`auto` classifier mode and `self_merge` is `true` (the default), rig also **appends** a carve-out
+string to `autoMode.allow` in the same user-scope settings file. The carve-out lets the agent
+self-merge a PR it authored in the session's starting repo via `gh ship` / `gh pr merge` —
+it clears the *Merge Without Review* and *Self-Approval* soft blocks **for the agent's own PRs
+only**. The append is idempotent (re-apply is a no-op), never removes the user's own
+`autoMode.allow` entries, and never touches the sibling `soft_deny`/`hard_deny`/`environment`
+sections — so every other classifier rule, notably the *Data Exfiltration* hard rule, stays in
+force. It is SAFE precisely because the other guards remain: the review-fix loop, the local CI
+gate (`ship.sh`), the `block-raw-pr-merge` agent-hook for *other* PRs, and the anti-exfil hard
+rule. It is **inert without auto-mode** (the classifier runs only under `auto`). `rig status`
+reports drift if the carve-out is missing while `self_merge` is configured. Set `self_merge:
+false` to keep the soft block (the agent asks before merging its own PR). An agent cannot write
+this carve-out to its own live settings (that trips the Self-Modification soft block) — run
+`rig apply` yourself to activate it.
 
 **Auto-mode write is claude-code-only (for now).** `kind: opencode` (and `codex`/`gemini`/
 `pi`/`commandcode`) are now **accepted** — rig provisions their **skill discovery** (see

@@ -674,6 +674,71 @@ _HARNESS_MODE_KEY = {
     "claude-code": ("permissions", "defaultMode"),
 }
 
+# The auto-mode self-merge carve-out. Rig APPENDS this string to ``autoMode.allow`` (an additive
+# merge, like the permissions/MCP merges) to clear soft blocks for the agent's own PRs. The full
+# rationale + safety argument is the source of truth in docs/config-schema.md (see #self-merge).
+# ``SELF_MERGE_CARVE_OUT`` is intentionally PUBLIC (no underscore): drift.py and the tests import it
+# as the shared "what rig writes" constant so apply and status can never diverge.
+# NOTE: the backticks inside the string are LOAD-BEARING — the classifier renders `gh ship`,
+# `--admin`, etc. as code spans; do not "clean" them away.
+_AUTO_MODE_SECTION = "autoMode"
+_AUTO_MODE_ALLOW_KEY = "allow"
+_AUTO_MODE_DEFAULTS = "$defaults"
+SELF_MERGE_CARVE_OUT = (
+    "Self-Merge via gh ship: The user has standing intent for the agent to merge a PR it "
+    "authored in the session's starting repo via `gh ship` / `gh pr merge`. This clears the "
+    "Merge Without Review and Self-Approval soft blocks for the agent's own PRs. Does NOT cover "
+    "`--admin`/`--force` review bypass, merging a PR the agent isn't working on, or any exfil "
+    "concern (still judged by the hard Data Exfiltration rule)."
+)
+
+
+def self_merge_allow_present(data: dict) -> bool:
+    """True when the self-merge carve-out is already in ``autoMode.allow`` (shared with drift).
+
+    Guards its own precondition: a non-dict ``data`` (a settings file that parsed to a JSON
+    list/scalar) yields ``False`` rather than raising, so callers need no pre-check.
+    """
+    if not isinstance(data, dict):
+        return False
+    block = data.get(_AUTO_MODE_SECTION)
+    if not isinstance(block, dict):
+        return False
+    lst = block.get(_AUTO_MODE_ALLOW_KEY)
+    return isinstance(lst, list) and SELF_MERGE_CARVE_OUT in lst
+
+
+def _ensure_self_merge_allow(data: dict) -> bool:
+    """Additively ensure ``autoMode.allow`` carries the carve-out. Returns True if it changed.
+
+    Never clobbers: an absent/non-list list is seeded with ``["$defaults"]`` then the carve-out
+    appended; an existing list keeps every entry and gets the carve-out appended once. Sibling
+    sections (``soft_deny``/``hard_deny``/``environment``) are never touched.
+    """
+    block = data.get(_AUTO_MODE_SECTION)
+    if not isinstance(block, dict):
+        block = {}
+        data[_AUTO_MODE_SECTION] = block
+    lst = block.get(_AUTO_MODE_ALLOW_KEY)
+    if not isinstance(lst, list):
+        # the one lossy edge in an otherwise purely-additive function: a malformed `allow` value
+        # (e.g. a stray string) is replaced by the inheritance sentinel rather than preserved —
+        # there is nothing meaningful to keep from a non-list allow list.
+        lst = [_AUTO_MODE_DEFAULTS]
+    if SELF_MERGE_CARVE_OUT in lst:
+        return False
+    block[_AUTO_MODE_ALLOW_KEY] = [*lst, SELF_MERGE_CARVE_OUT]
+    return True
+
+
+# mode_status values that mean "the auto/permission-mode key needs no write" (already correct, or
+# left untouched under on_conflict=skip). The additive carve-out can still change the file.
+_MODE_KEY_UNCHANGED = (None, "kept")
+
+
+def _mode_key_written(status: str | None) -> bool:
+    return status not in _MODE_KEY_UNCHANGED
+
 
 def harness_settings_file(action: Action) -> Path:
     """The settings file an ``apply_harness`` action targets (shared with drift).
@@ -697,68 +762,115 @@ def desired_harness_value(action: Action) -> tuple[tuple[str, str], str]:
     return (section, key), value
 
 
-def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
-    """Merge the harness auto/permission setting into the harness settings JSON.
+def _load_harness_json(
+    config_file: Path, action: Action, on_conflict: str
+) -> tuple[dict, str] | ActionResult:
+    """Load the harness settings JSON, handling absent/malformed files.
 
-    Idempotent (a re-apply with the same value is a no-op) and backup-noted: an existing
-    settings file with a DIFFERENT value for the managed key is backed up before converging
-    under ``on_conflict=backup`` (skip leaves it; overwrite replaces without a backup). Only
-    the single managed key is touched — every other setting in the file is preserved.
+    Returns ``(data, backup_note)`` on success, or an early ``ActionResult`` when the file is
+    malformed under ``on_conflict=skip`` / is not a JSON object. A malformed file under a
+    non-skip policy is backed up and treated as empty (never silently discarded).
+    """
+    if not config_file.is_file():
+        return {}, ""
+    try:
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+    except ValueError:
+        if on_conflict == "skip":
+            return ActionResult(
+                action, "skipped",
+                f"harness/{action.item}: existing {config_file} is malformed JSON "
+                "(on_conflict=skip), left untouched",
+            )
+        bak = fsutil.backup_path(config_file)
+        shutil.copy2(str(config_file), str(bak))
+        return {}, f" (backed up malformed config → {bak})"
+    if not isinstance(data, dict):
+        return ActionResult(action, "error", f"harness/{action.item}: {config_file} is not a JSON object")
+    return data, ""
+
+
+def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
+    """Merge the harness auto/permission mode + self-merge carve-out into the settings JSON.
+
+    Reconciles two managed things in the one file, both idempotent and additive-safe:
+    - ``permissions.defaultMode`` (the auto/permission mode) — a DIFFERENT prior value is backed
+      up before converging under ``on_conflict=backup`` (skip leaves it; overwrite replaces w/o a
+      backup).
+    - ``autoMode.allow`` (the self-merge carve-out, only when ``options['self_merge']`` is set —
+      i.e. auto-mode) — APPENDED once, never clobbering the user's own entries or sibling sections.
+    Every other setting in the file is preserved.
     """
     (section, key), value = desired_harness_value(action)
     config_file = harness_settings_file(action)
     config_file.parent.mkdir(parents=True, exist_ok=True)
 
-    data: dict = {}
-    backup_note = ""
-    if config_file.is_file():
-        try:
-            data = json.loads(config_file.read_text(encoding="utf-8"))
-        except ValueError:
-            # never silently discard an existing settings file (it holds the user's harness
-            # config). skip leaves it untouched; others back it up before rewriting.
-            if on_conflict == "skip":
-                return ActionResult(
-                    action, "skipped",
-                    f"harness/{action.item}: existing {config_file} is malformed JSON "
-                    "(on_conflict=skip), left untouched",
-                )
-            bak = fsutil.backup_path(config_file)
-            shutil.copy2(str(config_file), str(bak))
-            data = {}
-            backup_note = f" (backed up malformed config → {bak})"
-    if not isinstance(data, dict):
-        return ActionResult(action, "error", f"harness/{action.item}: {config_file} is not a JSON object")
+    loaded = _load_harness_json(config_file, action, on_conflict)
+    if isinstance(loaded, ActionResult):
+        return loaded
+    data, backup_note = loaded
 
     sect = data.get(section, {})
     if not isinstance(sect, dict):
         return ActionResult(action, "error", f"harness/{action.item}: '{section}' is not an object in {config_file}")
+
+    carveout_added = _ensure_self_merge_allow(data) if action.options.get("self_merge") else False
+
     current = sect.get(key)
+    # mode_status: what the mode key write is — None (already correct), "kept" (conflict left under
+    # skip), or a write status. The additive carve-out never triggers a backup.
+    mode_status: str | None
     if current == value:
-        return ActionResult(action, "skipped", f"harness/{action.item}: {section}.{key} already '{value}'")
+        mode_status = None
+    elif current is not None and on_conflict == "skip":
+        mode_status = "kept"
+    else:
+        mode_status = "created" if current is None else ("backed_up" if on_conflict == "backup" else "updated")
 
-    status = "created" if current is None else "updated"
-    if current is not None and current != value:
-        if on_conflict == "skip":
-            return ActionResult(
-                action, "skipped",
-                f"harness/{action.item}: {section}.{key}='{current}' exists "
-                f"(on_conflict=skip), left untouched",
-            )
-        if on_conflict == "backup" and backup_note == "":
-            bak = fsutil.backup_path(config_file)
-            shutil.copy2(str(config_file), str(bak))
-            backup_note = f" (backed up prior → {bak})"
-        status = "backed_up" if on_conflict == "backup" else "updated"
+    if not _mode_key_written(mode_status) and not carveout_added:
+        return ActionResult(action, "skipped", _harness_noop_detail(action, section, key, value))
 
-    sect[key] = value
-    data[section] = sect
+    if mode_status == "backed_up" and backup_note == "":
+        bak = fsutil.backup_path(config_file)
+        shutil.copy2(str(config_file), str(bak))
+        backup_note = f" (backed up prior → {bak})"
+
+    if _mode_key_written(mode_status):
+        sect[key] = value
+        data[section] = sect
+
     config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    auto = "auto-mode ON" if action.options.get("auto_mode") else "interactive"
+    # a carve-out-only write (mode key None/"kept") still changed the file → report "updated".
+    status = mode_status if _mode_key_written(mode_status) else "updated"
     return ActionResult(
         action, status,
-        f"harness/{action.item}: {section}.{key} → '{value}' ({auto}) in {config_file}{backup_note}",
+        _harness_write_detail(action, (section, key), value, mode_status, carveout_added, config_file, backup_note),
     )
+
+
+def _harness_noop_detail(action: Action, section: str, key: str, value: str) -> str:
+    """The 'nothing changed' detail — notes the carve-out presence when self-merge is configured."""
+    detail = f"harness/{action.item}: {section}.{key} already '{value}'"
+    if action.options.get("self_merge"):
+        detail += "; self-merge carve-out present"
+    return detail
+
+
+def _harness_write_detail(
+    action: Action, mode_key: tuple[str, str], value: str,
+    mode_status: str | None, carveout_added: bool, config_file: Path, backup_note: str,
+) -> str:
+    """Describe what the write did — the mode key and/or the additive self-merge carve-out."""
+    section, key = mode_key
+    if not _mode_key_written(mode_status):
+        left = " (mode key left, on_conflict=skip)" if mode_status == "kept" else ""
+        return (
+            f"harness/{action.item}: self-merge carve-out added to "
+            f"{_AUTO_MODE_SECTION}.{_AUTO_MODE_ALLOW_KEY}{left} in {config_file}{backup_note}"
+        )
+    auto = "auto-mode ON" if action.options.get("auto_mode") else "interactive"
+    carve = "; self-merge carve-out added" if carveout_added else ""
+    return f"harness/{action.item}: {section}.{key} → '{value}' ({auto}){carve} in {config_file}{backup_note}"
 
 
 # ── permission-allowlist provisioning (claude-code permissions.allow / opencode permission.bash) ──

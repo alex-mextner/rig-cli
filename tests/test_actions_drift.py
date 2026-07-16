@@ -12,11 +12,16 @@ from pathlib import Path
 import pytest
 
 from riglib.actions import run_plan
-from riglib.actions.runner import desired_mcp_server_entry
+from riglib.actions.runner import SELF_MERGE_CARVE_OUT, desired_mcp_server_entry
 from riglib.catalog import Catalog
 from riglib.config import LoadedConfig
 from riglib.drift import detect
 from riglib.plan import build
+
+def _user_settings() -> Path:
+    # computed per call, NOT a module constant: the autouse fixture monkeypatches HOME per test,
+    # so a constant captured at import time would point at the real ~/.claude and break isolation.
+    return Path(os.path.expanduser("~/.claude/settings.json"))
 
 
 def test_cc_and_codex_dispatchers_read_custom_hooks_dir_env(fake_agent_tools, tmp_path, monkeypatch):
@@ -1422,30 +1427,235 @@ def test_harness_drift_missing_then_modified(fake_agent_tools, tmp_path):
     assert not [x for x in rep3.items if x.category == "harness"]
 
 
+def _auto_harness_cfg(repo: Path, source: Path, **harness) -> LoadedConfig:
+    """Like ``_harness_cfg`` but auto_mode → USER-scope write (no repo settings_path).
+
+    Reuses the shared baseline so the two helpers can't drift; drops the ``settings_path`` that
+    ``_harness_cfg`` forces in (auto writes to ~/.claude, not the repo) and turns ship_delegator
+    off so it never creates repo/.claude and muddies the user-scope assertions.
+    """
+    cfg = _harness_cfg(repo, source, auto_mode=True, **harness)
+    cfg.data["harness"].pop("settings_path", None)
+    cfg.data["ship_delegator"] = {"enabled": False}
+    return cfg
+
+
+def test_self_merge_carveout_written_to_fresh_user_settings(fake_agent_tools, tmp_path):
+    # auto_mode + self_merge (default ON) → a fresh ~/.claude/settings.json gets the carve-out
+    # merged into autoMode.allow as ["$defaults", "<carve-out>"]; re-apply is a no-op.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_auto_harness_cfg(repo, fake_agent_tools), cat, project_type="unknown")
+    run_plan(plan)
+
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    assert data["autoMode"]["allow"] == ["$defaults", SELF_MERGE_CARVE_OUT]
+    assert data["permissions"]["defaultMode"] == "auto"
+
+    # idempotent: re-apply changes nothing, and the no-op detail names the carve-out presence
+    second = run_plan(plan)
+    h2 = [r for r in second.results if r.action.category == "harness"]
+    assert h2 and all(r.status == "skipped" for r in h2)
+    assert "self-merge carve-out present" in h2[0].detail
+    assert json.loads(_user_settings().read_text(encoding="utf-8"))["autoMode"]["allow"] == [
+        "$defaults", SELF_MERGE_CARVE_OUT
+    ]
+
+
+def test_self_merge_preserves_existing_allow_and_other_sections(fake_agent_tools, tmp_path):
+    # an existing autoMode.allow with other entries + sibling soft_deny/hard_deny sections must
+    # survive: the carve-out is appended once, nothing else in autoMode is touched.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _user_settings().parent.mkdir(parents=True, exist_ok=True)
+    _user_settings().write_text(
+        json.dumps({
+            "autoMode": {
+                "allow": ["$defaults", "Some prior carve-out"],
+                "soft_deny": ["$defaults", "keep me"],
+                "hard_deny": ["$defaults"],
+            },
+        }),
+        encoding="utf-8",
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_auto_harness_cfg(repo, fake_agent_tools), cat, project_type="unknown")
+    run_plan(plan)
+
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    assert data["autoMode"]["allow"] == ["$defaults", "Some prior carve-out", SELF_MERGE_CARVE_OUT]
+    # sibling sections untouched
+    assert data["autoMode"]["soft_deny"] == ["$defaults", "keep me"]
+    assert data["autoMode"]["hard_deny"] == ["$defaults"]
+
+    # idempotent second apply
+    run_plan(plan)
+    assert json.loads(_user_settings().read_text(encoding="utf-8"))["autoMode"]["allow"] == [
+        "$defaults", "Some prior carve-out", SELF_MERGE_CARVE_OUT
+    ]
+
+
+def test_self_merge_seeds_defaults_when_allow_is_non_list(fake_agent_tools, tmp_path):
+    # a malformed autoMode.allow (not a list) is re-seeded with $defaults, then the carve-out
+    # appended — never crashes on the bad shape.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _user_settings().parent.mkdir(parents=True, exist_ok=True)
+    _user_settings().write_text(
+        json.dumps({"autoMode": {"allow": "oops-a-string", "soft_deny": ["$defaults"]}}),
+        encoding="utf-8",
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_auto_harness_cfg(repo, fake_agent_tools), cat, project_type="unknown")
+    run_plan(plan)
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    assert data["autoMode"]["allow"] == ["$defaults", SELF_MERGE_CARVE_OUT]
+    assert data["autoMode"]["soft_deny"] == ["$defaults"]
+
+
+def test_self_merge_off_writes_no_carveout(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_auto_harness_cfg(repo, fake_agent_tools, self_merge=False), cat, project_type="unknown")
+    run_plan(plan)
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    assert "autoMode" not in data
+
+
+def test_self_merge_off_never_removes_an_existing_carveout(fake_agent_tools, tmp_path):
+    # the "additive only" promise: flipping self_merge:false must NOT strip a carve-out the user
+    # already has on disk — rig never removes autoMode.allow entries.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _user_settings().parent.mkdir(parents=True, exist_ok=True)
+    _user_settings().write_text(
+        json.dumps({"autoMode": {"allow": ["$defaults", SELF_MERGE_CARVE_OUT]}}),
+        encoding="utf-8",
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_auto_harness_cfg(repo, fake_agent_tools, self_merge=False), cat, project_type="unknown")
+    run_plan(plan)
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    assert data["autoMode"]["allow"] == ["$defaults", SELF_MERGE_CARVE_OUT]
+
+
+def test_self_merge_inert_without_auto_mode(fake_agent_tools, tmp_path):
+    # self_merge only makes sense under auto (the classifier only runs then); with an
+    # interactive/acceptEdits mode the carve-out is NOT written even if self_merge:true.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _harness_cfg(repo, fake_agent_tools, mode="acceptEdits", self_merge=True),
+        cat, project_type="unknown",
+    )
+    run_plan(plan)
+    settings = repo / ".claude" / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert "autoMode" not in data
+
+
+def test_self_merge_and_mode_change_in_one_apply(fake_agent_tools, tmp_path):
+    # combined write: the defaultMode key changes (backed up) AND the carve-out is added in a
+    # single apply — the most complex status/detail branch.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _user_settings().parent.mkdir(parents=True, exist_ok=True)
+    _user_settings().write_text(
+        json.dumps({"permissions": {"defaultMode": "default"}}), encoding="utf-8"
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_auto_harness_cfg(repo, fake_agent_tools), cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    assert data["permissions"]["defaultMode"] == "auto"
+    assert data["autoMode"]["allow"] == ["$defaults", SELF_MERGE_CARVE_OUT]
+    # a differing prior mode value → backed up before converging
+    assert any(p.name.startswith("settings.json.rig-bak-") for p in _user_settings().parent.iterdir())
+    hres = [r for r in report.results if r.action.category == "harness"]
+    assert hres and "self-merge carve-out added" in hres[0].detail
+
+
+def test_self_merge_carveout_added_when_mode_already_correct(fake_agent_tools, tmp_path):
+    # mode key already 'auto' on disk but the carve-out is absent → only the carve-out is written,
+    # status "updated", detail has no on_conflict-skip suffix.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _user_settings().parent.mkdir(parents=True, exist_ok=True)
+    _user_settings().write_text(
+        json.dumps({"permissions": {"defaultMode": "auto"}}), encoding="utf-8"
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_auto_harness_cfg(repo, fake_agent_tools), cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    assert data["permissions"]["defaultMode"] == "auto"
+    assert data["autoMode"]["allow"] == ["$defaults", SELF_MERGE_CARVE_OUT]
+    hres = [r for r in report.results if r.action.category == "harness"]
+    assert hres and hres[0].status == "updated"
+    assert "on_conflict=skip" not in hres[0].detail
+
+
+def test_self_merge_carveout_added_while_mode_key_left_under_skip(fake_agent_tools, tmp_path):
+    # on_conflict=skip + a differing prior defaultMode: the mode key is LEFT (skip), but the
+    # additive carve-out is still appended, and the detail carries the "mode key left" note.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _user_settings().parent.mkdir(parents=True, exist_ok=True)
+    _user_settings().write_text(
+        json.dumps({"permissions": {"defaultMode": "default"}}), encoding="utf-8"
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _auto_harness_cfg(repo, fake_agent_tools)
+    cfg.data["defaults"] = {"on_conflict": "skip"}
+    plan = build(cfg, cat, project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    assert data["permissions"]["defaultMode"] == "default"  # mode key left untouched
+    assert data["autoMode"]["allow"] == ["$defaults", SELF_MERGE_CARVE_OUT]  # carve-out still added
+    hres = [r for r in report.results if r.action.category == "harness"]
+    assert hres and "mode key left, on_conflict=skip" in hres[0].detail
+
+
+def test_self_merge_drift_missing_then_synced(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_auto_harness_cfg(repo, fake_agent_tools), cat, project_type="unknown")
+    run_plan(plan)
+
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    # drop the carve-out on disk → drift
+    data["autoMode"]["allow"] = ["$defaults"]
+    _user_settings().write_text(json.dumps(data), encoding="utf-8")
+    mod = [x for x in detect(plan).items if x.category == "harness" and "self-merge" in x.detail.lower()]
+    assert mod, "expected a self-merge carve-out drift item"
+
+    # re-apply converges
+    run_plan(plan)
+    assert SELF_MERGE_CARVE_OUT in json.loads(_user_settings().read_text(encoding="utf-8"))["autoMode"]["allow"]
+    assert not [x for x in detect(plan).items if x.category == "harness"]
+
+
 def test_harness_auto_writes_user_settings_not_repo(fake_agent_tools, tmp_path):
     # auto_mode:true with NO settings_path → CC `auto` is written to the USER settings file
     # (~/.claude/settings.json, HOME-isolated to tmp by the autouse fixture), NOT the repo —
     # CC ignores defaultMode:auto at project scope, so committing it per-repo would be a no-op.
-    import os
-
     repo = tmp_path / "repo"
     repo.mkdir()
     cat = Catalog.scan(str(fake_agent_tools))
-    cfg = LoadedConfig(
-        data={
-            "agent_tools_source": str(fake_agent_tools),
-            "skills": {"enabled": False}, "agent_hooks": {"enabled": False},
-            "ci": {"enabled": False}, "mcp": {"enabled": False},
-            "git_hooks": {"dispatcher": {"enabled": False}},
-            # ship_delegator is default-ON and writes <repo>/.claude/scripts/pr-ship.sh, which would
-            # create repo/.claude — off here so the assertion below isolates the HARNESS behavior.
-            "ship_delegator": {"enabled": False},
-            "harness": {"kind": "claude-code", "auto_mode": True},  # no settings_path → user scope
-        },
-        repo_root=repo,
-    )
+    # self_merge off keeps this test focused on the mode-key write (no autoMode.allow noise).
+    cfg = _auto_harness_cfg(repo, fake_agent_tools, self_merge=False)
     plan = build(cfg, cat, project_type="unknown")
-    user_settings = Path(os.path.expanduser("~/.claude/settings.json"))
+    user_settings = _user_settings()
 
     run_plan(plan)
     assert not (repo / ".claude").exists(), "auto must NOT write into the repo's project settings"

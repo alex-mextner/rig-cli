@@ -838,6 +838,12 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
     # an explicit `mode:` override wins over the auto_mode → mode mapping (lets a config pin
     # e.g. `acceptEdits` instead of full bypass while staying non-interactive for edits).
     mode_value = h.get("mode") or _HARNESS_AUTO_MODE[kind][auto_mode]
+    # The self-merge classifier carve-out (default ON) is EFFECTIVE only under `auto` — the
+    # auto-mode classifier is the only mode that runs the soft-block rules, and its config lives
+    # in the user-scope settings (same file the `auto` mode write targets). It is safe precisely
+    # because every other guard stays: the review-fix loop, the local CI gate via ship.sh, the
+    # agent-hooks (incl. block-raw-pr-merge for OTHER PRs), and the anti-exfil hard_deny.
+    self_merge = bool(h.get("self_merge", True)) and mode_value == "auto"
     # `auto` is honored only from the user's machine settings (CC strips it from project/local
     # scope); every other mode writes to the repo's project settings. Explicit settings_path wins.
     if h.get("settings_path"):
@@ -857,6 +863,7 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
                 "kind": kind,
                 "auto_mode": auto_mode,
                 "mode_value": str(mode_value),
+                "self_merge": self_merge,
             },
         )
     )

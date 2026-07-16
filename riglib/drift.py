@@ -67,6 +67,7 @@ from .actions.runner import (
     ship_env_file_path,
     transient_ship_root_skip_reason,
     schedule_plan_from_action,
+    self_merge_allow_present,
     skill_harness_link_target,
     tg_ctl_plan_from_action,
     tmux_plan_from_action,
@@ -1003,6 +1004,16 @@ def _check_harness(action: Action, report: DriftReport) -> None:
             DriftItem(
                 "modified", "harness", action.item, config_file,
                 f"{section}.{key} is '{current}', config declares '{value}'",
+            )
+        )
+    # the self-merge carve-out is a second managed thing in the same file (auto-mode only). Skip
+    # it for a non-dict root — the mode-key path above already reported that file, and a second
+    # row for the same malformed file would just be noise.
+    if action.options.get("self_merge") and isinstance(data, dict) and not self_merge_allow_present(data):
+        report.items.append(
+            DriftItem(
+                "missing", "harness", action.item, config_file,
+                "self-merge carve-out absent from autoMode.allow (config declares self_merge)",
             )
         )
 

@@ -831,6 +831,15 @@ def _validate_harness(h: dict[str, Any]) -> None:
             f"harness.auto_mode must be a bool, got {auto_mode!r}",
             schema_path="harness.auto_mode",
         )
+    # self_merge gates a security-sensitive global carve-out; plan.py coerces it via bool(...),
+    # so a non-bool like the string "false" would read truthy and ENABLE what the user meant to
+    # disable. Fail closed, mirroring auto_mode.
+    self_merge = h.get("self_merge")
+    if self_merge is not None and not isinstance(self_merge, bool):
+        raise ConfigError(
+            f"harness.self_merge must be a bool, got {self_merge!r}",
+            schema_path="harness.self_merge",
+        )
     mode = h.get("mode")
     if mode is not None and not isinstance(mode, str):
         raise ConfigError(f"harness.mode must be a string, got {mode!r}", schema_path="harness.mode")

@@ -364,6 +364,20 @@ def test_validate_rejects_non_bool_auto_mode():
         config.validate({"version": 1, "harness": {"auto_mode": "yes"}})
 
 
+@pytest.mark.parametrize("bad", ["false", "true", 0, 1])
+def test_validate_rejects_non_bool_self_merge(bad):
+    # self_merge gates a security-sensitive global carve-out; a non-bool like the string
+    # "false" would coerce truthy via bool(...) and ENABLE the carve-out the user meant to
+    # disable. Fail closed, mirroring auto_mode.
+    with pytest.raises(config.ConfigError, match="self_merge"):
+        config.validate({"version": 1, "harness": {"self_merge": bad}})
+
+
+def test_validate_accepts_bool_self_merge():
+    config.validate({"version": 1, "harness": {"self_merge": True}})
+    config.validate({"version": 1, "harness": {"self_merge": False}})
+
+
 def test_validate_accepts_hook_bridge_block():
     config.validate({"version": 1, "harness": {
         "kind": "claude-code", "hook_bridge": {"enabled": True, "python": "python3.12"}}})
