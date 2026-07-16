@@ -74,7 +74,7 @@ _VALID_MODE_NAMES = {"standard", "autonomous"}
 _VALID_AUTONOMOUS_UNTIL = {"clean", "budget", "manual"}
 # Harness kinds rig knows a skill/instruction discovery convention for — the union of the
 # skills-DIRECTORY harnesses (claude-code, opencode) and the INSTRUCTION-FILE harnesses
-# (codex, gemini, pi, commandcode). A ``harness.kind`` in this set is ACCEPTED: rig can
+# (codex, pi, commandcode). A ``harness.kind`` in this set is ACCEPTED: rig can
 # provision skill discovery (and, for the supported kinds, the auto-mode write / allowlist)
 # for it. The single source of truth is :mod:`riglib.harness_skills`. The narrower
 # auto-mode-write capability is gated separately in plan.py (``_HARNESS_SETTINGS``) — a kind
@@ -83,6 +83,12 @@ _VALID_HARNESS_KINDS = set(_KNOWN_HARNESS_KINDS)
 # No kind is "reserved + rejected" any longer — every documented kind is now provisionable for
 # skills. Kept as an (empty) set so the validator's reserved-kind branch stays well-defined.
 _RESERVED_HARNESS_KINDS: set[str] = set()
+# DEPRECATED harness kinds — removed everywhere (CTO 2026-07). Still recognized ONLY so a config
+# that names one fails with a helpful "no longer supported (deprecated)" message instead of the
+# generic typo error. gemini was an instruction-file harness (~/.gemini/GEMINI.md); it is gone.
+_DEPRECATED_HARNESS_KINDS: dict[str, str] = {
+    "gemini": "Gemini is deprecated and no longer provisioned by rig.",
+}
 
 
 class ConfigError(ValueError):
@@ -878,8 +884,9 @@ def _validate_by_stack_items(bs: Any) -> None:
 def _validate_harness(h: dict[str, Any]) -> None:
     """Validate the ``harness`` block — the agent harness's skill + auto/permission provisioning.
 
-    Fail-closed on an unknown ``kind`` (typo guard) and a non-bool ``auto_mode``. Every harness
-    rig knows a skill/instruction discovery convention for (claude-code, opencode, codex, gemini,
+    Fail-closed on an unknown ``kind`` (typo guard), a DEPRECATED ``kind`` (``gemini`` — helpful
+    "no longer supported" message), and a non-bool ``auto_mode``. Every harness
+    rig knows a skill/instruction discovery convention for (claude-code, opencode, codex,
     pi, commandcode — :data:`_VALID_HARNESS_KINDS`) is ACCEPTED here: rig provisions its SKILL
     discovery. The narrower auto/permission-MODE write is only implemented for some of them
     (claude-code today) and self-skips the rest with a plan note (see plan.py ``_build_harness``)
@@ -894,6 +901,13 @@ def _validate_harness(h: dict[str, Any]) -> None:
     kind = h.get("kind", "claude-code")
     if not isinstance(kind, str):
         raise ConfigError(f"harness.kind must be a string, got {kind!r}", schema_path="harness.kind")
+    if kind in _DEPRECATED_HARNESS_KINDS:
+        raise ConfigError(
+            f"harness.kind '{kind}' is no longer supported (deprecated). "
+            f"{_DEPRECATED_HARNESS_KINDS[kind]}",
+            fix=f"remove the harness block or use one of: {', '.join(sorted(_VALID_HARNESS_KINDS))}",
+            schema_path="harness.kind",
+        )
     if kind in _RESERVED_HARNESS_KINDS:
         raise ConfigError(
             f"harness.kind '{kind}' is documented but not implemented in this rig "
@@ -916,6 +930,13 @@ def _validate_harness(h: dict[str, Any]) -> None:
                 schema_path="harness.kinds",
             )
         for extra_kind in kinds:
+            if extra_kind in _DEPRECATED_HARNESS_KINDS:
+                raise ConfigError(
+                    f"harness.kinds entry '{extra_kind}' is no longer supported (deprecated). "
+                    f"{_DEPRECATED_HARNESS_KINDS[extra_kind]}",
+                    fix=f"use one of: {', '.join(sorted(_VALID_HARNESS_KINDS))}",
+                    schema_path="harness.kinds",
+                )
             if extra_kind in _RESERVED_HARNESS_KINDS:
                 raise ConfigError(
                     f"harness.kinds entry '{extra_kind}' is documented but not implemented in this rig "
@@ -1088,10 +1109,10 @@ _PERMISSIONS_KEYS = {"enabled", "kind", "tools", "extra", "disable", "settings_p
                      "allow", "deny", "ask"}
 # Harness kinds the ALLOWLIST provisioning supports — broader than the auto-mode write
 # (_VALID_HARNESS_KINDS), since opencode HAS an additively-mergeable allowlist even though its
-# auto-mode write is not yet implemented. codex/gemini/pi have no such mechanism → recorded N/A
+# auto-mode write is not yet implemented. codex/pi have no such mechanism → recorded N/A
 # (rejected here with a clear message rather than silently writing nothing / breaking the harness).
 _VALID_PERMISSIONS_KINDS = {"claude-code", "opencode"}
-_NA_PERMISSIONS_KINDS = {"codex", "gemini", "pi"}
+_NA_PERMISSIONS_KINDS = {"codex", "pi"}
 # A pre-allowed tool is a single command token: it must START with an alphanumeric or ``/`` (an
 # absolute path) — never a dash (a leading-dash entry like ``-rf`` / ``--flag`` would render a
 # nonsensical/surprising allowlist entry) — and otherwise contain only letters, digits, and the

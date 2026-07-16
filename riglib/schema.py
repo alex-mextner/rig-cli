@@ -275,7 +275,7 @@ AREAS: tuple[Area, ...] = (
                  "Which harness's permissions to provision. opencode is supported for the ALLOWLIST "
                  "independently of harness.kind (its deny/ask dialect is unverified -> N/A). "
                  "Absent permissions.kind, rig provisions supported harness.kind plus harness.kinds "
-                 "allowlists; codex/gemini have no additively-mergeable allowlist (N/A). The lists "
+                 "allowlists; codex has no additively-mergeable allowlist (N/A). The lists "
                  "(tools/extra/disable, allow/deny/ask) are edited directly in the config file.",
                  choices=("claude-code", "opencode"),
                  null_tokens=("", "null", "none", "~", "unset", "fan-out")),

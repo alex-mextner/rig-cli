@@ -23,10 +23,8 @@ Each harness expresses "auto-allow command ``foo`` and its subcommands" in a DIF
   gated by ``approval_policy``/``sandbox_mode`` (coarse) and Starlark ``execpolicy`` ``.rules``
   files (``prefix_rule(pattern=[...], decision="allow")``) — a separate mechanism, not a config
   array rig can additively merge. Recorded N/A here.
-- **gemini / pi** — N/A. Gemini's ``tools.core``/``coreTools`` is a TOOLSET RESTRICTION list, not
-  a per-command auto-approve: setting it disables every unlisted built-in tool, so writing it to
-  pre-allow ``git`` would BREAK the harness by removing read_file/write_file/etc. There is no
-  separate per-command allowlist that leaves the toolset intact. Recorded N/A rather than risk it.
+- **pi** — N/A. No documented per-command auto-approve allowlist that leaves the toolset intact;
+  recorded N/A rather than write a setting that could break the harness.
 
 Keeping the per-harness shape behind :data:`HARNESS_ALLOWLISTS` means the plan/runner/drift code
 keys off ``harness.kind`` exactly like the existing skill/hook provisioning, and a new harness is
@@ -99,7 +97,7 @@ class HarnessAllowlist:
 
 # The harness kinds rig can provision an allowlist for. claude-code is the primary, proven one
 # (its ``permissions.allow`` array is exactly what the live ~/.claude/settings.json already uses);
-# opencode's ``permission.bash`` object is the second. codex + gemini/pi have NO additively-
+# opencode's ``permission.bash`` object is the second. codex + pi have NO additively-
 # mergeable per-command allowlist (see the module docstring) and are absent here → recorded N/A by
 # :func:`harness_supported` / the harness matrix, never written.
 HARNESS_ALLOWLISTS: dict[str, HarnessAllowlist] = {
@@ -128,10 +126,6 @@ HARNESS_ALLOWLIST_NA: dict[str, str] = {
         "no per-command allowlist in config.toml — command execution is gated by "
         "approval_policy/sandbox_mode (coarse) and Starlark execpolicy .rules files, a separate "
         "mechanism rig does not additively merge"
-    ),
-    "gemini": (
-        "tools.core/coreTools is a TOOLSET RESTRICTION list, not a per-command auto-approve — "
-        "writing it would disable every unlisted built-in tool; no safe per-command allowlist exists"
     ),
     "pi": "no documented command-allowlist mechanism",
 }

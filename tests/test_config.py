@@ -344,9 +344,25 @@ def test_validate_rejects_non_string_harness_kind():
 def test_validate_accepts_all_supported_harness_kinds():
     # rig-cli#9: every harness rig knows a skill/instruction discovery convention for is now
     # ACCEPTED in harness.kind (skills-dir harnesses claude-code/opencode + instruction-file
-    # harnesses codex/gemini/pi/commandcode). Previously opencode (and the rest) were rejected.
-    for kind in ("claude-code", "opencode", "codex", "gemini", "pi", "commandcode"):
+    # harnesses codex/pi/commandcode). Previously opencode (and the rest) were rejected.
+    # gemini is DEPRECATED (removed everywhere) — see the dedicated rejection test below.
+    for kind in ("claude-code", "opencode", "codex", "pi", "commandcode"):
         config.validate({"version": 1, "harness": {"kind": kind}})
+
+
+def test_validate_rejects_deprecated_gemini_harness_kind():
+    # gemini is deprecated and no longer a supported harness; a config that still names it
+    # fails closed with a clear "no longer supported (deprecated)" message, not the generic
+    # typo error — so a user migrating off gemini knows WHY, not just that it's unknown.
+    with pytest.raises(config.ConfigError, match="no longer supported") as ei:
+        config.validate({"version": 1, "harness": {"kind": "gemini"}})
+    assert ei.value.schema_path == "harness.kind"
+    assert "gemini" in str(ei.value)
+
+
+def test_validate_rejects_deprecated_gemini_in_additional_kinds():
+    with pytest.raises(config.ConfigError, match="no longer supported"):
+        config.validate({"version": 1, "harness": {"kind": "claude-code", "kinds": ["gemini"]}})
 
 
 def test_validate_accepts_additional_harness_kinds():

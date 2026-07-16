@@ -40,7 +40,7 @@ from .harness_skills import (
 from .project_tools import HAFT_WORKFLOW_MODES
 
 # Every harness kind rig provisions skill/instruction discovery for, listed skills-dir kinds first
-# (claude-code, codex) then native-discovery (opencode) then instruction-file kinds (gemini, pi,
+# (claude-code, codex) then native-discovery (opencode) then instruction-file kinds (pi,
 # commandcode) — a stable, readable order for the published JSON-schema enum. Sourced from
 # :mod:`riglib.harness_skills` so the schema enum can never drift from what ``config.validate``
 # accepts.
@@ -332,7 +332,7 @@ _HARNESS_BLOCK = Block(
         "kind": Leaf(
             "string",
             "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode; "
-            "instruction-file: gemini/pi/commandcode; codex is also instruction-file via AGENTS.md). "
+            "instruction-file: pi/commandcode; codex is also instruction-file via AGENTS.md). "
             "The auto/permission-MODE write is "
             "claude-code-only today; other kinds still get their skill discovery provisioned.",
             enum=_HARNESS_KIND_ENUM,

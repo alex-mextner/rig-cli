@@ -64,12 +64,15 @@ def test_opencode_entry_shape_is_glob_key():
     assert desired_entries("opencode", ["git", "gh", "dev"]) == ["git *", "gh *", "dev *"]
 
 
-def test_codex_and_gemini_are_na():
+def test_codex_and_pi_are_na():
     assert not harness_supported("codex")
-    assert not harness_supported("gemini")
+    assert not harness_supported("pi")
     assert harness_supported("claude-code")
     assert harness_supported("opencode")
-    assert "codex" in HARNESS_ALLOWLIST_NA and "gemini" in HARNESS_ALLOWLIST_NA
+    assert "codex" in HARNESS_ALLOWLIST_NA and "pi" in HARNESS_ALLOWLIST_NA
+    # gemini is deprecated/removed — it is no longer a recognized allowlist harness at all.
+    assert "gemini" not in HARNESS_ALLOWLIST_NA
+    assert not harness_supported("gemini")
 
 
 # ── validation (fail-closed) ───────────────────────────────────────────────────────
@@ -307,7 +310,7 @@ def test_validate_permissions_kind_na_and_unknown_rejected():
     with pytest.raises(ConfigError):
         validate({"version": 1, "permissions": {"kind": "codex"}})   # N/A harness
     with pytest.raises(ConfigError):
-        validate({"version": 1, "permissions": {"kind": "gemini"}})  # N/A harness
+        validate({"version": 1, "permissions": {"kind": "gemini"}})  # deprecated/removed harness
     with pytest.raises(ConfigError):
         validate({"version": 1, "permissions": {"kind": "bogus"}})   # unknown
     validate({"version": 1, "permissions": {"kind": "opencode"}})    # supported

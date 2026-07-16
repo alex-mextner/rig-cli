@@ -80,8 +80,8 @@ _DEFAULTS_KEY = {
 # scan the default
 # ``skills_target`` directly; when the user customizes ``skills_target``, rig links back into the
 # native root so the harness still sees the installed skills. INSTRUCTION-FILE harnesses
-# (gemini/pi/commandcode) have no skills dir — they surface guidance via a global
-# AGENTS.md/GEMINI.md (the ``agents_md`` area), so the plural skill-dir resolver emits no link
+# (pi/commandcode) have no skills dir — they surface guidance via a global
+# AGENTS.md (the ``agents_md`` area), so the plural skill-dir resolver emits no link
 # for them and records a status note.
 # (The module-level alias name is preserved so ``plan._HARNESS_SKILL_DIRS`` keeps resolving.)
 _DEFAULT_HARNESS_KIND = "claude-code"
@@ -278,8 +278,8 @@ def _resolve_harness_skill_dir(config: LoadedConfig) -> Path | None:
     """Resolve the harness skill-discovery dir to symlink installed skills into.
 
     Returns ``None`` when ``skills.harness_link`` is disabled or the harness kind has no
-    known discovery dir — either an INSTRUCTION-FILE harness (gemini/pi/commandcode,
-    which surface skills via AGENTS.md/GEMINI.md, not a symlinked dir) or an unknown kind. We
+    known discovery dir — either an INSTRUCTION-FILE harness (pi/commandcode,
+    which surface skills via AGENTS.md, not a symlinked dir) or an unknown kind. We
     never guess a path. An explicit ``skills.harness_skill_dir`` overrides the per-harness
     default (and forces the link even for an instruction-file harness — the user pointed at a
     real dir on purpose).
@@ -331,8 +331,8 @@ def _skill_discovery_notes(config: LoadedConfig) -> list[str]:
     """A status note explaining why no harness skill-link is emitted for an instruction-file
     harness, or ``None`` when one is (skills-dir harness) or linking is disabled / overridden.
 
-    Keeps ``rig status`` honest: a gemini/pi/commandcode config that links no skills isn't a
-    silent gap — the note says the kind reads a global AGENTS.md/GEMINI.md instead, so the skill
+    Keeps ``rig status`` honest: a pi/commandcode config that links no skills isn't a
+    silent gap — the note says the kind reads a global AGENTS.md instead, so the skill
     content reaches it through the ``agents_md`` area, not a per-skill symlink.
     """
     sk = config.category("skills")
@@ -653,8 +653,8 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
         for _kind, link_dir in harness_link_dirs
         if not _same_dir(link_dir, skills_target)
     ]
-    # Instruction-file harness (gemini/pi/commandcode) → no skill-link dir; record WHY so
-    # ``rig status`` shows "uses <AGENTS.md/GEMINI.md>" instead of a silent empty skill-link area.
+    # Instruction-file harness (pi/commandcode) → no skill-link dir; record WHY so
+    # ``rig status`` shows "uses <AGENTS.md>" instead of a silent empty skill-link area.
     plan.notes.extend(_skill_discovery_notes(config))
     for item in _skills_enabled(config, catalog, project_type):
         installed = skills_target / item.path.name
@@ -907,7 +907,7 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
         return
     kind = str(h.get("kind", "claude-code"))
     if kind not in _HARNESS_SETTINGS:
-        # The config schema now ACCEPTS opencode/codex/gemini/pi/commandcode (rig provisions their
+        # The config schema now ACCEPTS opencode/codex/pi/commandcode (rig provisions their
         # SKILL discovery), but the auto/permission-MODE write is only implemented for the kinds in
         # ``_HARNESS_SETTINGS`` (claude-code today). Skip the auto-mode write for the others — but
         # say so, so a config that set ``auto_mode``/``mode`` on such a kind isn't a silent no-op.
@@ -967,7 +967,7 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
     baked rule baselines. The action carries the RESOLVED lists (so the runner stays config-pure)
     and is keyed off ``harness.kind`` (exactly like the auto-mode write), targeting the SAME
     per-harness user-scope settings file. A harness whose kind has no additively-mergeable
-    allowlist (codex, gemini/pi — see :mod:`riglib.permissions`) emits NO action and is recorded
+    allowlist (codex, pi — see :mod:`riglib.permissions`) emits NO action and is recorded
     N/A; a note explains why so ``rig status`` isn't silently empty.
     """
     from .permissions import (
@@ -1262,7 +1262,7 @@ def _build_hook_bridge_for_kind(
     bridge_spec = _hook_bridge_spec_for_kind(kind)
     if bridge_spec is None:
         # Reaching this branch means the harness has skill/instruction discovery but no known
-        # hook bridge surface yet (currently gemini/pi/commandcode). If a config EXPLICITLY
+        # hook bridge surface yet (currently pi/commandcode). If a config EXPLICITLY
         # asked for the bridge on such a kind, say it is not wired; the default-on case stays
         # quiet.
         if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is True:
