@@ -130,6 +130,69 @@ def detect_stack(repo_root: Path) -> str:
     return "unknown"
 
 
+def detect_stack_preset(repo_root: Path) -> str | None:
+    """Best-guess the repo's STACK PRESET (`l1/lang[/framework]`), or ``None`` if undetermined.
+
+    This is the stack-preset taxonomy (see docs/specs/2026-07-15-stack-presets.md), NOT the
+    build-toolchain :func:`detect_stack` (which returns bun-node/python-uv/go). Cheap top-level
+    probes only — the guess is a suggestion the user confirms in ``rig init``, never an authority.
+    Framework-level guessing is shallow in the foundation (SwiftUI-vs-UIKit / python web framework
+    detection is a follow-up); most guesses stop at ``l1/lang``.
+    """
+    swift = _detect_swift_stack(repo_root)
+    if swift:
+        return swift
+    node = _detect_node_stack(repo_root)
+    if node:
+        return node
+    if (repo_root / "pyproject.toml").is_file() or (repo_root / "uv.lock").is_file() or (
+        repo_root / "setup.py"
+    ).is_file():
+        return "backend/python"
+    if (repo_root / "go.mod").is_file():
+        return "backend/go"
+    if (repo_root / "Cargo.toml").is_file():
+        return "backend/rust"
+    return None
+
+
+def _detect_swift_stack(repo_root: Path) -> str | None:
+    """`mobile/swift` when a Swift package/Xcode project or top-level ``*.swift`` is present."""
+    if (repo_root / "Package.swift").is_file():
+        return "mobile/swift"
+    for entry in repo_root.iterdir():
+        if entry.suffix in (".xcodeproj", ".xcworkspace"):
+            return "mobile/swift"
+        if entry.suffix == ".swift" and entry.is_file():
+            return "mobile/swift"
+    return None
+
+
+def _detect_node_stack(repo_root: Path) -> str | None:
+    """Map a ``package.json``'s deps to a `frontend/*` or `backend/ts|js` stack preset."""
+    pkg = repo_root / "package.json"
+    if not pkg.is_file():
+        return None
+    import json
+
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+    lang = "ts" if (repo_root / "tsconfig.json").is_file() else "js"
+    if "react" in deps or "next" in deps:
+        return f"frontend/{lang}/react"
+    for fw in ("vue", "svelte"):
+        if fw in deps:
+            return f"frontend/{lang}/{fw}"
+    if "@angular/core" in deps:
+        return f"frontend/{lang}/angular"
+    if any(k in deps for k in ("express", "fastify", "hono", "koa", "@nestjs/core")):
+        return f"backend/{lang}"
+    return None
+
+
 def detect_project_type(repo_root: Path, stack: str) -> str:
     """Best-effort project-type guess from manifests/layout. Cheap heuristics only."""
     # monorepo signals

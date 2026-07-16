@@ -80,7 +80,10 @@ skills/by-stack/frontend/ts/ts-strictness/SKILL.md           # lang-level
 
 - The directory path **is** the stack path. A skill placed at
   `by-stack/<l1>/<lang>/<name>` is a **lang-level** skill (applies to every framework
-  under that lang); `by-stack/<l1>/<lang>/<fw>/<name>` is a **framework-level** skill.
+  under that lang); `by-stack/<l1>/<lang>/<fw>/<name>` is a **framework-level** skill. A
+  skill's stack path is always at least `l1/lang` (2 segments) — the same minimum depth a
+  declared stack has, so matching is a clean prefix relation. There is no `l1`-only
+  (domain-wide) skill in the foundation (a follow-up could add one if a real need appears).
 - This mirrors the existing `by-type/<kind>/<name>` convention exactly, so the catalog
   scanner, plan resolver, and drift code stay symmetrical (directory convention, not
   metadata tags — consistent with `by-type`, no SKILL.md frontmatter change needed).
@@ -96,7 +99,6 @@ The catalog scans each into an `Item`:
 A declared stack **inherits** every by-stack skill whose stack path is a **prefix** of (or
 equal to) the declared stack. For `stack: mobile/swift/swiftui` the selected groups are:
 
-- `by-stack/mobile/*` (every domain-level skill), plus
 - `by-stack/mobile/swift/*` (lang-level), plus
 - `by-stack/mobile/swift/swiftui/*` (framework-level).
 

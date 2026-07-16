@@ -95,3 +95,70 @@ def test_detect_python_cli_from_project_main(tmp_path: Path):
     pkg.mkdir()
     (pkg / "__main__.py").write_text("", encoding="utf-8")
     assert detect.detect_project_type(tmp_path, "python-uv") == "cli"
+
+
+# ── stack-preset detection (detect_stack_preset) ────────────────────────────────────────
+def _pkg(tmp_path: Path, deps: dict, dev: dict | None = None, tsconfig: bool = False) -> None:
+    data: dict = {"name": "x", "dependencies": deps}
+    if dev:
+        data["devDependencies"] = dev
+    (tmp_path / "package.json").write_text(json.dumps(data), encoding="utf-8")
+    if tsconfig:
+        (tmp_path / "tsconfig.json").write_text("{}", encoding="utf-8")
+
+
+def test_stack_preset_swift_package(tmp_path: Path):
+    (tmp_path / "Package.swift").write_text("// swift", encoding="utf-8")
+    assert detect.detect_stack_preset(tmp_path) == "mobile/swift"
+
+
+def test_stack_preset_swift_source_file(tmp_path: Path):
+    (tmp_path / "App.swift").write_text("import SwiftUI", encoding="utf-8")
+    assert detect.detect_stack_preset(tmp_path) == "mobile/swift"
+
+
+def test_stack_preset_react_ts(tmp_path: Path):
+    _pkg(tmp_path, {"react": "^18"}, tsconfig=True)
+    assert detect.detect_stack_preset(tmp_path) == "frontend/ts/react"
+
+
+def test_stack_preset_react_js_without_tsconfig(tmp_path: Path):
+    _pkg(tmp_path, {"react": "^18"})
+    assert detect.detect_stack_preset(tmp_path) == "frontend/js/react"
+
+
+def test_stack_preset_node_backend(tmp_path: Path):
+    _pkg(tmp_path, {"express": "^4"}, tsconfig=True)
+    assert detect.detect_stack_preset(tmp_path) == "backend/ts"
+
+
+def test_stack_preset_python(tmp_path: Path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    assert detect.detect_stack_preset(tmp_path) == "backend/python"
+
+
+def test_stack_preset_go(tmp_path: Path):
+    (tmp_path / "go.mod").write_text("module x\n", encoding="utf-8")
+    assert detect.detect_stack_preset(tmp_path) == "backend/go"
+
+
+def test_stack_preset_rust(tmp_path: Path):
+    (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n", encoding="utf-8")
+    assert detect.detect_stack_preset(tmp_path) == "backend/rust"
+
+
+def test_stack_preset_none_when_unrecognized(tmp_path: Path):
+    (tmp_path / "README.md").write_text("hi", encoding="utf-8")
+    assert detect.detect_stack_preset(tmp_path) is None
+
+
+def test_stack_preset_swift_wins_over_node_and_is_well_formed(tmp_path: Path):
+    # precedence: a Swift signal wins over a competing package.json, and every guess is a
+    # taxonomy-valid stack string.
+    from riglib import stack as stackmod
+
+    (tmp_path / "Package.swift").write_text("", encoding="utf-8")
+    _pkg(tmp_path, {"express": "^4"})  # competing backend/node signal
+    guess = detect.detect_stack_preset(tmp_path)
+    assert guess == "mobile/swift"
+    assert stackmod.is_valid_stack(guess)

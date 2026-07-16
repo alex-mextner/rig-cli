@@ -29,6 +29,7 @@ def default_state(
     *,
     agent_tools_source: str | None = None,
     project_type: str = "unknown",
+    stack: str | None = None,
 ) -> dict[str, Any]:
     """A sensible default config (opt-out skills, security hooks on, security CI gates).
 
@@ -71,6 +72,10 @@ def default_state(
             "on_conflict": "backup",
         },
         **({"agent_tools_source": agent_tools_source} if agent_tools_source else {}),
+        # The stack preset (l1/lang[/framework]) — written when init detected/confirmed one. Absent
+        # when undetected (a non-interactive init on an unrecognized repo), which triggers the soft-
+        # require warning rather than inventing a wrong stack. Selects the by-stack skills.
+        **({"stack": stack} if stack else {}),
         "skills": {
             "enabled": True,
             "target": "~/.agents/skills",

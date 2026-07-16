@@ -95,6 +95,100 @@ def test_plan_by_type_explicit_enable_overrides_type(fake_agent_tools, tmp_path)
     assert "by-type/frontend/tokens" not in skills
 
 
+# ── stack presets: by-stack catalog scan + hierarchical plan selection ──────────────────
+def test_catalog_scans_by_stack_skills(fake_agent_tools):
+    cat = Catalog.scan(str(fake_agent_tools))
+    names = cat.names("skills")
+    assert "by-stack/mobile/swift/swiftui/swiftui-mvvm" in names
+    assert "by-stack/mobile/swift/swift-concurrency" in names  # lang-level
+    assert "by-stack/frontend/ts/react/vercel-react-patterns" in names
+    # an l1-only SKILL.md (depth < 3, no lang) is IGNORED by the scanner
+    assert not any(n.startswith("by-stack/mobile/ignored-l1-only") for n in names)
+    assert not any("ignored-l1-only" in n for n in names)
+
+
+def test_by_stack_items_carry_stack_meta_and_off_by_default(fake_agent_tools):
+    cat = Catalog.scan(str(fake_agent_tools))
+    item = cat.get("skills", "by-stack/mobile/swift/swiftui/swiftui-mvvm")
+    assert item is not None
+    assert item.default_enabled is False
+    assert item.meta["stack"] == "mobile/swift/swiftui"
+    assert item.group == "by-stack/mobile/swift/swiftui"
+
+
+def test_plan_by_stack_selected_by_declared_stack_hierarchically(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"stack": "mobile/swift/swiftui", "skills": {"by_type": {}}}, tmp_path)
+    plan = build(cfg, cat, project_type="unknown")
+    skills = {a.item for a in plan.actions if a.category == "skills"}
+    # framework-level AND the inherited lang-level skill are both pulled in
+    assert "by-stack/mobile/swift/swiftui/swiftui-mvvm" in skills
+    assert "by-stack/mobile/swift/swift-concurrency" in skills
+    # a sibling stack's skills are NOT provisioned (no react in a swift repo)
+    assert "by-stack/frontend/ts/react/vercel-react-patterns" not in skills
+    assert "by-stack/frontend/ts/ts-strictness" not in skills
+
+
+def test_plan_by_stack_lang_only_stack_excludes_framework(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"stack": "mobile/swift", "skills": {"by_type": {}}}, tmp_path)
+    plan = build(cfg, cat, project_type="unknown")
+    skills = {a.item for a in plan.actions if a.category == "skills"}
+    assert "by-stack/mobile/swift/swift-concurrency" in skills  # lang-level matches
+    # a deeper (framework) skill than the declared stack must NOT be pulled in
+    assert "by-stack/mobile/swift/swiftui/swiftui-mvvm" not in skills
+
+
+def test_plan_no_stack_selects_no_by_stack_skills(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"skills": {"by_type": {}}}, tmp_path)
+    plan = build(cfg, cat, project_type="unknown")
+    skills = {a.item for a in plan.actions if a.category == "skills"}
+    assert not any(s.startswith("by-stack/") for s in skills)
+
+
+def test_plan_by_stack_disable_drops_a_selected_skill(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "stack": "mobile/swift/swiftui",
+            "skills": {"by_stack": {"disable": ["by-stack/mobile/swift/swift-concurrency"]}, "by_type": {}},
+        },
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    skills = {a.item for a in plan.actions if a.category == "skills"}
+    assert "by-stack/mobile/swift/swift-concurrency" not in skills  # disabled
+    assert "by-stack/mobile/swift/swiftui/swiftui-mvvm" in skills  # still selected
+
+
+def test_plan_by_stack_items_force_add_off_stack_skill(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "stack": "mobile/swift/swiftui",
+            "skills": {
+                "by_stack": {"items": {"by-stack/frontend/ts/react/vercel-react-patterns": {"enabled": True}}},
+                "by_type": {},
+            },
+        },
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    skills = {a.item for a in plan.actions if a.category == "skills"}
+    assert "by-stack/frontend/ts/react/vercel-react-patterns" in skills  # forced in
+
+
+def test_plan_by_stack_unknown_item_name_fails_closed(fake_agent_tools, tmp_path):
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"stack": "mobile/swift", "skills": {"by_stack": {"disable": ["by-stack/nope/x/y"]}}},
+        tmp_path,
+    )
+    with pytest.raises(UnknownItemError):
+        build(cfg, cat, project_type="unknown")
+
+
 def test_plan_ci_export_only_writes_nothing(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
     cfg = _cfg(

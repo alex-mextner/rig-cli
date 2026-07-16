@@ -31,6 +31,7 @@ def test_registry_covers_every_status_area():
     # the wizard must show what is enabled across ALL reconciled areas (the `rig status` rows).
     cats = {a.category for a in schema.AREAS}
     expected = {
+        "stack",
         "skills", "agent_hooks", "git_hooks", "ci", "mcp", "harness", "permissions",
         "mode", "models", "agents_md", "github", "tmux", "gitignore", "spotlight", "tg_ctl",
         "linters", "project_tools",
@@ -334,7 +335,9 @@ def test_writable_layer_agrees_with_the_scaffold():
     # REPO-writable areas that are default-ON at plan level and genuine repo artifacts, but carry NO
     # scaffolded default content (so the scaffold can't pre-write them): agents_md (a file IN the
     # repo) and linters (config files declared per-repo — there is no sensible default item to seed).
-    _repo_unscaffolded_ok = {"agents_md", "linters", "permissions"}
+    # stack: a REPO-writable preset that is only scaffolded when init detected/confirmed a stack;
+    # a bare default_state() (undetected repo) legitimately omits it → soft-require warning.
+    _repo_unscaffolded_ok = {"agents_md", "linters", "permissions", "stack"}
     for area in schema.AREAS:
         if schema.writable_layer_for_category(area.category) == schema.REPO:
             assert area.category in scaffolded or area.category in _repo_unscaffolded_ok, area.category
@@ -345,11 +348,14 @@ def test_writable_layer_agrees_with_the_scaffold():
     # layers.py groups as GLOBAL must be routed GLOBAL-only — otherwise the wizard would silently
     # write a machine-wide block into a committed repo file (the footgun the routing exists for).
     # agents_md is a repo file; permissions is still accepted repo-locally for compatibility even
-    # though status displays the reconciled harness settings under GLOBAL.
+    # though status displays the reconciled harness settings under GLOBAL. stack is a REPO-writable
+    # preset (the committed rig.yaml) that has no reconciled drift Area, so layers.py leaves it
+    # unregistered (defaulting the DISPLAY classification to GLOBAL) — but its WRITABLE layer is
+    # legitimately REPO (a global default is also allowed).
     for area in schema.AREAS:
         if (
             area.category not in scaffolded
-            and area.category not in {"agents_md", "permissions"}
+            and area.category not in {"agents_md", "permissions", "stack"}
             and layer_for_category(area.category) == schema.GLOBAL
         ):
             assert schema.writable_layer_for_category(area.category) == schema.GLOBAL, area.category

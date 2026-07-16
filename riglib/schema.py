@@ -158,6 +158,18 @@ def _opt(
 # generated scaffold in state.default_state / the validators' documented defaults.
 AREAS: tuple[Area, ...] = (
     Area(
+        "stack", "stack preset", "The repo's stack (l1/lang[/framework]) — selects the by-stack skill set.",
+        (
+            _opt("stack", KIND_STR, None,
+                 "The repo's stack preset as `l1/lang[/framework]` — e.g. mobile/swift/swiftui, "
+                 "frontend/ts/react, backend/python. l1 is one of mobile|frontend|backend|desktop|"
+                 "embedded|system; lang is required; framework is optional. It selects the by-stack "
+                 "skills the repo inherits (hierarchical: mobile/swift/swiftui pulls mobile/swift + "
+                 "mobile/swift/swiftui skills). Per-repo it is expected (soft-required); set a global "
+                 "default with `rig config set --global stack <value>`."),
+        ),
+    ),
+    Area(
         "skills", "skills", "Advisory markdown rules copied into the agent skills dir (opt-out model).",
         (
             _opt("skills.enabled", KIND_BOOL, True,
