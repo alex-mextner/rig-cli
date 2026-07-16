@@ -1821,6 +1821,52 @@ def test_self_merge_off_stray_ship_rules_reported_as_extra(fake_agent_tools, tmp
     assert extras, "stray ship rules under self_merge:false must surface as permissions extras"
 
 
+def test_self_merge_no_ship_rules_when_skip_leaves_non_auto_mode(fake_agent_tools, tmp_path):
+    # on_conflict=skip + an existing conflicting defaultMode ('default'): the mode key is LEFT
+    # interactive. The ACTIVE permissions.allow ship rules (checked in EVERY mode) must NOT be written
+    # — writing them would pre-approve `gh ship` while the harness is still interactive (codex #159 P2).
+    # drift must NOT flag the ship rules missing while the mode stays non-auto (the mode-key drift row
+    # already signals non-convergence).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _user_settings().parent.mkdir(parents=True, exist_ok=True)
+    _user_settings().write_text(
+        json.dumps({"permissions": {"defaultMode": "default"}}), encoding="utf-8"
+    )
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _auto_harness_cfg(repo, fake_agent_tools)
+    cfg.data["defaults"] = {"on_conflict": "skip"}
+    plan = build(cfg, cat, project_type="unknown")
+    run_plan(plan)
+
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    assert data["permissions"]["defaultMode"] == "default"  # mode left interactive under skip
+    assert "Bash(gh ship:*)" not in data["permissions"].get("allow", []), \
+        "ship rules pre-approved gh ship while defaultMode stayed interactive"
+    assert not [x for x in detect(plan).items if x.category == "harness" and "ship rules absent" in x.detail], \
+        "drift flagged ship rules missing while the mode is non-auto"
+
+
+def test_self_merge_drift_no_ship_rules_missing_when_mode_non_auto(fake_agent_tools, tmp_path):
+    # a clean auto apply, then defaultMode flipped to a non-auto value on disk AND the ship rules
+    # dropped: auto is no longer in effect → drift must NOT report the ship rules missing (only the
+    # mode-key drift row). apply couples the ship rules to the resulting auto mode.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_auto_harness_cfg(repo, fake_agent_tools), cat, project_type="unknown")
+    run_plan(plan)
+    data = json.loads(_user_settings().read_text(encoding="utf-8"))
+    data["permissions"]["defaultMode"] = "default"
+    data["permissions"]["allow"] = [r for r in data["permissions"]["allow"] if r not in SELF_MERGE_PERMISSIONS_ALLOW]
+    _user_settings().write_text(json.dumps(data), encoding="utf-8")
+    items = detect(plan).items
+    assert not [x for x in items if x.category == "harness" and "ship rules absent" in x.detail], \
+        "drift flagged ship rules missing while defaultMode is non-auto"
+    assert [x for x in items if x.category == "harness" and "defaultMode" in x.detail], \
+        "the mode-key drift must still be reported"
+
+
 def test_harness_auto_writes_user_settings_not_repo(fake_agent_tools, tmp_path):
     # auto_mode:true with NO settings_path → CC `auto` is written to the USER settings file
     # (~/.claude/settings.json, HOME-isolated to tmp by the autouse fixture), NOT the repo —

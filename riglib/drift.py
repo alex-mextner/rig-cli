@@ -1022,9 +1022,13 @@ def _check_harness(action: Action, report: DriftReport) -> None:
     # a non-dict root — the mode-key path above already reported that file, and a second row for the
     # same malformed file would just be noise.
     if action.options.get("self_merge") and isinstance(data, dict):
-        # `addable` (not `not present`) so a MALFORMED permissions.allow — already reported as a
-        # shape `modified` by the permissions check — doesn't also get an inaccurate 'absent' row.
-        if self_merge_permissions_addable(data):
+        # The ACTIVE ship rules are expected ONLY when auto is actually in effect on disk (defaultMode
+        # == the declared auto value). When the mode is non-auto — a skip that left it interactive, or
+        # a hand-flip — apply does NOT write the ship rules, so don't flag them missing; the mode-key
+        # drift row above already signals non-convergence (codex #159 P2). `addable` (not
+        # `not present`) so a MALFORMED permissions.allow — already a shape `modified` from the
+        # permissions check — doesn't get an inaccurate 'absent' row either.
+        if current == value and self_merge_permissions_addable(data):
             report.items.append(
                 DriftItem(
                     "missing", "harness", action.item, config_file,

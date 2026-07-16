@@ -912,14 +912,6 @@ def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
     # mode-key write below is a no-op (an unbound ``sect`` copy would drop the ship rules).
     data[section] = sect
 
-    self_merge = bool(action.options.get("self_merge"))
-    # SOFT-block carve-out (autoMode.allow) + HARD Bash-gate unblock (permissions.allow ship rules).
-    # Both self-target their own section off ``data`` (not the mode ``sect``) so the write target and
-    # the drift readers agree regardless of where the mode key lives.
-    carveout_added = _ensure_self_merge_allow(data) if self_merge else False
-    perms_added = _ensure_self_merge_permissions(data) if self_merge else False
-    extra_changed = carveout_added or perms_added
-
     current = sect.get(key)
     # mode_status: what the mode key write is — None (already correct), "kept" (conflict left under
     # skip), or a write status. The additive carve-out/ship-rules never trigger a backup.
@@ -930,6 +922,20 @@ def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
         mode_status = "kept"
     else:
         mode_status = "created" if current is None else ("backed_up" if on_conflict == "backup" else "updated")
+
+    self_merge = bool(action.options.get("self_merge"))
+    # The defaultMode this apply LEAVES on disk: the value we write, or the prior value kept under skip.
+    resulting_mode = current if mode_status == "kept" else value
+    # SOFT-block carve-out (autoMode.allow) + HARD Bash-gate unblock (permissions.allow ship rules), both
+    # self-targeting their own section off ``data`` (not the mode ``sect``) so writer and drift readers
+    # agree regardless of where the mode key lives. The carve-out is INERT without auto (the classifier
+    # only runs then) → safe whenever self_merge is configured. The ship rules are ACTIVE in EVERY mode,
+    # so write them ONLY when the RESULTING mode equals the declared auto value: a skip that left an
+    # interactive defaultMode must not pre-approve `gh ship` (codex #159 P2). Gating on ``value`` (not a
+    # literal "auto") keeps the writer symmetric with drift's ``current == value`` reader.
+    carveout_added = _ensure_self_merge_allow(data) if self_merge else False
+    perms_added = _ensure_self_merge_permissions(data) if (self_merge and resulting_mode == value) else False
+    extra_changed = carveout_added or perms_added
 
     if not _mode_key_written(mode_status) and not extra_changed:
         return ActionResult(action, "skipped", _harness_noop_detail(action, section, key, value, data))
