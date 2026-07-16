@@ -1408,6 +1408,18 @@ def _build_ship_delegator(config: LoadedConfig, catalog: Catalog, plan: InstallP
     # action carries no options) — its target is gh's config file, matching the drift row's target.
     from .gh_ship_alias import GH_SHIP_ALIAS_CATEGORY, gh_config_path
 
+    # The alias's out-of-repo fallback resolves AGENT_TOOLS_ROOT from the machine-level env file,
+    # which `_do_provision_ship_delegator` reconciles. In the ci-only combo (delegator DISABLED but
+    # a ci `ship` item asks for the alias) NO delegator action is emitted, so the alias action must
+    # own the env file itself — else `gh ship` outside a managed repo resolves nothing and exits 127
+    # on a clean machine (codex P2, PR #151). Carry canonical_ship ONLY then: when the delegator is
+    # emitted it reconciles the env file, so the alias stays a portable, option-less constant (no
+    # double writer). The runner + drift read this option to decide whether to reconcile/check it.
+    # (KNOWN GAP, pre-existing and out of this thread's scope: a SELF-HOSTING repo — agent-tools —
+    # with the delegator enabled skips the env reconcile entirely, so a clean machine that only ever
+    # applies agent-tools has no env file and `gh ship` outside it exits 127. The durable fix is to
+    # make the machine-global alias the SOLE owner of the machine-global env file; tracked separately.)
+    alias_options: dict[str, str] = {} if delegator_enabled else {"canonical_ship": str(canonical)}
     plan.actions.append(
         Action(
             kind="provision_gh_ship_alias",
@@ -1415,7 +1427,7 @@ def _build_ship_delegator(config: LoadedConfig, catalog: Catalog, plan: InstallP
             item="alias",
             source=catalog.source,
             target=gh_config_path(),
-            options={},
+            options=alias_options,
         )
     )
 

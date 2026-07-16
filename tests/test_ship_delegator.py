@@ -678,13 +678,74 @@ def test_ship_env_is_intentionally_absent_from_config_schema():
 
 
 def test_apply_only_ship_env_aliases_to_the_owning_action():
-    # `ship_env` is a drift/status-only category; the action that repairs it is ship_delegator.
-    # `rig apply --only ship_env` must therefore scope to the ship_delegator action, never a
-    # silent no-op that can't fix the drift status just named.
+    # `ship_env` is a drift/status-only category; the action that repairs it is ship_delegator
+    # normally. `rig apply --only ship_env` must scope to it, never a silent no-op.
     from riglib.cli import _scope_categories
 
     assert "ship_delegator" in _scope_categories("ship_env")
     assert _scope_categories("skills,ci") == {"skills", "ci"}
+
+
+def _alias_action(canonical: Path | None) -> Action:
+    from riglib.gh_ship_alias import GH_SHIP_ALIAS_CATEGORY
+
+    opts = {"canonical_ship": str(canonical)} if canonical is not None else {}
+    return Action(
+        kind="provision_gh_ship_alias", category=GH_SHIP_ALIAS_CATEGORY, item="alias",
+        source=Path("/src"), target=Path("/gh/config.yml"), options=opts,
+    )
+
+
+def test_only_ship_env_keeps_ci_only_alias_but_not_the_option_less_one(tmp_path):
+    # ci-only combo: `apply --only ship_env` must keep the canonical_ship-carrying alias (its env
+    # owner) — but NEVER the option-less alias of a normal delegator-enabled plan, which does not
+    # own ship_env and could clobber a user's `gh ship` alias (regression guard, codex P1 on #151).
+    from riglib.cli import _action_in_only_scope, _scope_categories
+
+    wanted = _scope_categories("ship_env")
+    canonical = _canonical_ship(tmp_path)
+    assert _action_in_only_scope(_alias_action(canonical), wanted), "ci-only owner must survive"
+    assert not _action_in_only_scope(_alias_action(None), wanted), "option-less alias must be dropped"
+
+
+def test_only_gh_ship_alias_keeps_alias_and_does_not_drag_delegator():
+    from riglib.cli import _action_in_only_scope, _scope_categories
+
+    wanted = _scope_categories("gh_ship_alias")
+    assert _action_in_only_scope(_alias_action(None), wanted)
+    assert not _action_in_only_scope(_action(Path("/repo"), Path("/x/ci/ship/ship.sh")), wanted)
+
+
+def test_ship_env_provenance_uses_declaring_layer_of_the_combo():
+    # ci-only combo declared in the GLOBAL cascade — even alongside an UNRELATED repo rig.yaml:
+    # ship_env / gh_ship_alias provenance must name the layer that actually declares the combo
+    # (via source_for_key), not blindly the repo file (codex P2 on #151).
+    from riglib.cli import _declaring_config
+
+    global_cfg = Path("/home/u/.config/rig/config.yaml")
+    repo_cfg = Path("/repo/rig.yaml")
+
+    class _Loaded:
+        repo_path = repo_cfg
+        global_path = global_cfg
+
+        def source_for_key(self, key):  # ship_delegator declared in GLOBAL, everything else in repo
+            return global_cfg if key == "ship_delegator" else repo_cfg
+
+    assert _declaring_config("ship_env", _Loaded()) == str(global_cfg)
+    assert _declaring_config("gh_ship_alias", _Loaded()) == str(global_cfg)
+
+
+def test_ship_env_area_configured_in_ci_only_combo():
+    # areas registry parity: with only the gh_ship_alias action present (ci-only combo — no
+    # ship_delegator action), the ship_env area must still roll up as CONFIGURED via configured_by,
+    # not render as "not configured".
+    from riglib.areas import AREAS, area_matches_action
+
+    area = next(a for a in AREAS if a.key == "ship_env")
+    assert area_matches_action(area, "gh_ship_alias", None), "alias owner must configure ship_env"
+    assert area_matches_action(area, "ship_delegator", None), "delegator owner still configures it"
+    assert not area_matches_action(area, "skills", None)
 
 
 def test_divergent_roots_last_apply_wins_and_other_repo_drifts(tmp_path):

@@ -902,12 +902,21 @@ from the rig-generated delegator, or the file is present but **not** git-ignored
 delegator would dirty the worktree). `rig apply` reconciles. Shown in the **repo** section.
 The **machine env file** is checked too, under its own `ship_env` category — shown in the
 **global** section, since the file is a machine-wide artifact (`rig apply --only ship_env`
-scopes to the owning `ship_delegator` action). A repo that carries its own `ci/ship/ship.sh`
+scopes to whichever action owns it: the `ship_delegator` action normally). A repo that carries its own `ci/ship/ship.sh`
 never reads the env file, so both `status` and `apply` leave it entirely alone for that repo —
 no check, no write, no backup (status/apply parity in both directions). The env-file check also
 survives a **non-git** cwd: `status` there drops repo-scoped areas, but `apply` still reconciles
 the machine env file, so the `ship_env` check keeps running (parity again — a missing/stale env
 file surfaces even from `rig status` in `~`).
+
+**ci-only combo (`ship_delegator: { enabled: false }` + `ci.items.ship.gh_alias: true`).** With the
+delegator area disabled but a CI `ship` item still requesting the alias, there is no delegator
+action to reconcile the machine env file — so the **`gh_ship_alias`** action owns it instead (it is
+where the alias's out-of-repo fallback reads `AGENT_TOOLS_ROOT`; without it `gh ship` outside a
+managed repo would exit 127). `rig apply` writes the env file, `rig status` checks it, and
+`rig apply --only ship_env` includes that alias action (but never the option-less alias of a normal
+delegator-enabled plan). Provenance points at the config layer that declares the combo — the repo
+`rig.yaml`, or the global config when it is declared purely there.
 
 ---
 

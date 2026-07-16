@@ -547,8 +547,20 @@ def _check_gh_ship_alias(action: Action, report: DriftReport) -> None:
 
     The alias is a machine-wide artifact (``gh_ship_alias`` is classified GLOBAL in
     :mod:`riglib.layers`), so ``rig status`` renders it under the machine layer, not this repo's.
+
+    ci-only combo (``ship_delegator`` disabled, ``ci.items.ship.gh_alias`` on): the plan builder
+    carries ``canonical_ship`` on this action because no ``provision_ship_delegator`` action owns
+    the machine env file — so this check must also byte-compare that file (apply reconciles it here,
+    :func:`riglib.actions.runner._do_provision_gh_ship_alias`, so status must flag its drift or the
+    two disagree). No self-hosting skip: the machine-global alias needs the env file regardless of
+    the current repo. When the delegator owns the env file this option is absent — its own drift
+    check covers the file, so we do NOT double-report it here.
     """
     from .gh_ship_alias import GH_SHIP_ALIAS_CATEGORY, gh_config_path, resolve_gh_ship_alias
+
+    raw_canonical = str(action.options.get("canonical_ship", "")).strip()
+    if raw_canonical:
+        _check_ship_env_file(Path(raw_canonical), report)
 
     r = resolve_gh_ship_alias()
     # ok → correct; no_gh → gh absent (unmanageable); unknown → gh config unreadable (rig refuses

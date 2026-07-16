@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 
 from riglib import gh_ship_alias as gsa
-from riglib.actions.runner import _do_provision_gh_ship_alias
+from riglib.actions.runner import (
+    _do_provision_gh_ship_alias,
+    ship_env_file_content,
+    ship_env_file_path,
+)
 from riglib.areas import AREAS
 from riglib.drift import DriftReport, _check_gh_ship_alias
 from riglib.layers import GLOBAL, layer_for_category
@@ -39,6 +43,25 @@ def _loaded(cfg: dict, repo: Path):
     from riglib.config import LoadedConfig
 
     return LoadedConfig(data=cfg, repo_root=repo)
+
+
+def _canonical_ship(tmp_path: Path) -> Path:
+    src = tmp_path / "agent-tools" / "ci" / "ship" / "ship.sh"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text("#!/usr/bin/env bash\necho ship\n", encoding="utf-8")
+    return src
+
+
+def _action_with_canonical(canonical: Path) -> Action:
+    """The ci-only-combo alias action: carries canonical_ship so it owns the machine env file."""
+    return Action(
+        kind="provision_gh_ship_alias",
+        category=gsa.GH_SHIP_ALIAS_CATEGORY,
+        item="alias",
+        source=Path("/src"),
+        target=Path("/repo"),
+        options={"canonical_ship": str(canonical)},
+    )
 
 
 # ── the expansion: portable constant, valid dispatcher ──────────────────────────────
@@ -183,8 +206,32 @@ def test_plan_ci_ship_gh_alias_emits_alias_even_without_delegator(fake_agent_too
         "ci": {"items": {"ship": {"enabled": True, "gh_alias": True}}},
     }
     plan = build(_loaded(cfg, repo), Catalog.scan(str(fake_agent_tools)), project_type="cli")
-    assert len([a for a in plan.actions if a.kind == "provision_gh_ship_alias"]) == 1
+    alias = [a for a in plan.actions if a.kind == "provision_gh_ship_alias"]
+    assert len(alias) == 1
     assert not [a for a in plan.actions if a.kind == "provision_ship_delegator"]
+    # ci-only combo: no delegator action owns the machine env file, so the alias action must carry
+    # canonical_ship and provision it itself (else the alias's out-of-repo fallback resolves nothing
+    # → `gh ship` exits 127 on a clean machine — codex P2 on PR #151).
+    assert alias[0].options.get("canonical_ship", "").endswith("ci/ship/ship.sh")
+
+
+def test_plan_alias_carries_no_canonical_ship_when_delegator_owns_env(fake_agent_tools, tmp_path):
+    # When the delegator IS enabled it reconciles the machine env file, so the alias action stays a
+    # portable, option-less constant — no canonical_ship, no double-writer of the env file.
+    from riglib.catalog import Catalog
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = {  # delegator default-on AND ci ship gh_alias on
+        "version": 1,
+        "agent_tools_source": str(fake_agent_tools),
+        "ci": {"items": {"ship": {"enabled": True, "gh_alias": True}}},
+    }
+    plan = build(_loaded(cfg, repo), Catalog.scan(str(fake_agent_tools)), project_type="cli")
+    alias = [a for a in plan.actions if a.kind == "provision_gh_ship_alias"]
+    assert len(alias) == 1
+    assert [a for a in plan.actions if a.kind == "provision_ship_delegator"]
+    assert "canonical_ship" not in alias[0].options
 
 
 def test_plan_emits_exactly_one_alias_when_both_paths_request(fake_agent_tools, tmp_path):
@@ -350,6 +397,82 @@ def test_handler_set_failure_is_soft_error(monkeypatch):
     assert res.status == "error" and "gh alias set` failed" in res.detail
 
 
+# ── ci-only combo: the alias action provisions the machine env file (codex P2, PR #151) ──────
+def test_handler_provisions_env_file_in_ci_only_combo(tmp_path, monkeypatch):
+    # ship_delegator off + ci.items.ship.gh_alias on: no provision_ship_delegator action reconciles
+    # the machine env file, so the alias action (carrying canonical_ship) must write it itself —
+    # the env file is where the alias's out-of-repo fallback reads AGENT_TOOLS_ROOT; without it
+    # `gh ship` exits 127 on a clean machine.
+    _stub_resolve(monkeypatch, "ok", gsa.gh_ship_alias_expansion())
+    canonical = _canonical_ship(tmp_path)
+    env_path = ship_env_file_path()
+    assert not env_path.exists()
+    res = _do_provision_gh_ship_alias(_action_with_canonical(canonical), "backup")
+    assert env_path.read_text(encoding="utf-8") == ship_env_file_content(canonical)
+    # the alias was already correct but the env file was just written → not a silent no-op
+    assert res.status == "updated"
+
+
+def test_handler_env_file_reconcile_is_idempotent(tmp_path, monkeypatch):
+    _stub_resolve(monkeypatch, "ok", gsa.gh_ship_alias_expansion())
+    canonical = _canonical_ship(tmp_path)
+    p = ship_env_file_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(ship_env_file_content(canonical), encoding="utf-8")
+    res = _do_provision_gh_ship_alias(_action_with_canonical(canonical), "backup")
+    assert res.status == "skipped", "env unchanged + alias ok → a true no-op"
+
+
+def test_handler_without_canonical_writes_no_env_file(tmp_path, monkeypatch):
+    # delegator-owned path: the option-less alias action never touches the machine env file.
+    _stub_resolve(monkeypatch, "ok", gsa.gh_ship_alias_expansion())
+    _do_provision_gh_ship_alias(_action(), "backup")
+    assert not ship_env_file_path().exists()
+
+
+def test_handler_transient_env_keeps_action_skipped_not_green(tmp_path, monkeypatch):
+    # A transient (temp-dir) agent_tools_source is REFUSED for the persistent machine pointer: the
+    # env reconcile returns skipped_transient. Even with the alias freshly created, the action must
+    # report `skipped` (the reconcile is INCOMPLETE — `gh ship` has no resolvable root) rather than
+    # a falsely-green `created`, mirroring the delegator's partial-outcome contract.
+    from riglib.actions.runner import _merge_env_into_alias_result, ActionResult
+
+    created = ActionResult(_action(), "created", "gh-ship-alias: `gh ship` set")
+    merged = _merge_env_into_alias_result(created, "skipped_transient", "refused transient pointer", True)
+    assert merged.status == "skipped"
+    assert "refused transient pointer" in merged.detail
+
+
+def test_handler_alias_error_still_surfaces_env_note(monkeypatch):
+    from riglib.actions.runner import _merge_env_into_alias_result, ActionResult
+
+    err = ActionResult(_action(), "error", "gh-ship-alias: `gh alias set` failed (rc != 0)")
+    merged = _merge_env_into_alias_result(err, "written", "wrote env file /x", False)
+    assert merged.status == "error"
+    assert "wrote env file /x" in merged.detail, "an env write before the alias error must not vanish"
+
+
+def test_env_write_does_not_mask_conflict_skipped_alias_drift(tmp_path, monkeypatch):
+    # env WRITTEN but a differing user alias is preserved under on_conflict=skip: the alias drift
+    # REMAINS, so the action must stay `skipped`, NOT bump to `updated` — else the report claims full
+    # reconciliation while `rig status` immediately re-reports the alias drift (codex P1 on #151).
+    _stub_resolve(monkeypatch, "update", "!user-custom")
+    canonical = _canonical_ship(tmp_path)
+    res = _do_provision_gh_ship_alias(_action_with_canonical(canonical), "skip")
+    assert res.status == "skipped"
+    assert "on_conflict=skip" in res.detail  # the alias-left-as-is reason is surfaced
+    assert ship_env_file_path().read_text(encoding="utf-8") == ship_env_file_content(canonical)
+
+
+def test_env_write_bumps_only_when_alias_already_in_sync(tmp_path, monkeypatch):
+    # env WRITTEN and the alias is genuinely in sync (no remaining drift) → the sole change is the
+    # env file, so the action legitimately reports `updated`.
+    _stub_resolve(monkeypatch, "ok", gsa.gh_ship_alias_expansion())
+    canonical = _canonical_ship(tmp_path)
+    res = _do_provision_gh_ship_alias(_action_with_canonical(canonical), "backup")
+    assert res.status == "updated"
+
+
 # ── drift parity ────────────────────────────────────────────────────────────────────
 def test_drift_missing_and_modified(monkeypatch):
     monkeypatch.setattr(gsa, "gh_available", lambda: True)
@@ -374,6 +497,30 @@ def test_drift_clean_when_ok_or_no_gh(monkeypatch):
     rep2 = DriftReport()
     _check_gh_ship_alias(_action(), rep2)
     assert not rep2.items, "gh absent → no phantom drift (apply/status parity)"
+
+
+def test_drift_checks_env_file_when_alias_owns_it(tmp_path, monkeypatch):
+    # ci-only combo: the alias action carries canonical_ship, so its drift check must also flag a
+    # missing machine env file (status/apply parity — apply reconciles it there). The alias itself
+    # is in sync, so ONLY the env-file drift should surface.
+    monkeypatch.setattr(gsa, "gh_available", lambda: True)
+    monkeypatch.setattr(gsa, "_read_ship_alias", gsa.gh_ship_alias_expansion)
+    canonical = _canonical_ship(tmp_path)
+    assert not ship_env_file_path().exists()
+    rep = DriftReport()
+    _check_gh_ship_alias(_action_with_canonical(canonical), rep)
+    env_items = [i for i in rep.items if i.category == "ship_env"]
+    assert env_items, "a missing machine env file must surface as ship_env drift"
+
+
+def test_drift_ignores_env_file_when_alias_has_no_canonical(tmp_path, monkeypatch):
+    # delegator-owned path: the option-less alias action must NOT probe the env file (the delegator
+    # action's drift check owns it — no double report).
+    monkeypatch.setattr(gsa, "gh_available", lambda: True)
+    monkeypatch.setattr(gsa, "_read_ship_alias", gsa.gh_ship_alias_expansion)
+    rep = DriftReport()
+    _check_gh_ship_alias(_action(), rep)
+    assert not [i for i in rep.items if i.category == "ship_env"]
 
 
 # ── registries ──────────────────────────────────────────────────────────────────────
