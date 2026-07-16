@@ -45,6 +45,10 @@ _CATEGORY_LAYER = {
     # repo-scoped ship_delegator action, but the artifact is machine-wide — its drift is the
     # machine's, not this repo's, so status must render it under the GLOBAL heading.
     "ship_env": GLOBAL,
+    # the machine-global `gh ship` alias (gh config): written by the repo-scoped gh_ship_alias
+    # action (emitted alongside ship_delegator), but the artifact is machine-wide — one alias serves
+    # every repo — so status renders it under the GLOBAL heading, not this repo's.
+    "gh_ship_alias": GLOBAL,
     # REPO — this repo, from ./rig.yaml
     "ci": REPO,
     "ship_delegator": REPO,

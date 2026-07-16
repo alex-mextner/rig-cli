@@ -84,6 +84,9 @@ AREAS: tuple[Area, ...] = (
     # same machine checks and reconciles the file.
     Area("ship_env", "agent-tools machine env (AGENT_TOOLS_ROOT)", GLOBAL, ("ship_env",),
          configured_by=("ship_delegator",)),
+    # the machine-global `gh ship` alias (gh config): one alias serves every repo, so it is GLOBAL
+    # even though its provisioning action is emitted alongside the repo-scoped ship_delegator.
+    Area("gh_ship_alias", "`gh ship` alias (gh config)", GLOBAL, ("gh_ship_alias",)),
     # ── REPO — this repository, from ./rig.yaml ──
     Area("ci", "CI gates", REPO, ("ci",), ship_slot=False),
     Area("ship", "ship / `gh ship` merge gate", REPO, ("ci",), ship_slot=True),

@@ -506,9 +506,14 @@ def _do_install_ci(action: Action, on_conflict: str) -> ActionResult:
         out = fsutil.copy_file(ship, target, on_conflict)
         _chmod_x_if_changed(target, out)
         detail = f"ship {out.detail}"
+        # NOTE: `gh_alias: true` on the ci ship item does NOT set the alias HERE. The `gh ship`
+        # alias is provisioned by the single `provision_gh_ship_alias` action (the plan builder
+        # emits it when this item requests it OR ship_delegator is on), so it honors on_conflict,
+        # is idempotent, and is drift-tracked. A direct writer here would be a SECOND, unconditional
+        # setter racing that reconciler (clobbering even under on_conflict=skip, rewriting an
+        # already-correct alias every apply). The option is consumed at plan-build time.
         if action.options.get("gh_alias"):
-            rc = _gh_alias_set("ship", str(target))
-            detail += "; gh alias set" if rc == 0 else "; gh alias FAILED (gh missing?)"
+            detail += "; gh ship alias via provision_gh_ship_alias"
         return ActionResult(action, out.status, detail, out.backup)
 
     # fail-closed on a requested variant the catalog doesn't ship — a variant is a config
@@ -2543,18 +2548,6 @@ def _set_git_global(key: str, value: str) -> int:
     return res.returncode
 
 
-def _gh_alias_set(name: str, path: str) -> int:
-    if not shutil.which("gh"):
-        return 1
-    try:
-        res = subprocess.run(
-            ["gh", "alias", "set", name, f"!{path}"], capture_output=True, text=True, timeout=15
-        )
-    except (OSError, subprocess.SubprocessError):
-        return 1
-    return res.returncode
-
-
 # ── tmux configuration provisioning (generate + migrate) ───────────────────────────
 def tmux_plan_from_action(action: Action):
     """Rebuild the pure :class:`~riglib.tmux.TmuxPlan` an action describes.
@@ -4544,6 +4537,52 @@ def _do_provision_ship_delegator(action: Action, on_conflict: str) -> ActionResu
     return ActionResult(action, status, f"ship-delegator: {file_note}; {exclude_note}{env_suffix}", backup)
 
 
+# ── machine-global `gh ship` alias (the entry point the delegator serves) ──────────
+def _do_provision_gh_ship_alias(action: Action, on_conflict: str) -> ActionResult:
+    """Provision/reconcile the machine-global ``gh ship`` alias (idempotent, drift-parity).
+
+    apply and drift switch on the SAME :func:`resolve_gh_ship_alias` state so status never
+    misreports. gh-missing self-skips (status/apply parity): a machine without ``gh`` is a clean
+    no-op, not a "missing alias" rig could never repair. The live ``gh alias set`` is guarded by
+    ``RIG_GH_ALIAS_DRY_RUN`` (the unit suite + CI set it) so no test touches the real gh config.
+
+    Conflict policy (the alias is gh-owned config, so the "backup" is recording the prior value in
+    the result detail, not a ``.rig-bak`` file): ``create`` always sets it; a DIFFERING existing
+    alias is left as-is under ``on_conflict=skip`` (with the current value noted) and overwritten
+    otherwise, the old value recorded. A ``gh alias set`` failure is a soft, noted error, never a
+    hard apply abort — gh being absent/erroring is not a rig failure.
+    """
+    from ..gh_ship_alias import resolve_gh_ship_alias, set_gh_ship_alias
+
+    r = resolve_gh_ship_alias()
+    if r.state == "no_gh":
+        return ActionResult(
+            action, "skipped",
+            "gh-ship-alias: `gh` CLI not found — skipped (install gh, then re-run rig apply)",
+        )
+    if r.state == "unknown":
+        return ActionResult(
+            action, "skipped",
+            "gh-ship-alias: gh config present but unreadable/malformed — left as-is (rig won't clobber it)",
+        )
+    if r.state == "ok":
+        return ActionResult(action, "skipped", "gh-ship-alias: `gh ship` already set")
+    if r.state == "update" and on_conflict == "skip":
+        return ActionResult(
+            action, "skipped",
+            f"gh-ship-alias: `gh ship` differs but left as-is (on_conflict=skip; current: {r.current})",
+        )
+    if os.environ.get("RIG_GH_ALIAS_DRY_RUN"):
+        verb = "would create" if r.state == "create" else "would update"
+        return ActionResult(action, "skipped", f"gh-ship-alias: {verb} `gh ship` (dry-run)")
+    rc = set_gh_ship_alias()
+    if rc != 0:
+        return ActionResult(action, "error", "gh-ship-alias: `gh alias set` failed (rc != 0)")
+    if r.state == "update":
+        return ActionResult(action, "updated", f"gh-ship-alias: `gh ship` updated (was: {r.current})")
+    return ActionResult(action, "created", "gh-ship-alias: `gh ship` set")
+
+
 # ── linter / formatter config files (the `linters` block) ──────────────────────────
 # rig provisions per-repo linter+formatter config files (CTO decision #4136.2). Each `linters.items`
 # entry names a tool + a repo-relative path + the exact file content; apply writes/reconciles it,
@@ -5951,6 +5990,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_schedule": _do_provision_schedule,
     "provision_agents_symlink": _do_provision_agents_symlink,
     "provision_ship_delegator": _do_provision_ship_delegator,
+    "provision_gh_ship_alias": _do_provision_gh_ship_alias,
     "provision_linter_config": _do_provision_linter_config,
     "provision_project_tool": _do_provision_project_tool,
     "provision_github_ruleset": _do_provision_github_ruleset,

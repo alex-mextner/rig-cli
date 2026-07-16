@@ -1369,8 +1369,19 @@ def _build_ship_delegator(config: LoadedConfig, catalog: Catalog, plan: InstallP
         sd = {}
     if not isinstance(sd, dict):
         return  # validate() already fail-closed on a non-mapping block
-    if sd.get("enabled") is False:
-        return
+    delegator_enabled = sd.get("enabled") is not False
+    # The `gh ship` gh alias is provisioned by ONE action, gated by EITHER path that wants it: the
+    # (default-on) ship_delegator area, OR a ci `ship` item with `gh_alias: true`. `_build_ci` runs
+    # BEFORE this, so its already-resolved ship action is in the plan — reading it here (rather than
+    # re-deriving the ci enable logic) keeps a single source of truth AND guarantees exactly one
+    # alias action (never a second, unconditional writer racing the reconciler). When ONLY the ci
+    # path asks (delegator disabled), the alias is still provisioned but no delegator file is.
+    ci_alias_requested = any(
+        a.kind == "install_ci" and a.options.get("slot") == "ship" and a.options.get("gh_alias")
+        for a in plan.actions
+    )
+    if not (delegator_enabled or ci_alias_requested):
+        return  # nothing to do — neither path wants the delegator or the alias
     canonical = catalog.source / "ci" / "ship" / "ship.sh"
     if not canonical.is_file():
         plan.notes.append(
@@ -1379,14 +1390,32 @@ def _build_ship_delegator(config: LoadedConfig, catalog: Catalog, plan: InstallP
             "that ships the ship gate)"
         )
         return
+    if delegator_enabled:
+        plan.actions.append(
+            Action(
+                kind="provision_ship_delegator",
+                category="ship_delegator",
+                item="delegator",
+                source=catalog.source,
+                target=config.repo_root,
+                options={"canonical_ship": str(canonical)},
+            )
+        )
+    # The machine-global `gh ship` alias is the ENTRY POINT the delegator serves: `gh ship <PR>`
+    # runs it, and it dispatches to `<repo>/.claude/scripts/pr-ship.sh` (or the canonical fallback).
+    # It was historically HAND-SET; provision it so a clean machine has a working `gh ship` and it
+    # can't silently go missing. A GLOBAL artifact (the expansion is a portable constant, so the
+    # action carries no options) — its target is gh's config file, matching the drift row's target.
+    from .gh_ship_alias import GH_SHIP_ALIAS_CATEGORY, gh_config_path
+
     plan.actions.append(
         Action(
-            kind="provision_ship_delegator",
-            category="ship_delegator",
-            item="delegator",
+            kind="provision_gh_ship_alias",
+            category=GH_SHIP_ALIAS_CATEGORY,
+            item="alias",
             source=catalog.source,
-            target=config.repo_root,
-            options={"canonical_ship": str(canonical)},
+            target=gh_config_path(),
+            options={},
         )
     )
 

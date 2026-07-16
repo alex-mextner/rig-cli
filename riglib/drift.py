@@ -167,6 +167,8 @@ def detect(
             _check_agents_symlink(action, report)
         elif action.kind == "provision_ship_delegator":
             _check_ship_delegator(action, report)
+        elif action.kind == "provision_gh_ship_alias":
+            _check_gh_ship_alias(action, report)
         elif action.kind == "provision_linter_config":
             _check_linter_config(action, report)
         elif action.kind == "provision_project_tool":
@@ -528,6 +530,42 @@ def _check_ship_delegator(action: Action, report: DriftReport) -> None:
                           "pr-ship.sh present but NOT git-ignored (apply adds it to .git/info/exclude "
                           "so it can't dirty the worktree)")
             )
+
+
+def _check_gh_ship_alias(action: Action, report: DriftReport) -> None:
+    """Flag drift on the machine-global ``gh ship`` alias (gh config, ``aliases.ship``).
+
+    Switches on the SAME :func:`resolve_gh_ship_alias` state apply uses, so status and apply read
+    one classification:
+
+    - ``ok``/``no_gh`` → no drift (either already correct, or gh is absent and neither side can
+      manage the alias — reporting a "missing" alias rig could never set would break status/apply
+      parity).
+    - ``create``       → ``missing``: gh has no ``ship`` alias (apply sets it).
+    - ``update``       → ``modified``: a ``ship`` alias exists but differs from the rig-managed
+      expansion (apply overwrites it unless ``on_conflict=skip``).
+
+    The alias is a machine-wide artifact (``gh_ship_alias`` is classified GLOBAL in
+    :mod:`riglib.layers`), so ``rig status`` renders it under the machine layer, not this repo's.
+    """
+    from .gh_ship_alias import GH_SHIP_ALIAS_CATEGORY, gh_config_path, resolve_gh_ship_alias
+
+    r = resolve_gh_ship_alias()
+    # ok → correct; no_gh → gh absent (unmanageable); unknown → gh config unreadable (rig refuses
+    # to clobber). All three are apply no-ops, so status reports no drift (status/apply parity).
+    if r.state in ("ok", "no_gh", "unknown"):
+        return
+    target = gh_config_path()
+    if r.state == "create":
+        report.items.append(
+            DriftItem("missing", GH_SHIP_ALIAS_CATEGORY, "alias", target,
+                      "`gh ship` alias not set (apply sets it so `gh ship <PR>` reaches the ship gate)")
+        )
+    elif r.state == "update":
+        report.items.append(
+            DriftItem("modified", GH_SHIP_ALIAS_CATEGORY, "alias", target,
+                      "`gh ship` alias differs from the rig-managed expansion (apply reconciles it)")
+        )
 
 
 def _check_linter_config(action: Action, report: DriftReport) -> None:

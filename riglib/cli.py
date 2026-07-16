@@ -1404,7 +1404,7 @@ def _declaring_config(category: str, loaded) -> str:
     # ship_delegator block — there is no ship_env key in any config. Point its provenance at
     # the declaring repo config, not the global file (which never mentions it) and never a
     # misleading "not declared in any layer" in a repo-only setup.
-    if category == "ship_env":
+    if category in ("ship_env", "gh_ship_alias"):
         return _declaring_config("ship_delegator", loaded)
     layer = layer_for_category(category)
     path = loaded.global_path if layer == GLOBAL else loaded.repo_path

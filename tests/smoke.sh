@@ -45,6 +45,14 @@ RIG="python3 $ROOT/bin/rig"
 # below relies on this too.)
 export RIG_TG_CTL_DRY_RUN=1
 
+# Provision the `gh ship` alias in DRY-RUN for the WHOLE smoke: gh_ship_alias is default-on, so the
+# apply leg would otherwise shell out to a REAL `gh alias set` and rewrite the developer's actual
+# `gh ship` alias (gh reads its config from $GH_CONFIG_DIR / $XDG_CONFIG_HOME, which smoke does NOT
+# isolate — only $HOME). RIG_GH_ALIAS_DRY_RUN skips the live `gh alias set` while still exercising
+# the plan/handler. Mirrors RIG_TG_CTL_DRY_RUN / RIG_TMUX_DRY_RUN — the hard "never touch real
+# machine state in a test" rule.
+export RIG_GH_ALIAS_DRY_RUN=1
+
 # Resolve an agent-tools checkout ONCE, up front, against the REAL HOME — the apply leg below
 # overwrites $HOME with an isolated tmp dir, so any later HOME-relative discovery would miss it.
 AGENT_TOOLS="${RIG_AGENT_TOOLS_SOURCE:-}"
