@@ -1150,6 +1150,13 @@ def _validate_permissions(p: dict[str, Any]) -> None:
     if kind is not None:
         if not isinstance(kind, str):
             raise ConfigError(f"permissions.kind must be a string, got {kind!r}", schema_path="permissions.kind")
+        if kind in _DEPRECATED_HARNESS_KINDS:
+            raise ConfigError(
+                f"permissions.kind '{kind}' is no longer supported (deprecated). "
+                f"{_DEPRECATED_HARNESS_KINDS[kind]}",
+                fix=f"remove permissions.kind or use one of: {', '.join(sorted(_VALID_PERMISSIONS_KINDS))}",
+                schema_path="permissions.kind",
+            )
         if kind in _NA_PERMISSIONS_KINDS:
             raise ConfigError(
                 f"permissions.kind '{kind}' has no additively-mergeable command allowlist "

@@ -309,7 +309,7 @@ def test_permissions_kind_override_targets_opencode(fake_agent_tools, tmp_path):
 def test_validate_permissions_kind_na_and_unknown_rejected():
     with pytest.raises(ConfigError):
         validate({"version": 1, "permissions": {"kind": "codex"}})   # N/A harness
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError, match="no longer supported"):
         validate({"version": 1, "permissions": {"kind": "gemini"}})  # deprecated/removed harness
     with pytest.raises(ConfigError):
         validate({"version": 1, "permissions": {"kind": "bogus"}})   # unknown
