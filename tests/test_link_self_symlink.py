@@ -15,6 +15,7 @@ from riglib.actions.runner import (
     _do_link_skill_harness,
     _do_register_opencode_hook_bridge,
 )
+from riglib.drift import DriftReport, _check_opencode_hook_bridge
 from riglib.plan import Action
 
 
@@ -77,6 +78,95 @@ def test_opencode_bridge_distinct_paths_still_links(tmp_path):
     assert res.status in {"created", "updated"}, res.detail
     assert plugin_link.is_symlink()
     assert plugin_link.resolve() == dest.resolve()
+
+
+# ── drift must mirror the apply skip (else status/apply loop forever) ─────────────
+def test_opencode_bridge_source_equals_target_is_not_drift(tmp_path):
+    # apply skips the self-target case (leaves the real plugin.js in place); drift MUST read
+    # it as in sync — otherwise `rig status` reports "real file (apply will replace it)"
+    # forever while apply keeps skipping, an apply/status loop (codex P2 on PR #155).
+    module = "opencode_hook_bridge"
+    dest = tmp_path / module / "plugin.js"
+    dest.parent.mkdir(parents=True)
+    dest.write_text("export const AgentToolsHookBridge = {};\n", encoding="utf-8")
+
+    report = DriftReport()
+    _check_opencode_hook_bridge(_opencode_action(tmp_path, module), tmp_path / "cfg", report)
+
+    assert report.in_sync, [i.detail for i in report.items]
+
+
+def test_opencode_bridge_wrapper_mode_self_target_runner_and_drift_agree(tmp_path):
+    # wrapper mode (hooks_dir set): the runner still skips self-target BEFORE writing wrapper
+    # text (guard is above the wrapper/symlink split), so it never overwrites the real plugin.
+    # drift must agree (in sync). This pins the mode the guard's reasoning is weakest on.
+    module = "opencode_hook_bridge"
+    dest = tmp_path / module / "plugin.js"
+    dest.parent.mkdir(parents=True)
+    original = "export const AgentToolsHookBridge = {};\n"
+    dest.write_text(original, encoding="utf-8")
+
+    action = Action(
+        kind="register_hook_bridge",
+        category="hook_bridge",
+        item="opencode",
+        source=tmp_path,
+        target=dest,
+        options={
+            "lib_dir": str(tmp_path),
+            "module": module,
+            "format": "opencode-plugin",
+            "hooks_dir": str(tmp_path / "hooks"),  # → uses_wrapper() is True
+        },
+    )
+    res = _do_register_opencode_hook_bridge(action, "backup")
+    assert res.status == "skipped", res.detail
+    assert "source == target" in res.detail
+    assert dest.is_file() and not dest.is_symlink()
+    assert _read(dest) == original  # wrapper text was NOT written over the real module
+
+    report = DriftReport()
+    _check_opencode_hook_bridge(action, tmp_path / "cfg", report)
+    assert report.in_sync, [i.detail for i in report.items]
+
+
+def test_opencode_bridge_self_target_but_plugin_absent_reports_drift(tmp_path):
+    # the guard is gated on dest.is_file() precisely so it does NOT mask a MISSING plugin: when
+    # source == target but nothing exists at that path, the runner errors ("bridge plugin
+    # missing"); drift must fall through and report out-of-sync (not linked), never in-sync.
+    module = "opencode_hook_bridge"
+    dest = tmp_path / module / "plugin.js"  # deliberately NOT created
+    report = DriftReport()
+    _check_opencode_hook_bridge(_opencode_action(tmp_path, module), tmp_path / "cfg", report)
+
+    assert not report.in_sync
+    assert any("not linked" in i.detail for i in report.items), [i.detail for i in report.items]
+
+
+def test_opencode_bridge_distinct_paths_still_reports_real_file_drift(tmp_path):
+    # guard must NOT suppress genuine drift: a real file at a plugin_path distinct from dest
+    # is still flagged (apply would replace it).
+    module = "opencode_hook_bridge"
+    dest = tmp_path / "lib" / module / "plugin.js"
+    dest.parent.mkdir(parents=True)
+    dest.write_text("export const AgentToolsHookBridge = {};\n", encoding="utf-8")
+    plugin_link = tmp_path / "opencode" / "plugin" / "zz-agent-tools-hook-bridge.js"
+    plugin_link.parent.mkdir(parents=True)
+    plugin_link.write_text("// a real user file, not our symlink\n", encoding="utf-8")
+
+    action = Action(
+        kind="register_hook_bridge",
+        category="hook_bridge",
+        item="opencode",
+        source=tmp_path / "lib",
+        target=plugin_link,
+        options={"lib_dir": str(tmp_path / "lib"), "module": module, "format": "opencode-plugin"},
+    )
+    report = DriftReport()
+    _check_opencode_hook_bridge(action, tmp_path / "cfg", report)
+
+    assert not report.in_sync
+    assert any("real file" in i.detail for i in report.items), [i.detail for i in report.items]
 
 
 # ── skill-harness link — same class, cover it too ─────────────────────────────────
