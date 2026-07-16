@@ -621,6 +621,21 @@ def _validate_stack(data: dict[str, Any]) -> None:
         ) from exc
 
 
+def resolve_init_stack(
+    repo_root: Path, *, explicit: str | None = None, global_stack: str | None = None
+) -> str | None:
+    """Resolve the stack preset a fresh ``rig init`` writes into the committed rig.yaml.
+
+    Cascade (mirrors the headless init resolver so the interactive wizard and the headless
+    path agree): an explicit ``--stack`` wins, else the global-config default, else a
+    best-guess from the repo files, else ``None`` (unset → :func:`stack_requirement_warning`).
+    Both the headless `_resolve_init_plan` and the interactive TUI go through here so the
+    two front-ends can never seed a different stack."""
+    from .detect import detect_stack_preset
+
+    return explicit or global_stack or detect_stack_preset(repo_root)
+
+
 def stack_requirement_warning(config: "LoadedConfig") -> str | None:
     """A soft-require warning when a repo config carries no ``stack``, else ``None``.
 

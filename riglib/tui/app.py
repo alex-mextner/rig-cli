@@ -19,10 +19,38 @@ from pathlib import Path
 
 from ..actions import run_plan
 from ..catalog import Catalog, CatalogError
-from ..config import LoadedConfig, validate
-from ..detect import detect_environment
+from ..config import LoadedConfig, load, resolve_init_stack, validate
+from ..detect import Environment, detect_environment
 from ..plan import build
 from ..state import SetupState
+
+
+def _global_stack(repo_root: Path) -> str | None:
+    """The GLOBAL-layer stack default only (never the repo layer).
+
+    Deliberately ``include_repo=False``: the wizard's cascade uses this as the *global
+    default*, and reading the repo layer here would (a) let an existing ``rig.yaml`` shadow
+    the global default and (b) fail-closed on a MALFORMED existing ``rig.yaml`` — which must
+    NOT stop the wizard from opening (opening it is how the user fixes that file)."""
+    return load(repo_root, include_global=True, include_repo=False).stack
+
+
+def _initial_wizard_state(env: Environment, explicit_stack: str | None = None) -> SetupState:
+    """The default ``SetupState`` the interactive wizard opens with.
+
+    Seeds the stack preset (via the SHARED :func:`resolve_init_stack` cascade the headless
+    ``rig init`` uses: explicit ``--stack`` → global default → repo-file detection) so
+    Export/Apply from the TUI writes a ``rig.yaml`` carrying the same ``stack`` — otherwise
+    the by-stack skills would go unselected on the canonical interactive path. Kept
+    module-level (textual-free) so it is unit-testable without instantiating the App.
+    ``agent_tools_source`` stays unpinned: the committed rig.yaml must be portable
+    (re-detected per machine)."""
+    stack = resolve_init_stack(
+        env.repo_root, explicit=explicit_stack, global_stack=_global_stack(env.repo_root)
+    )
+    return SetupState.default(
+        agent_tools_source=None, project_type=env.project_type, stack=stack
+    )
 
 _CATEGORY_BLURB = {
     "skills": "Advisory markdown rules copied into your agent skills dir (opt-out model).",
@@ -65,7 +93,7 @@ def _build_wizard_class():
             ("x", "export", "Export yaml"),
         ]
 
-        def __init__(self, repo_root: Path) -> None:
+        def __init__(self, repo_root: Path, stack: str | None = None) -> None:
             super().__init__()
             self.env = detect_environment(repo_root)
             # write/plan at the detected git root, so the wizard matches headless
@@ -78,18 +106,24 @@ def _build_wizard_class():
             except CatalogError as exc:
                 self._catalog_error = str(exc)
             # keep the committed rig.yaml portable: do NOT pin the auto-detected absolute
-            # source (mirrors the headless path; other machines re-detect it).
-            self.state = SetupState.default(
-                agent_tools_source=None,
-                project_type=self.env.project_type,
-            )
+            # source (mirrors the headless path; other machines re-detect it). Seed the
+            # stack preset through the shared cascade — honoring an explicit `--stack` so the
+            # interactive path never silently discards it — so the wizard selects the by-stack
+            # skills just like headless `rig init`.
+            self.state = _initial_wizard_state(self.env, explicit_stack=stack)
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=False)
             src = self._catalog.source if self._catalog else f"NOT FOUND ({self._catalog_error})"
+            # Two distinct concepts: `toolchain` is the build stack (bun-node/python-uv/go),
+            # `stack preset` is the l1/lang[/framework] value THIS wizard will write into
+            # rig.yaml and use to select by-stack skills. Show the preset so the user can
+            # verify/override the heuristic before Export/Apply, not the unrelated toolchain.
+            preset = self.state.data.get("stack") or "unset (add via --stack / config)"
             yield Static(
                 f"repo: {self.env.repo_root}\n"
-                f"stack: {self.env.stack}   type: {self.env.project_type}   "
+                f"stack preset: {preset}   toolchain: {self.env.stack}   "
+                f"type: {self.env.project_type}   "
                 f"gh: {'authed' if self.env.gh_authed else 'no'}   "
                 f"dispatcher: {'installed' if self.env.dispatcher_installed else 'no'}\n"
                 f"agent-tools source: {src}",
@@ -199,7 +233,7 @@ def _build_wizard_class():
     return RigWizard
 
 
-def run_wizard(repo_root: Path) -> int:
-    app = _build_wizard_class()(repo_root)
+def run_wizard(repo_root: Path, stack: str | None = None) -> int:
+    app = _build_wizard_class()(repo_root, stack=stack)
     app.run()
     return 0

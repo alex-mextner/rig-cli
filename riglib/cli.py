@@ -743,7 +743,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
         from .tui import run_wizard
 
         try:
-            return run_wizard(Path(args.cwd).resolve())
+            # thread --stack through so a TTY `rig init --stack …` is honored, not silently
+            # dropped at the interactive boundary (the headless path already respects it).
+            return run_wizard(Path(args.cwd).resolve(), stack=getattr(args, "stack", None))
         except ImportError:
             return _setup_preview_no_tui(args, reason="no-textual")
 
@@ -763,7 +765,14 @@ def _resolve_init_plan(args: argparse.Namespace, *, use_default: bool):
     plan-resolvers share one convention so a caller can't mix them up.
     """
     from .catalog import Catalog
-    from .config import ConfigError, LoadedConfig, load, read_yaml_file, validate
+    from .config import (
+        ConfigError,
+        LoadedConfig,
+        load,
+        read_yaml_file,
+        resolve_init_stack,
+        validate,
+    )
     from .detect import detect_environment
     from .plan import build
     from .state import SetupState
@@ -784,13 +793,10 @@ def _resolve_init_plan(args: argparse.Namespace, *, use_default: bool):
         Catalog.scan(global_source)  # verify an agent-tools checkout exists (fail early)
         # Stack preset: an explicit --stack wins, else the global default (cascade), else a
         # best-guess from the repo files. Written into the committed rig.yaml so the by-stack
-        # skills are selected; left unset (→ soft-require warning) when nothing is known.
-        from .detect import detect_stack_preset
-
-        stack = (
-            getattr(args, "stack", None)
-            or global_cfg.stack
-            or detect_stack_preset(repo_root)
+        # skills are selected; left unset (→ soft-require warning) when nothing is known. The
+        # interactive TUI seeds its state through the SAME helper, so both front-ends agree.
+        stack = resolve_init_stack(
+            repo_root, explicit=getattr(args, "stack", None), global_stack=global_cfg.stack
         )
         state = SetupState.default(
             agent_tools_source=None, project_type=env.project_type, stack=stack
