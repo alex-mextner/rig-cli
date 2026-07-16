@@ -92,6 +92,44 @@ def test_apply_is_idempotent(fake_agent_tools, tmp_path):
     assert all(r.status in ("skipped",) for r in second.results), second.summary()
 
 
+def test_multi_descriptor_hook_installs_all_stays_clean(fake_agent_tools, tmp_path):
+    """A hook dir with TWO descriptors: both write, re-apply skips both, drift is clean (#184).
+
+    End-to-end proof (not just planned actions): the fake ``dual-guard`` hook ships a pre-bash
+    AND a pre-write descriptor. Both must land on disk, a second ``run_plan`` must skip both,
+    and ``detect`` must report neither missing nor extra.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    hooks_dir = tmp_path / "hooks"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = LoadedConfig(
+        data={
+            "agent_tools_source": str(fake_agent_tools),
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True, "target": str(hooks_dir)},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+        },
+        repo_root=repo,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+
+    first = run_plan(plan)
+    assert not first.errors, [r.detail for r in first.errors]
+    assert (hooks_dir / "dual-guard.pre-bash.json").is_file()
+    assert (hooks_dir / "dual-guard.pre-write.json").is_file()
+
+    second = run_plan(plan)
+    dual = [r for r in second.results if r.action.item == "dual-guard"]
+    assert len(dual) == 2
+    assert all(r.status == "skipped" for r in dual), [r.detail for r in dual]
+
+    report = detect(plan, scan_hook_dirs=[hooks_dir])
+    hook_drift = [i for i in report.items if i.category == "agent_hooks" and "dual-guard" in i.item]
+    assert not hook_drift, [(i.direction, i.item) for i in hook_drift]
+
+
 def test_dispatcher_idempotent_status(fake_agent_tools, tmp_path, monkeypatch):
     """The dispatcher action rolls sub-outcomes up: a no-op second run reports 'skipped'."""
     repo = tmp_path / "repo"
