@@ -228,7 +228,7 @@ def test_apply_in_non_git_dir_writes_env_file_and_status_goes_clean(
         encoding="utf-8",
     )
 
-    rc = main(["apply", "-C", str(plain), "--config", str(cfg)])
+    rc = main(["apply", "commit", "-C", str(plain), "--config", str(cfg)])
     capsys.readouterr()
     assert rc == 0
 

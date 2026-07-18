@@ -201,7 +201,7 @@ def ensure_gh_auth(*, owner: str, repo: str) -> AuthOutcome:
         probe=_gh_auth_ok,
         notify_message=message,
         timeout_detail=(
-            f"gh is not authenticated — run `{cmd}` and re-run `rig apply` to provision "
+            f"gh is not authenticated — run `{cmd}` and re-run `rig apply commit` to provision "
             f"settings on {owner}/{repo}"
         ),
     )

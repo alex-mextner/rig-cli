@@ -287,7 +287,7 @@ def test_wizard_propagates_non_zero_apply_rc(tmp_path):
         out=lambda s: out_lines.append(s),
     )
     assert rc == 5  # the failing apply rc is returned verbatim
-    assert not any("run `rig apply` to converge" in ln for ln in out_lines)
+    assert not any("run `rig apply commit` to converge" in ln for ln in out_lines)
 
 
 def test_wizard_quit_without_changes_does_not_apply(tmp_path):
@@ -459,7 +459,7 @@ def test_wizard_pending_change_then_decline_apply(tmp_path):
     )
     assert rc == 0
     assert calls == []  # declined → no apply
-    assert any("run `rig apply` to converge" in ln for ln in out_lines)
+    assert any("run `rig apply commit` to converge" in ln for ln in out_lines)
     import yaml
 
     assert yaml.safe_load((repo / "rig.yaml").read_text())["harness"]["auto_mode"] is False

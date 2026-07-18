@@ -17,6 +17,18 @@ They are distinct, NOT synonyms. Interactivity (full TUI / semi / non-interactiv
 **orthogonal** to the command — both `init` and `apply` run in any of the three modes,
 decided by TTY + config + flags. `init` is the canonical onboarding command (the front door).
 
+**`rig apply` is PREVIEW-BY-DEFAULT — it splits into `info` and `commit`.** A bare `rig apply`
+is an ALIAS for **`rig apply info`**: it builds + prints the plan (grouped, notes collapsed),
+states it is a preview, and points at `rig apply commit` — it MUTATES NOTHING. **`rig apply
+commit`** is the subcommand that ACTUALLY executes the plan (per-phase progress on the slow
+live-activation runners, then a `✓ applied N actions (C changed, M unchanged) in Xs` completion
+line). `--dry-run` still forces a preview (even under `commit`). For automation back-compat, a
+bare `rig apply --yes` is read as commit intent and executes; the explicit CI form is `rig apply
+commit --yes`. Both `info` and `commit` share the SAME `plan.build` — only `commit` calls
+`actions.run_plan` (never fork the executor). The user must always be able to review the plan
+before anything mutates. NOTE for call sites: a bare `rig apply` in a script now applies NOTHING
+— scripts/tests/CI that mean to execute MUST say `rig apply commit`.
+
 **`rig setup` is the INTERACTIVE config wizard** (NOT an alias for `init`/`apply`). In a TTY it
 shows what is enabled across every reconciled area (the same areas as `rig status`), lets you
 change options in the local `rig.yaml` AND the global `~/.config/rig/config.yaml` — each option

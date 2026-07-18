@@ -1570,7 +1570,7 @@ def _check_spotlight(action: Action, report: DriftReport) -> None:
             DriftItem(
                 "missing", "spotlight", action.item, uncovered[0],
                 f"{len(uncovered)}/{len(targets)} dependency/build dirs lack "
-                f"{spotlight.SENTINEL_NAME} — run `rig apply` (or `rig spotlight-sweep`) to re-cover",
+                f"{spotlight.SENTINEL_NAME} — run `rig apply commit` (or `rig spotlight-sweep`) to re-cover",
             )
         )
 

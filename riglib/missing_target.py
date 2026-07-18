@@ -133,7 +133,7 @@ def scan_settings_hooks(settings_file: Path) -> list[errors.MissingTargetError]:
                     target=missing,
                     why=f"a hook command in {settings_file} runs `{missing}`, but that file "
                     f"is gone — the harness would fail with a generic PreToolUse error",
-                    regen="re-run `rig apply` to reinstall the managed hooks, or remove the "
+                    regen="re-run `rig apply commit` to reinstall the managed hooks, or remove the "
                     f"stale hook entry from {settings_file}",
                 )
             )
