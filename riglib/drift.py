@@ -1324,12 +1324,24 @@ def _check_opencode_hook_bridge(action: Action, config_file: Path, report: Drift
     plugin_path, dest = opencode_hook_bridge_plugin_target(action)
     from .actions.runner import (
         legacy_opencode_bridge_needs_cleanup,
+        _link_targets_itself,
         _opencode_bridge_exclude_context,
         _opencode_exclude_has_entry,
         _same_link_dest,
         opencode_hook_bridge_uses_wrapper,
         opencode_hook_bridge_wrapper_text,
     )
+
+    if _link_targets_itself(plugin_path, dest) and dest.is_file():
+        # source == target with the real plugin present: the runner skips UNCONDITIONALLY here
+        # (before the wrapper/symlink split, after its own dest.is_file() check) — it never
+        # self-symlinks nor overwrites the real module. Drift must read this as in sync, else
+        # status reports "real file (apply will replace it)" forever while apply keeps skipping,
+        # an apply/status loop. Gated on the SAME `dest.is_file()` the runner checks first (same
+        # path, same symlink-following semantics), so drift and apply agree on "real file
+        # present": when it is ABSENT (or a broken self-symlink loop) the runner errors ("bridge
+        # plugin missing"), so we fall through to the normal checks that surface it — never mask.
+        return
 
     if opencode_hook_bridge_uses_wrapper(action):
         if not plugin_path.is_file() or plugin_path.is_symlink():

@@ -191,6 +191,13 @@ def _do_link_skill_harness(action: Action, on_conflict: str) -> ActionResult:
         # the installed skill the link should point at isn't on disk — the copy_skill action
         # surfaces that failure; don't create a dangling link on top of it.
         return ActionResult(action, "error", f"skill-link/{action.item}: install target missing: {dest}")
+    if _link_targets_itself(link_path, dest):
+        # link would point the installed skill at itself — never clobber the real dir/file
+        # with a self-referential symlink (see _link_targets_itself).
+        return ActionResult(
+            action, "skipped",
+            f"skill-link/{action.item}: source == target ({dest}), skipping to avoid self-symlink",
+        )
     link_path.parent.mkdir(parents=True, exist_ok=True)
 
     if link_path.is_symlink():
@@ -217,6 +224,27 @@ def _do_link_skill_harness(action: Action, on_conflict: str) -> ActionResult:
 
     link_path.symlink_to(dest)
     return ActionResult(action, "created", f"skill-link/{action.item}: linked {link_path} → {dest}")
+
+
+def _link_targets_itself(link_path: Path, dest: Path) -> bool:
+    """True when a symlink ``link_path -> dest`` would point the file at its OWN location.
+
+    Normalizes both to an absolute path with the PARENT resolved (collapsing any symlinked
+    ancestor dirs) but the leaf name kept verbatim — we must NOT ``resolve()`` ``link_path``
+    itself: it may already BE the self-referential symlink we are guarding against (whose
+    ``resolve()`` raises ``OSError: Too many levels of symbolic links``). When both normalize
+    to the same path, creating the link would replace the real source file with a symlink to
+    itself — the 2026-07-15 opencode-bridge corruption. Callers must skip in that case.
+    """
+    try:
+        a = link_path.parent.resolve(strict=False) / link_path.name
+        b = dest.parent.resolve(strict=False) / dest.name
+    except OSError:
+        # cannot prove the link is NOT self-referential (e.g. an ancestor symlink loop or a
+        # permissions error on resolve) — fail SAFE: treat it as self and let the caller skip,
+        # never fall through to the clobber-and-symlink path on an unresolvable parent.
+        return True
+    return a == b
 
 
 def _same_link_dest(link_path: Path, current: Path, dest: Path) -> bool:
@@ -1642,6 +1670,13 @@ def _do_register_opencode_hook_bridge(action: Action, on_conflict: str) -> Actio
     plugin_path, dest = opencode_hook_bridge_plugin_target(action)
     if not dest.is_file():
         return ActionResult(action, "error", f"hook_bridge/{action.item}: bridge plugin missing: {dest}")
+    if _link_targets_itself(plugin_path, dest):
+        # plugin_path IS the source plugin.js — linking (or wrapper-writing) here would replace
+        # the real git-tracked module with a self-symlink (or overwrite it). Refuse; leave it.
+        return ActionResult(
+            action, "skipped",
+            f"hook_bridge/{action.item}: source == target ({dest}), skipping to avoid self-symlink",
+        )
     plugin_path.parent.mkdir(parents=True, exist_ok=True)
 
     def finalize(status: str, detail: str) -> ActionResult:
