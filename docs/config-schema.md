@@ -654,7 +654,7 @@ existing committed configs.
 permissions:
   enabled: true                # provision the permissions layer (false → leave the harness config alone)
   # kind: opencode             # target one harness allowlist explicitly (default: supported harness.kind + harness.kinds)
-  # tools: [tg, review, draw, 3d, rig, task, dev, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES the default set
+  # tools: [tg, review, draw, 3d, rig, task, dev, pm, research, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES the default set
   # extra: [kubectl]           # ADD to the (default or explicit) set
   # disable: [gitleaks]        # drop from rig's desired set (won't ADD it; never removes a live entry)
   # allow:                     # RAW rule entries asserted present in the allow list (on TOP of tools)
@@ -677,8 +677,11 @@ permissions:
 | `ask` | str[] | the baked ask baseline | rule entries asserted present in the ask list; **replaces** the baseline wholesale (`[]` disables it). claude-code only — see below |
 | `settings_path` | path (JSON) | per-harness default | override the settings file to merge into (default: `~/.claude/settings.json` for claude-code, `~/.config/opencode/opencode.json` for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory. With multiple harnesses and no explicit `permissions.kind`, one override can only name one file, so rig targets the first supported harness and notes the skipped kinds |
 
-**Default tool set.** Our ecosystem CLIs — `tg`, `review`, `draw`, `3d`, `rig`, `task`, `dev` —
-plus the external tools we lean on: `gh`, `git`, `rg`, `uv`, `bun`, `jq`, `gitleaks`. For
+**Default tool set.** Our ecosystem CLIs — `tg`, `review`, `draw`, `3d`, `rig`, `task`, `dev`,
+`pm`, `research` — plus the external tools we lean on: `gh`, `git`, `rg`, `uv`, `bun`, `jq`,
+`gitleaks`. `pm` (pm-cli) and `research` (research-cli) are read-only ecosystem coordinators — an
+observing/reconciling project manager and a multi-provider research/panel CLI — that never edit
+code, so they share the safe profile of `review`/`task`. For
 claude-code, the `dev` entry is written as `Bash(dev:*)`, which is the provisioned `dev:*`
 permission surface for project-local development workflows. The `dev` implementation lives in
 agent-tools; rig provisions the harness permission for it but does not implement its runtime
