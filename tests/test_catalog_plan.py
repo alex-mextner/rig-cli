@@ -23,6 +23,115 @@ def test_catalog_scan_finds_all_categories(fake_agent_tools):
     assert "fake-mcp" in cat.names("mcp")
 
 
+def test_catalog_discovers_every_json_in_a_multi_descriptor_hook_dir(fake_agent_tools):
+    """A hook dir shipping multiple ``*.json`` descriptors registers ALL of them (#184 gap).
+
+    ``dual-guard`` ships both ``dual-guard.pre-bash.json`` and ``dual-guard.pre-write.json``
+    (mirroring the real ``orchestrator-stays-thin``). The scanner used to take only the first
+    sorted descriptor, silently dropping the ``pre-write`` guard — enforcement never fired.
+    """
+    cat = Catalog.scan(str(fake_agent_tools))
+    item = cat.get("agent_hooks", "dual-guard")
+    assert item is not None
+    assert set(item.descriptors) == {"dual-guard.pre-bash.json", "dual-guard.pre-write.json"}
+
+
+def test_plan_installs_every_descriptor_of_a_multi_descriptor_hook(fake_agent_tools, tmp_path, monkeypatch):
+    """``rig apply`` must emit an install action for EVERY descriptor in a multi-json hook dir."""
+    import os
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "claude-code"},
+        },
+        tmp_path,
+    )
+
+    plan = build(cfg, cat, project_type="unknown")
+
+    dual = [
+        a
+        for a in plan.actions
+        if a.kind == "install_agent_hook" and a.item == "dual-guard"
+    ]
+    target = Path(os.path.expanduser("~/.claude/hooks"))
+    assert {a.options.get("descriptor") for a in dual} == {
+        "dual-guard.pre-bash.json",
+        "dual-guard.pre-write.json",
+    }
+    assert {a.target for a in dual} == {target}
+
+
+def test_plan_multi_descriptor_fans_out_across_targets_without_false_collision(
+    fake_agent_tools, tmp_path, monkeypatch
+):
+    """N descriptors × M harness targets → N×M actions; same basename in DIFFERENT target
+    dirs must NOT trip the collision guard (the collision key is scoped by full target path).
+    """
+    import os
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "harness": {"kind": "claude-code", "kinds": ["codex"]},
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+        },
+        tmp_path,
+    )
+
+    plan = build(cfg, cat, project_type="unknown")
+
+    dual = [a for a in plan.actions if a.kind == "install_agent_hook" and a.item == "dual-guard"]
+    claude = Path(os.path.expanduser("~/.claude/hooks"))
+    codex = Path(os.path.expanduser("~/.codex/hooks"))
+    assert {(a.target, a.options["descriptor"]) for a in dual} == {
+        (claude, "dual-guard.pre-bash.json"),
+        (claude, "dual-guard.pre-write.json"),
+        (codex, "dual-guard.pre-bash.json"),
+        (codex, "dual-guard.pre-write.json"),
+    }
+
+
+def test_plan_fails_closed_on_descriptor_basename_collision(fake_agent_tools, tmp_path):
+    """Two hooks shipping the same descriptor basename into one target dir must fail closed.
+
+    Descriptors from different hooks share one flat destination namespace. If two collide on
+    basename, one would silently clobber the other (a lost guard, drift never clean). The plan
+    must refuse rather than build a self-conflicting install.
+    """
+    from riglib.catalog import Catalog as _Cat
+    from riglib.catalog import Item
+    from riglib.plan import PlanError
+
+    src = Catalog.scan(str(fake_agent_tools)).source
+    colliding = [
+        Item("guard-a", "agent_hooks", "", "", src / "a", descriptors=("shared.pre-write.json",)),
+        Item("guard-b", "agent_hooks", "", "", src / "b", descriptors=("shared.pre-write.json",)),
+    ]
+    cat = _Cat(source=src, items=colliding)
+    cfg = _cfg(
+        {
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True, "target": str(tmp_path / "hooks")},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+        },
+        tmp_path,
+    )
+    with pytest.raises(PlanError, match="descriptor collision"):
+        build(cfg, cat, project_type="unknown")
+
+
 def test_fake_catalog_never_fabricates_a_removed_slot(fake_agent_tools):
     """Anti-masking guard: no item the fake catalog fabricates may be a ``_REMOVED_SLOTS`` entry.
 

@@ -264,6 +264,25 @@ def fake_agent_tools(tmp_path: Path) -> Path:
     )
     _write(root / "agent-hooks" / "background-subagent-gate" / "README.md", "# background-subagent-gate\n")
 
+    # a MULTI-descriptor agent hook: one hook dir shipping TWO *.json descriptors (mirrors
+    # the real `orchestrator-stays-thin`, which carries both a pre-bash AND a pre-write
+    # guard). Both descriptors must be discovered and installed — the pre-write one used to
+    # be silently dropped because the scanner took only the first sorted *.json (#184 gap).
+    for point, script in (("pre-bash", "dual_guard_bash"), ("pre-write", "dual_guard_write")):
+        _write(
+            root / "agent-hooks" / "dual-guard" / f"dual-guard.{point}.json",
+            json.dumps(
+                {
+                    "id": "dual-guard",
+                    "point": point,
+                    "cmd": f"/ABSOLUTE/PATH/TO/agent-hooks/dual-guard/{script}.py",
+                    "on_error": "closed",
+                }
+            ),
+        )
+        _write(root / "agent-hooks" / "dual-guard" / f"{script}.py", "#!/usr/bin/env python3\n")
+    _write(root / "agent-hooks" / "dual-guard" / "README.md", "# dual-guard\ntwo descriptors\n")
+
     # CI slots: workflow.yml + a variant + a slot-named file + the slots the default
     # scaffold (riglib/state.py) references, so `setup --yes` (default) is satisfiable.
     _write(root / "ci" / "codeql" / "workflow.yml", "name: codeql\n")

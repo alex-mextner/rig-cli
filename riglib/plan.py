@@ -107,7 +107,11 @@ class Action:
     options: dict[str, Any] = field(default_factory=dict)
 
     def describe(self) -> str:
-        return f"{self.category}/{self.item} → {self.target}"
+        # A hook item can emit several actions into one target dir (one per descriptor);
+        # append the descriptor name so plan/dry-run lines stay distinguishable.
+        descriptor = self.options.get("descriptor")
+        dest = self.target / descriptor if descriptor else self.target
+        return f"{self.category}/{self.item} → {dest}"
 
 
 @dataclass
@@ -582,6 +586,56 @@ def _validate_item_names(config: LoadedConfig, catalog: Catalog) -> None:
         _check("git_hooks", set(gh), gh_known, "git_hooks")
 
 
+def _plan_agent_hooks(plan: InstallPlan, config: LoadedConfig, catalog: Catalog) -> None:
+    """Emit one ``install_agent_hook`` action per descriptor of every enabled hook.
+
+    A hook dir may ship MORE THAN ONE ``*.json`` descriptor (e.g. a pre-bash AND a pre-write
+    guard). Emit one action per descriptor so all of them land — taking only the first
+    silently drops the rest (#184 gap). Fail-closed on a destination collision: descriptors
+    from different hooks share one flat target dir, so two hooks shipping the same basename
+    would clobber each other (one guard silently lost, drift never clean).
+    """
+    ah = config.category("agent_hooks")
+    if ah.get("enabled") is False:
+        return
+    ah.setdefault("all", True)
+    hook_targets = _resolve_agent_hooks_targets(config)
+    seen: dict[Path, str] = {}
+    for item in catalog.by_category("agent_hooks"):
+        if not _item_enabled(ah, item, type_enabled=False):
+            continue
+        spec = ah.get("items", {}).get(item.name, {})
+        # Drop empty names so a descriptor-less item can't produce a degenerate
+        # ``hooks_target / ""`` (which collapses to the bare dir). A catalog item always
+        # carries ≥1 descriptor; the meta fallback only guards hand-built Items.
+        descriptors = tuple(d for d in (item.descriptors or (item.meta.get("descriptor", ""),)) if d)
+        for hooks_target in hook_targets:
+            for descriptor in descriptors:
+                dest = hooks_target / descriptor
+                if dest in seen and seen[dest] != item.name:
+                    raise PlanError(
+                        f"agent-hook descriptor collision: '{item.name}' and "
+                        f"'{seen[dest]}' both install '{descriptor}' into {hooks_target} — "
+                        f"one guard would silently clobber the other. Rename the descriptor "
+                        f"in agent-tools so hook basenames are unique."
+                    )
+                seen[dest] = item.name
+                plan.actions.append(
+                    Action(
+                        kind="install_agent_hook",
+                        category="agent_hooks",
+                        item=item.name,
+                        source=item.path,
+                        target=hooks_target,
+                        options={
+                            "descriptor": descriptor,
+                            "on_error": spec.get("on_error") if isinstance(spec, dict) else None,
+                            "agent_tools_source": str(catalog.source),
+                        },
+                    )
+                )
+
+
 def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknown") -> InstallPlan:
     """Build the ordered :class:`InstallPlan` from config + catalog."""
     plan = InstallPlan(on_conflict=str(config.defaults.get("on_conflict", "backup")))
@@ -628,28 +682,7 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
             )
 
     # ── agent_hooks ──────────────────────────────────────────────────────────────
-    ah = config.category("agent_hooks")
-    if ah.get("enabled") is not False:
-        ah.setdefault("all", True)
-        hook_targets = _resolve_agent_hooks_targets(config)
-        for item in catalog.by_category("agent_hooks"):
-            if _item_enabled(ah, item, type_enabled=False):
-                spec = ah.get("items", {}).get(item.name, {})
-                for hooks_target in hook_targets:
-                    plan.actions.append(
-                        Action(
-                            kind="install_agent_hook",
-                            category="agent_hooks",
-                            item=item.name,
-                            source=item.path,
-                            target=hooks_target,
-                            options={
-                                "descriptor": item.meta.get("descriptor", ""),
-                                "on_error": spec.get("on_error") if isinstance(spec, dict) else None,
-                                "agent_tools_source": str(catalog.source),
-                            },
-                        )
-                    )
+    _plan_agent_hooks(plan, config, catalog)
 
     # ── git_hooks (dispatcher) ───────────────────────────────────────────────────
     gh = config.category("git_hooks")

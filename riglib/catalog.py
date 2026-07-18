@@ -52,6 +52,9 @@ class Item:
     path: Path  # the on-disk carrier (dir or file) the action copies/wires
     default_enabled: bool = True
     meta: dict[str, str] = field(default_factory=dict)
+    # For an agent-hook item: EVERY ``*.json`` descriptor the hook dir ships. A single dir may
+    # carry more than one (e.g. a pre-bash AND a pre-write guard); all of them must install.
+    descriptors: tuple[str, ...] = ()
 
 
 # Items the catalog marks situational — off by default unless explicitly enabled or the
@@ -238,8 +241,8 @@ class Catalog:
         if not ah.is_dir():
             return
         for d in sorted(p for p in ah.iterdir() if p.is_dir()):
-            descriptor = next(iter(sorted(d.glob("*.json"))), None)
-            if descriptor is None:
+            descriptors = tuple(p.name for p in sorted(d.glob("*.json")))
+            if not descriptors:
                 continue
             desc = _first_line(d / "README.md")
             self.items.append(
@@ -250,7 +253,10 @@ class Catalog:
                     description=desc,
                     path=d,
                     default_enabled=True,
-                    meta={"descriptor": descriptor.name},
+                    # ``descriptor`` (first) kept for back-compat display; ``descriptors``
+                    # carries EVERY *.json so the plan installs all of them, not just [0].
+                    meta={"descriptor": descriptors[0]},
+                    descriptors=descriptors,
                 )
             )
 
