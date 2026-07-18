@@ -267,6 +267,53 @@ def test_validate_accepts_scripts_strings_and_cmd_mappings():
     })
 
 
+def test_validate_rejects_mixed_type_script_keys_without_crashing():
+    # A YAML entry can mix a string typo key with a numeric/boolean key (PyYAML preserves the
+    # native type), e.g. `cmd: ...` alongside a bare `1: ...`. sorted() over a set of mixed str
+    # and int keys raises TypeError instead of the intended ConfigError — this must surface as
+    # a structured config error naming the malformed mapping, not an unhandled traceback out of
+    # `rig apply`/`status`, and not a misleading "unknown key: 1".
+    with pytest.raises(config.ConfigError, match=r"scripts\.bad keys must be strings \(got 1\)"):
+        config.validate({
+            "version": 1,
+            "scripts": {"bad": {"cmd": "echo hi", "command": "typo", 1: "oops"}},
+        })
+
+
+def test_validate_rejects_mixed_type_dev_e2e_job_keys_without_crashing():
+    with pytest.raises(config.ConfigError, match=r"dev\.e2e\.jobs\.bad keys must be strings \(got 1\)"):
+        config.validate({
+            "version": 1,
+            "dev": {"e2e": {"jobs": {"bad": {"script": "e2e", "commnd": "typo", 1: "oops"}}}},
+        })
+
+
+def test_validate_rejects_non_string_script_key_with_no_other_typo():
+    # Pins the ordering: the non-string-key check must run BEFORE the unknown-key check, not
+    # rely on a coincidental typo key to avoid reaching the crashing sorted() call.
+    with pytest.raises(config.ConfigError, match=r"scripts\.bad keys must be strings \(got 1\)"):
+        config.validate({"version": 1, "scripts": {"bad": {"cmd": "echo hi", 1: "oops"}}})
+
+
+def test_validate_rejects_bool_script_key_without_crashing():
+    # YAML's `yes:`/`true:` parses as a bool key — a different TypeError path than int.
+    with pytest.raises(config.ConfigError, match=r"scripts\.bad keys must be strings \(got True\)"):
+        config.validate({"version": 1, "scripts": {"bad": {"cmd": "echo hi", True: "oops"}}})
+
+
+def test_validate_rejects_non_string_script_name():
+    with pytest.raises(config.ConfigError, match=r"scripts keys must be strings \(got 1\)"):
+        config.validate({"version": 1, "scripts": {1: "echo hi"}})
+
+
+def test_validate_rejects_non_string_dev_e2e_job_name():
+    with pytest.raises(config.ConfigError, match=r"dev\.e2e\.jobs keys must be strings \(got 1\)"):
+        config.validate({
+            "version": 1,
+            "dev": {"e2e": {"jobs": {1: {"script": "e2e"}}}},
+        })
+
+
 @pytest.mark.parametrize(
     "doc, schema_path, msg",
     [

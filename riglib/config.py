@@ -1221,6 +1221,8 @@ def _validate_scripts(scripts: Any) -> None:
     if not isinstance(scripts, dict):
         raise ConfigError("scripts must be a mapping", schema_path="scripts")
     for name, spec in scripts.items():
+        if not isinstance(name, str):
+            raise ConfigError(f"scripts keys must be strings (got {name!r})", schema_path="scripts")
         path = f"scripts.{name}"
         if isinstance(spec, str):
             continue
@@ -1229,6 +1231,9 @@ def _validate_scripts(scripts: Any) -> None:
                 f"{path} must be a string or a mapping with cmd",
                 schema_path=path,
             )
+        non_str = [k for k in spec if not isinstance(k, str)]
+        if non_str:
+            raise ConfigError(f"{path} keys must be strings (got {non_str[0]!r})", schema_path=path)
         unknown = sorted(set(spec) - _SCRIPT_KEYS)
         if unknown:
             bad = unknown[0]
@@ -1284,9 +1289,16 @@ def _validate_dev(dev: Any) -> None:
             if not isinstance(jobs, dict):
                 raise ConfigError("dev.e2e.jobs must be a mapping", schema_path="dev.e2e.jobs")
             for name, job in jobs.items():
+                if not isinstance(name, str):
+                    raise ConfigError(
+                        f"dev.e2e.jobs keys must be strings (got {name!r})", schema_path="dev.e2e.jobs"
+                    )
                 path = f"dev.e2e.jobs.{name}"
                 if not isinstance(job, dict):
                     raise ConfigError(f"{path} must be a mapping", schema_path=path)
+                non_str = [k for k in job if not isinstance(k, str)]
+                if non_str:
+                    raise ConfigError(f"{path} keys must be strings (got {non_str[0]!r})", schema_path=path)
                 unknown = sorted(set(job) - _DEV_E2E_JOB_KEYS)
                 if unknown:
                     bad = unknown[0]
