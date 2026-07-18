@@ -16,6 +16,10 @@
       "type": "string",
       "description": "the agent-tools checkout to apply FROM (default: auto-detect)"
     },
+    "stack": {
+      "type": "string",
+      "description": "the repo's stack preset `l1/lang[/framework]` (e.g. mobile/swift/swiftui, frontend/ts/react, backend/python). l1 in mobile|frontend|backend|desktop|embedded|system; lang required; framework optional. Selects by-stack skills. Global default is optional; a per-repo value is expected (soft-required)."
+    },
     "defaults": {
       "type": "object",
       "description": "cross-category fallback targets + the on-conflict policy.",
@@ -140,6 +144,27 @@
             "items": {
               "type": "object",
               "description": "per-skill overrides keyed by `by-type/<kind>/<name>`",
+              "additionalProperties": {
+                "type": "object"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "by_stack": {
+          "type": "object",
+          "description": "by-stack skills auto-selected by the repo's declared `stack` (hierarchical prefix match); tune with disable / per-item overrides.",
+          "properties": {
+            "disable": {
+              "type": "array",
+              "description": "by-stack skill item names (`by-stack/<l1>/<lang>[/<fw>]/<name>`) to drop even though the declared stack would select them",
+              "items": {
+                "type": "string"
+              }
+            },
+            "items": {
+              "type": "object",
+              "description": "per-skill overrides keyed by `by-stack/<l1>/<lang>[/<fw>]/<name>` (`enabled: true` force-adds an off-stack skill; `enabled: false` drops one)",
               "additionalProperties": {
                 "type": "object"
               }

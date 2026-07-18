@@ -443,6 +443,15 @@ def _skills_enabled(config: LoadedConfig, catalog: Catalog, project_type: str) -
     if not isinstance(bt_items_cfg, dict):
         bt_items_cfg = {}
 
+    bs_cfg = sk.get("by_stack", {})
+    if not isinstance(bs_cfg, dict):
+        bs_cfg = {}
+    bs_disable = set(bs_cfg.get("disable", []) or [])
+    bs_items_cfg = bs_cfg.get("items", {})
+    if not isinstance(bs_items_cfg, dict):
+        bs_items_cfg = {}
+    declared_stack = config.stack
+
     for item in catalog.by_category("skills"):
         if item.group == "universal":
             if _item_enabled(uni_cfg, item, type_enabled=True):
@@ -459,7 +468,40 @@ def _skills_enabled(config: LoadedConfig, catalog: Catalog, project_type: str) -
                     continue
             if type_on:
                 out.append(item)
+        elif item.group.startswith("by-stack/"):
+            if _by_stack_item_enabled(item, declared_stack, bs_disable, bs_items_cfg):
+                out.append(item)
     return out
+
+
+def _by_stack_item_enabled(
+    item: Item,
+    declared_stack: str | None,
+    disable: set[str],
+    items_cfg: dict[str, Any],
+) -> bool:
+    """Whether a by-stack skill is provisioned for the repo's declared stack.
+
+    Auto-selected when the item's stack path is a PREFIX of the declared stack (hierarchical
+    inheritance — see :mod:`riglib.stack`), unless dropped via ``skills.by_stack.disable`` or a
+    ``skills.by_stack.items.<name>.enabled: false`` override. An explicit
+    ``items.<name>.enabled: true`` FORCES the skill in even without a matching stack (the
+    escape hatch for pulling one stack skill into an off-stack repo).
+
+    NOTE: this is a deliberately-separate resolver from :func:`_item_enabled` (universal/by_type):
+    by_stack has no ``enable``/``all`` axis — selection is driven by the declared ``stack`` prefix
+    match, not a bundle-enable list — so the two do not share a code path. The only overlap is the
+    per-item ``enabled`` override + the ``disable`` list, kept explicit here for readability."""
+    from .stack import stack_matches
+
+    spec = items_cfg.get(item.name)
+    if isinstance(spec, dict) and "enabled" in spec:
+        return bool(spec["enabled"])
+    if item.name in disable:
+        return False
+    if not declared_stack:
+        return False
+    return stack_matches(declared_stack, item.meta.get("stack", ""))
 
 
 def _validate_item_names(config: LoadedConfig, catalog: Catalog) -> None:
@@ -510,6 +552,15 @@ def _validate_item_names(config: LoadedConfig, catalog: Catalog) -> None:
         if isinstance(bt_items, dict):
             _check("skills", set(bt_items), bt_known, "skills.by_type.items")
         _check("skills", set(bt.get("enable", []) or []), bt_kinds, "skills.by_type.enable")
+    # skills — by_stack group (fully-qualified `by-stack/<l1>/<lang>[/<fw>]/<name>` item keys)
+    bs = sk.get("by_stack", {}) if isinstance(sk, dict) else {}
+    if isinstance(bs, dict):
+        bs_known = {i.name for i in catalog.by_category("skills") if i.group.startswith("by-stack/")}
+        bs_items = bs.get("items", {})
+        refs = set(bs.get("disable", []) or [])
+        if isinstance(bs_items, dict):
+            refs |= set(bs_items)
+        _check("skills", refs, bs_known, "skills.by_stack.items")
 
     # agent_hooks + mcp — flat items/enable/disable
     for cat_name in ("agent_hooks", "mcp"):

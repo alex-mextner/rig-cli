@@ -168,6 +168,13 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("-C", "--cwd", default=".", help="repo root to operate on (default: cwd)")
         parser.add_argument("--config", help="apply this config file headlessly (non-interactive)")
         parser.add_argument("--yes", action="store_true", help="non-interactive; assume yes")
+        # The repo's stack preset (l1/lang[/framework]); overrides auto-detection. Written into the
+        # scaffolded rig.yaml and used to select the by-stack skill set.
+        parser.add_argument(
+            "--stack",
+            help="the repo stack preset l1/lang[/framework] (e.g. mobile/swift/swiftui, "
+            "frontend/ts/react, backend/python); default: auto-detect from the repo",
+        )
         # NOTE: there is intentionally NO --no-write-config flag. rig.yaml is the committed
         # source of truth and is NOT optional (AGENTS.md). Use --dry-run for a no-write preview.
         parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
@@ -736,7 +743,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
         from .tui import run_wizard
 
         try:
-            return run_wizard(Path(args.cwd).resolve())
+            # thread --stack through so a TTY `rig init --stack …` is honored, not silently
+            # dropped at the interactive boundary (the headless path already respects it).
+            return run_wizard(Path(args.cwd).resolve(), stack=getattr(args, "stack", None))
         except ImportError:
             return _setup_preview_no_tui(args, reason="no-textual")
 
@@ -756,7 +765,14 @@ def _resolve_init_plan(args: argparse.Namespace, *, use_default: bool):
     plan-resolvers share one convention so a caller can't mix them up.
     """
     from .catalog import Catalog
-    from .config import ConfigError, LoadedConfig, load, read_yaml_file, validate
+    from .config import (
+        ConfigError,
+        LoadedConfig,
+        load,
+        read_yaml_file,
+        resolve_init_stack,
+        validate,
+    )
     from .detect import detect_environment
     from .plan import build
     from .state import SetupState
@@ -772,9 +788,19 @@ def _resolve_init_plan(args: argparse.Namespace, *, use_default: bool):
         # honor a global-config-pinned agent_tools_source for the scan (the documented cascade
         # has a valid global layer), but do NOT pin it into the committed rig.yaml — that would
         # break the env/default fallback on other machines.
-        global_source = load(repo_root, include_global=True).agent_tools_source
+        global_cfg = load(repo_root, include_global=True)
+        global_source = global_cfg.agent_tools_source
         Catalog.scan(global_source)  # verify an agent-tools checkout exists (fail early)
-        state = SetupState.default(agent_tools_source=None, project_type=env.project_type)
+        # Stack preset: an explicit --stack wins, else the global default (cascade), else a
+        # best-guess from the repo files. Written into the committed rig.yaml so the by-stack
+        # skills are selected; left unset (→ soft-require warning) when nothing is known. The
+        # interactive TUI seeds its state through the SAME helper, so both front-ends agree.
+        stack = resolve_init_stack(
+            repo_root, explicit=getattr(args, "stack", None), global_stack=global_cfg.stack
+        )
+        state = SetupState.default(
+            agent_tools_source=None, project_type=env.project_type, stack=stack
+        )
         # Build the plan from the GENERATED state, not from disk: with --dry-run there may be no
         # rig.yaml on disk yet, so loading from disk would preview an empty/stale plan instead of
         # what setup decided. Carry the global source into the in-memory config so the catalog
@@ -1123,7 +1149,7 @@ def _print_non_git_status(env, config: str | None = None) -> int:
 
     print(_bold("rig status"))
     print(f"  repo: {env.repo_root}")
-    print(f"  stack: {env.stack}  type: {env.project_type}")
+    print(f"  toolchain: {env.stack}  type: {env.project_type}")
     layers = "(none — built-in defaults)"
     try:
         explicit = _resolve_explicit_config(env, config)
@@ -1142,6 +1168,22 @@ def _print_non_git_status(env, config: str | None = None) -> int:
     print(f"  config layers: {layers}")
     _print_non_git_note()
     return 0
+
+
+def _print_stack_preset(loaded) -> None:
+    """Print the declared stack preset (or the soft-require warning + detected guess).
+
+    Distinct from the toolchain line above: this is the by-stack curation axis. A declared stack
+    is shown plainly; an absent one prints the migration-phase soft-require warning so the user
+    knows to set it (per-repo stack is mandatory by policy, warned-not-enforced for now)."""
+    from .config import stack_requirement_warning
+
+    if loaded.stack:
+        print(f"  stack-preset: {loaded.stack}")
+        return
+    warning = stack_requirement_warning(loaded)
+    if warning:
+        print(_warn(f"  {warning}"))
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1176,7 +1218,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print(_bold("rig status"))
     print(f"  repo: {env.repo_root}")
-    print(f"  stack: {env.stack}  type: {env.project_type}")
+    print(f"  toolchain: {env.stack}  type: {env.project_type}")
+    _print_stack_preset(loaded)
     cfg_src = ", ".join(loaded.layers) or "(none — built-in defaults)"
     print(f"  config layers: {cfg_src}")
 

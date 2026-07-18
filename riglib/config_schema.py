@@ -213,6 +213,21 @@ _SKILLS_BLOCK = Block(
             open_map="items",
             open_map_doc="per-skill overrides keyed by `by-type/<kind>/<name>`",
         ),
+        "by_stack": Block(
+            doc="by-stack skills auto-selected by the repo's declared `stack` (hierarchical "
+            "prefix match); tune with disable / per-item overrides.",
+            leaves={
+                "disable": Leaf(
+                    "array",
+                    "by-stack skill item names (`by-stack/<l1>/<lang>[/<fw>]/<name>`) to drop "
+                    "even though the declared stack would select them",
+                    items_type="string",
+                ),
+            },
+            open_map="items",
+            open_map_doc="per-skill overrides keyed by `by-stack/<l1>/<lang>[/<fw>]/<name>` "
+            "(`enabled: true` force-adds an off-stack skill; `enabled: false` drops one)",
+        ),
     },
 )
 
@@ -805,6 +820,20 @@ _TG_CTL_BLOCK = Block(
 _TOP_LEAVES: dict[str, Leaf] = {
     "version": Leaf("integer", "schema version (only 1 supported)", default=1, minimum=1),
     "agent_tools_source": Leaf("string", "the agent-tools checkout to apply FROM (default: auto-detect)"),
+    # The STACK PRESET (distinct from the build-toolchain detect.Environment.stack). Shape is
+    # `l1/lang[/framework]` — l1 is a closed six-enum (mobile/frontend/backend/desktop/embedded/
+    # system), lang required, framework optional; lang/framework are OPEN vocabulary. Selects the
+    # by-stack skills the repo inherits. Global = machine default (optional); per-repo = mandatory
+    # by policy (soft-required — a missing value warns, a malformed value fails). The enum is NOT
+    # pinned in JSON-schema because lang/framework are open; the six-enum spine is enforced by the
+    # Python validator (config.validate).
+    "stack": Leaf(
+        "string",
+        "the repo's stack preset `l1/lang[/framework]` (e.g. mobile/swift/swiftui, "
+        "frontend/ts/react, backend/python). l1 in mobile|frontend|backend|desktop|embedded|"
+        "system; lang required; framework optional. Selects by-stack skills. Global default is "
+        "optional; a per-repo value is expected (soft-required).",
+    ),
 }
 
 _SCRIPTS_BLOCK = Block(

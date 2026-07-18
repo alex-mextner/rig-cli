@@ -133,6 +133,20 @@ def test_default_state_is_portable(monkeypatch):
     assert disp["runner"].startswith("~/")
 
 
+def test_default_state_includes_stack_when_provided():
+    data = default_state(agent_tools_source=None, project_type="frontend", stack="frontend/ts/react")
+    assert data["stack"] == "frontend/ts/react"
+    # validation accepts the scaffolded config
+    from riglib import config
+
+    config.validate(data)
+
+
+def test_default_state_omits_stack_when_unset():
+    data = default_state(agent_tools_source=None, project_type="unknown")
+    assert "stack" not in data  # undetected → absent (soft-require warning), not invented
+
+
 def test_state_write_has_header(tmp_path):
     state = SetupState.default(project_type="backend")
     out = state.write(tmp_path / "rig.yaml")

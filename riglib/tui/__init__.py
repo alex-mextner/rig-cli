@@ -13,7 +13,7 @@ from __future__ import annotations
 __all__ = ["run_wizard"]
 
 
-def run_wizard(repo_root):  # noqa: ANN001, ANN201 — lazy re-export to keep import cheap
+def run_wizard(repo_root, stack=None):  # noqa: ANN001, ANN201 — lazy re-export to keep import cheap
     from .app import run_wizard as _run
 
-    return _run(repo_root)
+    return _run(repo_root, stack=stack)

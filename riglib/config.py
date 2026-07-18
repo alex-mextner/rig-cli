@@ -40,6 +40,7 @@ _VALID_TOP_KEYS = {
     "version",
     "defaults",
     "agent_tools_source",
+    "stack",
     "skills",
     "agent_hooks",
     "git_hooks",
@@ -387,6 +388,17 @@ class LoadedConfig:
         v = self.data.get("agent_tools_source")
         return str(v) if v else None
 
+    @property
+    def stack(self) -> str | None:
+        """The declared stack preset (``l1/lang[/framework]``), or ``None`` when unset.
+
+        This is the STACK PRESET (the by-stack curation axis), distinct from the build-toolchain
+        ``detect.Environment.stack``. Cascaded like every value: a repo ``stack`` overrides the
+        global default. Shape is validated in :func:`validate`; here we only surface the raw value.
+        """
+        v = self.data.get("stack")
+        return str(v).strip() if isinstance(v, str) and v.strip() else None
+
     def category(self, name: str) -> dict[str, Any]:
         cat = self.data.get(name)
         return cat if isinstance(cat, dict) else {}
@@ -556,6 +568,7 @@ def validate(data: dict[str, Any]) -> None:
         if project_block in data and not isinstance(data[project_block], dict):
             raise ConfigError(f"{project_block} must be a mapping", schema_path=project_block)
 
+    _validate_stack(data)
     _validate_ci(data.get("ci", {}))
     _validate_agent_hooks(data.get("agent_hooks", {}))
     _validate_mcp(data.get("mcp", {}))
@@ -575,6 +588,71 @@ def validate(data: dict[str, Any]) -> None:
     _validate_ship_delegator(data.get("ship_delegator", {}))
     _validate_linters(data.get("linters", {}))
     _validate_project_tools(data.get("project_tools", {}))
+
+
+def _validate_stack(data: dict[str, Any]) -> None:
+    """Validate the top-level ``stack`` preset value's SHAPE, if present.
+
+    A MISSING stack is NOT an error here — per-repo mandatoriness is a SOFT requirement surfaced
+    as a warning by init/apply/status (see :func:`stack_requirement_warning`), not a hard
+    validation failure (which would break every existing committed rig.yaml on the next apply).
+    Only a PRESENT, malformed value fails: wrong shape or an l1 outside the six-enum. lang and
+    framework are open vocabulary. The parse/enum logic lives in :mod:`riglib.stack` (one source).
+    """
+    if "stack" not in data:
+        return
+    value = data["stack"]
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"stack must be a string like 'l1/lang[/framework]', got {value!r}",
+            schema_path="stack",
+        )
+    from .stack import STACK_L1, StackError, parse_stack
+
+    try:
+        parse_stack(value)
+    except StackError as exc:
+        raise ConfigError(
+            str(exc),
+            why="stack is the repo's stack preset (l1/lang[/framework]); it selects by-stack skills",
+            fix=f"use l1/lang[/framework] with l1 in {list(STACK_L1)} "
+            "(e.g. mobile/swift/swiftui, frontend/ts/react, backend/python)",
+            schema_path="stack",
+        ) from exc
+
+
+def resolve_init_stack(
+    repo_root: Path, *, explicit: str | None = None, global_stack: str | None = None
+) -> str | None:
+    """Resolve the stack preset a fresh ``rig init`` writes into the committed rig.yaml.
+
+    Cascade (mirrors the headless init resolver so the interactive wizard and the headless
+    path agree): an explicit ``--stack`` wins, else the global-config default, else a
+    best-guess from the repo files, else ``None`` (unset → :func:`stack_requirement_warning`).
+    Both the headless `_resolve_init_plan` and the interactive TUI go through here so the
+    two front-ends can never seed a different stack."""
+    from .detect import detect_stack_preset
+
+    return explicit or global_stack or detect_stack_preset(repo_root)
+
+
+def stack_requirement_warning(config: "LoadedConfig") -> str | None:
+    """A soft-require warning when a repo config carries no ``stack``, else ``None``.
+
+    Per-repo ``stack`` is mandatory by POLICY but enforced softly during the migration phase: a
+    missing value warns (and points at the detected guess) rather than failing. Callers (init /
+    apply / status) print the returned line. A present stack → ``None`` (no warning)."""
+    if config.stack:
+        return None
+    from .detect import detect_stack_preset
+
+    guess = detect_stack_preset(config.repo_root)
+    hint = f"; rig detected '{guess}'" if guess else ""
+    return (
+        "stack: not set — declare it in rig.yaml as l1/lang[/framework] "
+        f"(e.g. mobile/swift/swiftui, frontend/ts/react, backend/python){hint}. "
+        "Run `rig init` to set it, or `rig config set stack <value>`."
+    )
 
 
 def _validate_ci(ci: dict[str, Any]) -> None:
@@ -762,13 +840,39 @@ def _validate_skills(sk: dict[str, Any]) -> None:
         )
     # Reject a typo'd FIXED key in the universal / by_type sub-blocks too (the schema closes them).
     # The catalog-keyed `by_type.items` map stays open; only OTHER unknown keys are rejected.
-    for sub in ("universal", "by_type"):
+    for sub in ("universal", "by_type", "by_stack"):
         block = sk.get(sub)
         if block is None:
             continue
         if not isinstance(block, dict):
             raise ConfigError(f"skills.{sub} must be a mapping, got {block!r}", schema_path=f"skills.{sub}")
         _reject_unknown_keys(block, f"skills.{sub}")
+    _validate_by_stack_items(sk.get("by_stack"))
+
+
+def _validate_by_stack_items(bs: Any) -> None:
+    """Fail-closed on a malformed ``skills.by_stack.items.<name>`` spec.
+
+    Mirrors the per-item shape checks in ``_validate_mcp`` / ``_validate_agent_hooks`` so by_stack
+    is not the one lax corner: each item value must be a mapping, and a present ``enabled`` must be
+    a real bool (not a truthy string that ``bool()`` would silently coerce). Without this a typo'd
+    ``items.foo: "yes"`` or ``enabled: "false"`` would be accepted then silently ignored/misread."""
+    if not isinstance(bs, dict):
+        return
+    items = bs.get("items")
+    if items is None:
+        return
+    if not isinstance(items, dict):
+        raise ConfigError("skills.by_stack.items must be a mapping", schema_path="skills.by_stack.items")
+    for name, spec in items.items():
+        path = f"skills.by_stack.items.{name}"
+        if not isinstance(spec, dict):
+            raise ConfigError(f"{path} must be a mapping, got {spec!r}", schema_path=path)
+        enabled = spec.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ConfigError(
+                f"{path}.enabled must be a bool, got {enabled!r}", schema_path=f"{path}.enabled"
+            )
 
 
 def _validate_harness(h: dict[str, Any]) -> None:

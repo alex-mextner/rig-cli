@@ -13,6 +13,7 @@ agent-tools on-disk layout this scanner understands::
 
     skills/universal/<name>/SKILL.md            → category "skills", group "universal"
     skills/by-type/<kind>/<name>/SKILL.md       → category "skills", group "by-type/<kind>"
+    skills/by-stack/<l1>/<lang>[/<fw>]/<n>/SKILL.md → "skills", group "by-stack/<l1>/<lang>[/<fw>]"
     agent-hooks/<name>/<name>.<point>.json      → category "agent_hooks"
     ci/<name>/{workflow.yml,*.sh}               → category "ci"
     git-hooks/{global-dispatcher,pre-commit,…}  → category "git_hooks"
@@ -192,6 +193,45 @@ class Catalog:
                             meta={"kind": kind, "skill": d.name},
                         )
                     )
+
+        self._scan_by_stack(sk)
+
+    def _scan_by_stack(self, sk: Path) -> None:
+        """Scan ``skills/by-stack/<l1>/<lang>[/<framework>]/<name>/SKILL.md`` into items.
+
+        The directory PATH is the stack path (``l1/lang`` or ``l1/lang/framework``), mirroring
+        the ``by-type`` convention. A SKILL.md must live at least three components below
+        ``by-stack`` — ``<l1>/<lang>/<name>`` (stack ``l1/lang``) or
+        ``<l1>/<lang>/<framework>/<name>`` (stack ``l1/lang/framework``). A SKILL.md only two
+        components down (``by-stack/<l1>/<name>``, i.e. l1-only, no lang) is IGNORED, enforcing the
+        taxonomy's "lang is required" rule at scan time. ``rel`` below is the path parts including
+        the skill-dir name, so a valid item has ``len(rel) >= 3`` and the stack path is
+        ``rel[:-1]``. Items are off by default; the plan pulls them in when the declared ``stack``
+        is a prefix-match of the item's stack.
+        """
+        by_stack = sk / "by-stack"
+        if not by_stack.is_dir():
+            return
+        for skill_md in sorted(by_stack.rglob("SKILL.md")):
+            skill_dir = skill_md.parent
+            rel = skill_dir.relative_to(by_stack).parts
+            # rel = (<l1>, <lang>[, <framework>], <name>); stack path is everything but the name.
+            if len(rel) < 3:
+                # depth < 3 → the SKILL.md is at l1/<name> (l1-only) or shallower: no lang → skip.
+                continue
+            stack_path = "/".join(rel[:-1])
+            name = rel[-1]
+            self.items.append(
+                Item(
+                    name=f"by-stack/{stack_path}/{name}",
+                    category="skills",
+                    group=f"by-stack/{stack_path}",
+                    description=_read_skill_description(skill_md),
+                    path=skill_dir,
+                    default_enabled=False,
+                    meta={"stack": stack_path, "skill": name},
+                )
+            )
 
     def _scan_agent_hooks(self) -> None:
         ah = self.source / "agent-hooks"

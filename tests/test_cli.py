@@ -459,6 +459,30 @@ def test_setup_dryrun_never_launches_wizard(tmp_path, capsys, fake_agent_tools, 
     assert "Plan:" in capsys.readouterr().out
 
 
+def test_init_stack_flag_reaches_the_wizard(tmp_path, fake_agent_tools, monkeypatch):
+    # a TTY `rig init --stack …` must thread the explicit preset through to the wizard, not
+    # silently drop it at the interactive boundary (regression: the wizard ignored --stack).
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: True)
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+    seen = {}
+
+    def _capture(root, stack=None):
+        seen["root"] = str(root)
+        seen["stack"] = stack
+        return 0
+
+    monkeypatch.setattr("riglib.tui.app.run_wizard", _capture, raising=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo), "--stack", "backend/python"])
+    assert rc == 0
+    assert seen["stack"] == "backend/python"
+
+
 def test_textual_fallback_previews_and_writes_nothing(tmp_path, capsys, fake_agent_tools, monkeypatch):
     """textual is a CORE dependency now (it ships WITH rig), so it is missing only on a genuinely
     broken environment. When it IS missing, `rig init` must NOT silently scaffold+apply — it shows
@@ -535,7 +559,7 @@ def test_init_tty_launches_tui_directly_no_install_step(tmp_path, capsys, fake_a
     monkeypatch.setattr("subprocess.run", _no_subprocess)
     launched = {"v": False}
 
-    def _wizard(_root):
+    def _wizard(_root, stack=None):
         launched["v"] = True
         return 0
 
@@ -738,7 +762,7 @@ def test_no_tui_preview_existing_config_matches_apply(tmp_path, capsys, fake_age
     monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
     monkeypatch.setattr(
         "riglib.tui.run_wizard",
-        lambda _root: (_ for _ in ()).throw(ImportError("No module named 'textual'")),
+        lambda _root, stack=None: (_ for _ in ()).throw(ImportError("No module named 'textual'")),
     )
     repo = tmp_path / "repo"
     repo.mkdir()
