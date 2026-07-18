@@ -1082,13 +1082,16 @@ def _build_execpolicy(config: LoadedConfig, plan: InstallPlan) -> None:
         if not execpolicy_supported(kind):
             continue
         spec = HARNESS_EXECPOLICY[kind]
+        # codex's rules root honors RIG_CODEX_HOME (same resolver as its hooks/skills/config
+        # targets); other kinds fall back to the generic ~-expansion of the declared path.
+        rules_path = _codex_user_path("rules/rig-managed.rules") if kind == "codex" else spec.rules_path
         plan.actions.append(
             Action(
                 kind="provision_execpolicy",
                 category="permissions",
                 item=kind,
                 source=config.repo_root,  # no carrier in agent-tools; anchor on the repo
-                target=_expand(spec.rules_path, config.repo_root),
+                target=_expand(rules_path, config.repo_root),
                 options={"kind": kind, "tools": tools},
             )
         )

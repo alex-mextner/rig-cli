@@ -87,6 +87,18 @@ def test_plan_emits_execpolicy_for_codex(fake_agent_tools, tmp_path, monkeypatch
     assert act.target == tmp_path / "home" / ".codex" / "rules" / "rig-managed.rules"
 
 
+def test_plan_execpolicy_target_honors_rig_codex_home(fake_agent_tools, tmp_path, monkeypatch):
+    # Codex skills/hooks/config all resolve through RIG_CODEX_HOME when set; the execpolicy
+    # .rules target must use the same resolver, not a hard-coded ~/.codex.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    codex_home = tmp_path / "custom-codex-home"
+    monkeypatch.setenv("RIG_CODEX_HOME", str(codex_home))
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = build(_codex_cfg(repo, fake_agent_tools), Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    act = _execpolicy_action(plan)
+    assert act.target == codex_home / "rules" / "rig-managed.rules"
+
+
 def test_plan_no_execpolicy_when_permissions_disabled(fake_agent_tools, tmp_path):
     repo = tmp_path / "repo"; repo.mkdir()
     plan = build(_codex_cfg(repo, fake_agent_tools, enabled=False),
