@@ -346,7 +346,7 @@ ci:
     ship:
       enabled: true
       install_to: ~/bin              # ship is a client command, not a workflow
-      gh_alias: true                 # gh alias set ship
+      gh_alias: true                 # set the `gh ship` alias to the portable dispatcher
 ```
 
 | Per-item key | Type | Default | Meaning |
@@ -354,7 +354,7 @@ ci:
 | `enabled` | bool | per-item | install this gate |
 | `tier` | `block`/`warn` | `block` | enforcement strength (recorded; the workflow itself encodes it) |
 | `variant` | str | — | e.g. codeql `selfgate` selects `workflow-selfgate.yml` |
-| `install_to` / `gh_alias` | path/bool | — | ship-specific (it is a client command) |
+| `install_to` / `gh_alias` | path/bool | — | ship-specific (it is a client command). `gh_alias: true` sets the `gh ship` alias to the **portable dispatcher** (same body the `ship_delegator` area writes — see below), NOT a `~/bin/ship` copy path, so the two provisioning paths never conflict. |
 
 `target: export-only` records the choices without writing files (an agent applies later or
 a non-GitHub CI uses each slot's `*.sh`).
@@ -837,12 +837,13 @@ sync.
 
 ## `ship_delegator`
 
-Provisions the per-repo **`gh ship` delegator** — `.claude/scripts/pr-ship.sh` — so the global
-`gh ship` alias (which runs `<repo>/.claude/scripts/pr-ship.sh`) works in **this** repo on a clean
-machine. Historically that delegator existed **only in agent-tools**, so `gh ship` failed in every
-other managed repo (papered over by a runtime alias fallback); this is the durable fix — rig
-provisions it everywhere. Default **ON** — on `rig init` AND `rig apply` rig writes/reconciles the
-delegator; idempotent (a re-apply that finds it correct is a no-op).
+Provisions the per-repo **`gh ship` delegator** — `.claude/scripts/pr-ship.sh` — **and the
+machine-global `gh ship` gh alias that runs it** — so `gh ship <PR>` works in **this** repo on a
+clean machine. Historically the delegator existed **only in agent-tools** (so `gh ship` failed in
+every other managed repo) **and the `gh ship` alias itself was hand-set** (so on a fresh machine or
+after a gh-config reset `gh ship` became "unknown command"); this is the durable fix — rig
+provisions **both** everywhere. Default **ON** — on `rig init` AND `rig apply` rig writes/reconciles
+the delegator and the alias; idempotent (a re-apply that finds them correct is a no-op).
 
 ```yaml
 ship_delegator:
@@ -862,6 +863,19 @@ writes idempotently from the agent-tools checkout it applied from. The rendered 
 is a **portable constant** — no machine-specific path is ever baked into it — so a repo may even
 commit the file verbatim (agent-tools does) and a re-apply stays a byte-for-byte no-op. A clean
 machine therefore gets a working `gh ship` in every repo with no alias hacks.
+
+**The `gh ship` alias itself is rig-provisioned too (machine-global).** Alongside the per-repo
+delegator, rig sets the `gh ship` **gh alias** (`gh alias set --clobber ship …`) to a **portable
+dispatcher**: it runs `<repo>/.claude/scripts/pr-ship.sh` in a managed repo, else falls back to the
+canonical `ci/ship/ship.sh` resolved via the same machine env file. The expansion is a **portable
+constant** — no machine path baked in — so a re-apply is a byte-exact no-op. One alias serves every
+repo, so it is a **global** artifact (shown in the **global** status section under `gh_ship_alias`)
+even though the action rides along with the repo-scoped `ship_delegator`. When `gh` is not
+installed, rig **self-skips** the alias (status and apply both no-op — no phantom "missing alias"
+it could never set). Honors `on_conflict`: a **differing** existing alias is overwritten (the old
+value noted) under the default `backup`/`overwrite`, or left as-is under `skip`. This supersedes the
+older ci-`ship` `gh_alias` copy-path form — that flag now writes the same portable dispatcher, not a
+`~/bin/ship` copy path, so the two never fight.
 
 **Repo-local shadowing is intentional (and a debugging footgun to know about).** Because the
 delegator runs a repo-local `ci/ship/ship.sh` first, any repo that happens to carry one — a stale,
@@ -888,12 +902,21 @@ from the rig-generated delegator, or the file is present but **not** git-ignored
 delegator would dirty the worktree). `rig apply` reconciles. Shown in the **repo** section.
 The **machine env file** is checked too, under its own `ship_env` category — shown in the
 **global** section, since the file is a machine-wide artifact (`rig apply --only ship_env`
-scopes to the owning `ship_delegator` action). A repo that carries its own `ci/ship/ship.sh`
+scopes to whichever action owns it: the `ship_delegator` action normally). A repo that carries its own `ci/ship/ship.sh`
 never reads the env file, so both `status` and `apply` leave it entirely alone for that repo —
 no check, no write, no backup (status/apply parity in both directions). The env-file check also
 survives a **non-git** cwd: `status` there drops repo-scoped areas, but `apply` still reconciles
 the machine env file, so the `ship_env` check keeps running (parity again — a missing/stale env
 file surfaces even from `rig status` in `~`).
+
+**ci-only combo (`ship_delegator: { enabled: false }` + `ci.items.ship.gh_alias: true`).** With the
+delegator area disabled but a CI `ship` item still requesting the alias, there is no delegator
+action to reconcile the machine env file — so the **`gh_ship_alias`** action owns it instead (it is
+where the alias's out-of-repo fallback reads `AGENT_TOOLS_ROOT`; without it `gh ship` outside a
+managed repo would exit 127). `rig apply` writes the env file, `rig status` checks it, and
+`rig apply --only ship_env` includes that alias action (but never the option-less alias of a normal
+delegator-enabled plan). Provenance points at the config layer that declares the combo — the repo
+`rig.yaml`, or the global config when it is declared purely there.
 
 ---
 

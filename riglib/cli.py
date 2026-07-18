@@ -1003,14 +1003,34 @@ def _setup_headless(args: argparse.Namespace, *, use_default: bool) -> int:
 def _scope_categories(only: str) -> set[str]:
     """Parse ``--only`` into the set of ACTION categories to keep.
 
-    ``ship_env`` is a drift/status-only category (the machine env file): the action that writes
-    it IS the ``ship_delegator`` action, so a status-guided ``apply --only ship_env`` must not
-    silently no-op — alias it to the owning action category.
+    ``ship_env`` is a drift/status-only category (the machine env file): it has no standalone
+    action — it is reconciled by whichever action OWNS it. That is the ``ship_delegator`` action
+    normally, and the ``gh_ship_alias`` action in the ci-only combo (delegator disabled,
+    ``ci.items.ship.gh_alias`` on). This returns only the always-safe ``ship_delegator`` alias; the
+    ci-only owner is pulled in by :func:`_action_in_only_scope`, which keys on the ACTION contract
+    (a ``gh_ship_alias`` action that carries ``canonical_ship``) — a bare category add would also
+    drag the option-less alias action that does NOT own ``ship_env`` and could clobber a user alias.
     """
     wanted = {s.strip() for s in only.split(",")}
     if "ship_env" in wanted:
         wanted.add("ship_delegator")
     return wanted
+
+
+def _action_in_only_scope(action, wanted: set[str]) -> bool:
+    """Whether ``action`` survives an ``--only`` filter for the ``wanted`` categories.
+
+    A plain category match keeps the action. The one contract-level exception: ``ship_env`` has no
+    standalone action, so scoping to it must ALSO keep the ci-only owner — a ``gh_ship_alias``
+    action that carries ``canonical_ship`` (only then does it reconcile the env file). The
+    option-less ``gh_ship_alias`` action (normal delegator-enabled plan) does NOT own ``ship_env``
+    and is correctly excluded, so ``apply --only ship_env`` can never touch an unrelated alias.
+    """
+    if action.category in wanted:
+        return True
+    if "ship_env" in wanted and action.kind == "provision_gh_ship_alias":
+        return bool(str(action.options.get("canonical_ship", "")).strip())
+    return False
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
@@ -1035,7 +1055,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
     if args.only:
         wanted = _scope_categories(args.only)
-        plan.actions = [a for a in plan.actions if a.category in wanted]
+        plan.actions = [a for a in plan.actions if _action_in_only_scope(a, wanted)]
 
     _print_plan(plan, full=getattr(args, "plan", False))
     if args.dry_run:
@@ -1400,12 +1420,15 @@ def _declaring_config(category: str, loaded) -> str:
     """
     from .layers import GLOBAL, layer_for_category
 
-    # `ship_env` is a GLOBAL artifact (the machine env file) DECLARED by the repo-scoped
-    # ship_delegator block — there is no ship_env key in any config. Point its provenance at
-    # the declaring repo config, not the global file (which never mentions it) and never a
-    # misleading "not declared in any layer" in a repo-only setup.
-    if category == "ship_env":
-        return _declaring_config("ship_delegator", loaded)
+    # `ship_env`/`gh_ship_alias` are GLOBAL machine artifacts with no key of their own — their
+    # provenance is the layer that declares the delegator/alias combo. `source_for_key` tracks the
+    # REAL declaring layer per key (repo OR global), so a ci-only combo declared purely in the global
+    # cascade (`ship_delegator.enabled: false` + `ci.items.ship.gh_alias`) is attributed to the
+    # global config even when an UNRELATED repo `rig.yaml` also exists — the case a bare repo-vs-
+    # global lookup mislabels. Falls back to the primary config when the (default-on) delegator
+    # declares no key, matching "would live in the repo rig.yaml".
+    if category in ("ship_env", "gh_ship_alias"):
+        return str(loaded.source_for_key("ship_delegator"))
     layer = layer_for_category(category)
     path = loaded.global_path if layer == GLOBAL else loaded.repo_path
     return str(path) if path is not None else "not declared in any layer"

@@ -76,14 +76,21 @@ AREAS: tuple[Area, ...] = (
     Area("models", "model-freshness cron", GLOBAL, ("models",)),
     Area("tg_ctl", "tg-ctl inbound daemon", GLOBAL, ("tg_ctl",)),
     Area("tools", "personal CLI ecosystem (tg/review/task/draw/…)", GLOBAL, ("tools",)),
-    # the machine-level agent-tools/env file (AGENT_TOOLS_ROOT): a GLOBAL artifact written by the
-    # repo-scoped ship_delegator action — hence configured_by, not a category claim on that action.
+    # the machine-level agent-tools/env file (AGENT_TOOLS_ROOT): a GLOBAL artifact with no
+    # standalone action — hence configured_by, not a category claim. It is written by whichever
+    # action OWNS it: the repo-scoped ship_delegator action normally, or the machine-global
+    # gh_ship_alias action in the ci-only combo (ship_delegator disabled but ci.items.ship.gh_alias
+    # on), where the alias's out-of-repo fallback is the sole consumer. BOTH mark the area configured
+    # so a clean ci-only setup does not render the managed env file as "not configured".
     # In a SELF-HOSTING repo (carries ci/ship/ship.sh) the env file is deliberately neither
     # checked nor written, so this area renders "in sync" there — which is the honest reading
     # ("nothing rig needs to do here"), not a blind spot: any ordinary repo's status/apply on the
     # same machine checks and reconciles the file.
     Area("ship_env", "agent-tools machine env (AGENT_TOOLS_ROOT)", GLOBAL, ("ship_env",),
-         configured_by=("ship_delegator",)),
+         configured_by=("ship_delegator", "gh_ship_alias")),
+    # the machine-global `gh ship` alias (gh config): one alias serves every repo, so it is GLOBAL
+    # even though its provisioning action is emitted alongside the repo-scoped ship_delegator.
+    Area("gh_ship_alias", "`gh ship` alias (gh config)", GLOBAL, ("gh_ship_alias",)),
     # ── REPO — this repository, from ./rig.yaml ──
     Area("ci", "CI gates", REPO, ("ci",), ship_slot=False),
     Area("ship", "ship / `gh ship` merge gate", REPO, ("ci",), ship_slot=True),

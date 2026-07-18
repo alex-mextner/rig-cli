@@ -123,6 +123,14 @@ def _isolate_scheduler(monkeypatch):
     # RIG_SPOTLIGHT_DRY_RUN=1 makes the plist write run (and stay assertable) while skipping the
     # live load AND the drift loaded-probe. Symmetric with RIG_TMUX_DRY_RUN in _isolate_tmux_activation.
     monkeypatch.setenv("RIG_SPOTLIGHT_DRY_RUN", "1")
+    # gh_ship_alias is default-on (emitted alongside ship_delegator), so a provision_gh_ship_alias
+    # action + its drift check exist in EVERY e2e plan. The drift check shells out to `gh alias list`
+    # against the isolated (empty) gh config and would flag a permanent phantom "missing alias".
+    # Neutralize it suite-wide (the dedicated test_gh_ship_alias.py restores the real one), and set
+    # RIG_GH_ALIAS_DRY_RUN so the runner never shells `gh alias set` at the real (or tmp) gh config.
+    # Symmetric with the tg_ctl / tmux guards.
+    monkeypatch.setattr(driftmod, "_check_gh_ship_alias", lambda action, report: None)
+    monkeypatch.setenv("RIG_GH_ALIAS_DRY_RUN", "1")
 
     for mod in (runner, driftmod):
         monkeypatch.setattr(mod, "_launchctl", lambda verb, arg: 0, raising=False)
