@@ -228,7 +228,7 @@ class SetupState:
             "# rig.yaml — declarative setup for this repo, applied by `rig apply commit`.\n"
             "# COMMITTED BY DEFAULT: this file is the reproducible source of truth.\n"
             "# Global defaults live at ~/.config/rig/config.yaml; this file overrides them.\n"
-            "# See: rig status (drift), rig apply (converge). Schema: docs/config-schema.md\n\n"
+            "# See: rig status (drift), rig apply commit (converge). Schema: docs/config-schema.md\n\n"
         )
         path.write_text(header + self.to_yaml(), encoding="utf-8")
         return path
