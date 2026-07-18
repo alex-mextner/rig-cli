@@ -413,7 +413,7 @@ _PERMISSIONS_BLOCK = Block(
             ("string", "null"),
             "which harness's permissions to provision; null/absent means fan out to supported "
             "harness.kind plus harness.kinds",
-            enum=("claude-code", "opencode", None),
+            enum=("claude-code", "opencode", "pi", None),
         ),
         "tools": Leaf("array", "command names to pre-allow (replaces the default set)", items_type="string"),
         "extra": Leaf("array", "command names to ADD on top of the set", items_type="string"),

@@ -286,11 +286,12 @@ AREAS: tuple[Area, ...] = (
             _opt("permissions.kind", KIND_ENUM, None,
                  "Which harness's permissions to provision. opencode is supported for the ALLOWLIST "
                  "AND deny/ask (its own permission.bash glob dialect) independently of harness.kind. "
+                 "pi is supported for its own deny/ask policy file (no additive allowlist). "
                  "Absent permissions.kind, rig provisions supported harness.kind plus harness.kinds "
                  "allowlists; codex has no config allowlist (its allow/coarse-deny go via the "
                  "execpolicy .rules block). The lists (tools/extra/disable, allow/deny/ask) are "
                  "edited directly in the config file.",
-                 choices=("claude-code", "opencode"),
+                 choices=("claude-code", "opencode", "pi"),
                  null_tokens=("", "null", "none", "~", "unset", "fan-out")),
         ),
     ),

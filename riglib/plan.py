@@ -1147,7 +1147,32 @@ def _build_pi_extension(
         return True
     install_dir = _expand(pi_user_path(f"extensions/{ext_name}"), config.repo_root)
     policy_file = _expand(pi_user_path("rig-permission-policy.json"), config.repo_root)
-    policy = pi_policy_document()
+    # `deny`/`ask` REPLACE the baked baseline wholesale, same "[] disables it" semantics as the
+    # claude-code allowlist path (_resolve_permission_rules). Only an explicit EMPTY override is
+    # honored here: the config dialect for deny/ask entries is claude-code's rule-string syntax
+    # (`Bash(x:*)`), which doesn't translate into pi's structured argvAll/flagsAny rule dicts —
+    # so a non-empty override can't be safely applied and is dropped with a visible plan note
+    # instead of silently reconciling a policy different from the declared config.
+    deny_override = [] if p.get("deny") == [] else None
+    ask_override = [] if p.get("ask") == [] else None
+    for role in ("deny", "ask"):
+        val = p.get(role)
+        if val is not None and val != []:
+            plan.notes.append(
+                f"permissions: raw {role} entries dropped for harness '{kind}' — pi's policy rules "
+                "are structured (not the claude-code rule-string dialect); edit the pi policy file "
+                "directly for custom rules"
+            )
+    # tools/extra/disable/allow are the config-allowlist keys — pi has no additively-mergeable
+    # allowlist (see harness_permission_extension), so they're inert for this kind. Note it,
+    # rather than a silent no-op, so a user setting them for pi gets visible feedback.
+    dropped_allowlist_keys = [k for k in ("tools", "extra", "disable", "allow") if p.get(k) is not None]
+    if dropped_allowlist_keys:
+        plan.notes.append(
+            f"permissions: {'/'.join(dropped_allowlist_keys)} ignored for harness '{kind}' — pi has "
+            "no additively-mergeable command allowlist (only deny/ask policy rules)"
+        )
+    policy = pi_policy_document(deny_override=deny_override, ask_override=ask_override)
     plan.actions.append(
         Action(
             kind="provision_pi_extension",

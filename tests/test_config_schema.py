@@ -95,7 +95,7 @@ def test_permissions_kind_schema_accepts_null_for_unpinned_fanout():
     kind = config_schema.json_schema()["properties"]["permissions"]["properties"]["kind"]
 
     assert kind["type"] == ["string", "null"]
-    assert kind["enum"] == ["claude-code", "opencode", None]
+    assert kind["enum"] == ["claude-code", "opencode", "pi", None]
     assert "fan out" in kind["description"]
 
 

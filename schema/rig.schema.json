@@ -611,6 +611,7 @@
           "enum": [
             "claude-code",
             "opencode",
+            "pi",
             null
           ]
         },

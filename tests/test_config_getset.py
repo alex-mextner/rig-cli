@@ -364,6 +364,27 @@ def test_cli_set_registered_list_error_is_clean(tmp_path, capsys, fake_agent_too
     assert captured.err == ""
 
 
+def test_cli_set_permissions_kind_accepts_pi(tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply):
+    # `rig config set permissions.kind pi` must work through the schema-driven surfaces
+    # (config set / rig setup / config-web) — not require hand-editing rig.yaml — now that pi is
+    # a provisioned permissions.kind target (the pi permission-guard extension).
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {enabled: false}\nci: {enabled: false}\n"
+        "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
+        "permissions: {enabled: true, kind: claude-code}\n",
+    )
+
+    rc = main(["config", "set", "permissions.kind", "pi", "-C", str(repo)])
+
+    assert rc == 0
+    written = config.load(repo)
+    assert written.data["permissions"]["kind"] == "pi"
+
+
 def test_cli_set_nullable_registered_option_writes_explicit_null(
     tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply
 ):

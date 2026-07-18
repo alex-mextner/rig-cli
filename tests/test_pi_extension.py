@@ -115,6 +115,103 @@ def test_plan_emits_pi_extension_action(tmp_path, fake_agent_tools, monkeypatch)
     assert not any("has no allowlist to provision" in n and "pi" in n for n in plan.notes)
 
 
+def test_plan_keeps_baseline_when_deny_ask_absent_for_pi(tmp_path, fake_agent_tools, monkeypatch):
+    # Pins the invariant the override logic rests on: an ABSENT deny/ask key (not an empty list)
+    # must still yield the full baked baseline, never an empty policy.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "piroot"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plan = build(_pi_cfg(repo, fake_agent_tools), Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    action = _pi_action(plan)
+    assert len(action.options["policy"]["rules"]) > 1  # the full baked baseline, not wiped
+
+
+def test_plan_notes_non_list_deny_for_pi(tmp_path, fake_agent_tools, monkeypatch):
+    # A scalar deny (a plausible YAML typo, e.g. `deny: "Bash(rm:*)"` instead of a list) must not
+    # be silently dropped with zero feedback — it matches neither `== []` nor a populated list.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "piroot"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _pi_cfg(repo, fake_agent_tools)
+    cfg.data["permissions"]["deny"] = "Bash(rm:*)"
+    plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    assert any("raw deny entries dropped" in n and "pi" in n for n in plan.notes)
+
+
+def test_plan_notes_allowlist_keys_ignored_for_pi(tmp_path, fake_agent_tools, monkeypatch):
+    # pi has no additively-mergeable command allowlist — tools/extra/disable/allow must be
+    # noted as ignored, not silently no-op'd.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "piroot"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _pi_cfg(repo, fake_agent_tools)
+    cfg.data["permissions"]["extra"] = ["kubectl"]
+    plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    assert any("ignored for harness 'pi'" in n and "extra" in n for n in plan.notes)
+
+
+def test_plan_honors_empty_deny_ask_override_for_pi(tmp_path, fake_agent_tools, monkeypatch):
+    # permissions.deny: [] / ask: [] REPLACE the baked baseline wholesale (disables it) — the
+    # same "[] disables it" semantics the claude-code allowlist path honors.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "piroot"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _pi_cfg(repo, fake_agent_tools)
+    cfg.data["permissions"]["deny"] = []
+    cfg.data["permissions"]["ask"] = []
+    plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    action = _pi_action(plan)
+    assert action.options["policy"]["rules"] == []
+
+
+def test_plan_wipes_only_the_overridden_role_for_pi(tmp_path, fake_agent_tools, monkeypatch):
+    # deny/ask overrides are independent — wiping deny must NOT also wipe ask, and vice versa.
+    from riglib.permissions import pi_policy_document
+
+    full_baseline_count = len(pi_policy_document()["rules"])
+    ask_only_count = len(pi_policy_document(deny_override=[])["rules"])
+    assert 0 < ask_only_count < full_baseline_count  # sanity: baseline has BOTH deny and ask rules
+
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "piroot"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _pi_cfg(repo, fake_agent_tools)
+    cfg.data["permissions"]["deny"] = []
+    plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    action = _pi_action(plan)
+    assert len(action.options["policy"]["rules"]) == ask_only_count  # ask rules preserved
+
+
+def test_plan_provisions_pi_extension_when_permissions_kind_pinned_off_harness_kind(
+    tmp_path, fake_agent_tools, monkeypatch
+):
+    # permissions.kind is independently settable from harness.kind — pinning permissions.kind
+    # to pi while harness.kind is claude-code must still provision the pi extension.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "piroot"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _pi_cfg(repo, fake_agent_tools)
+    cfg.data["harness"] = {"enabled": False, "kind": "claude-code"}
+    plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    action = _pi_action(plan)
+    assert action.options["kind"] == "pi"
+
+
+def test_plan_drops_non_empty_deny_ask_override_for_pi_with_note(tmp_path, fake_agent_tools, monkeypatch):
+    # A populated deny/ask override is in claude-code's rule-STRING dialect (Bash(x:*)), which
+    # doesn't translate into pi's structured argvAll/flagsAny rule dicts — it must be dropped
+    # with a visible note, never silently ignored while still reconciling the baked baseline.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "piroot"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cfg = _pi_cfg(repo, fake_agent_tools)
+    cfg.data["permissions"]["deny"] = ["Bash(sudo rm:*)"]
+    plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    action = _pi_action(plan)
+    assert action.options["policy"]["rules"]  # baseline still applied, not silently emptied
+    assert any("raw deny entries dropped" in n and "pi" in n for n in plan.notes)
+
+
 def test_plan_notes_when_extension_missing_from_catalog(tmp_path, fake_agent_tools, monkeypatch):
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "piroot"))
     import shutil
