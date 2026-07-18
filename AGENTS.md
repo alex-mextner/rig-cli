@@ -86,7 +86,7 @@ when a lifecycle verb actually needs it). The server binds `127.0.0.1` only and 
   `~/.claude/skills`, codex → `~/.codex/skills`; rig symlinks each skill in via a
   `link_skill_harness` action), native discovery (opencode auto-loads `~/.agents/skills`, so rig
   records a note and links nothing when skills install to the default target), and global
-  instruction files (codex/gemini/pi/commandcode → `AGENTS.md`/`GEMINI.md`). Codex is dual:
+  instruction files (codex/pi/commandcode → `AGENTS.md`). Codex is dual:
   `~/.codex/skills` carries skills and `~/.codex/AGENTS.md` carries global instructions. Add a
   new harness as one entry there — never scatter the path across plan/config/schema. The config
   schema ACCEPTS every kind in that registry; the runner/drift for skill links are

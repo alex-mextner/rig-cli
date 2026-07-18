@@ -87,7 +87,7 @@ def test_harness_kind_schema_describes_skill_discovery_modes():
 
     assert "skills-dir: claude-code/codex" in description
     assert "native-discovery: opencode" in description
-    assert "instruction-file: gemini/pi/commandcode" in description
+    assert "instruction-file: pi/commandcode" in description
     assert "codex is also instruction-file" in description
 
 

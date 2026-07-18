@@ -38,7 +38,7 @@ Harnesses split into three families by HOW they surface skills:
       unnecessary when skills install to the default target.
 
 - **instruction-file harnesses** — they have NO per-skill discovery directory; agent guidance
-  reaches them through a single global INSTRUCTION FILE (``AGENTS.md`` / ``GEMINI.md``), not
+  reaches them through a single global INSTRUCTION FILE (``AGENTS.md``), not
   through a symlinked skill folder. rig records these N/A for skill-LINKING (it never invents a
   fake skills dir), and the discovery file path is documented here so ``rig status`` can report
   "N/A — uses <file>" instead of an empty, silent gap. The repo-local ``agents_md`` area only
@@ -48,7 +48,6 @@ Harnesses split into three families by HOW they surface skills:
     - **codex** → ``~/.codex/AGENTS.md`` (or ``$RIG_CODEX_HOME/AGENTS.md`` when explicitly set;
       Codex CLI reads ``AGENTS.md``-style global instructions
       IN ADDITION to its ``~/.codex/skills`` dir above — dual membership).
-    - **gemini** → ``~/.gemini/GEMINI.md`` (Gemini CLI's global instruction file).
     - **commandcode** → ``~/.commandcode/AGENTS.md`` (its global instruction dir, AGENTS.md-style).
     - **pi** → ``~/.config/pi/AGENTS.md`` (AGENTS.md-style global instructions).
 
@@ -87,7 +86,7 @@ HARNESS_NATIVE_SKILLS: dict[str, str] = {
 
 # ── instruction-file harnesses: no per-skill discovery dir; guidance via a global file ───────
 # These harnesses do not enumerate a skills directory; their agent guidance comes from one global
-# instruction file (AGENTS.md / GEMINI.md), not from a per-skill symlink. Recorded here (with the
+# instruction file (AGENTS.md), not from a per-skill symlink. Recorded here (with the
 # file path) so ``rig`` reports "N/A — uses <file>" rather than silently linking nothing OR
 # guessing a directory that does not exist.
 #
@@ -97,7 +96,6 @@ HARNESS_NATIVE_SKILLS: dict[str, str] = {
 # file path for status notes. Skills-dir membership takes precedence for the link decision, so no
 # "uses AGENTS.md instead of skills" note is emitted for codex.
 HARNESS_INSTRUCTION_FILES: dict[str, str] = {
-    "gemini": "~/.gemini/GEMINI.md",
     "pi": "~/.config/pi/AGENTS.md",
     "commandcode": "~/.commandcode/AGENTS.md",
 }

@@ -94,7 +94,7 @@ mcp:
 #     allow: [WebFetch]     # RAW rule entries asserted in the allow list (adopt a hand-grown allowlist)
 #     deny: []              # REPLACES the baked deny baseline ([] disables; absent → baseline)
 #     ask: []               # REPLACES the baked ask baseline ([] disables; absent → baseline)
-# Keyed off permissions.kind, else harness.kind (codex/gemini have no additively-mergeable
+# Keyed off permissions.kind, else harness.kind (codex has no additively-mergeable
 # allowlist → recorded N/A; opencode's rule dialect is unverified → raw allow/deny/ask entries
 # are dropped with a plan note; its tool-derived allowlist still works).
 
