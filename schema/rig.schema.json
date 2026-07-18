@@ -181,111 +181,111 @@
       "additionalProperties": false
     },
     "skills": {
-    "type": "object",
-    "description": "advisory markdown rules copied into the agent skills dir (opt-out model).",
-    "properties": {
-      "enabled": {
-        "type": "boolean",
-        "description": "install skills at all",
-        "default": true
-      },
-      "target": {
-        "type": "string",
-        "description": "where SKILL.md dirs are copied",
-        "default": "~/.agents/skills"
-      },
-      "all": {
-        "type": "boolean",
-        "description": "enable all skills (opt-out)",
-        "default": true
-      },
-      "harness_link": {
-        "type": "boolean",
-        "description": "also symlink each installed skill into the harness discovery dir",
-        "default": true
-      },
-      "harness_skill_dir": {
-        "type": "string",
-        "description": "override the harness skill-discovery dir"
-      },
-      "universal": {
-        "type": "object",
-        "description": "the universal skill set (opt-out via disable / opt-in via enable).",
-        "properties": {
-          "all": {
-            "type": "boolean",
-            "description": "enable all universal skills",
-            "default": true
-          },
-          "disable": {
-            "type": "array",
-            "description": "universal skills to drop",
-            "items": {
-              "type": "string"
-            }
-          },
-          "enable": {
-            "type": "array",
-            "description": "universal skills to add (with all:false)",
-            "items": {
-              "type": "string"
-            }
-          }
+      "type": "object",
+      "description": "advisory markdown rules copied into the agent skills dir (opt-out model).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "install skills at all",
+          "default": true
         },
-        "additionalProperties": false
-      },
-      "by_type": {
-        "type": "object",
-        "description": "by-type skill bundles for the detected project type.",
-        "properties": {
-          "enable": {
-            "type": "array",
-            "description": "which by-type bundles to install whole",
-            "items": {
-              "type": "string"
-            }
-          },
-          "disable": {
-            "type": "array",
-            "description": "by-type bundles to drop",
-            "items": {
-              "type": "string"
-            }
-          },
-          "items": {
-            "type": "object",
-            "description": "per-skill overrides keyed by `by-type/<kind>/<name>`",
-            "additionalProperties": {
-              "type": "object"
-            }
-          }
+        "target": {
+          "type": "string",
+          "description": "where SKILL.md dirs are copied",
+          "default": "~/.agents/skills"
         },
-        "additionalProperties": false
-      },
-      "by_stack": {
-        "type": "object",
-        "description": "by-stack skills auto-selected by the repo's declared `stack` (hierarchical prefix match); tune with disable / per-item overrides.",
-        "properties": {
-          "disable": {
-            "type": "array",
-            "description": "by-stack skill item names (`by-stack/<l1>/<lang>[/<fw>]/<name>`) to drop even though the declared stack would select them",
-            "items": {
-              "type": "string"
+        "all": {
+          "type": "boolean",
+          "description": "enable all skills (opt-out)",
+          "default": true
+        },
+        "harness_link": {
+          "type": "boolean",
+          "description": "also symlink each installed skill into the harness discovery dir",
+          "default": true
+        },
+        "harness_skill_dir": {
+          "type": "string",
+          "description": "override the harness skill-discovery dir"
+        },
+        "universal": {
+          "type": "object",
+          "description": "the universal skill set (opt-out via disable / opt-in via enable).",
+          "properties": {
+            "all": {
+              "type": "boolean",
+              "description": "enable all universal skills",
+              "default": true
+            },
+            "disable": {
+              "type": "array",
+              "description": "universal skills to drop",
+              "items": {
+                "type": "string"
+              }
+            },
+            "enable": {
+              "type": "array",
+              "description": "universal skills to add (with all:false)",
+              "items": {
+                "type": "string"
+              }
             }
           },
-          "items": {
-            "type": "object",
-            "description": "per-skill overrides keyed by `by-stack/<l1>/<lang>[/<fw>]/<name>` (`enabled: true` force-adds an off-stack skill; `enabled: false` drops one)",
-            "additionalProperties": {
-              "type": "object"
-            }
-          }
+          "additionalProperties": false
         },
-        "additionalProperties": false
-      }
+        "by_type": {
+          "type": "object",
+          "description": "by-type skill bundles for the detected project type.",
+          "properties": {
+            "enable": {
+              "type": "array",
+              "description": "which by-type bundles to install whole",
+              "items": {
+                "type": "string"
+              }
+            },
+            "disable": {
+              "type": "array",
+              "description": "by-type bundles to drop",
+              "items": {
+                "type": "string"
+              }
+            },
+            "items": {
+              "type": "object",
+              "description": "per-skill overrides keyed by `by-type/<kind>/<name>`",
+              "additionalProperties": {
+                "type": "object"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "by_stack": {
+          "type": "object",
+          "description": "by-stack skills auto-selected by the repo's declared `stack` (hierarchical prefix match); tune with disable / per-item overrides.",
+          "properties": {
+            "disable": {
+              "type": "array",
+              "description": "by-stack skill item names (`by-stack/<l1>/<lang>[/<fw>]/<name>`) to drop even though the declared stack would select them",
+              "items": {
+                "type": "string"
+              }
+            },
+            "items": {
+              "type": "object",
+              "description": "per-skill overrides keyed by `by-stack/<l1>/<lang>[/<fw>]/<name>` (`enabled: true` force-adds an off-stack skill; `enabled: false` drops one)",
+              "additionalProperties": {
+                "type": "object"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
-    "additionalProperties": false
-  },
     "agent_hooks": {
       "type": "object",
       "description": "programmatic guards that block before a side effect (no-verify, secrets, raw merge).",

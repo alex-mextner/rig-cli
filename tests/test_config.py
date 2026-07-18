@@ -78,7 +78,7 @@ def test_validate_accepts_project_dev_script_blocks():
     })
 
 
-def test_load_preserves_project_dev_script_blocks(tmp_path, monkeypatch):
+def test_load_round_trips_valid_scripts_and_dev_blocks(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     repo = tmp_path / "repo"
     _w(
@@ -88,16 +88,54 @@ def test_load_preserves_project_dev_script_blocks(tmp_path, monkeypatch):
         "  test: uv run pytest\n"
         "  custom:\n"
         "    cmd: ./scripts/custom.sh\n"
-        "    unexpected: [still, preserved]\n"
+        "dev:\n"
+        "  server:\n"
+        "    script: test\n"
+        "    ports: [5173]\n",
+    )
+
+    loaded = config.load(repo)
+
+    assert loaded.data["scripts"]["custom"]["cmd"] == "./scripts/custom.sh"
+    assert loaded.data["dev"]["server"]["ports"] == [5173]
+
+
+def test_load_rejects_unknown_scripts_key(tmp_path, monkeypatch):
+    # scripts was a loose accept-and-preserve pass-through before the rich dev-server schema;
+    # it is now strict like every other block — an unknown key is REJECTED, not silently
+    # preserved.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        "version: 1\n"
+        "scripts:\n"
+        "  test: uv run pytest\n"
+        "  custom:\n"
+        "    cmd: ./scripts/custom.sh\n"
+        "    unexpected: [still, preserved]\n",
+    )
+
+    with pytest.raises(config.ConfigError, match=r"unknown scripts\.custom key: unexpected"):
+        config.load(repo)
+
+
+def test_load_rejects_unknown_dev_key(tmp_path, monkeypatch):
+    # dev was a loose accept-and-preserve pass-through before the rich dev-server schema; it
+    # is now strict like every other block — an unknown key is REJECTED, not silently
+    # preserved.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        "version: 1\n"
         "dev:\n"
         "  servver:\n"
         "    typo_owned_by_dev_helper: true\n",
     )
 
-    loaded = config.load(repo)
-
-    assert loaded.data["scripts"]["custom"]["unexpected"] == ["still", "preserved"]
-    assert loaded.data["dev"]["servver"]["typo_owned_by_dev_helper"] is True
+    with pytest.raises(config.ConfigError, match=r"unknown dev key: servver"):
+        config.load(repo)
 
 
 @pytest.mark.parametrize("key", ["scripts", "dev"])

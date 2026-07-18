@@ -422,16 +422,31 @@ def test_status_updated_not_created_for_existing_file(fake_agent_tools, tmp_path
 # ── disable + default-on, end to end through apply ───────────────────────────────────
 def test_disable_drops_tool_from_desired_set_end_to_end(fake_agent_tools, tmp_path):
     # `disable` removes a tool from rig's DESIRED set so it is never ADDED to the allowlist.
+    # Disable the ENTIRE default set (not a hand-picked subset) so this assertion can't silently
+    # drift when a future PR adds another default tool — intent is explicit (nothing survives),
+    # not positional.
     repo = tmp_path / "repo"; repo.mkdir()
     settings = repo / "settings.json"
-    plan = build(_cfg(repo, fake_agent_tools, settings, disable=["gitleaks", "draw", "3d", "rig",
-                 "task", "dev", "tg", "review", "jq", "rg"]),
+    plan = build(_cfg(repo, fake_agent_tools, settings, disable=list(DEFAULT_TOOLS)),
                  Catalog.scan(str(fake_agent_tools)), project_type="unknown")
     run_plan(plan)
     allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
     assert "Bash(gitleaks:*)" not in allow  # disabled → never added
     assert "Bash(dev:*)" not in allow
-    assert allow == ["Bash(dev:*)"]  # the one remaining default lifecycle surface survives
+    assert allow == []  # every default tool was disabled — nothing survives
+
+
+def test_disable_leaves_other_defaults_intact(fake_agent_tools, tmp_path):
+    # A focused counterpart to the exhaustive-disable test above: disabling one tool must not
+    # touch any other default tool's presence in the allowlist.
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    plan = build(_cfg(repo, fake_agent_tools, settings, disable=["gitleaks"]),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    run_plan(plan)
+    allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
+    assert "Bash(gitleaks:*)" not in allow
+    assert "Bash(pm:*)" in allow
 
 
 def test_disable_dev_drops_dev_from_desired_set(fake_agent_tools, tmp_path):
