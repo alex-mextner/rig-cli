@@ -38,10 +38,10 @@ _DESTRUCTIVE_RAW_COMMANDS = ("rm", "sudo", "dd", "kill", "killall", "pkill", "sh
 def test_default_tools_cover_ecosystem_and_external():
     for t in ("tg", "review", "draw", "3d", "rig", "task", "dev", "pm", "research"):  # our CLIs
         assert t in DEFAULT_TOOLS
-    for t in ("gh", "git", "rg", "uv", "bun", "jq", "gitleaks"):  # safe external dev tools
+    for t in ("rg", "jq", "gitleaks"):  # read-only helper tools
         assert t in DEFAULT_TOOLS
-    # NOTHING destructive is blanket-allowed
-    for t in _DESTRUCTIVE_RAW_COMMANDS:
+    # Development lifecycle and process/git/external-write access routes through `dev`, not raw tools.
+    for t in _DESTRUCTIVE_RAW_COMMANDS + ("lsof", "ps", "pgrep", "docker", "bun", "npm", "uv", "gh", "git"):
         assert t not in DEFAULT_TOOLS
 
 
@@ -58,7 +58,7 @@ def test_resolve_tools_replace_add_remove_and_dedup():
     assert resolve_tools(["git", "gh"], None, None) == ["git", "gh"]
     # extra ADDS, disable REMOVES, both against the DEFAULT set when tools is None
     out = resolve_tools(None, ["kubectl"], ["gitleaks"])
-    assert "kubectl" in out and "gitleaks" not in out and "git" in out
+    assert "kubectl" in out and "gitleaks" not in out and "dev" in out and "git" not in out
     # dedup, first-seen order preserved
     assert resolve_tools(["git", "git", "gh"], ["gh"], None) == ["git", "gh"]
 
@@ -194,6 +194,28 @@ def test_apply_is_additive_and_never_clobbers_existing(fake_agent_tools, tmp_pat
     assert data["model"] == "opus"
     assert data["permissions"]["defaultMode"] == "auto"
     assert data["permissions"]["deny"] == ["Bash(rm:*)"]
+
+
+def test_narrowed_default_allowlist_does_not_prune_existing_broad_entries(fake_agent_tools, tmp_path):
+    """Changing rig's default desired tools must not delete grants already present on a machine."""
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    legacy = ["Bash(git:*)", "Bash(gh:*)", "Bash(uv:*)", "Bash(bun:*)"]
+    settings.write_text(json.dumps({"permissions": {"allow": legacy}}), encoding="utf-8")
+
+    plan = build(
+        _cfg(repo, fake_agent_tools, settings, deny=[], ask=[]),
+        Catalog.scan(str(fake_agent_tools)),
+        project_type="unknown",
+    )
+    report = run_plan(plan)
+
+    assert not report.errors
+    allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
+    assert allow[:len(legacy)] == legacy
+    for entry in legacy:
+        assert allow.count(entry) == 1
+    assert "Bash(dev:*)" in allow
 
 
 def test_apply_backs_up_before_change_under_backup_policy(fake_agent_tools, tmp_path):
@@ -400,16 +422,31 @@ def test_status_updated_not_created_for_existing_file(fake_agent_tools, tmp_path
 # ── disable + default-on, end to end through apply ───────────────────────────────────
 def test_disable_drops_tool_from_desired_set_end_to_end(fake_agent_tools, tmp_path):
     # `disable` removes a tool from rig's DESIRED set so it is never ADDED to the allowlist.
+    # Disable the ENTIRE default set (not a hand-picked subset) so this assertion can't silently
+    # drift when a future PR adds another default tool — intent is explicit (nothing survives),
+    # not positional.
     repo = tmp_path / "repo"; repo.mkdir()
     settings = repo / "settings.json"
-    plan = build(_cfg(repo, fake_agent_tools, settings, disable=["gitleaks", "draw", "3d", "rig",
-                 "task", "dev", "tg", "review", "uv", "bun", "jq", "rg"]),
+    plan = build(_cfg(repo, fake_agent_tools, settings, disable=list(DEFAULT_TOOLS)),
                  Catalog.scan(str(fake_agent_tools)), project_type="unknown")
     run_plan(plan)
     allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
     assert "Bash(gitleaks:*)" not in allow  # disabled → never added
     assert "Bash(dev:*)" not in allow
-    assert "Bash(git:*)" in allow and "Bash(gh:*)" in allow  # the rest survive
+    assert allow == []  # every default tool was disabled — nothing survives
+
+
+def test_disable_leaves_other_defaults_intact(fake_agent_tools, tmp_path):
+    # A focused counterpart to the exhaustive-disable test above: disabling one tool must not
+    # touch any other default tool's presence in the allowlist.
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    plan = build(_cfg(repo, fake_agent_tools, settings, disable=["gitleaks"]),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    run_plan(plan)
+    allow = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
+    assert "Bash(gitleaks:*)" not in allow
+    assert "Bash(pm:*)" in allow
 
 
 def test_disable_dev_drops_dev_from_desired_set(fake_agent_tools, tmp_path):

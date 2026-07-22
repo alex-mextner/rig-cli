@@ -59,15 +59,134 @@
     },
     "scripts": {
       "type": "object",
-      "description": "project-local named commands consumed by dev helpers; rig accepts and preserves the map.",
+      "description": "repo-level commands consumed by the standalone `dev run <name>` CLI (alex-mextner/dev-cli).",
       "properties": {},
-      "additionalProperties": true
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "pattern": "\\S",
+                "description": "command line run by `dev run <name>`"
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
     },
     "dev": {
       "type": "object",
-      "description": "project-local dev/e2e lifecycle metadata consumed by dev helpers; rig accepts and preserves the map.",
-      "properties": {},
-      "additionalProperties": true
+      "description": "repo-level development server and e2e metadata consumed by the standalone `dev` CLI (alex-mextner/dev-cli, provisioned like any other ecosystem tool via the `tools:` block).",
+      "properties": {
+        "server": {
+          "type": "object",
+          "description": "development server metadata for `dev` lifecycle commands.",
+          "properties": {
+            "script": {
+              "type": "string",
+              "description": "name of the top-level scripts entry that starts the dev server"
+            },
+            "url": {
+              "type": "string",
+              "description": "base URL the development server serves"
+            },
+            "ready_url": {
+              "type": "string",
+              "description": "URL the dev CLI can poll before running e2e"
+            },
+            "port": {
+              "type": "integer",
+              "description": "a single known TCP port the dev CLI may check (fallback alias for `ports: [port]` — dev-cli reads `ports` first, then falls back to this)",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "ports": {
+              "type": "array",
+              "description": "known TCP ports the dev CLI may check",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            },
+            "process_matchers": {
+              "type": "array",
+              "description": "process command substrings the dev CLI may use to identify owned server processes",
+              "items": {
+                "type": "string"
+              }
+            },
+            "logs_root": {
+              "type": "string",
+              "description": "directory where the dev CLI writes server logs"
+            }
+          },
+          "additionalProperties": false
+        },
+        "e2e": {
+          "type": "object",
+          "description": "end-to-end test metadata for `dev` lifecycle commands.",
+          "properties": {
+            "script": {
+              "type": "string",
+              "description": "name of the top-level scripts entry that runs e2e tests"
+            },
+            "requires_server": {
+              "type": "boolean",
+              "description": "whether e2e expects the dev server to be running",
+              "default": true
+            },
+            "artifacts_root": {
+              "type": "string",
+              "description": "directory where e2e writes artifacts"
+            },
+            "logs_root": {
+              "type": "string",
+              "description": "directory where the dev CLI writes e2e logs"
+            },
+            "jobs": {
+              "type": "object",
+              "description": "named e2e jobs keyed by job name",
+              "additionalProperties": {
+                "type": "object",
+                "description": "one named e2e job consumed by the standalone `dev` CLI (alex-mextner/dev-cli).",
+                "properties": {
+                  "script": {
+                    "type": "string",
+                    "description": "name of the top-level scripts entry that runs this e2e job"
+                  },
+                  "requires_server": {
+                    "type": "boolean",
+                    "description": "whether this e2e job expects the dev server",
+                    "default": true
+                  },
+                  "artifacts_root": {
+                    "type": "string",
+                    "description": "directory where this e2e job writes artifacts"
+                  },
+                  "logs_root": {
+                    "type": "string",
+                    "description": "directory where this e2e job writes logs"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "skills": {
       "type": "object",

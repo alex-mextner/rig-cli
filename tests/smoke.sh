@@ -257,7 +257,7 @@ YAML
   pass "rig init --yes --apply installed skills + CI + dispatcher + harness skill links"
 
   # permissions (default-ON): the command allowlist lands in the harness settings.json with our
-  # ecosystem CLIs + safe dev tools pre-allowed (Bash(<tool>:*)), AND the deny/ask rule baselines
+  # ecosystem CLIs + read-only helpers pre-allowed (Bash(<tool>:*)), AND the deny/ask rule baselines
   # (rig-cli#100 — the outer belt) land alongside it. This is the security-sensitive default-on
   # path — assert it actually wrote, not just that status is green.
   CCSET="$HOME/.claude/settings.json"
@@ -270,7 +270,7 @@ sys.path.insert(0, sys.argv[2])
 from riglib.permissions import DEFAULT_TOOLS
 perms = json.load(open(sys.argv[1])).get("permissions", {})
 allow = set(perms.get("allow", []))
-# the full default set — our ecosystem CLIs + the safe external dev tools
+# the full default set — ecosystem CLIs + read-only helpers; dev owns lifecycle safety
 missing = {f"Bash({t}:*)" for t in DEFAULT_TOOLS} - allow
 # the deny/ask baselines (spot-check one loud rule each — the exact list is unit-tested)
 if "Bash(sudo rm:*)" not in set(perms.get("deny", [])):

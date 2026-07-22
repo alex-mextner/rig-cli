@@ -35,10 +35,10 @@ This document is the human-readable reference; the machine-readable schema is
 
 **Strict by default — an unknown key is rejected, not ignored.** Fixed rig-owned blocks are closed
 (`additionalProperties: false`): a typo'd key (`aut_mode`, `enabld`) fails loudly with the schema
-path, rather than silently having no effect. The deliberate pass-through maps are top-level
-`scripts:` / `dev:` (owned by dev helpers), catalog-keyed `items:` (under `skills.by_type`,
-`agent_hooks`, `ci`, `mcp`), and `fragments:` (under `git_hooks.dispatcher`). A bad catalog item
-*name* is caught later as a catalog/unknown-item error (exit `4`), not a schema typo.
+path, rather than silently having no effect. The open maps are top-level `scripts:`, the
+catalog-keyed `items:` (under `skills.by_type`, `agent_hooks`, `ci`, `mcp`), `fragments:` (under
+`git_hooks.dispatcher`), and the schema-shaped `dev.e2e.jobs:` map. A bad catalog item *name* is caught later as a
+catalog/unknown-item error (exit `4`), not a schema typo.
 
 ## CLI Exit Codes
 
@@ -71,8 +71,8 @@ defaults:                       # cross-category fallback targets/policy
 
 agent_tools_source: ~/xp/agent-tools   # the agent-tools checkout to apply FROM (default: auto-detect)
 
-scripts: { ... }             # project-local named commands consumed by dev helpers
-dev: { ... }                 # dev/e2e lifecycle metadata consumed by dev helpers
+scripts: { ... }              # repo-level named commands consumed by the standalone `dev` CLI
+dev: { ... }                  # repo-level dev server/e2e lifecycle metadata consumed by `dev`
 skills: { ... }
 agent_hooks: { ... }
 git_hooks: { ... }
@@ -95,8 +95,9 @@ the default candidates (`~/xp/agent-tools`, `~/work/agent-tools`, `~/agent-tools
 ## `scripts`
 
 Project-local named commands consumed by the `dev` CLI and portable hooks. `rig` validates that
-this top-level key is a mapping, then preserves it; command semantics are owned by the dev helper
-that executes the script.
+this top-level key is a mapping of string names to either a non-empty command string or a
+`{cmd: "<non-empty string>"}` mapping (no other keys); command semantics are owned by the dev
+helper that executes the script.
 
 ```yaml
 scripts:
@@ -625,8 +626,8 @@ tables such as `[profiles.default]`.
 ## `permissions`
 
 Reconciles the **per-harness permissions layer** (rig-cli#100): the command **ALLOWLIST** — our
-ecosystem CLIs and the safe-to-allow external dev tools **pre-allowed**, so the agent never
-stops to ask permission for a known-safe command — plus, for claude-code, the conservative
+ecosystem CLIs and a small read-only helper set **pre-allowed**, so the agent never stops to ask
+permission for a known-safe command — plus, for claude-code, the conservative
 **deny/ask rule baselines** (the outer enforcement belt: the harness evaluates
 deny → ask → allow *before* PreToolUse hooks and independently of the model; the argv-parsing
 agent-hook guards stay the deep layer underneath). **Default ON**: an absent/empty
@@ -639,13 +640,15 @@ every list (auto-mode, your accumulated allowlist, your own deny/ask rules) is p
 desired entries are merged in, deduped; a re-apply is a no-op.
 
 **Scope of the default set, honestly.** rig pre-allows the *tools* in the list at the
-command-prefix level — for claude-code that is `Bash(<tool>:*)`, which DOES cover every subcommand
-and flag of that tool (so `git` includes `git push --force`, `gh` includes `gh repo delete`). The
-default set is therefore "tools we trust the agent to drive", not "only read-only subcommands". The
-restraint is in WHICH tools are on the list: it is dev/VCS tooling we already lean on, and it does
-NOT add inherently-destructive standalone commands (`rm`, `sudo`, `dd`, `mkfs`, …) — those stay
-behind a prompt. If you want a narrower grant (e.g. only `git status`/`git log`), set `tools` to a
-custom list and add the specific `Bash(...)` entries by hand in the harness settings.
+command-prefix level — for claude-code that is `Bash(<tool>:*)`, which covers every subcommand and
+flag of that tool. That is why the default set is deliberately narrow: lifecycle operations go
+through the standalone `dev` CLI (alex-mextner/dev-cli), and rig grants `Bash(dev:*)` as the
+single safe development surface. rig does **not** grant raw process-control, package-manager,
+git-hosting, or broad
+external-write tools by default: no `kill`, `lsof`, `ps`, `pgrep`, `pkill`, `docker`, `bun`, `npm`,
+`uv`, `gh`, or `git`. The safety boundary for those workflows belongs inside `dev`, where the CLI
+can validate project ownership and intent. If you need a repo-specific raw grant, opt into it
+explicitly with `tools`, `extra`, or a raw `allow` entry.
 
 The allowlist file itself is per-machine. `permissions` may live in the global config for
 machine-wide defaults, and repo-local `permissions:` remains accepted for compatibility with
@@ -655,7 +658,7 @@ existing committed configs.
 permissions:
   enabled: true                # provision the permissions layer (false → leave the harness config alone)
   # kind: opencode             # target one harness allowlist explicitly (default: supported harness.kind + harness.kinds)
-  # tools: [tg, review, draw, 3d, rig, task, dev, pm, research, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES the default set
+  # tools: [tg, review, draw, 3d, rig, task, dev, pm, research, rg, jq, gitleaks]  # REPLACES the default set
   # extra: [kubectl]           # ADD to the (default or explicit) set
   # disable: [gitleaks]        # drop from rig's desired set (won't ADD it; never removes a live entry)
   # allow:                     # RAW rule entries asserted present in the allow list (on TOP of tools)
@@ -679,14 +682,20 @@ permissions:
 | `settings_path` | path (JSON) | per-harness default | override the settings file to merge into (default: `~/.claude/settings.json` for claude-code, `~/.config/opencode/opencode.json` for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory. With multiple harnesses and no explicit `permissions.kind`, one override can only name one file, so rig targets the first supported harness and notes the skipped kinds |
 
 **Default tool set.** Our ecosystem CLIs — `tg`, `review`, `draw`, `3d`, `rig`, `task`, `dev`,
-`pm`, `research` — plus the external tools we lean on: `gh`, `git`, `rg`, `uv`, `bun`, `jq`,
-`gitleaks`. `pm` (pm-cli) and `research` (research-cli) are read-only ecosystem coordinators — an
-observing/reconciling project manager and a multi-provider research/panel CLI — that never edit
-code, so they share the safe profile of `review`/`task`. For
-claude-code, the `dev` entry is written as `Bash(dev:*)`, which is the provisioned `dev:*`
-permission surface for project-local development workflows. The `dev` implementation lives in
-agent-tools; rig provisions the harness permission for it but does not implement its runtime
-process-safety checks.
+`pm`, `research` — plus read-only helper tools: `rg`, `jq`, `gitleaks`. `pm` (pm-cli) and
+`research` (research-cli) are read-only ecosystem coordinators — an observing/reconciling project
+manager and a multi-provider research/panel CLI — that never edit code, so they share the safe
+profile of `review`/`task`. For claude-code, the `dev` entry is written as `Bash(dev:*)`, which is
+the provisioned `dev:*` permission surface for project-local development workflows. The `dev`
+implementation lives in agent-tools; rig provisions the harness permission for it but does not
+implement its runtime process-safety checks. Rig does **not** add raw process-control,
+package-manager, container, git-hosting, or VCS commands such as `kill`, `lsof`, `ps`, `pgrep`,
+`pkill`, `docker`, `bun`, `npm`, `uv`, `gh`, or `git`; those safety checks belong inside `dev`.
+
+This default is additive, not retroactive cleanup: if an older rig already added broad entries such
+as `Bash(git:*)`, `Bash(gh:*)`, `Bash(uv:*)`, or `Bash(bun:*)` to a local harness settings file,
+`rig apply` will not remove them. Prune those live entries manually after confirming `dev` covers
+the workflow, or adopt intentional repo-specific exceptions under `permissions.allow` / `extra`.
 
 **Multi-harness migration note.** When `permissions.kind` is absent or explicitly `null`,
 permissions fan out to every configured harness kind with an additive allowlist implementation
@@ -759,6 +768,114 @@ user entry BEYOND the rig-managed baseline as `extra` drift — reported, **neve
 extras are summarized into one counted item, since a live allowlist accumulates hundreds of
 hand-approved entries; deny/ask extras are named per entry). To silence an allow `extra`, adopt the
 entry into `permissions.allow` in the config or prune it from the settings file by hand.
+
+---
+
+## `scripts`
+
+Defines repo-level command aliases consumed by the **agent-tools** `dev` CLI:
+`dev run <name>` reads this mapping and runs the selected command. rig's responsibility is
+limited to validating and documenting the `rig.yaml` shape, and to provisioning the harness
+permission surface for `dev:*` / `Bash(dev:*)`. The actual `dev` implementation and its process
+safety checks live in agent-tools. These aliases are intentionally independent of package-manager
+script systems, so Python tools, shell scripts, and repos without `package.json` can expose named
+commands the same way.
+
+```yaml
+scripts:
+  test: python -m pytest -q
+  lint:
+    cmd: ruff check .
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `scripts` | map | `{}` | repo-level commands keyed by the name passed to `dev run <name>` |
+| `scripts.<name>` | string \| map | — | either a command string, or a mapping with `cmd` |
+| `scripts.<name>.cmd` | string | — | command line run by `dev run <name>` |
+
+The schema is intentionally conservative: a script entry must be either a string or exactly a
+mapping with `cmd`; unknown keys inside the entry are rejected. This keeps rig's contract stable
+while leaving execution, process ownership, and destructive-command checks inside `dev`.
+Because the agent harness sees only `dev run <name>`, not the nested command string, `dev` is the
+trust boundary for these aliases and must reject commands that are not a safe, project-owned
+development workflow.
+
+---
+
+## `dev`
+
+Declares repo-level metadata consumed by the **agent-tools** `dev` CLI for development server and
+e2e lifecycle flows. Commands still live under top-level `scripts:`; `dev:` only names which
+script is the default server/e2e command and records metadata the dev CLI can use for readiness,
+owned-process checks, logs, and test artifacts. rig validates this shape, but it deliberately does
+not cross-reference script names against `scripts:`; a missing script is reported by `dev` at
+runtime. rig provisions `dev:*` / `Bash(dev:*)`; the actual lifecycle implementation and safe
+process handling live in agent-tools (see agent-tools#208).
+
+```yaml
+scripts:
+  server: npm run dev
+  e2e:
+    cmd: npx playwright test
+
+dev:
+  server:
+    script: server
+    url: http://localhost:3000
+    ready_url: http://localhost:3000/health
+    ports: [3000, 5173]
+    process_matchers: ["vite", "npm run dev"]
+    logs_root: .dev/logs/server
+  e2e:
+    script: e2e
+    requires_server: true
+    artifacts_root: test-results
+    logs_root: .dev/logs/e2e
+    jobs:
+      smoke:
+        script: e2e-smoke
+        requires_server: true
+        artifacts_root: test-results/smoke
+        logs_root: .dev/logs/e2e-smoke
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `dev.server` | map | `{}` | development server metadata |
+| `dev.server.script` | string | — | name of the top-level `scripts.<name>` entry that starts the dev server |
+| `dev.server.url` | string | — | base URL the development server serves |
+| `dev.server.ready_url` | string | — | URL the dev CLI can poll before running e2e |
+| `dev.server.port` | int | — | a single known TCP port — dev-cli's fallback alias for `ports: [port]`, used ONLY when `ports` is absent. Declaring both `port` and `ports` on the same server is rejected (one of the two would be silently ignored at runtime); declare exactly one. |
+| `dev.server.ports` | int[] | `[]` | known TCP ports the dev CLI may check for this project's server |
+| `dev.server.process_matchers` | str[] | `[]` | process command substrings the dev CLI may use to identify owned server processes |
+| `dev.server.logs_root` | path | — | directory where the dev CLI writes server logs |
+| `dev.e2e` | map | `{}` | end-to-end test metadata |
+| `dev.e2e.script` | string | — | name of the top-level `scripts.<name>` entry that runs e2e tests |
+| `dev.e2e.requires_server` | bool | `true` | whether e2e expects the dev server to be running |
+| `dev.e2e.artifacts_root` | path | — | directory where e2e writes artifacts such as traces, screenshots, or reports |
+| `dev.e2e.logs_root` | path | — | directory where the dev CLI writes e2e logs |
+| `dev.e2e.jobs` | map | `{}` | named e2e jobs keyed by job name |
+| `dev.e2e.jobs.<name>.script` | string | — | name of the top-level `scripts.<name>` entry for this job |
+| `dev.e2e.jobs.<name>.requires_server` | bool | `true` | whether this job expects the dev server to be running |
+| `dev.e2e.jobs.<name>.artifacts_root` | path | — | directory where this job writes artifacts |
+| `dev.e2e.jobs.<name>.logs_root` | path | — | directory where this job writes logs |
+
+No raw process-control command belongs here. Do not add `kill`, `lsof`, `ps`, `pgrep`, `pkill`,
+`docker`, `bun`, `npm`, `uv`, `gh`, `git`, or similar commands to `permissions.tools` to support
+this flow; configure scripts and route lifecycle work through `dev`, whose implementation owns the
+safety boundary.
+
+For explicit multi-project sessions, pass additional project roots through the environment rather
+than committed config:
+
+```bash
+DEV_PROJECT_PATHS=/abs/app:/abs/service dev e2e run smoke
+```
+
+`DEV_PROJECT_PATHS` is a colon-separated list of additional project paths for the agent-tools
+`dev` CLI to consider in the current session. It is intentionally not a `rig.yaml` key; committed
+config describes this repo, while cross-repo coordination is session-scoped.
 
 ---
 
@@ -1686,6 +1803,7 @@ tools:
     review: { repo: ~/xp/review-cli }
     task:   { repo: ~/xp/task-cli }
     draw:   { repo: ~/xp/draw-cli }
+    dev:    { repo: ~/xp/dev-cli }
     # a bare entry defaults repo to ~/xp/<name>-cli:
     # foo: {}
 ```
@@ -1788,8 +1906,8 @@ there is one emitter and the schema is never maintained in parallel (see "The JS
 
 **Which file a change is written to.** Each option is routed to its **owning layer**:
 
-- **REPO** options (`skills`, `agent_hooks`, `git_hooks`, `ci`, `mcp`, `harness`, `models`,
-  `github`, `agents_md`, `linters`, `project_tools`) are written to the repo's `./rig.yaml` — the
+- **REPO** options (`skills`, `agent_hooks`, `git_hooks`, `ci`, `mcp`, `harness`, `scripts`,
+  `dev`, `models`, `github`, `agents_md`, `linters`, `project_tools`) are written to the repo's `./rig.yaml` — the
   values the default scaffold commits.
 - **GLOBAL-only** options (`gitignore`, `tg_ctl`, `tmux`, `mode`) are machine-wide blocks the
   scaffold never writes into a committed repo file; the wizard writes them to
@@ -1857,15 +1975,17 @@ rig config set harness.auto_mode false --no-apply        # write only, print the
 `apply`/`status`/`init` validate before touching disk and **fail closed**. **Every block is
 strict**: an unknown FIXED key in *any* block — `defaults`, `skills`, `agent_hooks`, `git_hooks`
 (+ `dispatcher`), `ci`, `mcp`, `harness` (+ `hook_bridge`), `permissions`, `models` (+ `schedule`),
-`agents_md`, `github` (+ `ruleset` / `merge` / `ghas` / `actions` / `browser`), `tmux` (+ every
+`agents_md`, `scripts`, `dev` (+ `server` / `e2e`), `github` (+ `ruleset` / `merge` / `ghas` / `actions` / `browser`), `tmux` (+ every
 sub-block), `gitignore`, `tg_ctl`, `project_tools` (+ `haft` / `workflow` / `serena` / `sverklo`) — is
-rejected with the schema path of the offender, not silently ignored. The deliberate pass-through
-maps are top-level `scripts:` / `dev:` and the catalog-keyed `items:` / `fragments:` maps described
-above. Bad-value rejections
+rejected with the schema path of the offender, not silently ignored. (The open maps are
+top-level `scripts:`, the catalog-keyed `items:` / `fragments:` maps, plus `dev.e2e.jobs:` — see
+"Strict by default" above.) Bad-value rejections
 include: unsupported `version`, invalid `on_conflict` / ci `tier` / agent-hook `on_error`, an
 unknown or reserved `harness.kind`, a non-bool `harness.auto_mode`, a non-mapping
 `harness.hook_bridge` / non-bool `hook_bridge.enabled` / non-string `hook_bridge.python`, a
 non-bool `git_hooks.dispatcher` bool knob, a malformed/out-of-range `models.schedule.time`, a
+bad `scripts.<name>` entry (not a string or `{cmd: string}`), a
+bad `dev.server`/`dev.e2e` entry, a
 non-bool `agents_md.enabled`/`symlink`, a non-bool `github.ruleset` boolean knob, a
 `github.ruleset.required_reviews` that is not an int ≥ 0, a `github.ruleset.required_status_checks`
 that is not a list of strings, a bad `tmux.apply` enum, a `tmux.resurrect.processes` that is not a

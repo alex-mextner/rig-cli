@@ -78,7 +78,7 @@ def test_validate_accepts_project_dev_script_blocks():
     })
 
 
-def test_load_preserves_project_dev_script_blocks(tmp_path, monkeypatch):
+def test_load_round_trips_valid_scripts_and_dev_blocks(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     repo = tmp_path / "repo"
     _w(
@@ -88,16 +88,54 @@ def test_load_preserves_project_dev_script_blocks(tmp_path, monkeypatch):
         "  test: uv run pytest\n"
         "  custom:\n"
         "    cmd: ./scripts/custom.sh\n"
-        "    unexpected: [still, preserved]\n"
+        "dev:\n"
+        "  server:\n"
+        "    script: test\n"
+        "    ports: [5173]\n",
+    )
+
+    loaded = config.load(repo)
+
+    assert loaded.data["scripts"]["custom"]["cmd"] == "./scripts/custom.sh"
+    assert loaded.data["dev"]["server"]["ports"] == [5173]
+
+
+def test_load_rejects_unknown_scripts_key(tmp_path, monkeypatch):
+    # scripts was a loose accept-and-preserve pass-through before the rich dev-server schema;
+    # it is now strict like every other block — an unknown key is REJECTED, not silently
+    # preserved.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        "version: 1\n"
+        "scripts:\n"
+        "  test: uv run pytest\n"
+        "  custom:\n"
+        "    cmd: ./scripts/custom.sh\n"
+        "    unexpected: [still, preserved]\n",
+    )
+
+    with pytest.raises(config.ConfigError, match=r"unknown scripts\.custom key: unexpected"):
+        config.load(repo)
+
+
+def test_load_rejects_unknown_dev_key(tmp_path, monkeypatch):
+    # dev was a loose accept-and-preserve pass-through before the rich dev-server schema; it
+    # is now strict like every other block — an unknown key is REJECTED, not silently
+    # preserved.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    _w(
+        repo / "rig.yaml",
+        "version: 1\n"
         "dev:\n"
         "  servver:\n"
         "    typo_owned_by_dev_helper: true\n",
     )
 
-    loaded = config.load(repo)
-
-    assert loaded.data["scripts"]["custom"]["unexpected"] == ["still", "preserved"]
-    assert loaded.data["dev"]["servver"]["typo_owned_by_dev_helper"] is True
+    with pytest.raises(config.ConfigError, match=r"unknown dev key: servver"):
+        config.load(repo)
 
 
 @pytest.mark.parametrize("key", ["scripts", "dev"])
@@ -129,6 +167,10 @@ def test_validate_rejects_non_mapping_project_dev_blocks(key):
         ({"version": 1, "gitignore": {"entres": []}}, "gitignore.entres", "unknown gitignore key"),
         ({"version": 1, "tg_ctl": {"labl": "x"}}, "tg_ctl.labl", "unknown tg_ctl key"),
         ({"version": 1, "agents_md": {"symlnk": True}}, "agents_md.symlnk", "unknown agents_md key"),
+        ({"version": 1, "scripts": {"test": {"command": "pytest"}}}, "scripts.test.command", "unknown scripts.test key"),
+        ({"version": 1, "dev": {"serve": {"script": "server"}}}, "dev.serve", "unknown dev key"),
+        ({"version": 1, "dev": {"server": {"command": "vite"}}}, "dev.server.command", "unknown dev.server key"),
+        ({"version": 1, "dev": {"e2e": {"command": "playwright"}}}, "dev.e2e.command", "unknown dev.e2e key"),
     ],
 )
 def test_validate_rejects_unknown_block_key_with_schema_path(doc, schema_path, msg):
@@ -212,6 +254,178 @@ def test_open_map_block_fixed_knobs_are_type_checked(doc, schema_path):
     # agent_hooks/permissions is rejected at runtime, not only by an editor.
     with pytest.raises(config.ConfigError) as ei:
         config.validate(doc)
+    assert ei.value.schema_path == schema_path
+
+
+def test_validate_accepts_scripts_strings_and_cmd_mappings():
+    config.validate({
+        "version": 1,
+        "scripts": {
+            "test": "python -m pytest -q",
+            "lint": {"cmd": "ruff check ."},
+        },
+    })
+
+
+def test_validate_rejects_mixed_type_script_keys_without_crashing():
+    # A YAML entry can mix a string typo key with a numeric/boolean key (PyYAML preserves the
+    # native type), e.g. `cmd: ...` alongside a bare `1: ...`. sorted() over a set of mixed str
+    # and int keys raises TypeError instead of the intended ConfigError — this must surface as
+    # a structured config error naming the malformed mapping, not an unhandled traceback out of
+    # `rig apply`/`status`, and not a misleading "unknown key: 1".
+    with pytest.raises(config.ConfigError, match=r"scripts\.bad keys must be strings \(got 1\)"):
+        config.validate({
+            "version": 1,
+            "scripts": {"bad": {"cmd": "echo hi", "command": "typo", 1: "oops"}},
+        })
+
+
+def test_validate_rejects_mixed_type_dev_e2e_job_keys_without_crashing():
+    with pytest.raises(config.ConfigError, match=r"dev\.e2e\.jobs\.bad keys must be strings \(got 1\)"):
+        config.validate({
+            "version": 1,
+            "dev": {"e2e": {"jobs": {"bad": {"script": "e2e", "commnd": "typo", 1: "oops"}}}},
+        })
+
+
+def test_validate_rejects_non_string_script_key_with_no_other_typo():
+    # Pins the ordering: the non-string-key check must run BEFORE the unknown-key check, not
+    # rely on a coincidental typo key to avoid reaching the crashing sorted() call.
+    with pytest.raises(config.ConfigError, match=r"scripts\.bad keys must be strings \(got 1\)"):
+        config.validate({"version": 1, "scripts": {"bad": {"cmd": "echo hi", 1: "oops"}}})
+
+
+def test_validate_rejects_bool_script_key_without_crashing():
+    # YAML's `yes:`/`true:` parses as a bool key — a different TypeError path than int.
+    with pytest.raises(config.ConfigError, match=r"scripts\.bad keys must be strings \(got True\)"):
+        config.validate({"version": 1, "scripts": {"bad": {"cmd": "echo hi", True: "oops"}}})
+
+
+def test_validate_rejects_non_string_script_name():
+    with pytest.raises(config.ConfigError, match=r"scripts keys must be strings \(got 1\)"):
+        config.validate({"version": 1, "scripts": {1: "echo hi"}})
+
+
+def test_validate_rejects_non_string_dev_e2e_job_name():
+    with pytest.raises(config.ConfigError, match=r"dev\.e2e\.jobs keys must be strings \(got 1\)"):
+        config.validate({
+            "version": 1,
+            "dev": {"e2e": {"jobs": {1: {"script": "e2e"}}}},
+        })
+
+
+@pytest.mark.parametrize(
+    "doc, schema_path, msg",
+    [
+        ({"version": 1, "scripts": []}, "scripts", "scripts must be a mapping"),
+        ({"version": 1, "scripts": {"test": None}}, "scripts.test", "must be a string or a mapping"),
+        ({"version": 1, "scripts": {"test": []}}, "scripts.test", "must be a string or a mapping"),
+        ({"version": 1, "scripts": {"test": {}}}, "scripts.test.cmd", "requires a non-empty cmd string"),
+        ({"version": 1, "scripts": {"test": {"cmd": 123}}}, "scripts.test.cmd", "requires a non-empty cmd string"),
+        ({"version": 1, "scripts": {"test": {"cmd": ""}}}, "scripts.test.cmd", "requires a non-empty cmd string"),
+        ({"version": 1, "scripts": {"test": {"cmd": "   "}}}, "scripts.test.cmd", "requires a non-empty cmd string"),
+        ({"version": 1, "scripts": {"test": ""}}, "scripts.test", "must be a non-empty command string"),
+        ({"version": 1, "scripts": {"test": "   "}}, "scripts.test", "must be a non-empty command string"),
+    ],
+)
+def test_validate_rejects_bad_scripts(doc, schema_path, msg):
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate(doc)
+    assert msg in ei.value.what
+    assert ei.value.schema_path == schema_path
+
+
+def test_validate_accepts_dev_server_and_e2e_metadata():
+    config.validate({
+        "version": 1,
+        "scripts": {
+            "server": "npm run dev",
+            "e2e": {"cmd": "npx playwright test"},
+        },
+        "dev": {
+            "server": {
+                "script": "server",
+                "url": "http://localhost:3000",
+                "ready_url": "http://localhost:3000/health",
+                "ports": [3000, 5173],
+                "process_matchers": ["vite", "npm run dev"],
+                "logs_root": ".dev/logs/server",
+            },
+            "e2e": {
+                "script": "e2e",
+                "requires_server": True,
+                "artifacts_root": "test-results",
+                "logs_root": ".dev/logs/e2e",
+                "jobs": {
+                    "smoke": {
+                        "script": "e2e-smoke",
+                        "requires_server": True,
+                        "artifacts_root": "test-results/smoke",
+                        "logs_root": ".dev/logs/e2e-smoke",
+                    },
+                },
+            },
+        },
+    })
+
+
+def test_validate_accepts_dev_server_singular_port_alias():
+    """``port`` (singular) is dev-cli's own documented fallback for a single-port server — an
+    existing config using it must not start failing apply/status just because ``ports`` (plural)
+    is the more commonly documented form (a real regression found in review)."""
+    config.validate({
+        "version": 1,
+        "scripts": {"server": "npm run dev"},
+        "dev": {"server": {"script": "server", "port": 3000}},
+    })
+
+
+def test_validate_rejects_both_port_and_ports_declared():
+    # dev-cli reads `ports` first and only falls back to `port` when `ports` is absent, so
+    # declaring both leaves one value silently dead — reject the ambiguity outright.
+    with pytest.raises(config.ConfigError, match=r"must not declare both port and ports"):
+        config.validate({
+            "version": 1,
+            "dev": {"server": {"port": 3000, "ports": [5173]}},
+        })
+
+
+@pytest.mark.parametrize(
+    "doc, schema_path, msg",
+    [
+        ({"version": 1, "dev": []}, "dev", "dev must be a mapping"),
+        ({"version": 1, "dev": {"server": []}}, "dev.server", "dev.server must be a mapping"),
+        ({"version": 1, "dev": {"e2e": []}}, "dev.e2e", "dev.e2e must be a mapping"),
+        ({"version": 1, "dev": {"server": {"script": 1}}}, "dev.server.script", "dev.server.script must be a string"),
+        ({"version": 1, "dev": {"server": {"url": 1}}}, "dev.server.url", "dev.server.url must be a string"),
+        ({"version": 1, "dev": {"server": {"ready_url": 1}}}, "dev.server.ready_url", "dev.server.ready_url must be a string"),
+        ({"version": 1, "dev": {"server": {"port": "3000"}}}, "dev.server.port", "dev.server.port must be an int"),
+        ({"version": 1, "dev": {"server": {"port": True}}}, "dev.server.port", "dev.server.port must be an int"),
+        ({"version": 1, "dev": {"server": {"port": 0}}}, "dev.server.port", "dev.server.port must be an int from 1 to 65535"),
+        ({"version": 1, "dev": {"server": {"port": 65536}}}, "dev.server.port", "dev.server.port must be an int from 1 to 65535"),
+        ({"version": 1, "dev": {"server": {"ports": "3000"}}}, "dev.server.ports", "dev.server.ports must be a list of ints"),
+        ({"version": 1, "dev": {"server": {"ports": [True]}}}, "dev.server.ports", "dev.server.ports must be a list of ints"),
+        ({"version": 1, "dev": {"server": {"ports": [0]}}}, "dev.server.ports", "dev.server.ports entries must be ints from 1 to 65535"),
+        ({"version": 1, "dev": {"server": {"ports": [65536]}}}, "dev.server.ports", "dev.server.ports entries must be ints from 1 to 65535"),
+        ({"version": 1, "dev": {"server": {"process_matchers": "vite"}}}, "dev.server.process_matchers", "dev.server.process_matchers must be a list of strings"),
+        ({"version": 1, "dev": {"server": {"process_matchers": ["vite", 1]}}}, "dev.server.process_matchers", "dev.server.process_matchers must be a list of strings"),
+        ({"version": 1, "dev": {"server": {"logs_root": 1}}}, "dev.server.logs_root", "dev.server.logs_root must be a string"),
+        ({"version": 1, "dev": {"e2e": {"script": 1}}}, "dev.e2e.script", "dev.e2e.script must be a string"),
+        ({"version": 1, "dev": {"e2e": {"requires_server": "yes"}}}, "dev.e2e.requires_server", "dev.e2e.requires_server must be a bool"),
+        ({"version": 1, "dev": {"e2e": {"artifacts_root": 1}}}, "dev.e2e.artifacts_root", "dev.e2e.artifacts_root must be a string"),
+        ({"version": 1, "dev": {"e2e": {"logs_root": 1}}}, "dev.e2e.logs_root", "dev.e2e.logs_root must be a string"),
+        ({"version": 1, "dev": {"e2e": {"jobs": []}}}, "dev.e2e.jobs", "dev.e2e.jobs must be a mapping"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": []}}}}, "dev.e2e.jobs.smoke", "dev.e2e.jobs.smoke must be a mapping"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": {"script": 1}}}}}, "dev.e2e.jobs.smoke.script", "dev.e2e.jobs.smoke.script must be a string"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": {"requires_server": "yes"}}}}}, "dev.e2e.jobs.smoke.requires_server", "dev.e2e.jobs.smoke.requires_server must be a bool"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": {"artifacts_root": 1}}}}}, "dev.e2e.jobs.smoke.artifacts_root", "dev.e2e.jobs.smoke.artifacts_root must be a string"),
+        ({"version": 1, "dev": {"e2e": {"jobs": {"smoke": {"logs_root": 1}}}}}, "dev.e2e.jobs.smoke.logs_root", "dev.e2e.jobs.smoke.logs_root must be a string"),
+    ],
+)
+def test_validate_rejects_bad_dev_metadata(doc, schema_path, msg):
+    with pytest.raises(config.ConfigError) as ei:
+        config.validate(doc)
+    assert msg in ei.value.what
     assert ei.value.schema_path == schema_path
 
 

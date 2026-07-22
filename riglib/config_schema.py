@@ -4,10 +4,10 @@ What this is
 ------------
 A declarative description of EVERY ``rig.yaml`` / ``~/.config/rig/config.yaml`` block: each
 top-level key, its fixed sub-keys, their types/enums/defaults, and whether the block is *closed*
-(an unknown key is rejected — ``additionalProperties: false``) or carries an *open* ``items:`` /
-``fragments:`` map keyed by arbitrary catalog item names. :func:`json_schema` emits a Draft-07
-document from it; :func:`schema_path_exists` answers "is this dotted key a known schema node" for
-error messages.
+(an unknown key is rejected — ``additionalProperties: false``) or carries one named open map such
+as ``items:``, ``fragments:``, or ``jobs:``. :func:`json_schema` emits a Draft-07 document from it;
+:func:`schema_pointer_for` answers "where is this dotted key in the generated schema?" for error
+messages.
 
 Why a SEPARATE module from ``config.py`` and ``schema.py``
 ---------------------------------------------------------
@@ -75,7 +75,8 @@ class Leaf:
 
     ``type`` is a JSON-Schema type name (``boolean``/``string``/``integer``/``array``/``object``),
     or a tuple of type names for nullable/union leaves.
-    ``enum`` pins the allowed string values; ``minimum`` an integer floor; ``items_type`` the
+    ``enum`` pins the allowed string values; ``minimum``/``maximum`` are integer bounds (applied
+    to the leaf itself, or to each array element when ``type`` is ``array``); ``items_type`` the
     element type of an ``array``; ``items_enum`` pins allowed array entries; ``items_pattern``
     constrains string array entries;
     ``additional_properties_type`` models a string-keyed object map.
@@ -92,6 +93,7 @@ class Leaf:
     enum: tuple[Any, ...] = ()
     default: Any = None
     minimum: int | None = None
+    maximum: int | None = None
     items_type: str | None = None
     items_enum: tuple[str, ...] = ()
     items_pattern: str | None = None
@@ -105,14 +107,21 @@ class Leaf:
             node["enum"] = list(self.enum)
         if self.default is not None:
             node["default"] = self.default
-        if self.minimum is not None:
+        if self.minimum is not None and self.type != "array":
             node["minimum"] = self.minimum
+        if self.maximum is not None and self.type != "array":
+            node["maximum"] = self.maximum
         if self.type == "array" and self.items_type:
-            node["items"] = {"type": self.items_type}
+            items: dict[str, Any] = {"type": self.items_type}
+            if self.minimum is not None:
+                items["minimum"] = self.minimum
+            if self.maximum is not None:
+                items["maximum"] = self.maximum
             if self.items_enum:
-                node["items"]["enum"] = list(self.items_enum)
+                items["enum"] = list(self.items_enum)
             if self.items_pattern:
-                node["items"]["pattern"] = self.items_pattern
+                items["pattern"] = self.items_pattern
+            node["items"] = items
         if self.type == "object" and self.additional_properties_type:
             node["additionalProperties"] = {"type": self.additional_properties_type}
         if self.type == "string" and self.not_pattern:
@@ -126,15 +135,17 @@ class Block:
 
     ``leaves`` are the fixed, named keys. ``nested`` are sub-blocks (each itself a :class:`Block`).
     ``open_map`` names an arbitrary-keyed child map this block permits (``items`` for ci/mcp/
-    agent_hooks/skills.by_type, ``fragments`` for git_hooks.dispatcher) — its keys are catalog item
-    names, so the block stays open under that ONE key while every other key is still rejected.
+    agent_hooks/skills.by_type, ``fragments`` for git_hooks.dispatcher, ``jobs`` for dev.e2e), so
+    the block stays open under that ONE key while every other key is still rejected.
     ``open_map_item`` optionally pins the SHAPE of each map VALUE: when set, the published schema
     models every item with that block's ``required``/``properties``/``enum`` (so an editor flags a
     missing ``content`` or a bad ``role``), matching the Python validator. When ``None`` (ci/mcp/
     agent_hooks — whose item shapes are catalog-defined and open by design) each item stays a
     permissive ``{"type": "object"}``. ``closed`` (default True) emits ``additionalProperties: false``
     so an unknown FIXED key fails; a block with an ``open_map`` carries an explicit
-    ``additionalProperties`` allowing only the map. ``doc`` is the block's one-line description.
+    ``additionalProperties`` allowing only the map. ``additional_properties`` is for a top-level
+    dictionary whose own keys are the user-defined entries (``scripts``). ``doc`` is the block's
+    one-line description.
     """
 
     doc: str
@@ -144,6 +155,7 @@ class Block:
     open_map_doc: str = ""
     open_map_item: Block | None = None
     open_map_item_required: tuple[str, ...] = ()
+    additional_properties: Any | None = None
     closed: bool = True
 
     def child_keys(self) -> set[str]:
@@ -160,9 +172,9 @@ class Block:
             props[name] = blk.to_node()
         node: dict[str, Any] = {"type": "object", "description": self.doc, "properties": props}
         if self.open_map:
-            # the open child map: an object whose keys are arbitrary item names. By default we don't
+            # the open child map: an object whose keys are arbitrary names. By default we don't
             # model each item's inner shape (catalog-defined, open by design) → a permissive object-
-            # of-objects. When `open_map_item` IS set (linters), we model the item shape so the
+            # of-objects. When `open_map_item` IS set, we model the item shape so the
             # published schema enforces required keys / enums exactly like the Python validator.
             if self.open_map_item is not None:
                 item_node = self.open_map_item.to_node()
@@ -176,7 +188,10 @@ class Block:
                 "description": self.open_map_doc or "per-item overrides keyed by item name",
                 "additionalProperties": additional,
             }
-        node["additionalProperties"] = False if self.closed else True
+        if self.additional_properties is not None:
+            node["additionalProperties"] = self.additional_properties
+        else:
+            node["additionalProperties"] = False if self.closed else True
         return node
 
 
@@ -548,6 +563,84 @@ _MODE_BLOCK = Block(
     },
 )
 
+_SCRIPTS_BLOCK = Block(
+    doc="repo-level commands consumed by the standalone `dev run <name>` CLI (alex-mextner/dev-cli).",
+    additional_properties={
+        "anyOf": [
+            {"type": "string", "pattern": r"\S"},
+            {
+                "type": "object",
+                "properties": {
+                    "cmd": {
+                        "type": "string",
+                        "pattern": r"\S",
+                        "description": "command line run by `dev run <name>`",
+                    },
+                },
+                "required": ["cmd"],
+                "additionalProperties": False,
+            },
+        ],
+    },
+)
+
+_DEV_E2E_JOB_BLOCK = Block(
+    doc="one named e2e job consumed by the standalone `dev` CLI (alex-mextner/dev-cli).",
+    leaves={
+        "script": Leaf("string", "name of the top-level scripts entry that runs this e2e job"),
+        "requires_server": Leaf("boolean", "whether this e2e job expects the dev server", default=True),
+        "artifacts_root": Leaf("string", "directory where this e2e job writes artifacts"),
+        "logs_root": Leaf("string", "directory where this e2e job writes logs"),
+    },
+)
+
+_DEV_BLOCK = Block(
+    doc="repo-level development server and e2e metadata consumed by the standalone `dev` CLI "
+    "(alex-mextner/dev-cli, provisioned like any other ecosystem tool via the `tools:` block).",
+    nested={
+        "server": Block(
+            doc="development server metadata for `dev` lifecycle commands.",
+            leaves={
+                "script": Leaf("string", "name of the top-level scripts entry that starts the dev server"),
+                "url": Leaf("string", "base URL the development server serves"),
+                "ready_url": Leaf("string", "URL the dev CLI can poll before running e2e"),
+                "port": Leaf(
+                    "integer",
+                    "a single known TCP port the dev CLI may check (fallback alias for `ports: "
+                    "[port]` — dev-cli reads `ports` first, then falls back to this)",
+                    minimum=1,
+                    maximum=65535,
+                ),
+                "ports": Leaf(
+                    "array",
+                    "known TCP ports the dev CLI may check",
+                    items_type="integer",
+                    minimum=1,
+                    maximum=65535,
+                ),
+                "process_matchers": Leaf(
+                    "array",
+                    "process command substrings the dev CLI may use to identify owned server processes",
+                    items_type="string",
+                ),
+                "logs_root": Leaf("string", "directory where the dev CLI writes server logs"),
+            },
+        ),
+        "e2e": Block(
+            doc="end-to-end test metadata for `dev` lifecycle commands.",
+            leaves={
+                "script": Leaf("string", "name of the top-level scripts entry that runs e2e tests"),
+                "requires_server": Leaf("boolean", "whether e2e expects the dev server to be running", default=True),
+                "artifacts_root": Leaf("string", "directory where e2e writes artifacts"),
+                "logs_root": Leaf("string", "directory where the dev CLI writes e2e logs"),
+            },
+            open_map="jobs",
+            open_map_doc="named e2e jobs keyed by job name",
+            open_map_item=_DEV_E2E_JOB_BLOCK,
+        ),
+    },
+)
+
 _MODELS_BLOCK = Block(
     doc="a daily cron that runs the model-freshness checker and proposes version bumps.",
     leaves={
@@ -882,16 +975,6 @@ _TOP_LEAVES: dict[str, Leaf] = {
     ),
 }
 
-_SCRIPTS_BLOCK = Block(
-    doc="project-local named commands consumed by dev helpers; rig accepts and preserves the map.",
-    closed=False,
-)
-
-_DEV_BLOCK = Block(
-    doc="project-local dev/e2e lifecycle metadata consumed by dev helpers; rig accepts and preserves the map.",
-    closed=False,
-)
-
 BLOCKS: dict[str, Block] = {
     "defaults": _DEFAULTS_BLOCK,
     "scripts": _SCRIPTS_BLOCK,
@@ -926,7 +1009,7 @@ def json_schema() -> dict[str, Any]:
     """Emit the COMPLETE Draft-07 JSON Schema for rig.yaml + the global config (one source).
 
     Strict by construction: every block is ``additionalProperties: false`` except where it carries
-    an open ``items``/``fragments`` map (catalog item names), so an unknown FIXED key is a schema
+    an open map such as ``items``/``fragments``/``jobs``, so an unknown FIXED key is a schema
     violation an editor flags. ``scope`` is whitelisted at the top level only (a tolerated legacy
     key the loader drops). This is what ``schema/rig.schema.json`` is generated from.
     """
@@ -953,8 +1036,8 @@ def schema_pointer_for(dotted: str) -> str | None:
     """A JSON pointer into ``schema/rig.schema.json`` for ``dotted``, or ``None`` if it can't resolve.
 
     The path is walked through the block registry, prefixing ``/properties/`` between resolvable
-    nodes. Walking STOPS at an open ``items``/``fragments`` map — segments past it (catalog item
-    names like ``secret-scan``) are NOT schema nodes, so the pointer would dangle. We return a
+    nodes. Walking STOPS at an open map — segments past it (item names like ``secret-scan`` or
+    ``smoke``) are NOT schema nodes, so the pointer would dangle. We return a
     pointer to the open-map node itself in that case (the deepest node that actually exists), which
     is honest: the editor jumps to ``…/items``, not a non-existent ``…/items/secret-scan``. An
     unknown top block → ``None`` (the caller then shows the dotted path without a dangling pointer).
@@ -1003,6 +1086,9 @@ def block_child_keys(block_path: str) -> set[str] | None:
     if block is None:
         return None
     for part in parts[1:]:
+        if block.open_map and part == block.open_map and block.open_map_item is not None:
+            block = block.open_map_item
+            continue
         block = block.nested.get(part)
         if block is None:
             return None
