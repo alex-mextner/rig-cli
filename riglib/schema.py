@@ -191,18 +191,28 @@ AREAS: tuple[Area, ...] = (
             _opt("agent_hooks.all", KIND_BOOL, True,
                  "Install ALL guard hooks (vs cherry-picking via items). Recommended on."),
             _opt("agent_hooks.worktree_only", KIND_BOOL, False,
-                 "Opt-IN: enforce the worktree-only workflow. The worktree-only-writes hook "
-                 "denies an Edit/Write while the checkout sits on the default branch (main/"
-                 "master) — authoring happens in a feature-branch worktree instead. Off by "
-                 "default so a repo that legitimately works on main (e.g. 3d-cli) is never "
-                 "blocked. Escape hatch: RIG_ALLOW_MAIN_EDIT=1."),
+                 "Opt-IN: enforce the worktree-only workflow. Gates TWO hooks: worktree-only-writes "
+                 "denies an Edit/Write while the checkout sits on the default branch (main/master); "
+                 "pin-primary-worktree denies a git checkout/switch that would move the repo's "
+                 "PRIMARY worktree onto anything but the default branch — authoring happens in a "
+                 "feature-branch worktree instead. Off by default so a repo that legitimately works "
+                 "on main (e.g. 3d-cli) is never blocked. No self-service env bypass — each hook has "
+                 "its OWN hatch var: a deliberate one-off Edit/Write on main is requested via "
+                 "RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES=\"<justification>\"; a one-off git checkout/"
+                 "switch in the primary checkout via "
+                 "RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE=\"<justification>\" "
+                 "(both: tg approval, deny-by-default; bare 1 rejected)."),
             _opt("agent_hooks.orchestrator_only", KIND_BOOL, True,
-                 "Opt-OUT: keep the orchestrator thin. The orchestrator-stays-thin hook blocks "
-                 "inline implementation (Bash / code Edits) by the main thread, delegating to a "
-                 "subagent, while still allowing read-only inspection and orchestration (gh pr "
-                 "list/view/checks, gh ship, tg, review, git worktree list). On by default — set "
-                 "false to exempt a repo that works inline (e.g. 3d-cli). Escape hatch: "
-                 "ALLOW_ORCHESTRATOR_WORK=1 + reason."),
+                 "Opt-OUT: keep the orchestrator thin. The orchestrator-stays-thin hook warns on "
+                 "the first inline implementation (Bash / code Edits) by the main thread, "
+                 "delegating to a subagent, then blocks a repeat within its TTL. Read-only "
+                 "inspection (git status/ls/cat/grep/find, git worktree list) is never gated; "
+                 "tg/review are sanctioned orchestration, also never gated. ALL gh is delegated to "
+                 "a subagent too — gh ship, gh pr list/view/checks, gh run, gh api included. On by "
+                 "default — set false to exempt a repo that works inline (e.g. 3d-cli). No "
+                 "self-service env bypass; a one-off is requested via "
+                 "RIG_HATCH_REQUEST_ORCHESTRATOR_STAYS_THIN=\"<justification>\" (tg approval, "
+                 "deny-by-default; bare 1 rejected)."),
         ),
     ),
     Area(

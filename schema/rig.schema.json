@@ -204,12 +204,12 @@
         },
         "worktree_only": {
           "type": "boolean",
-          "description": "enforce the worktree-only workflow: the worktree-only-writes hook DENIES an Edit/Write while the checkout sits on the default branch (main/master). Opt-IN, default OFF — a repo that works directly on main (e.g. 3d-cli) leaves it off and is never blocked. Escape hatch: RIG_ALLOW_MAIN_EDIT=1. (Alex tg#5742.)",
+          "description": "enforce the worktree-only workflow: gates TWO hooks. worktree-only-writes DENIES an Edit/Write while the checkout sits on the default branch (main/master); pin-primary-worktree DENIES a git checkout/switch that would move the repo's PRIMARY worktree onto anything but the default branch. Opt-IN, default OFF — a repo that works directly on main (e.g. 3d-cli) leaves it off and is never blocked. No self-service env bypass — each hook has its OWN hatch var: a deliberate one-off Edit/Write on main is requested via RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES=\"<justification>\"; a one-off git checkout/switch in the primary checkout via RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE=\"<justification>\" (both: tg approval, deny-by-default; bare 1 rejected). (Alex tg#5742, tg#6462/tg#6477.)",
           "default": false
         },
         "orchestrator_only": {
           "type": "boolean",
-          "description": "keep the orchestrator thin: the orchestrator-stays-thin hook blocks inline implementation Bash / code Edits by the main thread (delegate to a subagent). Opt-OUT, default ON — set false to exempt a repo that legitimately works inline (e.g. 3d-cli). Escape hatch: ALLOW_ORCHESTRATOR_WORK=1 + reason. (Alex tg#5743.)",
+          "description": "keep the orchestrator thin: the orchestrator-stays-thin hook warns on the first inline implementation Bash / code Edit by the main thread (delegate to a subagent), then blocks a repeat within its TTL. Read-only inspection (git status/ls/cat/grep/find, git worktree list) is never gated; tg/review are sanctioned orchestration, also never gated. ALL gh is delegated to a subagent too — gh ship, gh pr list/view/checks, gh run, gh api included. Opt-OUT, default ON — set false to exempt a repo that legitimately works inline (e.g. 3d-cli). No self-service env bypass; a one-off is requested via RIG_HATCH_REQUEST_ORCHESTRATOR_STAYS_THIN=\"<justification>\" (tg approval, deny-by-default; bare 1 rejected). (Alex tg#5743, tg#7103.)",
           "default": true
         },
         "items": {
