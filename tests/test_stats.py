@@ -184,7 +184,7 @@ def test_detect_our_cli_handles_pipelines():
     assert detect_our_cli("(cd /x && review)") == "review"
     assert detect_our_cli("{ review; }") == "review"
     assert detect_our_cli("/usr/local/bin/3d test") == "3d"
-    assert detect_our_cli("dev e2e smoke") == "dev"
+    assert detect_our_cli("dev e2e run smoke") == "dev"
     assert detect_our_cli("dev-server up") is None
     assert detect_our_cli("(cd /x && ls)") is None
 

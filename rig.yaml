@@ -73,7 +73,7 @@ mcp:
 
 # ── Permissions — allowlist + deny/ask baselines in the harness settings (rig-cli#100) ─────
 # Default **ON**: an ABSENT `permissions:` block still provisions the allowlist with the default
-# tool set, so rig pre-allows tg/review/draw/3d/rig/task/dev + gh/git/rg/uv/bun/jq/gitleaks in the
+# tool set, so rig pre-allows tg/review/draw/3d/rig/task/dev/pm/research + read-only rg/jq/gitleaks in the
 # harness's permission allowlist (claude-code: permissions.allow in ~/.claude/settings.json;
 # opencode: permission.bash) — AND, for claude-code, asserts the conservative deny/ask rule
 # baselines (raw `gh pr merge`, force pushes, sudo rm, screencapture denied; pkill/killall/
@@ -81,14 +81,15 @@ mcp:
 # ADDITIVE — every existing entry is preserved, the desired ones are merged in, deduped; a
 # re-apply is a no-op; extras are reported as drift, never deleted. The allow grant is at the
 # command-PREFIX level (Bash(<tool>:*) covers a tool's subcommands/flags), so the restraint is in
-# WHICH tools are listed — dev/VCS tooling, never standalone destructive commands (rm/sudo/dd).
-# GLOBAL-only (the settings file is per-machine), like
-# tg_ctl/gitignore — so it is NOT scaffolded into this committed repo rig.yaml; declare it in the
-# global config (~/.config/rig/config.yaml) to override the lists. Config-driven:
+# WHICH tools are listed — read-only helpers only; raw process-control/package-manager/git-hosting
+# tools (gh/git/uv/bun/npm/docker/kill/lsof/ps/pgrep) are deliberately absent by default;
+# development lifecycle work routes through `dev` instead. GLOBAL-only (the settings file is
+# per-machine), like tg_ctl/gitignore — so it is NOT scaffolded into this committed repo rig.yaml;
+# declare it in the global config (~/.config/rig/config.yaml) to override the lists. Config-driven:
 #   permissions:
 #     enabled: true
 #     kind: opencode        # target opencode's allowlist (default: follow harness.kind / claude-code)
-#     tools: [tg, review, draw, 3d, rig, task, dev, gh, git, rg, uv, bun, jq, gitleaks]  # REPLACES default
+#     tools: [tg, review, draw, 3d, rig, task, dev, pm, research, rg, jq, gitleaks]  # REPLACES default
 #     extra: [kubectl]      # ADDS to the (default or explicit) set
 #     disable: [gitleaks]   # drops from rig's desired set (won't ADD it; never removes a live entry)
 #     allow: [WebFetch]     # RAW rule entries asserted in the allow list (adopt a hand-grown allowlist)

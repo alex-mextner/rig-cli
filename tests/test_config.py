@@ -320,8 +320,12 @@ def test_validate_rejects_non_string_dev_e2e_job_name():
         ({"version": 1, "scripts": []}, "scripts", "scripts must be a mapping"),
         ({"version": 1, "scripts": {"test": None}}, "scripts.test", "must be a string or a mapping"),
         ({"version": 1, "scripts": {"test": []}}, "scripts.test", "must be a string or a mapping"),
-        ({"version": 1, "scripts": {"test": {}}}, "scripts.test.cmd", "requires a cmd string"),
-        ({"version": 1, "scripts": {"test": {"cmd": 123}}}, "scripts.test.cmd", "requires a cmd string"),
+        ({"version": 1, "scripts": {"test": {}}}, "scripts.test.cmd", "requires a non-empty cmd string"),
+        ({"version": 1, "scripts": {"test": {"cmd": 123}}}, "scripts.test.cmd", "requires a non-empty cmd string"),
+        ({"version": 1, "scripts": {"test": {"cmd": ""}}}, "scripts.test.cmd", "requires a non-empty cmd string"),
+        ({"version": 1, "scripts": {"test": {"cmd": "   "}}}, "scripts.test.cmd", "requires a non-empty cmd string"),
+        ({"version": 1, "scripts": {"test": ""}}, "scripts.test", "must be a non-empty command string"),
+        ({"version": 1, "scripts": {"test": "   "}}, "scripts.test", "must be a non-empty command string"),
     ],
 )
 def test_validate_rejects_bad_scripts(doc, schema_path, msg):
@@ -365,6 +369,27 @@ def test_validate_accepts_dev_server_and_e2e_metadata():
     })
 
 
+def test_validate_accepts_dev_server_singular_port_alias():
+    """``port`` (singular) is dev-cli's own documented fallback for a single-port server — an
+    existing config using it must not start failing apply/status just because ``ports`` (plural)
+    is the more commonly documented form (a real regression found in review)."""
+    config.validate({
+        "version": 1,
+        "scripts": {"server": "npm run dev"},
+        "dev": {"server": {"script": "server", "port": 3000}},
+    })
+
+
+def test_validate_rejects_both_port_and_ports_declared():
+    # dev-cli reads `ports` first and only falls back to `port` when `ports` is absent, so
+    # declaring both leaves one value silently dead — reject the ambiguity outright.
+    with pytest.raises(config.ConfigError, match=r"must not declare both port and ports"):
+        config.validate({
+            "version": 1,
+            "dev": {"server": {"port": 3000, "ports": [5173]}},
+        })
+
+
 @pytest.mark.parametrize(
     "doc, schema_path, msg",
     [
@@ -374,6 +399,10 @@ def test_validate_accepts_dev_server_and_e2e_metadata():
         ({"version": 1, "dev": {"server": {"script": 1}}}, "dev.server.script", "dev.server.script must be a string"),
         ({"version": 1, "dev": {"server": {"url": 1}}}, "dev.server.url", "dev.server.url must be a string"),
         ({"version": 1, "dev": {"server": {"ready_url": 1}}}, "dev.server.ready_url", "dev.server.ready_url must be a string"),
+        ({"version": 1, "dev": {"server": {"port": "3000"}}}, "dev.server.port", "dev.server.port must be an int"),
+        ({"version": 1, "dev": {"server": {"port": True}}}, "dev.server.port", "dev.server.port must be an int"),
+        ({"version": 1, "dev": {"server": {"port": 0}}}, "dev.server.port", "dev.server.port must be an int from 1 to 65535"),
+        ({"version": 1, "dev": {"server": {"port": 65536}}}, "dev.server.port", "dev.server.port must be an int from 1 to 65535"),
         ({"version": 1, "dev": {"server": {"ports": "3000"}}}, "dev.server.ports", "dev.server.ports must be a list of ints"),
         ({"version": 1, "dev": {"server": {"ports": [True]}}}, "dev.server.ports", "dev.server.ports must be a list of ints"),
         ({"version": 1, "dev": {"server": {"ports": [0]}}}, "dev.server.ports", "dev.server.ports entries must be ints from 1 to 65535"),

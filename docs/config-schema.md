@@ -71,8 +71,8 @@ defaults:                       # cross-category fallback targets/policy
 
 agent_tools_source: ~/xp/agent-tools   # the agent-tools checkout to apply FROM (default: auto-detect)
 
-scripts: { ... }             # project-local named commands consumed by dev helpers
-dev: { ... }                 # dev/e2e lifecycle metadata consumed by dev helpers
+scripts: { ... }              # repo-level named commands consumed by the standalone `dev` CLI
+dev: { ... }                  # repo-level dev server/e2e lifecycle metadata consumed by `dev`
 skills: { ... }
 agent_hooks: { ... }
 git_hooks: { ... }
@@ -81,8 +81,6 @@ mcp: { ... }
 mode: { ... }                 # GLOBAL operating mode; autonomous review/fix/quorum/escalation policy
 harness: { ... }              # agent harness auto/permission provisioning (auto-mode)
 permissions: { ... }          # per-harness permissions layer (allowlist + deny/ask baselines), default ON
-scripts: { ... }              # repo-level commands consumed by agent-tools `dev run <name>`
-dev: { ... }                  # repo-level dev server/e2e metadata consumed by agent-tools `dev`
 models: { ... }               # daily model-freshness checker schedule (launchd/crontab cron)
 agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
 github: { ... }               # repo settings: ruleset/merge/ghas/actions via gh api + browser via agent-browser, default ON
@@ -97,8 +95,9 @@ the default candidates (`~/xp/agent-tools`, `~/work/agent-tools`, `~/agent-tools
 ## `scripts`
 
 Project-local named commands consumed by the `dev` CLI and portable hooks. `rig` validates that
-this top-level key is a mapping, then preserves it; command semantics are owned by the dev helper
-that executes the script.
+this top-level key is a mapping of string names to either a non-empty command string or a
+`{cmd: "<non-empty string>"}` mapping (no other keys); command semantics are owned by the dev
+helper that executes the script.
 
 ```yaml
 scripts:
@@ -643,8 +642,9 @@ desired entries are merged in, deduped; a re-apply is a no-op.
 **Scope of the default set, honestly.** rig pre-allows the *tools* in the list at the
 command-prefix level — for claude-code that is `Bash(<tool>:*)`, which covers every subcommand and
 flag of that tool. That is why the default set is deliberately narrow: lifecycle operations go
-through the agent-tools `dev` CLI, and rig grants `Bash(dev:*)` as the single safe development
-surface. rig does **not** grant raw process-control, package-manager, git-hosting, or broad
+through the standalone `dev` CLI (alex-mextner/dev-cli), and rig grants `Bash(dev:*)` as the
+single safe development surface. rig does **not** grant raw process-control, package-manager,
+git-hosting, or broad
 external-write tools by default: no `kill`, `lsof`, `ps`, `pgrep`, `pkill`, `docker`, `bun`, `npm`,
 `uv`, `gh`, or `git`. The safety boundary for those workflows belongs inside `dev`, where the CLI
 can validate project ownership and intent. If you need a repo-specific raw grant, opt into it
@@ -846,6 +846,7 @@ dev:
 | `dev.server.script` | string | — | name of the top-level `scripts.<name>` entry that starts the dev server |
 | `dev.server.url` | string | — | base URL the development server serves |
 | `dev.server.ready_url` | string | — | URL the dev CLI can poll before running e2e |
+| `dev.server.port` | int | — | a single known TCP port — dev-cli's fallback alias for `ports: [port]`, used ONLY when `ports` is absent. Declaring both `port` and `ports` on the same server is rejected (one of the two would be silently ignored at runtime); declare exactly one. |
 | `dev.server.ports` | int[] | `[]` | known TCP ports the dev CLI may check for this project's server |
 | `dev.server.process_matchers` | str[] | `[]` | process command substrings the dev CLI may use to identify owned server processes |
 | `dev.server.logs_root` | path | — | directory where the dev CLI writes server logs |
@@ -869,7 +870,7 @@ For explicit multi-project sessions, pass additional project roots through the e
 than committed config:
 
 ```bash
-DEV_PROJECT_PATHS=/abs/app:/abs/service dev e2e smoke
+DEV_PROJECT_PATHS=/abs/app:/abs/service dev e2e run smoke
 ```
 
 `DEV_PROJECT_PATHS` is a colon-separated list of additional project paths for the agent-tools
@@ -1802,6 +1803,7 @@ tools:
     review: { repo: ~/xp/review-cli }
     task:   { repo: ~/xp/task-cli }
     draw:   { repo: ~/xp/draw-cli }
+    dev:    { repo: ~/xp/dev-cli }
     # a bare entry defaults repo to ~/xp/<name>-cli:
     # foo: {}
 ```

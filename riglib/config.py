@@ -1225,6 +1225,14 @@ def _validate_scripts(scripts: Any) -> None:
             raise ConfigError(f"scripts keys must be strings (got {name!r})", schema_path="scripts")
         path = f"scripts.{name}"
         if isinstance(spec, str):
+            # dev-cli itself strips and rejects an empty/whitespace-only command string (a
+            # non-empty command is its actual contract) — reject it here too, so a malformed
+            # config is caught at `rig apply`/`status` time instead of surfacing later as a
+            # confusing dev-cli runtime error.
+            if not spec.strip():
+                raise ConfigError(
+                    f"{path} must be a non-empty command string, got {spec!r}", schema_path=path
+                )
             continue
         if not isinstance(spec, dict):
             raise ConfigError(
@@ -1244,15 +1252,20 @@ def _validate_scripts(scripts: Any) -> None:
                 schema_path=f"{path}.{bad}",
             )
         cmd = spec.get("cmd")
-        if not isinstance(cmd, str):
+        if not isinstance(cmd, str) or not cmd.strip():
             raise ConfigError(
-                f"{path} requires a cmd string",
+                f"{path} requires a non-empty cmd string",
                 schema_path=f"{path}.cmd",
             )
 
 
 _DEV_KEYS = {"server", "e2e"}
-_DEV_SERVER_KEYS = {"script", "url", "ready_url", "ports", "process_matchers", "logs_root"}
+# ``port`` (singular) is dev-cli's own documented fallback for a single-port server (it reads
+# ``ports`` first, then falls back to ``[port]`` if ``ports`` is absent — see dev-cli's
+# ``_entry_ports``). rig's own validator must accept the same alias or an existing config using
+# ``port:`` starts failing ``rig apply``/``rig status`` the moment this stricter key-set landed
+# (a real regression found in review, not a hypothetical).
+_DEV_SERVER_KEYS = {"script", "url", "ready_url", "port", "ports", "process_matchers", "logs_root"}
 _DEV_E2E_KEYS = {"script", "requires_server", "artifacts_root", "logs_root", "jobs"}
 _DEV_E2E_JOB_KEYS = {"script", "requires_server", "artifacts_root", "logs_root"}
 
@@ -1271,7 +1284,20 @@ def _validate_dev(dev: Any) -> None:
         _check_str(server, "script", "dev.server.script")
         _check_str(server, "url", "dev.server.url")
         _check_str(server, "ready_url", "dev.server.ready_url")
+        _check_port(server, "port", "dev.server.port")
         _check_port_list(server, "ports", "dev.server.ports")
+        # dev-cli reads `ports` first and only falls back to `port` when `ports` is ABSENT — so a
+        # config declaring both has one silently-dead key (Fable review). Every other check here
+        # is strict about ambiguity; reject the combination instead of accepting a config where
+        # one of the two values is quietly ignored.
+        if server.get("port") is not None and server.get("ports") is not None:
+            raise ConfigError(
+                "dev.server must not declare both port and ports",
+                why="dev-cli reads ports first and only falls back to port when ports is absent, "
+                "so declaring both leaves one value silently ignored",
+                fix="declare only one of dev.server.port or dev.server.ports",
+                schema_path="dev.server.port",
+            )
         _check_str_list(server, "process_matchers", "dev.server.process_matchers")
         _check_str(server, "logs_root", "dev.server.logs_root")
 
@@ -1320,14 +1346,37 @@ def _check_str_list(block: dict[str, Any], key: str, path: str) -> None:
         raise ConfigError(f"{path} must be a list of strings, got {value!r}", schema_path=path)
 
 
+_PORT_MIN, _PORT_MAX = 1, 65535
+
+
+def _is_valid_port(value: Any) -> bool:
+    """True iff ``value`` is a plain (non-bool) int TCP port in [1, 65535]."""
+    return isinstance(value, int) and not isinstance(value, bool) and _PORT_MIN <= value <= _PORT_MAX
+
+
+def _check_port(block: dict[str, Any], key: str, path: str) -> None:
+    """Validate a single-port ``port:`` value (dev-cli's fallback alias for ``ports: [port]``)."""
+    value = block.get(key)
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{path} must be an int, got {value!r}", schema_path=path)
+    if not _is_valid_port(value):
+        raise ConfigError(
+            f"{path} must be an int from {_PORT_MIN} to {_PORT_MAX}, got {value!r}", schema_path=path
+        )
+
+
 def _check_port_list(block: dict[str, Any], key: str, path: str) -> None:
     value = block.get(key)
     if value is None:
         return
     if not isinstance(value, list) or any(isinstance(v, bool) or not isinstance(v, int) for v in value):
         raise ConfigError(f"{path} must be a list of ints, got {value!r}", schema_path=path)
-    if any(v < 1 or v > 65535 for v in value):
-        raise ConfigError(f"{path} entries must be ints from 1 to 65535, got {value!r}", schema_path=path)
+    if any(not _is_valid_port(v) for v in value):
+        raise ConfigError(
+            f"{path} entries must be ints from {_PORT_MIN} to {_PORT_MAX}, got {value!r}", schema_path=path
+        )
 
 
 def _validate_permission_rule_lists(p: dict[str, Any]) -> None:

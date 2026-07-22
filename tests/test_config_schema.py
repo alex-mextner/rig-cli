@@ -12,6 +12,7 @@ Covers the three things "it should work" means for the schema layer:
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -128,12 +129,27 @@ def test_scripts_schema_accepts_string_or_cmd_mapping_entries():
     scripts = doc["properties"]["scripts"]
     assert scripts["type"] == "object"
     item = scripts["additionalProperties"]
-    assert item["anyOf"][0] == {"type": "string"}
+    # `pattern: \S` enforces non-empty/non-whitespace-only at the schema level too, matching the
+    # runtime validator (riglib/config.py) — an editor validating against this schema must reject
+    # exactly what `rig apply`/`status` rejects (a real drift found in review).
+    assert item["anyOf"][0] == {"type": "string", "pattern": r"\S"}
     mapping = item["anyOf"][1]
     assert mapping["type"] == "object"
     assert mapping["additionalProperties"] is False
     assert mapping["required"] == ["cmd"]
     assert mapping["properties"]["cmd"]["type"] == "string"
+    assert mapping["properties"]["cmd"]["pattern"] == r"\S"
+
+
+def test_scripts_schema_pattern_matches_the_runtime_non_empty_rule():
+    # A lightweight Draft-07 regex check (no jsonschema dependency available): the schema's
+    # `pattern` must actually reject the same empty/whitespace-only values the runtime validator
+    # (riglib/config.py::_validate_scripts) rejects, and accept the same values it accepts.
+    doc = config_schema.json_schema()
+    pattern = re.compile(doc["properties"]["scripts"]["additionalProperties"]["anyOf"][0]["pattern"])
+    assert pattern.search("npm run dev")
+    assert not pattern.search("")
+    assert not pattern.search("   ")
 
 
 def test_dev_schema_models_server_and_e2e_metadata():
@@ -144,10 +160,15 @@ def test_dev_schema_models_server_and_e2e_metadata():
 
     server = dev["properties"]["server"]
     assert server["additionalProperties"] is False
-    assert set(server["properties"]) == {"script", "url", "ready_url", "ports", "process_matchers", "logs_root"}
+    assert set(server["properties"]) == {
+        "script", "url", "ready_url", "port", "ports", "process_matchers", "logs_root",
+    }
     assert server["properties"]["script"]["type"] == "string"
     assert server["properties"]["url"]["type"] == "string"
     assert server["properties"]["ready_url"]["type"] == "string"
+    assert server["properties"]["port"]["type"] == "integer"
+    assert server["properties"]["port"]["minimum"] == 1
+    assert server["properties"]["port"]["maximum"] == 65535
     assert server["properties"]["ports"]["items"] == {"type": "integer", "minimum": 1, "maximum": 65535}
     assert server["properties"]["process_matchers"]["items"] == {"type": "string"}
     assert server["properties"]["logs_root"]["type"] == "string"

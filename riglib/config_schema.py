@@ -564,14 +564,18 @@ _MODE_BLOCK = Block(
 )
 
 _SCRIPTS_BLOCK = Block(
-    doc="repo-level commands consumed by the agent-tools `dev run <name>` CLI.",
+    doc="repo-level commands consumed by the standalone `dev run <name>` CLI (alex-mextner/dev-cli).",
     additional_properties={
         "anyOf": [
-            {"type": "string"},
+            {"type": "string", "pattern": r"\S"},
             {
                 "type": "object",
                 "properties": {
-                    "cmd": {"type": "string", "description": "command line run by `dev run <name>`"},
+                    "cmd": {
+                        "type": "string",
+                        "pattern": r"\S",
+                        "description": "command line run by `dev run <name>`",
+                    },
                 },
                 "required": ["cmd"],
                 "additionalProperties": False,
@@ -581,7 +585,7 @@ _SCRIPTS_BLOCK = Block(
 )
 
 _DEV_E2E_JOB_BLOCK = Block(
-    doc="one named e2e job consumed by the agent-tools `dev` CLI.",
+    doc="one named e2e job consumed by the standalone `dev` CLI (alex-mextner/dev-cli).",
     leaves={
         "script": Leaf("string", "name of the top-level scripts entry that runs this e2e job"),
         "requires_server": Leaf("boolean", "whether this e2e job expects the dev server", default=True),
@@ -591,7 +595,8 @@ _DEV_E2E_JOB_BLOCK = Block(
 )
 
 _DEV_BLOCK = Block(
-    doc="repo-level development server and e2e metadata consumed by the agent-tools `dev` CLI.",
+    doc="repo-level development server and e2e metadata consumed by the standalone `dev` CLI "
+    "(alex-mextner/dev-cli, provisioned like any other ecosystem tool via the `tools:` block).",
     nested={
         "server": Block(
             doc="development server metadata for `dev` lifecycle commands.",
@@ -599,6 +604,13 @@ _DEV_BLOCK = Block(
                 "script": Leaf("string", "name of the top-level scripts entry that starts the dev server"),
                 "url": Leaf("string", "base URL the development server serves"),
                 "ready_url": Leaf("string", "URL the dev CLI can poll before running e2e"),
+                "port": Leaf(
+                    "integer",
+                    "a single known TCP port the dev CLI may check (fallback alias for `ports: "
+                    "[port]` — dev-cli reads `ports` first, then falls back to this)",
+                    minimum=1,
+                    maximum=65535,
+                ),
                 "ports": Leaf(
                     "array",
                     "known TCP ports the dev CLI may check",
