@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .catalog import Catalog, Item
@@ -1083,8 +1083,27 @@ def _build_execpolicy(config: LoadedConfig, plan: InstallPlan) -> None:
             continue
         spec = HARNESS_EXECPOLICY[kind]
         # codex's rules root honors RIG_CODEX_HOME (same resolver as its hooks/skills/config
-        # targets); other kinds fall back to the generic ~-expansion of the declared path.
-        rules_path = _codex_user_path("rules/rig-managed.rules") if kind == "codex" else spec.rules_path
+        # targets); other kinds fall back to the generic ~-expansion of the declared path. The
+        # RIG_CODEX_HOME-aware root is joined with the SAME suffix declared in spec.rules_path
+        # (relative to codex's default ~/.codex root) so the two never drift.
+        rules_path = spec.rules_path
+        if kind == "codex":
+            codex_prefix = "~/.codex/"
+            if not rules_path.startswith(codex_prefix):
+                raise PlanError(
+                    f"codex execpolicy rules_path must live under {codex_prefix!r}: {rules_path!r}"
+                )
+            suffix = rules_path[len(codex_prefix) :]
+            # The suffix is a hardcoded spec constant today (never user input), but this is the
+            # one seam where a future spec/config change could smuggle a `..`/absolute component
+            # and escape RIG_CODEX_HOME (Codex review of #169). PurePosixPath normalizes `.`/`//`
+            # but leaves `..` and a leading `/` visible for us to reject explicitly.
+            suffix_path = PurePosixPath(suffix)
+            if not suffix.strip() or suffix_path.is_absolute() or ".." in suffix_path.parts:
+                raise PlanError(
+                    f"codex execpolicy rules_path suffix must not escape RIG_CODEX_HOME: {suffix!r}"
+                )
+            rules_path = _codex_user_path(suffix)
         plan.actions.append(
             Action(
                 kind="provision_execpolicy",

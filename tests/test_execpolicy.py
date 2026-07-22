@@ -28,7 +28,7 @@ from riglib.permissions import (
     _render_codex_rule,
     execpolicy_rule_lines,
 )
-from riglib.plan import build
+from riglib.plan import PlanError, build
 
 
 def _codex_cfg(repo: Path, source: Path, **perm) -> LoadedConfig:
@@ -97,6 +97,104 @@ def test_plan_execpolicy_target_honors_rig_codex_home(fake_agent_tools, tmp_path
     plan = build(_codex_cfg(repo, fake_agent_tools), Catalog.scan(str(fake_agent_tools)), project_type="unknown")
     act = _execpolicy_action(plan)
     assert act.target == codex_home / "rules" / "rig-managed.rules"
+    # The default (unset RIG_CODEX_HOME) root must NOT also appear anywhere in the plan.
+    default_root = tmp_path / "home" / ".codex"
+    assert all(default_root not in a.target.parents for a in plan.actions if a.target is not None)
+
+
+def test_execpolicy_rules_path_suffix_matches_spec():
+    # riglib.plan._build_execpolicy derives the RIG_CODEX_HOME-relative suffix by stripping the
+    # "~/.codex/" prefix from HARNESS_EXECPOLICY["codex"].rules_path (raising if it doesn't start
+    # with that prefix) — this pins the precondition that derivation relies on, without also
+    # pinning the filename it strips off.
+    from riglib.permissions import HARNESS_EXECPOLICY
+
+    assert HARNESS_EXECPOLICY["codex"].rules_path.startswith("~/.codex/")
+
+
+def test_plan_execpolicy_raises_when_codex_rules_path_root_diverges(fake_agent_tools, tmp_path, monkeypatch):
+    # If HARNESS_EXECPOLICY["codex"].rules_path ever moves off the "~/.codex/" root without the
+    # derivation in plan.py being updated, fail loudly at plan-build time instead of silently
+    # producing a corrupt target (a literal "~" path component).
+    import dataclasses
+
+    from riglib import permissions
+
+    diverged = dataclasses.replace(
+        permissions.HARNESS_EXECPOLICY["codex"],
+        rules_path="~/.config/codex/rules/rig-managed.rules",
+    )
+    monkeypatch.setitem(permissions.HARNESS_EXECPOLICY, "codex", diverged)
+    repo = tmp_path / "repo"; repo.mkdir()
+    # PlanError (not a bare ValueError) so this surfaces through the SAME error path
+    # apply/status/init already handle, instead of an uncaught traceback (Opus review of #169).
+    with pytest.raises(PlanError, match="must live under"):
+        build(_codex_cfg(repo, fake_agent_tools), Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+
+
+def test_plan_execpolicy_raises_when_codex_rules_path_suffix_escapes_root(fake_agent_tools, tmp_path, monkeypatch):
+    # A `..`-carrying (or absolute) suffix must not be allowed to escape RIG_CODEX_HOME — even
+    # though the suffix is a hardcoded spec constant today, not user input, this closes the seam
+    # a future spec/config change could exploit (Codex review of #169).
+    import dataclasses
+
+    from riglib import permissions
+
+    diverged = dataclasses.replace(
+        permissions.HARNESS_EXECPOLICY["codex"],
+        rules_path="~/.codex/../outside.rules",
+    )
+    monkeypatch.setitem(permissions.HARNESS_EXECPOLICY, "codex", diverged)
+    repo = tmp_path / "repo"; repo.mkdir()
+    with pytest.raises(PlanError, match="must not escape"):
+        build(_codex_cfg(repo, fake_agent_tools), Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+
+
+def test_plan_execpolicy_raises_when_codex_rules_path_suffix_is_empty(fake_agent_tools, tmp_path, monkeypatch):
+    # An empty suffix (rules_path == the bare "~/.codex/" root) would otherwise silently target
+    # the codex home DIRECTORY itself as the rules "file" — reject it rather than let a degenerate
+    # spec value pass validation quietly (Fable review of #169).
+    import dataclasses
+
+    from riglib import permissions
+
+    diverged = dataclasses.replace(permissions.HARNESS_EXECPOLICY["codex"], rules_path="~/.codex/")
+    monkeypatch.setitem(permissions.HARNESS_EXECPOLICY, "codex", diverged)
+    repo = tmp_path / "repo"; repo.mkdir()
+    with pytest.raises(PlanError, match="must not escape"):
+        build(_codex_cfg(repo, fake_agent_tools), Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+
+
+def test_plan_execpolicy_target_derives_from_spec_suffix_not_hardcoded(fake_agent_tools, tmp_path, monkeypatch):
+    # A change to HARNESS_EXECPOLICY["codex"].rules_path's SUFFIX (same "~/.codex/" root) must be
+    # reflected in the planned target — pins that the derivation actually reads the spec rather
+    # than hardcoding "rules/rig-managed.rules" (Codex review of #169: the divergence/traversal
+    # tests above only pin the ROOT-mismatch and escape cases, not that the suffix is honored).
+    import dataclasses
+
+    from riglib import permissions
+
+    diverged = dataclasses.replace(
+        permissions.HARNESS_EXECPOLICY["codex"],
+        rules_path="~/.codex/policies/custom.rules",
+    )
+    monkeypatch.setitem(permissions.HARNESS_EXECPOLICY, "codex", diverged)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    codex_home = tmp_path / "custom-codex-home"
+    monkeypatch.setenv("RIG_CODEX_HOME", str(codex_home))
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = build(_codex_cfg(repo, fake_agent_tools), Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    act = _execpolicy_action(plan)
+    assert act.target == codex_home / "policies" / "custom.rules"
+
+
+def test_plan_execpolicy_target_default_when_rig_codex_home_unset(fake_agent_tools, tmp_path, monkeypatch):
+    monkeypatch.delenv("RIG_CODEX_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = build(_codex_cfg(repo, fake_agent_tools), Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    act = _execpolicy_action(plan)
+    assert act.target == tmp_path / "home" / ".codex" / "rules" / "rig-managed.rules"
 
 
 def test_plan_no_execpolicy_when_permissions_disabled(fake_agent_tools, tmp_path):
