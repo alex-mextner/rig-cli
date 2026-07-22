@@ -55,6 +55,17 @@ SCHEMA_ID = "https://github.com/alex-mextner/rig-cli/blob/main/schema/rig.schema
 # the CLI, the docs, and the sync test name the same file.
 SCHEMA_REL_PATH = "schema/rig.schema.json"
 PERMISSION_RULE_JSON_PATTERN = r"^(?!.*[\r\n])[A-Za-z0-9_*.-]+(\(.+\))?$"
+# Mirrors riglib.tmux's `_pane_titles_format_is_safe` char/substring blocklist EXACTLY (a test —
+# `test_pane_titles_format_python_check_matches_json_schema_pattern` — runs a shared corpus
+# through both and asserts identical verdicts, so the two can't independently drift): `"`, `\`,
+# `$`, `#(` (tmux's shell-exec format token), true Unicode-category-Cc control characters (ASCII
+# 0x00-0x1F/0x7F + the C1 range 0x80-0x9F) except a bare tab, and U+2028/U+2029
+# (LINE/PARAGRAPH SEPARATOR). Deliberately narrower than "any non-printable character" — that
+# would also reject ordinary Powerline/Nerd-Font glyphs (category Co/Cf) that are common in a
+# real pane-border-format and can't corrupt a double-quoted tmux value. Kept as a regex here
+# (rather than importing tmux.py's Python check) so the published JSON schema can express the
+# SAME rule for editors/CI validating rig.yaml offline, without a runtime import.
+TMUX_PANE_TITLES_FORMAT_UNSAFE_PATTERN = r'["\\$]|#\(|[\x00-\x08\x0a-\x1f\x7f-\x9f  ]'
 
 
 # ── leaf + block descriptors (the declarative registry) ───────────────────────────────
@@ -68,6 +79,10 @@ class Leaf:
     element type of an ``array``; ``items_enum`` pins allowed array entries; ``items_pattern``
     constrains string array entries;
     ``additional_properties_type`` models a string-keyed object map.
+    ``not_pattern`` (scalar ``string`` leaves only) rejects any value that MATCHES the given
+    regex anywhere — modeled as a ``"not": {"pattern": …}`` sub-schema — for a value whose
+    validity is "must not contain X" rather than "must match a shape" (``enum``/``pattern``
+    model the latter; a positive pattern can't express a character-blocklist cleanly).
     ``default`` is shown in the schema (editors surface it); ``None`` means "no default
     advertised" (omitted from the emitted node).
     """
@@ -81,6 +96,7 @@ class Leaf:
     items_enum: tuple[str, ...] = ()
     items_pattern: str | None = None
     additional_properties_type: str | None = None
+    not_pattern: str | None = None
 
     def to_node(self) -> dict[str, Any]:
         node_type: Any = list(self.type) if isinstance(self.type, tuple) else self.type
@@ -99,6 +115,8 @@ class Leaf:
                 node["items"]["pattern"] = self.items_pattern
         if self.type == "object" and self.additional_properties_type:
             node["additionalProperties"] = {"type": self.additional_properties_type}
+        if self.type == "string" and self.not_pattern:
+            node["not"] = {"pattern": self.not_pattern}
         return node
 
 
@@ -670,6 +688,22 @@ _TMUX_BLOCK = Block(
         "login_shell": Block(
             doc="restored panes are login shells (source ~/.zprofile/PATH).",
             leaves={"enabled": Leaf("boolean", "set a login-shell default-command", default=True), "shell": Leaf("string", "login shell path ('' → resolve $SHELL)", default="")},
+        ),
+        "pane_titles": Block(
+            doc="pane-border-status titles (position + format), and separately dropping tmux's default clock+date from status-right.",
+            leaves={
+                "enabled": Leaf("boolean", "provision pane-border-status (the pane title itself)", default=True),
+                "position": Leaf("string", "pane-border-status placement", enum=("top", "bottom"), default="top"),
+                "format": Leaf(
+                    "string",
+                    "pane-border-format value (no date/time token by default; must not contain "
+                    "'\"', '\\\\', '$', '#(' (a shell-exec token), or a non-printable character "
+                    "other than a plain tab)",
+                    default="#{session_name} #{window_index}:#{window_name}#{window_flags}",
+                    not_pattern=TMUX_PANE_TITLES_FORMAT_UNSAFE_PATTERN,
+                ),
+                "clear_status_right": Leaf("boolean", "when `enabled` is on, also clear tmux's default clock+date status-right; a SEPARATE toggle (nested under `enabled`) so status-right can be left alone while keeping the border title", default=True),
+            },
         ),
     },
 )

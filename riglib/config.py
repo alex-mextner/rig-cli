@@ -1936,6 +1936,7 @@ _TMUX_TOP_KEYS = {
     "boot",
     "login_shell",
     "autosave",
+    "pane_titles",
 }
 _TMUX_SUBKEYS = {
     "resurrect": {"processes", "capture_pane_contents"},
@@ -1946,6 +1947,7 @@ _TMUX_SUBKEYS = {
     "boot": {"enabled", "label"},
     "login_shell": {"enabled", "shell"},
     "autosave": {"enabled", "label", "stale_after"},
+    "pane_titles": {"enabled", "position", "format", "clear_status_right"},
 }
 
 
@@ -2028,12 +2030,52 @@ def _validate_tmux(t: dict[str, Any]) -> None:
                 f"tmux.continuum.save_interval must be an int >= 1, got {interval!r}"
             )
 
-    for sub in ("moshi", "cc_restore", "anti_sprawl", "boot", "login_shell", "autosave"):
+    for sub in ("moshi", "cc_restore", "anti_sprawl", "boot", "login_shell", "autosave", "pane_titles"):
         block = t.get(sub, {})
         if isinstance(block, dict):
             value = block.get("enabled")
             if value is not None and not isinstance(value, bool):
                 raise ConfigError(f"tmux.{sub}.enabled must be a bool, got {value!r}")
+    pane_titles = t.get("pane_titles", {})
+    if isinstance(pane_titles, dict):
+        # Import here (not at module top) only to sidestep import-order churn in this large
+        # module; tmux.py itself has zero internal riglib imports, so there is no cycle risk —
+        # this is the ONE source for both the valid-position set and the format-safety check,
+        # shared with tmux.build_tmux's own defense-in-depth clamp (review: the two must never
+        # independently drift).
+        from .tmux import VALID_PANE_TITLES_POSITIONS, _pane_titles_format_is_safe
+
+        position = pane_titles.get("position")
+        if position is not None and (
+            not isinstance(position, str) or position not in VALID_PANE_TITLES_POSITIONS
+        ):
+            raise ConfigError(
+                f"tmux.pane_titles.position must be one of "
+                f"{sorted(VALID_PANE_TITLES_POSITIONS)}, got {position!r}",
+                fix=f"use one of: {', '.join(sorted(VALID_PANE_TITLES_POSITIONS))}",
+                schema_path="tmux.pane_titles.position",
+            )
+        fmt = pane_titles.get("format")
+        if fmt is not None:
+            if not isinstance(fmt, str):
+                raise ConfigError(f"tmux.pane_titles.format must be a string, got {fmt!r}")
+            if not _pane_titles_format_is_safe(fmt):
+                raise ConfigError(
+                    r"""tmux.pane_titles.format must not contain '"', '\', '$', '#(' (a """
+                    "shell-exec token), or a non-printable character other than a plain tab "
+                    "(they can corrupt, inject into, or execute code from the generated tmux "
+                    f"config), got {fmt!r}",
+                    fix=(
+                        "drop the offending character/sequence — tmux format variables use "
+                        r"""'#{...}', never '$' or '#('"""
+                    ),
+                    schema_path="tmux.pane_titles.format",
+                )
+        clear_sr = pane_titles.get("clear_status_right")
+        if clear_sr is not None and not isinstance(clear_sr, bool):
+            raise ConfigError(
+                f"tmux.pane_titles.clear_status_right must be a bool, got {clear_sr!r}"
+            )
     autosave = t.get("autosave", {})
     if isinstance(autosave, dict):
         label = autosave.get("label")

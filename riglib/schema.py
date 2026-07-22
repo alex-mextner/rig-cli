@@ -37,6 +37,7 @@ from .config import ConfigError, canonical_dot_path, get_path as _config_get_pat
 from .config import set_path as _config_set_path
 from .harness_skills import HARNESS_INSTRUCTION_FILES, HARNESS_NATIVE_SKILLS, HARNESS_SKILL_DIR_KINDS
 from .layers import GLOBAL, REPO, layer_for_category
+from .tmux import DEFAULT_PANE_TITLES_FORMAT
 
 # The value kinds the wizard knows how to prompt for and coerce. Kept tiny on purpose.
 KIND_BOOL = "bool"
@@ -346,6 +347,17 @@ AREAS: tuple[Area, ...] = (
             _opt("tmux.enabled", KIND_BOOL, False,
                  "Manage tmux config declaratively (generate + migrate an existing ~/.tmux.conf). "
                  "Off (default) = leave tmux alone."),
+            _opt("tmux.pane_titles.enabled", KIND_BOOL, True,
+                 "Show a compact pane-border title (session/window, no date/time). "
+                 "On by default whenever tmux.enabled is on."),
+            _opt("tmux.pane_titles.position", KIND_ENUM, "top",
+                 "Where pane-border-status renders the title.", choices=("top", "bottom")),
+            _opt("tmux.pane_titles.format", KIND_STR, DEFAULT_PANE_TITLES_FORMAT,
+                 "pane-border-format value. No date/time token by default; must not contain "
+                 "'\"', '\\\\', '$', or control characters (they can corrupt the generated tmux config)."),
+            _opt("tmux.pane_titles.clear_status_right", KIND_BOOL, True,
+                 "Clear tmux's default clock+date status-right ('%H:%M %d-%b-%y'), separately "
+                 "from pane_titles.enabled, so an existing customized status-right can be kept."),
         ),
     ),
     Area(

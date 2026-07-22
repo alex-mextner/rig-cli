@@ -51,6 +51,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -116,6 +117,63 @@ DEFAULT_GENERATED_DIR = "~/.config/rig/tmux"
 # The default apply mechanism: import (a single source-file line in ~/.tmux.conf) is preferred
 # over the managed-block splice. Lives here with every other tmux default.
 DEFAULT_APPLY_MODE = "import"
+
+# ── pane titles (2026-07-20, Alex tg#… "pane titles at top, no date") ─────────────────────
+# tmux's built-in status-right DEFAULTS to a clock+date (`%H:%M %d-%b-%y`) that rig never
+# overrode, so every rig-managed session showed a wasted-space "10:39 20-Jul-26" at the bottom.
+# Default ON: pane-border-status moves the compact per-pane title to the TOP of each pane, and
+# (also default ON, via the SEPARATE `clear_status_right` knob — nested under `enabled`, so
+# turning pane titles off turns this off too) rig clears that default clock+date. This IS a
+# behavior change on upgrade for anyone who both enabled `tmux:` AND hand-set a custom
+# status-right — `clear_status_right: false` is the documented opt-out (review: `enabled` and
+# the status-right clear were originally ONE undifferentiated boolean; splitting them at least
+# gives an escape hatch, even though the default still clears). continuum's own status-right
+# autosave indicator, when it fires, still appends onto the now-empty value — see the ordering
+# note in render_rig_conf. `position` and `format` are user-configurable.
+DEFAULT_PANE_TITLES_POSITION = "top"
+VALID_PANE_TITLES_POSITIONS = {"top", "bottom"}
+# No `%H:%M`/`%d-%b-%y` token — that's the exact date/time waste being removed. Session + window
+# index/name + the standard dirty/zoomed flags, nothing else.
+DEFAULT_PANE_TITLES_FORMAT = "#{session_name} #{window_index}:#{window_name}#{window_flags}"
+# Characters/sequences a `pane-border-format` value must NOT contain — each is a way to corrupt
+# or take over the generated tmux config:
+#   `"`        closes the tmux double-quoted option value early (truncating/corrupting the rest
+#              of rig.tmux.conf — the exact class of bug this whole module works around for the
+#              Moshi/continuum ordering)
+#   `\`        lets a crafted value escape into the closing quote
+#   `$`        triggers tmux's own ${VAR} expansion INSIDE a double-quoted value (the same
+#              hazard already documented for login_shell.shell)
+#   `#(`       tmux's shell-command format token — tmux RUNS the command through the shell every
+#              time it renders the border, on a timer, for the life of the server. This is the
+#              actual code-execution vector (worse than `$`), not just corruption.
+#   true CONTROL characters (Unicode category ``Cc`` — ASCII 0x00-0x1F/0x7F plus the C1 range
+#              0x80-0x9F, incl. newline/CR) inject an extra tmux directive into the managed
+#              conf; U+2028/U+2029 (LINE/PARAGRAPH SEPARATOR) are treated the same way even
+#              though they're category Zl/Zp, not Cc, since some terminals/parsers treat them as
+#              line breaks. A bare tab is tolerated (harmless inside a double-quoted value, a
+#              plausible separator). Deliberately narrower than `str.isprintable()` — that
+#              rejects Private-Use/Format characters too (category ``Co``/``Cf``), which would
+#              reject ordinary Powerline/Nerd-Font glyphs (U+E0B0 etc.) common in a real
+#              pane-border-format and can't corrupt a double-quoted tmux value.
+# Enforced in config.py's `_validate_tmux` (user-facing) AND defensively in
+# `_pane_titles_format_is_safe` below (a replayed/stored plan or a direct `build_tmux` caller
+# bypasses `validate()` entirely) AND in the published JSON schema
+# (`config_schema.TMUX_PANE_TITLES_FORMAT_UNSAFE_PATTERN` — the SAME rule, kept in sync by
+# `test_pane_titles_format_python_check_matches_json_schema_pattern`).
+_PANE_TITLES_FORMAT_FORBIDDEN_CHARS = frozenset('"\\$')
+_PANE_TITLES_FORMAT_FORBIDDEN_SUBSTRINGS = ("#(",)
+_PANE_TITLES_FORMAT_FORBIDDEN_LINE_BREAKS = frozenset("  ")  # LINE/PARAGRAPH SEPARATOR
+
+
+def _pane_titles_format_is_safe(fmt: str) -> bool:
+    """True iff ``fmt`` is safe to interpolate into a tmux double-quoted option value."""
+    if any(c in _PANE_TITLES_FORMAT_FORBIDDEN_CHARS for c in fmt):
+        return False
+    if any(bad in fmt for bad in _PANE_TITLES_FORMAT_FORBIDDEN_SUBSTRINGS):
+        return False
+    if any(c in _PANE_TITLES_FORMAT_FORBIDDEN_LINE_BREAKS for c in fmt):
+        return False
+    return all(c == "\t" or unicodedata.category(c) != "Cc" for c in fmt)
 
 # The two managed cc scripts' basenames (live in the generated dir).
 CC_SAVE_NAME = "cc-save.sh"
@@ -187,6 +245,14 @@ class TmuxPlan:
     boot_label: str
     login_shell_enabled: bool
     login_shell: str  # "" → resolve $SHELL at config-eval time in the shell; else a literal path
+    pane_titles_enabled: bool
+    pane_titles_position: str  # "top" | "bottom"
+    pane_titles_format: str  # a pane-border-format value; the default carries no date/time token
+    # Drop tmux's default clock+date status-right. A SEPARATE toggle from `pane_titles_enabled`
+    # (not independent of it — render_rig_conf nests this inside `if pane_titles_enabled`), so
+    # you can turn OFF just the status-right clear while keeping the border title, but you can't
+    # get the clear without the title.
+    pane_titles_clear_status_right: bool
     # The tmux binary, resolved ONCE at plan time (build_tmux). Baked here — NOT re-resolved per
     # render — so `rig apply` and `rig status` (each a fresh plan, possibly under a different
     # ambient PATH: an interactive shell vs a launchd/cron-spawned status with a minimal PATH)
@@ -312,7 +378,9 @@ class TmuxPlan:
           2. resurrect/continuum OPTIONS (processes incl. claude, capture-pane, restore,
              save-interval, boot)
           3. cc-restore resurrect HOOKS (post-save / post-restore → the managed scripts)
-          4. the Moshi ``status-right`` tweak (opt-in) — BEFORE any plugin init
+          4. pane-titles (default-on) + the Moshi ``status-right`` tweak (opt-in) — BOTH BEFORE
+             any plugin init, since continuum's own status-right autosave indicator (when it
+             fires) appends onto whatever status-right already holds
           5. resurrect ``run-shell`` init
           6. continuum ``run-shell`` init  ← LAST, so nothing after it wipes its hook
           7. tpm init (must be the very last line per tpm's own contract)
@@ -404,6 +472,26 @@ class TmuxPlan:
                 f'set -g @resurrect-hook-post-save-all "{save_cmd}"',
                 f'set -g @resurrect-hook-post-restore-all "{restore_cmd}"',
             ]
+
+        if self.pane_titles_enabled:
+            # Placed BEFORE continuum's run-shell init (same ordering constraint as the Moshi
+            # tweak below): continuum's own status-right autosave indicator, when it fires
+            # (autosave_enabled=False path), APPENDS onto the current status-right value rather
+            # than overwriting it — so clearing it here first still lets that indicator show,
+            # just without tmux's default clock+date glued in front of it.
+            out += [
+                "",
+                "# ── pane titles: at the TOP, no date/time (rig apply tmux.pane_titles) ─────",
+                "set -g pane-border-status " + self.pane_titles_position,
+                f"set -g pane-border-format \"{self.pane_titles_format}\"",
+            ]
+            if self.pane_titles_clear_status_right:
+                out += [
+                    "# tmux's built-in status-right default is a clock+date (`%H:%M %d-%b-%y`) —",
+                    "# wasted space once the pane title above carries the session/window context.",
+                    "# Clear it. (tmux.pane_titles.clear_status_right: false keeps a custom value.)",
+                    "set -g status-right ''",
+                ]
 
         if self.moshi_enabled:
             out += [
@@ -1041,6 +1129,7 @@ def build_tmux(
     boot: dict | None = None,
     login_shell: dict | None = None,
     autosave: dict | None = None,
+    pane_titles: dict | None = None,
 ) -> TmuxPlan:
     """Resolve the desired :class:`TmuxPlan` from the (already-validated) tmux config block.
 
@@ -1058,6 +1147,7 @@ def build_tmux(
     boot = boot or {}
     login_shell = login_shell or {}
     autosave = autosave or {}
+    pane_titles = pane_titles or {}
 
     def _expand(p: str | Path) -> Path:
         s = str(p)
@@ -1105,7 +1195,42 @@ def build_tmux(
         autosave_enabled=bool(_knob(autosave, "enabled", True)),
         autosave_label=str(_knob(autosave, "label", DEFAULT_AUTOSAVE_LABEL)),
         autosave_stale_after=int(_knob(autosave, "stale_after", DEFAULT_STALE_AFTER)),
+        pane_titles_enabled=bool(_knob(pane_titles, "enabled", True)),
+        pane_titles_position=_resolve_pane_titles_position(pane_titles),
+        pane_titles_format=_resolve_pane_titles_format(pane_titles),
+        pane_titles_clear_status_right=bool(_knob(pane_titles, "clear_status_right", True)),
     )
+
+
+def _resolve_pane_titles_position(pane_titles: dict) -> str:
+    """The configured position, DEFENSIVELY clamped to the valid set.
+
+    ``config.validate`` already rejects an invalid ``position`` for a fresh ``rig apply``/`init`,
+    but ``tmux_plan_from_action`` rebuilds a :class:`TmuxPlan` straight from a stored/replayed
+    ``Action.options`` (drift checks, tests, any future carrier) WITHOUT re-running ``validate``.
+    An unclamped garbage value would render an unknown-value ``set -g pane-border-status <x>``,
+    which tmux rejects — aborting the WHOLE config before continuum init (review finding).
+    """
+    position = pane_titles.get("position")
+    if position is None:
+        return DEFAULT_PANE_TITLES_POSITION
+    position = str(position)
+    return position if position in VALID_PANE_TITLES_POSITIONS else DEFAULT_PANE_TITLES_POSITION
+
+
+def _resolve_pane_titles_format(pane_titles: dict) -> str:
+    """The configured pane-border-format, DEFENSIVELY falling back to the safe default.
+
+    Same defense-in-depth rationale as :func:`_resolve_pane_titles_position`: an unsafe format
+    (one containing ``"``/``\\``/``$``/a control char — see ``_PANE_TITLES_FORMAT_FORBIDDEN_CHARS``)
+    would corrupt or inject into the generated tmux config if it ever reached the renderer without
+    going through ``config.validate`` first.
+    """
+    fmt = pane_titles.get("format")
+    if fmt is None:
+        return DEFAULT_PANE_TITLES_FORMAT
+    fmt = str(fmt)
+    return fmt if _pane_titles_format_is_safe(fmt) else DEFAULT_PANE_TITLES_FORMAT
 
 
 # ── pure ~/.tmux.conf splicing (block apply mode) ─────────────────────────────────────────

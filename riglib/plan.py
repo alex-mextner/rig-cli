@@ -1935,6 +1935,7 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
                 "boot": dict(t.get("boot", {}) or {}),
                 "login_shell": login_shell,
                 "autosave": autosave,
+                "pane_titles": dict(t.get("pane_titles", {}) or {}),
             },
         )
         )

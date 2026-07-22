@@ -1101,6 +1101,40 @@
             }
           },
           "additionalProperties": false
+        },
+        "pane_titles": {
+          "type": "object",
+          "description": "pane-border-status titles (position + format), and separately dropping tmux's default clock+date from status-right.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "provision pane-border-status (the pane title itself)",
+              "default": true
+            },
+            "position": {
+              "type": "string",
+              "description": "pane-border-status placement",
+              "enum": [
+                "top",
+                "bottom"
+              ],
+              "default": "top"
+            },
+            "format": {
+              "type": "string",
+              "description": "pane-border-format value (no date/time token by default; must not contain '\"', '\\\\', '$', '#(' (a shell-exec token), or a non-printable character other than a plain tab)",
+              "default": "#{session_name} #{window_index}:#{window_name}#{window_flags}",
+              "not": {
+                "pattern": "[\"\\\\$]|#\\(|[\\x00-\\x08\\x0a-\\x1f\\x7f-\\x9f  ]"
+              }
+            },
+            "clear_status_right": {
+              "type": "boolean",
+              "description": "when `enabled` is on, also clear tmux's default clock+date status-right; a SEPARATE toggle (nested under `enabled`) so status-right can be left alone while keeping the border title",
+              "default": true
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
