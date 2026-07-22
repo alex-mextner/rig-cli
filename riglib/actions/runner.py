@@ -418,6 +418,11 @@ def _do_install_dispatcher(action: Action, on_conflict: str) -> ActionResult:
     # 2. the composers (core.hooksPath target). Git ignores a non-executable hook, so the
     # exec bit must be set even when the content is already identical (else a re-apply
     # leaves the dispatcher silently disabled). Only a CONFLICT-skip leaves them untouched.
+    # This relies on `fsutil.dirs_identical` being MODE-BLIND (compares file set + content
+    # only): the chmod below runs unconditionally on a content-"identical" skip too, so a
+    # source that (for whatever reason — a test fixture, a checkout that dropped the bit)
+    # isn't executable still converges the target to executable without that mode-only
+    # divergence being misread as drift on the next idempotent re-apply (rig-cli#175 review).
     src_hooks = src / "hooks"
     if src_hooks.is_dir():
         out = fsutil.copy_tree(src_hooks, composer_target, on_conflict)

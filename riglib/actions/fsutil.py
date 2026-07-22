@@ -46,7 +46,13 @@ _backup_path = backup_path
 
 
 def dirs_identical(a: Path, b: Path) -> bool:
-    """Shallow-ish recursive compare: same file set, same contents."""
+    """Shallow-ish recursive compare: same file set, same contents.
+
+    Deliberately does NOT compare mode bits: at least one caller intentionally installs a target
+    mode that differs from the source (see the call site in `riglib/actions/runner.py` for why),
+    so a mode-aware comparison here would misreport that legitimate divergence as drift on every
+    idempotent re-apply. A caller that needs strict mode fidelity (e.g. an executable skill file,
+    where the target should match the source's mode exactly) must check it separately."""
     if not a.is_dir() or not b.is_dir():
         return False
     cmp = filecmp.dircmp(str(a), str(b))
