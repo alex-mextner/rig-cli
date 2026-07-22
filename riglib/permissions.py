@@ -20,10 +20,11 @@ Each harness expresses "auto-allow command ``foo`` and its subcommands" in a DIF
 - **opencode** — ``~/.config/opencode/opencode.json`` JSON, ``permission.bash`` (singular
   ``permission``) is an OBJECT whose KEYS are command globs and whose VALUES are
   ``"allow"``/``"ask"``/``"deny"``; the entry is ``"foo *": "allow"``.
-- **codex** — N/A. ``~/.codex/config.toml`` has no per-command allowlist; command execution is
-  gated by ``approval_policy``/``sandbox_mode`` (coarse) and Starlark ``execpolicy`` ``.rules``
-  files (``prefix_rule(pattern=[...], decision="allow")``) — a separate mechanism, not a config
-  array rig can additively merge. Recorded N/A here.
+- **codex** — the config.toml allowlist is N/A (no per-command array to merge), but the allow +
+  coarse-deny EFFECT is delivered via Starlark ``execpolicy`` ``.rules`` files
+  (``prefix_rule(pattern=[...], decision="allow"|"forbidden")``) — a SEPARATE surface rig now
+  provisions through :data:`HARNESS_EXECPOLICY` (the ``provision_execpolicy`` action), not this
+  additive-array allowlist. Recorded N/A *here* (the allowlist registry); provisioned there.
 - **pi** — N/A. No documented per-command auto-approve allowlist that leaves the toolset intact;
   recorded N/A rather than write a setting that could break the harness.
 
@@ -80,6 +81,31 @@ def _render_opencode(tool: str) -> str:
     opencode's documented pattern syntax (no colon form).
     """
     return f"{tool} *"
+
+
+def _render_codex_rule(tool: str) -> str:
+    """The codex execpolicy ``prefix_rule`` line that pre-allows command ``tool`` + its args.
+
+    codex auto-scans ``~/.codex/rules/*.rules`` (Starlark) at startup; a ``prefix_rule`` whose
+    ``pattern`` is the single leading token ``[<tool>]`` and ``decision="allow"`` matches any
+    invocation that STARTS with ``tool`` (``tool``, ``tool sub``, ``tool --flag x``). This is
+    coarse by design — a leading-token prefix cannot target a specific dangerous flag, so the
+    precise flag-position guards stay in the PreToolUse hook bridge (same split as claude-code).
+    """
+    toks = ", ".join(f'"{t}"' for t in tool.split())
+    return f'prefix_rule(pattern=[{toks}], decision="allow", justification="rig-managed")'
+
+
+def _render_codex_deny(pattern: tuple[str, ...]) -> str:
+    """A codex execpolicy ``forbidden`` ``prefix_rule`` for the multi-token command ``pattern``.
+
+    ``decision="forbidden"`` is the most-restrictive verdict (``forbidden > prompt > allow``). The
+    pattern is a token list, so ``("gh", "pr", "merge")`` blocks any command whose first three
+    tokens are ``gh pr merge`` — but NOT ``gh pr list``. Kept coarse + minimal on purpose (see
+    :data:`CODEX_DENY_RULES`).
+    """
+    toks = ", ".join(f'"{t}"' for t in pattern)
+    return f'prefix_rule(pattern=[{toks}], decision="forbidden", justification="rig-managed")'
 
 
 @dataclass(frozen=True)
@@ -203,26 +229,79 @@ CLAUDE_CODE_ASK_RULES: tuple[str, ...] = (
     "Bash(git reset * --hard)",
 )
 
-# The baked rule baseline per harness kind. Only claude-code: its rule syntax above is the one
-# whose matcher semantics we verified against the vendor docs; other kinds are absent (empty).
+# ── opencode deny / ask baselines — the OUTER belt in opencode's permission.bash glob dialect ─
+# opencode's ``permission.bash`` glob dialect (VERIFIED 2026-07): ``*`` = zero-or-more chars,
+# ``?`` = one char, LAST matching key wins. These mirror the claude-code baselines' INTENT but are
+# hand-written in that dialect — they are CONSTANTS (a deny/ask rule targets a dangerous invocation,
+# not a per-tool render). The VALUE ("deny"/"ask") comes from the rule container spec below.
+#
+# FIDELITY GAP (deliberate, documented): opencode ``*`` has NO word boundary, so ``git push*--force*``
+# ALSO matches ``--force-with-lease`` (the SAFE force) that the claude-code word-boundary matcher
+# EXCLUDES. Over-blocking the safe force here is acceptable — the precise flag-position guard lives
+# in the opencode PreToolUse plugin bridge (same split as claude-code: glob/prefix rules are the
+# coarse belt, the argv-parsing hook is the deep layer). The flag-first ``git commit --no-verify*``
+# form is safe (flag leads, so it can't false-positive on a commit MESSAGE that mentions the flag).
+OPENCODE_DENY_RULES: tuple[str, ...] = (
+    "gh pr merge*",
+    "git push*--force*",
+    "git push -f*",
+    "git commit --no-verify*",
+    "sudo rm*",
+    "screencapture*",
+)
+OPENCODE_ASK_RULES: tuple[str, ...] = (
+    "pkill*",
+    "killall*",
+    "git reset*--hard*",
+)
+
+# The baked rule baseline per harness kind. claude-code (Bash(...) specifiers, vendor-doc-verified)
+# and opencode (permission.bash globs, verified dialect). Other kinds are absent (empty).
 DEFAULT_RULES: dict[str, dict[str, tuple[str, ...]]] = {
     "claude-code": {"deny": CLAUDE_CODE_DENY_RULES, "ask": CLAUDE_CODE_ASK_RULES},
+    "opencode": {"deny": OPENCODE_DENY_RULES, "ask": OPENCODE_ASK_RULES},
 }
 
-# Where each rule list lives in the harness settings file. claude-code only: opencode's
-# ``permission.bash`` object DOES accept "deny"/"ask" values, but its glob dialect for
-# multi-word / mid-wildcard rules is UNVERIFIED — a deny you believe in but that never matches
-# is worse than a reported gap, so it is recorded N/A (mirroring HARNESS_ALLOWLIST_NA) until
-# someone verifies the dialect and adds a renderer.
-HARNESS_RULE_CONTAINERS: dict[str, dict[str, tuple[str, ...]]] = {
-    "claude-code": {"deny": ("permissions", "deny"), "ask": ("permissions", "ask")},
+
+@dataclass(frozen=True)
+class RuleContainer:
+    """WHERE a harness holds one deny/ask rule list, and its container shape.
+
+    ``key_path`` is the dotted path in the settings file; ``container`` is ``"array"`` (claude-code
+    — deny/ask are separate JSON lists) or ``"object"`` (opencode — deny/ask share the SAME
+    ``permission.bash`` object with the allow list, keyed by glob → ``value``). ``value`` is the
+    object-form per-entry value (``"deny"``/``"ask"``) and is ``None`` for the array form.
+    """
+
+    key_path: tuple[str, ...]
+    container: str  # "array" | "object"
+    value: str | None = None
+
+
+# Where each rule list lives per harness kind. claude-code writes two dedicated arrays; opencode
+# folds deny/ask INTO the same ``permission.bash`` object as allow (values "deny"/"ask") — so the
+# runner emits them AFTER the allow keys, keeping rig's denies past any broad ``*``/allow (opencode
+# is last-match-wins).
+HARNESS_RULE_CONTAINERS: dict[str, dict[str, RuleContainer]] = {
+    "claude-code": {
+        "deny": RuleContainer(("permissions", "deny"), "array", None),
+        "ask": RuleContainer(("permissions", "ask"), "array", None),
+    },
+    "opencode": {
+        "deny": RuleContainer(("permission", "bash"), "object", "deny"),
+        "ask": RuleContainer(("permission", "bash"), "object", "ask"),
+    },
 }
-HARNESS_RULES_NA: dict[str, str] = {
-    "opencode": (
-        "permission.bash accepts deny/ask values, but its glob dialect for multi-word rules "
-        "is unverified — not provisioned until proven"
-    ),
-}
+# Kinds with NO verified deny/ask rule dialect at all (recorded so a config that asked for rules
+# gets a visible plan note rather than a silent drop). Empty now that opencode is verified.
+HARNESS_RULES_NA: dict[str, str] = {}
+
+# Kinds whose config-level ``permissions.allow/deny/ask`` lists are consumed VERBATIM. Those
+# user-facing lists are documented as claude-code dialect (``Bash(...)`` specifiers), so only
+# claude-code adopts them. opencode HAS rule containers but uses its BAKED opencode-dialect
+# baseline: an explicit config override there would be a claude-shaped string written as an
+# opencode glob key (a rule that never matches), so it is dropped with a plan note instead.
+CONFIG_RULE_DIALECT_KINDS: frozenset[str] = frozenset({"claude-code"})
 
 
 def resolve_rules(kind: str, role: str, override: list[str] | None) -> list[str]:
@@ -286,3 +365,72 @@ def desired_entries(kind: str, tools: list[str]) -> list[str]:
         seen.add(entry)
         out.append(entry)
     return out
+
+
+# ── codex execpolicy — allow + coarse deny via ~/.codex/rules/*.rules (rig-cli MVP) ──────────
+# codex has NO per-command allowlist in config.toml, but it auto-scans ``~/.codex/rules/*.rules``
+# (Starlark) at startup with NO config.toml reference needed. rig writes a MARKER-DELIMITED managed
+# block of ``prefix_rule(...)`` lines: the same resolved tool set as the allowlist (decision=allow)
+# plus a MINIMAL coarse deny (decision=forbidden). This is the codex counterpart of the claude-code
+# permissions.allow/deny belt — keyed off ``harness.kind`` via :data:`HARNESS_EXECPOLICY` so the
+# plan/runner/drift never scatter the path.
+#
+# FIDELITY GAP (deliberate): ``prefix_rule`` matches a LEADING-token prefix, so a coarse
+# ``("git", "push")`` forbidden would over-block ALL pushes. The deny set is therefore kept to
+# unambiguous full-command bans only; every flag-position guard (force-push, --no-verify anywhere)
+# stays in the PreToolUse hook bridge (same split as claude-code).
+CODEX_DENY_RULES: tuple[tuple[str, ...], ...] = (
+    ("gh", "pr", "merge"),
+    ("sudo", "rm"),
+    ("screencapture",),
+)
+
+
+@dataclass(frozen=True)
+class HarnessExecpolicy:
+    """How ONE harness expresses a startup-scanned command policy file (codex execpolicy .rules).
+
+    ``rules_path`` is the per-machine file rig writes its managed block into; ``render_allow`` turns
+    one tool name into an ``allow`` ``prefix_rule`` line; ``deny_rules`` is the coarse ``forbidden``
+    baseline (token-list patterns).
+    """
+
+    kind: str
+    rules_path: str
+    render_allow: Callable[[str], str]
+    deny_rules: tuple[tuple[str, ...], ...]
+
+
+HARNESS_EXECPOLICY: dict[str, HarnessExecpolicy] = {
+    "codex": HarnessExecpolicy(
+        kind="codex",
+        rules_path="~/.codex/rules/rig-managed.rules",
+        render_allow=_render_codex_rule,
+        deny_rules=CODEX_DENY_RULES,
+    ),
+}
+
+
+def execpolicy_supported(kind: str) -> bool:
+    """True when rig can provision an execpolicy .rules block for ``kind`` (codex today)."""
+    return kind in HARNESS_EXECPOLICY
+
+
+def execpolicy_rule_lines(kind: str, tools: list[str]) -> list[str]:
+    """The managed ``prefix_rule(...)`` lines for ``kind``: allow(tools) then the coarse deny set.
+
+    Deduped in tool order; the forbidden lines follow (execpolicy is most-restrictive-wins, so
+    order does not change the verdict, but keeping deny last mirrors the opencode/claude ordering
+    discipline and reads clearly). Raises ``KeyError`` for an unsupported kind (callers gate on
+    :func:`execpolicy_supported`).
+    """
+    spec = HARNESS_EXECPOLICY[kind]
+    lines: list[str] = []
+    seen: set[str] = set()
+    for t in tools:
+        line = spec.render_allow(t)
+        if line not in seen:
+            seen.add(line)
+            lines.append(line)
+    lines.extend(_render_codex_deny(p) for p in spec.deny_rules)
+    return lines

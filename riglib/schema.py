@@ -277,17 +277,19 @@ AREAS: tuple[Area, ...] = (
             _opt("permissions.enabled", KIND_BOOL, True,
                  "Provision the per-harness permissions layer: the command allowlist (tg/review/draw/"
                  "3d/rig/task/dev + gh/git/rg/uv/bun/jq/gitleaks pre-allowed, no per-call prompts) plus "
-                 "the deny/ask rule baselines (claude-code only; raw PR-merge, force-push, sudo rm, "
-                 "screencapture denied; pkill/killall/git reset --hard prompt). Additive — merges "
+                 "the deny/ask rule baselines (claude-code AND opencode; raw PR-merge, force-push, sudo "
+                 "rm, screencapture denied; pkill/killall/git reset --hard prompt). codex gets a "
+                 "safe-command allow + coarse deny via its execpolicy .rules block. Additive — merges "
                  "into the existing lists, never clobbers or removes the user's own entries. Off = "
                  "leave it alone. The target settings file is per-machine; repo-local config is "
                  "still accepted for compatibility."),
             _opt("permissions.kind", KIND_ENUM, None,
                  "Which harness's permissions to provision. opencode is supported for the ALLOWLIST "
-                 "independently of harness.kind (its deny/ask dialect is unverified -> N/A). "
+                 "AND deny/ask (its own permission.bash glob dialect) independently of harness.kind. "
                  "Absent permissions.kind, rig provisions supported harness.kind plus harness.kinds "
-                 "allowlists; codex has no additively-mergeable allowlist (N/A). The lists "
-                 "(tools/extra/disable, allow/deny/ask) are edited directly in the config file.",
+                 "allowlists; codex has no config allowlist (its allow/coarse-deny go via the "
+                 "execpolicy .rules block). The lists (tools/extra/disable, allow/deny/ask) are "
+                 "edited directly in the config file.",
                  choices=("claude-code", "opencode"),
                  null_tokens=("", "null", "none", "~", "unset", "fan-out")),
         ),

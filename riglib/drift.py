@@ -21,8 +21,11 @@ from pathlib import Path
 
 from .actions import fsutil
 from .actions.runner import (
+    EXECPOLICY_BEGIN_MARKER,
+    EXECPOLICY_END_MARKER,
     _ci_companion_files,
     _find_marker_lines,
+    _splice_managed_block,
     _git_global,
     _launchctl_gui_loaded,
     _launchctl_loaded,
@@ -39,6 +42,8 @@ from .actions.runner import (
     descriptor_text,
     desired_harness_value,
     desired_permission_specs,
+    execpolicy_block_text,
+    execpolicy_rules_file,
     find_managed_bridge_hook,
     github_actions_state,
     github_ghas_state,
@@ -159,6 +164,8 @@ def detect(
             _check_harness(action, report)
         elif action.kind == "provision_permissions":
             _check_permissions(action, report, self_merge_owned=permissions_settings_file(action) in self_merge_files)
+        elif action.kind == "provision_execpolicy":
+            _check_execpolicy(action, report)
         elif action.kind == "register_hook_bridge":
             _check_hook_bridge(action, report)
         elif action.kind == "provision_schedule":
@@ -1157,8 +1164,51 @@ def _check_permissions(action: Action, report: DriftReport, *, self_merge_owned:
         for err in shape_errors:
             report.items.append(DriftItem("modified", "permissions", action.item, config_file, err))
         return
+    # Per-spec missing/modified (each spec owns its own entries — no overlap even when specs share
+    # a container, since a role's keys never appear in a sibling role's desired set).
     for ps, node in resolved:
-        _check_permission_entries(action, ps, node, config_file, report, self_merge_owned=self_merge_owned)
+        _check_permission_entries(action, ps, node, config_file, report)
+    # Extras are reported ONCE PER CONTAINER, not per spec: opencode folds allow + deny + ask into
+    # the SAME permission.bash object, so (a) a rig-written deny key must be computed against the
+    # UNION of all roles' desired entries or it looks like an allow "extra", and (b) a genuine user
+    # extra must not be reported once per sharing spec. For claude-code each role has its own
+    # key_path, so a container has exactly one spec — the union is that spec's entries (unchanged).
+    _report_container_extras(action, resolved, config_file, report, self_merge_owned=self_merge_owned)
+
+
+def _report_container_extras(
+    action: Action, resolved: list[tuple[object, object]], config_file: Path, report: DriftReport,
+    *, self_merge_owned: bool = False,
+) -> None:
+    """One extras pass per container (see :func:`_check_permissions`).
+
+    Groups the resolved (spec, node) pairs by container key_path, computes the extras (present
+    entries not in the UNION of every sharing role's desired entries), and reports them under a
+    single representative spec — preferring the ``allow`` role so a shared object's extras use the
+    summarized allow shape rather than a per-entry deny/ask dump.
+
+    ``self_merge_owned`` suppresses the rig-OWNED self-merge ship rules from the ``allow`` extras
+    (they are written by apply_harness into this same file under an active self-merge — not user
+    cruft). Only applied when a self-merge action actually owns this file; a stray ship rule under
+    self_merge:false (or a different permissions target) still reports."""
+    by_container: dict[tuple[str, ...], list[tuple[object, object]]] = {}
+    for ps, node in resolved:
+        by_container.setdefault(ps.key_path, []).append((ps, node))
+    for pairs in by_container.values():
+        specs = [ps for ps, _ in pairs]
+        node = pairs[0][1]
+        union: set[str] = set()
+        for ps in specs:
+            union.update(ps.entries)
+        rep_spec = next((ps for ps in specs if ps.role == "allow"), specs[0])
+        if rep_spec.container == "array":
+            present = [e for e in (node if isinstance(node, list) else []) if isinstance(e, str)]
+        else:
+            present = list(node) if isinstance(node, dict) else []
+        extras = [k for k in present if k not in union]
+        if rep_spec.role == "allow" and self_merge_owned:
+            extras = [e for e in extras if e not in SELF_MERGE_PERMISSIONS_ALLOW]
+        _report_permission_extras(action, rep_spec, extras, config_file, report)
 
 
 def _resolve_permission_container(data: dict, ps) -> tuple[object, str | None]:
@@ -1190,13 +1240,11 @@ def _resolve_permission_container(data: dict, ps) -> tuple[object, str | None]:
     return node, None
 
 
-def _check_permission_entries(
-    action: Action, ps, node, config_file: Path, report: DriftReport, *, self_merge_owned: bool = False
-) -> None:
-    """Per-entry drift for ONE well-shaped container — missing/modified for the desired entries,
-    then the user's extras (see :func:`_report_permission_extras` for the reporting shape)."""
+def _check_permission_entries(action: Action, ps, node, config_file: Path, report: DriftReport) -> None:
+    """Per-entry MISSING/MODIFIED drift for ONE well-shaped container (extras are reported once per
+    container by :func:`_report_container_extras`, since opencode shares permission.bash across
+    roles)."""
     dotted = ".".join(ps.key_path)
-    desired = set(ps.entries)
     if ps.container == "array":
         raw_list = node if isinstance(node, list) else []
         junk = [e for e in raw_list if not isinstance(e, str)]
@@ -1208,22 +1256,13 @@ def _check_permission_entries(
                           f"{dotted} contains {len(junk)} non-string entr{'y' if len(junk) == 1 else 'ies'} "
                           "(hand-edit — apply ignores them, prune by hand)")
             )
-        present_list = [e for e in raw_list if isinstance(e, str)]
-        present = set(present_list)
+        present = {e for e in raw_list if isinstance(e, str)}
         for entry in ps.entries:
             if entry not in present:
                 report.items.append(
                     DriftItem("missing", "permissions", action.item, config_file,
                               f"'{entry}' not in {dotted} (apply adds it)")
                 )
-        extras = [e for e in present_list if e not in desired]
-        if ps.role == "allow" and self_merge_owned:
-            # the self-merge ship rules are rig-owned (written by apply_harness into THIS file under
-            # an active self_merge) — not user cruft, so don't count them as "beyond the baseline"
-            # extras. Only suppressed when a self-merge action actually owns this file: a stray ship
-            # rule under self_merge:false (or in a different permissions target) still reports.
-            extras = [e for e in extras if e not in SELF_MERGE_PERMISSIONS_ALLOW]
-        _report_permission_extras(action, ps, extras, config_file, report)
         return
     existing = node if isinstance(node, dict) else {}
     for entry in ps.entries:
@@ -1238,7 +1277,6 @@ def _check_permission_entries(
                           f"'{entry}' in {dotted} is {existing.get(entry)!r}, not {ps.value!r} "
                           "(user override — apply leaves it)")
             )
-    _report_permission_extras(action, ps, [k for k in existing if k not in desired], config_file, report)
 
 
 def _report_permission_extras(action: Action, ps, extras: list[str], config_file: Path, report: DriftReport) -> None:
@@ -1267,6 +1305,51 @@ def _report_permission_extras(action: Action, ps, extras: list[str], config_file
         report.items.append(
             DriftItem("extra", "permissions", action.item, config_file,
                       f"'{entry}' in {dotted} but not in the rig-managed baseline (rig never removes it)")
+        )
+
+
+def _check_execpolicy(action: Action, report: DriftReport) -> None:
+    """Flag drift between the configured codex execpolicy block and the on-disk .rules file.
+
+    missing  — the .rules file is absent, or holds no rig-managed block (apply APPENDS it).
+    modified — the managed block is stale (apply rewrites it), OR the file has unbalanced/misordered
+               markers rig refuses to rewrite (a HAND fix — apply hard-errors, does not reconcile).
+
+    Routes through the SAME :func:`_splice_managed_block` resolver apply uses, so the drift verdict
+    and its message can never overstate what apply will actually do."""
+    desired = execpolicy_block_text(action)
+    path = execpolicy_rules_file(action)
+    if not path.is_file():
+        report.items.append(
+            DriftItem("missing", "permissions", action.item, path, "execpolicy .rules file not written")
+        )
+        return
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError as exc:
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path, f"cannot read {path}: {exc}")
+        )
+        return
+    _, state, _detail = _splice_managed_block(
+        content, desired, EXECPOLICY_BEGIN_MARKER, EXECPOLICY_END_MARKER
+    )
+    if state == "ok":
+        return  # in sync
+    if state == "create":
+        report.items.append(
+            DriftItem("missing", "permissions", action.item, path, "no rig-managed execpolicy block (apply adds it)")
+        )
+    elif state == "conflict":
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path,
+                      "unbalanced/misordered rig-managed execpolicy markers — reconcile by hand, then re-run")
+        )
+    else:  # update
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path,
+                      "rig-managed execpolicy block is stale (apply rewrites it)")
         )
 
 

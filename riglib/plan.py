@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .catalog import Catalog, Item
@@ -99,7 +99,7 @@ def _agent_hooks_target_for_kind(kind: str) -> str | None:
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_project_tool | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes | provision_spotlight
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | provision_execpolicy | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_project_tool | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes | provision_spotlight
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -824,6 +824,7 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── permissions (per-harness command allowlist) ───────────────────────────────
     _build_mode(config, plan)
     _build_permissions(config, plan)
+    _build_execpolicy(config, plan)
 
     # ── hook bridge (make agents-hooks/v1 descriptors FIRE in the harness) ─────────
     _build_hook_bridge(config, catalog, plan)
@@ -1003,12 +1004,25 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
                 f"supported harness only ({kinds[0]}); skipped {', '.join(skipped)}"
             )
 
+    from .permissions import execpolicy_supported
+
     for kind in kinds:
         if not harness_supported(kind):
-            reason = HARNESS_ALLOWLIST_NA.get(kind, "no command-allowlist mechanism")
-            plan.notes.append(
-                f"permissions: skipped — harness '{kind}' has no allowlist to provision ({reason})"
-            )
+            # No config-array allowlist to merge — but the effect is still delivered by other
+            # surfaces, so describe what IS achieved rather than a bare "skipped". codex: safe-command
+            # allow + coarse deny via the execpolicy .rules block (planned separately below) plus
+            # flag-position denies via the PreToolUse hook bridge. gemini/pi: N/A (no mechanism).
+            if execpolicy_supported(kind):
+                plan.notes.append(
+                    f"permissions: harness '{kind}' has no config allowlist — safe-command allow + "
+                    "coarse deny are provisioned via the execpolicy .rules block, and flag-position "
+                    "denies via the PreToolUse hook bridge"
+                )
+            else:
+                reason = HARNESS_ALLOWLIST_NA.get(kind, "no command-allowlist mechanism")
+                plan.notes.append(
+                    f"permissions: skipped — harness '{kind}' has no allowlist to provision ({reason})"
+                )
             continue
 
         allow_rules, deny_rules, ask_rules = _resolve_permission_rules(p, kind, plan)
@@ -1033,6 +1047,71 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
                     "deny_rules": deny_rules,
                     "ask_rules": ask_rules,
                 },
+            )
+        )
+
+
+def _build_execpolicy(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the codex execpolicy .rules provisioning (allow + coarse deny), unless disabled.
+
+    Part of the ``permissions`` feature (gated by the same ``permissions.enabled`` and, when set,
+    ``permissions.kind`` selection). For each configured harness kind that supports an execpolicy
+    surface (codex — see :data:`riglib.permissions.HARNESS_EXECPOLICY`), emit ONE
+    ``provision_execpolicy`` action carrying the SAME resolved tool set the allowlist uses. codex
+    has no config-array allowlist, so this is how its safe-command allow + coarse deny is delivered;
+    flag-position denies stay in the PreToolUse hook bridge. A kind with no execpolicy surface emits
+    nothing here (the allowlist builder already noted it).
+    """
+    from .permissions import HARNESS_EXECPOLICY, execpolicy_supported, resolve_tools
+
+    p = config.data.get("permissions")
+    if p is None:
+        p = {}
+    if not isinstance(p, dict):
+        return
+    if p.get("enabled") is False:
+        return
+
+    tools_cfg = p.get("tools")
+    tools = resolve_tools(
+        list(tools_cfg) if isinstance(tools_cfg, list) else None,
+        list(p.get("extra", []) or []) if isinstance(p.get("extra"), list) else [],
+        list(p.get("disable", []) or []) if isinstance(p.get("disable"), list) else [],
+    )
+    for kind in _permissions_kinds(config, p):
+        if not execpolicy_supported(kind):
+            continue
+        spec = HARNESS_EXECPOLICY[kind]
+        # codex's rules root honors RIG_CODEX_HOME (same resolver as its hooks/skills/config
+        # targets); other kinds fall back to the generic ~-expansion of the declared path. The
+        # RIG_CODEX_HOME-aware root is joined with the SAME suffix declared in spec.rules_path
+        # (relative to codex's default ~/.codex root) so the two never drift.
+        rules_path = spec.rules_path
+        if kind == "codex":
+            codex_prefix = "~/.codex/"
+            if not rules_path.startswith(codex_prefix):
+                raise PlanError(
+                    f"codex execpolicy rules_path must live under {codex_prefix!r}: {rules_path!r}"
+                )
+            suffix = rules_path[len(codex_prefix) :]
+            # The suffix is a hardcoded spec constant today (never user input), but this is the
+            # one seam where a future spec/config change could smuggle a `..`/absolute component
+            # and escape RIG_CODEX_HOME (Codex review of #169). PurePosixPath normalizes `.`/`//`
+            # but leaves `..` and a leading `/` visible for us to reject explicitly.
+            suffix_path = PurePosixPath(suffix)
+            if not suffix.strip() or suffix_path.is_absolute() or ".." in suffix_path.parts:
+                raise PlanError(
+                    f"codex execpolicy rules_path suffix must not escape RIG_CODEX_HOME: {suffix!r}"
+                )
+            rules_path = _codex_user_path(suffix)
+        plan.actions.append(
+            Action(
+                kind="provision_execpolicy",
+                category="permissions",
+                item=kind,
+                source=config.repo_root,  # no carrier in agent-tools; anchor on the repo
+                target=_expand(rules_path, config.repo_root),
+                options={"kind": kind, "tools": tools},
             )
         )
 
@@ -1134,12 +1213,16 @@ def _autonomous_allow_rules(config: LoadedConfig, kind: str, plan: InstallPlan) 
     raw = devtools.get("allow", list(_AUTONOMOUS_DEFAULT_ALLOW_RULES))
     if not isinstance(raw, list) or not raw:
         return []
-    from .permissions import HARNESS_RULE_CONTAINERS, HARNESS_RULES_NA
+    from .permissions import CONFIG_RULE_DIALECT_KINDS
 
-    if kind not in HARNESS_RULE_CONTAINERS:
-        reason = HARNESS_RULES_NA.get(kind, "no verified rule dialect")
+    # The autonomous dev-tool allow rules are claude-code dialect (Bash(...) specifiers), so only
+    # kinds that consume that dialect verbatim get them. opencode HAS rule containers but a
+    # different glob dialect — adding a claude-shaped rule as an opencode allow key would be a bogus
+    # entry that never matches, so drop it with a note (same split as _resolve_permission_rules).
+    if kind not in CONFIG_RULE_DIALECT_KINDS:
         plan.notes.append(
-            f"autonomous mode: development tool allow rules dropped for harness '{kind}' ({reason})"
+            f"autonomous mode: development tool allow rules dropped for harness '{kind}' "
+            "(claude-code dialect rules; this harness has a different command-rule syntax)"
         )
         return []
     out: list[str] = []
@@ -1160,13 +1243,22 @@ def _resolve_permission_rules(
     ``allow`` is ADDITIVE raw entries on top of the tool-derived allowlist (this is how the
     hand-grown machine allowlist is adopted as declared config); ``deny``/``ask`` REPLACE the
     baked baseline (see :mod:`riglib.permissions` — an explicit ``[]`` disables it). All three
-    are RAW rule strings in claude-code's dialect, so a harness kind with no VERIFIED rule
-    dialect (opencode: its ``permission.bash`` glob keys are a DIFFERENT syntax) gets none of
-    them — with a plan note when the config explicitly asked, so the drop is visible in
-    ``rig plan``, never silent (a claude-shaped rule written as an opencode glob key would be a
-    bogus entry that never matches).
+    config lists are RAW rule strings in claude-code's dialect, so only claude-code
+    (``CONFIG_RULE_DIALECT_KINDS``) consumes them verbatim:
+
+    - A kind with NO rule containers at all (codex — its execpolicy is a separate surface) gets
+      nothing here, with a plan note when the config explicitly asked.
+    - A kind WITH containers but a different dialect (opencode: ``permission.bash`` glob keys) gets
+      its BAKED opencode-dialect deny/ask baseline (never the claude-shaped config override, which
+      would be a bogus glob key that never matches); the raw config allow/deny/ask are dropped with
+      a plan note so the drop is visible in ``rig plan``, never silent.
     """
-    from .permissions import HARNESS_RULE_CONTAINERS, HARNESS_RULES_NA, resolve_rules
+    from .permissions import (
+        CONFIG_RULE_DIALECT_KINDS,
+        HARNESS_RULE_CONTAINERS,
+        HARNESS_RULES_NA,
+        resolve_rules,
+    )
 
     if kind not in HARNESS_RULE_CONTAINERS:
         dropped = [k for k in ("allow", "deny", "ask") if isinstance(p.get(k), list)]
@@ -1176,6 +1268,16 @@ def _resolve_permission_rules(
                 f"permissions: raw {'/'.join(dropped)} entries dropped — harness '{kind}' ({reason})"
             )
         return [], [], []
+    if kind not in CONFIG_RULE_DIALECT_KINDS:
+        # opencode: containers exist, but the config lists are claude-dialect → drop with a note,
+        # and use the BAKED opencode-dialect baseline (override=None) for deny/ask.
+        dropped = [k for k in ("allow", "deny", "ask") if isinstance(p.get(k), list)]
+        if dropped:
+            plan.notes.append(
+                f"permissions: raw {'/'.join(dropped)} entries dropped — harness '{kind}' uses its "
+                "baked opencode-dialect deny/ask baseline (config lists are claude-code dialect)"
+            )
+        return [], resolve_rules(kind, "deny", None), resolve_rules(kind, "ask", None)
     allow_cfg = p.get("allow")
     allow_rules: list[str] = []
     seen: set[str] = set()
