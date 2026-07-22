@@ -53,8 +53,7 @@ def reconcile():
              f'text-anchor="middle" {MONO}>rig — reconcile</text>')
 
     rows = [
-        [("$ ", C["prompt"]), ("rig apply commit", C["fg"]),
-         ("   # bare `rig apply` previews first", C["skipped"])],
+        [("$ ", C["prompt"]), ("rig apply", C["fg"])],
         row("✔ created", C["created"], "skills/shell-timeouts", "→ ~/.agents/skills"),
         row("✔ created", C["created"], "agent-hooks/block-no-verify", "→ ~/.claude/hooks"),
         row("✔ created", C["created"], "ci/secret-scan", "→ .github/workflows"),
