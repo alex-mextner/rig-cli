@@ -283,16 +283,15 @@ non-default custom path. Claude behavior is unchanged: `claude-code` still defau
 
 ### Per-repo workflow knobs — `worktree_only` / `orchestrator_only`
 
-Two booleans that configure the **runtime behaviour** of three installed hooks per repo
-(`worktree-only-writes`, `pin-primary-worktree`, `orchestrator-stays-thin`). They
+Two booleans that configure the **runtime behaviour** of two installed hooks per repo. They
 are read by the hook scripts from **this committed `rig.yaml`** at fire time — `rig apply`
 does **not** consume them (nothing to install; the hooks self-read the knob). They live in the
 `agent_hooks` block so the strict validator accepts them.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `worktree_only` | bool | `false` | **opt-IN.** Gates TWO hooks together (one feature, one flag): (1) `worktree-only-writes` (pre-write) **denies an Edit/Write while the checkout is on the repo's default branch** (main/master, detected via `origin/HEAD` / `init.defaultBranch`, never hardcoded); (2) `pin-primary-worktree` (pre-bash, agent-tools#182/#183) **denies a `git checkout`/`git switch` that would move the repo's PRIMARY worktree (never a linked `git worktree add` tree, detected via `--git-dir` vs `--git-common-dir`) onto anything but the default branch** — added because (1) alone never sees a bare `git checkout` (not an Edit/Write call) and, once on a feature branch, can't distinguish the primary checkout from a legitimate linked worktree (Alex tg#6462/tg#6477, a real incident this closed). Together: all authoring happens in a SEPARATE worktree on a feature branch; the primary checkout is for merge/pull/read-only. Default **off** so a repo that legitimately works on main (e.g. `3d-cli`) is never blocked. **Before enrolling a repo, audit its sanctioned automated flows (release scripts, `gh ship` wrappers) for a non-default `git checkout`/`switch` in the primary checkout — this guard has no special-casing for them.** No self-service env bypass — each hook has its OWN hatch var, not a shared one: a deliberate one-off Edit/Write on main is requested via `RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES="<justification>"`; a one-off `git checkout`/`switch` in the primary checkout is requested separately via `RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE="<justification>"` (both: tg approval, deny-by-default, bare `1` rejected). (Alex tg#5742, tg#6462/tg#6477.) |
-| `orchestrator_only` | bool | `true` | **opt-OUT.** By DESIGN, when `true` (default), the `orchestrator-stays-thin` hook warns on the first implementation-shaped Bash/code-Edit by the main thread (delegate to a subagent), then blocks a repeat within its TTL — both descriptors, `pre-bash` and `pre-write`, are provisioned (the catalog installs every descriptor a hook directory ships, not just the first alphabetically). Read-only inspection (`git status`/`ls`/`cat`/`grep`/`find`, `git worktree list`) is never gated; `tg`/`review` are sanctioned orchestration, also never gated. **ALL `gh` is delegated to a subagent, not inline orchestrator work** — `gh ship`, `gh pr list/view/checks`, `gh run`, `gh api` included. Set `false` to exempt a repo that works inline (e.g. `3d-cli`). Default **on** = no behaviour change for a repo that omits the key. No self-service env bypass; a one-off is requested via `RIG_HATCH_REQUEST_ORCHESTRATOR_STAYS_THIN="<justification>"` (tg approval, deny-by-default; bare `1` rejected). (Alex tg#5743, tg#7103.) |
+| `worktree_only` | bool | `false` | **opt-IN.** Gates TWO hooks together (one feature, one flag): (1) `worktree-only-writes` (pre-write) **denies an Edit/Write while the checkout is on the repo's default branch** (main/master, detected via `origin/HEAD` / `init.defaultBranch`, never hardcoded); (2) `pin-primary-worktree` (pre-bash, agent-tools#182/#183) **denies a `git checkout`/`git switch` that would move the repo's PRIMARY worktree (never a linked `git worktree add` tree, detected via `--git-dir` vs `--git-common-dir`) onto anything but the default branch** — added because (1) alone never sees a bare `git checkout` (not an Edit/Write call) and, once on a feature branch, can't distinguish the primary checkout from a legitimate linked worktree (Alex tg#6462/tg#6477, a real incident this closed). Together: all authoring happens in a SEPARATE worktree on a feature branch; the primary checkout is for merge/pull/read-only. Default **off** so a repo that legitimately works on main (e.g. `3d-cli`) is never blocked. **Before enrolling a repo, audit its sanctioned automated flows (release scripts, `gh ship` wrappers) for a non-default `git checkout`/`switch` in the primary checkout — this guard has no special-casing for them.** Escape hatch for a deliberate one-off (both hooks): `RIG_ALLOW_MAIN_EDIT=1`. (Alex tg#5742, tg#6462/tg#6477.) |
+| `orchestrator_only` | bool | `true` | **opt-OUT.** By DESIGN, when `true` (default), the `orchestrator-stays-thin` hook should block inline implementation Bash **and** code Edits by the main thread (delegate to a subagent), allowing read-only inspection **and** orchestration (`gh pr list/view/checks`, `gh ship`, `tg`, `review`, `git worktree list`). **In practice today only the Bash half is live** — known gap, agent-tools#184: the catalog only provisions one descriptor per hook directory, alphabetically first (`pre-bash`), so the `pre-write` descriptor (the code-Edits half) has never actually been installed. Set `false` to exempt a repo that works inline (e.g. `3d-cli`). Default **on** = no behaviour change for a repo that omits the key. Escape hatch: `ALLOW_ORCHESTRATOR_WORK=1` + reason. (Alex tg#5743.) |
 
 Both take effect only where the corresponding hook is installed (`agent_hooks.all: true`, or
 the item enabled). They are **runtime** signals, not provisioning — a fresh clone reads the
@@ -714,33 +713,12 @@ flag — the `block-no-verify` agent-hook remains the authoritative argv-level g
 `Bash(sudo rm:*)`, and `Bash(screencapture:*)` (screenshots go through Playwright/CDP). Ask
 (prompt, don't block): `Bash(pkill:*)`, `Bash(killall:*)`, `Bash(git reset --hard:*)` +
 `Bash(git reset * --hard *)` + `Bash(git reset * --hard)`. The full annotated list lives in
-`riglib/permissions.py`.
-
-**Baked deny/ask baselines (opencode).** opencode now gets its OWN deny/ask baseline written into
-the `permission.bash` object (values `"deny"`/`"ask"`), hand-written in opencode's glob dialect
-(`*` = zero-or-more chars, `?` = one char, **last matching key wins**). Deny: `"gh pr merge*"`,
-`"git push*--force*"`, `"git push -f*"`, `"git commit --no-verify*"`, `"sudo rm*"`,
-`"screencapture*"`. Ask: `"pkill*"`, `"killall*"`, `"git reset*--hard*"`. rig emits these AFTER
-the allow keys so they sit past any broad `"*"`/allow (last-match-wins ordering discipline). Two
-deliberate **fidelity gaps**, documented: (1) opencode `*` has NO word boundary, so
-`"git push*--force*"` also matches `--force-with-lease` (the safe force) that the claude-code
-word-boundary matcher excludes — the precise flag-position guard stays in the opencode PreToolUse
-plugin bridge (same split as claude-code); (2) the user-facing `allow`/`deny`/`ask` config lists
-are claude-code dialect (`Bash(...)` specifiers), so under `kind: opencode` a configured raw list
-is **dropped with a visible plan note** and the baked opencode-dialect baseline is used instead (a
-claude-shaped rule written as an opencode glob key would never match). The tool-derived allowlist
-(`tools`/`extra`/`disable`) works for opencode as before.
-
-**codex execpolicy (allow + coarse deny).** codex has no config allowlist, so rig writes a
-marker-delimited managed block of Starlark `prefix_rule(...)` lines into
-`~/.codex/rules/rig-managed.rules` (codex auto-scans `~/.codex/rules/*.rules` at startup — no
-`config.toml` reference needed). The resolved tool set becomes `decision="allow"` prefix rules; a
-MINIMAL coarse deny (`gh pr merge`, `sudo rm`, `screencapture`) becomes `decision="forbidden"`.
-**Fidelity gap:** `prefix_rule` matches a leading-token prefix, so a coarse `["git","push"]`
-forbidden would over-block ALL pushes — the coarse deny is therefore kept to unambiguous
-full-command bans only, and every flag-position guard stays in the PreToolUse hook bridge (same
-split as claude-code). The block is idempotent, backup-noted, preserves any lines outside its
-markers, and `rig status` surfaces it as `missing`/`modified` drift.
+`riglib/permissions.py`. For **opencode** the raw `allow`/`deny`/`ask` lists are **N/A**: its
+`permission.bash` object accepts deny/ask values, but its glob-key dialect is a DIFFERENT syntax
+from claude-code rule strings and is unverified for multi-word rules — a configured raw list
+under `kind: opencode` is dropped with a visible plan note, never guessed at (a claude-shaped
+rule written as an opencode glob key would be a bogus entry that never matches). The
+tool-derived allowlist (`tools`/`extra`/`disable`) still works for opencode.
 
 **What gets written, per harness (keyed off `permissions.kind`, else supported `harness.kind` plus `harness.kinds`).**
 
@@ -748,13 +726,12 @@ markers, and `rig status` surfaces it as `missing`/`modified` drift.
   entry per tool in the form `Bash(<tool>:*)` (matching the prefix-glob form CC honors). The
   array is merged additively + deduped; every other entry survives.
 - **opencode** — `permission.bash` in `~/.config/opencode/opencode.json` (a JSON object) gains a
-  `"<tool> *": "allow"` entry per tool, plus the baked deny/ask baseline (`"<glob>": "deny"`/`"ask"`),
-  only when the key is absent — an existing user `"deny"`/`"ask"` is never downgraded. deny/ask keys
-  are emitted after the allow keys (last-match-wins ordering).
-- **codex** — the command allowlist is **N/A** in `config.toml`, but the allow + coarse-deny effect
-  IS delivered: rig writes a managed `prefix_rule(...)` block into `~/.codex/rules/rig-managed.rules`
-  (a `provision_execpolicy` action; codex auto-scans that dir at startup). Flag-position denies stay
-  in the PreToolUse hook bridge.
+  `"<tool> *": "allow"` entry per tool, only when the key is absent — an existing user
+  `"deny"`/`"ask"` is never downgraded.
+- **codex** — **N/A**. `~/.codex/config.toml` (or `$RIG_CODEX_HOME/config.toml`) has no
+  per-command allowlist rig can additively merge; command execution is gated by
+  `approval_policy`/`sandbox_mode` (coarse) and Starlark `execpolicy` `.rules` files — a separate
+  mechanism. Recorded N/A, never written.
 - **pi** — **N/A**. No documented per-command auto-approve allowlist that leaves the toolset
   intact, so it is recorded N/A, never written.
 
@@ -1474,11 +1451,6 @@ tmux:
   login_shell:
     enabled: true               # restored panes are LOGIN shells (so ~/.zprofile/PATH is sourced)
     shell: ""                   # "" → resolve the user's $SHELL at apply; else an absolute path
-  pane_titles:
-    enabled: true               # pane-border-status: a compact per-pane title
-    position: top                # "top" or "bottom"
-    format: "#{session_name} #{window_index}:#{window_name}#{window_flags}"
-    clear_status_right: true    # separately clear tmux's default clock+date status-right
 ```
 
 | Key | Type | Default | Meaning |
@@ -1501,10 +1473,6 @@ tmux:
 | `autosave.enabled` | bool | `true` | provision an **independent** launchd saver (`StartInterval` = `continuum.save_interval` minutes) that calls resurrect `save.sh` directly — decoupled from continuum's fragile status-right hook. When on, rig emits `@continuum-save-interval '0'` so there is exactly **one** authoritative saver (no racing writers over the `last` symlink). The wrapper guards against no-server, empty servers, and a **degenerate save** (a bare boot-time `main` never clobbers a richer prior snapshot), and writes a health-state file + log line so a silent month-long death is impossible. |
 | `autosave.label` | str | `ai.hyperide.tmux-autosave` | the autosave launchd agent label (and plist filename stem) |
 | `autosave.stale_after` | int ≥ 1 | `45` | minutes: the freshness threshold. After each run the saver logs a `WARN` in the health file when the newest snapshot is older than this; **`rig status` reads that health record and surfaces a `tmux autosave agent: STALE …` line** when the agent's last run is older than `stale_after` (i.e. the saver stopped firing) — the observability that turns a silent month-long death into a visible one within one interval. The line is advisory (it does not change the status exit code) and only appears when the agent's launchd plist is actually installed. |
-| `pane_titles.enabled` | bool | `true` | provision `pane-border-status`/`pane-border-format` (a compact per-pane title). `false` emits neither, makes `position`/`format` moot, and disables `clear_status_right` too (it is nested under `enabled`, not independent of it). **Behavior change on upgrade**: with this on (the default whenever `tmux.enabled` is also on), rig now clears tmux's default clock+date `status-right` for everyone — see `clear_status_right` below for the opt-out. |
-| `pane_titles.position` | enum | `top` | `pane-border-status` placement: `top` or `bottom`. An invalid stored value (e.g. from a replayed plan that bypassed validation) is defensively clamped back to `top` at render time rather than emitting a `set` tmux would reject. |
-| `pane_titles.format` | str | `"#{session_name} #{window_index}:#{window_name}#{window_flags}"` | `pane-border-format` value. The default carries **no date/time token** by design. Must **not** contain `"`, `\`, `$`, `#(` (tmux's shell-exec format token — tmux runs it through the shell on every render, the actual code-execution vector), or a non-printable character other than a plain tab — those would corrupt, inject into, or execute code from the generated tmux config; rejected at validate time (and in the published JSON schema), and defensively substituted back to the default if an unsafe value ever reaches the renderer some other way. |
-| `pane_titles.clear_status_right` | bool | `true` | when `pane_titles.enabled` is also true, additionally clear tmux's built-in `status-right` default — which is otherwise a clock+date (`%H:%M %d-%b-%y`), wasted space once the pane title carries the session/window context. A SEPARATE toggle from `enabled` (not independent of it): set this `false` to keep the border title while preserving an existing custom `status-right`. |
 | `login_shell.enabled` | bool | `true` | set a **login-shell** `default-command` so restored panes source `~/.zprofile`/PATH (resurrect otherwise restores a non-login shell with a broken env) |
 | `login_shell.shell` | str | `""` | login shell path. `""` resolves the user's `$SHELL` at apply (falling back to `/bin/zsh` then `/bin/sh`); a non-empty override **must be an absolute path** to the shell binary (a relative name or a command-with-args is rejected, so it can't silently produce a broken `default-command`) and is used verbatim. The path is **baked at generation** — NOT a tmux `${SHELL}` reference, because tmux rejects `${VAR:-default}` and would abort the whole config |
 
@@ -1564,13 +1532,9 @@ boot plist, the import line / managed block) — never on the user's hand-writte
 **The root-cause ordering guarantee.** tmux-continuum's autosave timer lives in `status-right`.
 A hand-written conf that ran `set -g status-right ''` (a Moshi tweak) **after**
 `run-shell …/continuum.tmux` silently wiped continuum's hook → autosave died → a reboot restored
-a weeks-stale session. rig's generator pins the order: plugin options → cc-restore hooks →
-**pane_titles (default-on) + the Moshi tweak (opt-in), BOTH BEFORE continuum init** → resurrect
-init → **continuum init LAST** → tpm init last-of-all. So neither tweak can ever wipe continuum's
-hook. `pane_titles.clear_status_right` (default-on when `pane_titles.enabled` is also on) also
-clears `status-right` — not gated on `$MOSHI_CLIENT`; it's a separate feature, dropping tmux's
-default clock+date rather than the Moshi gesture fix — but the same BEFORE-continuum-init
-placement applies for the same reason.
+a weeks-stale session. rig's generator pins the order: plugin options → cc-restore hooks → the
+**Moshi tweak (opt-in, BEFORE continuum init)** → resurrect init → **continuum init LAST** → tpm
+init last-of-all. So the Moshi tweak can never wipe continuum's hook again.
 
 **Boot + live activation (clean machine → fully working, zero manual steps).** A `rig apply`
 with `boot.enabled` writes a launchd agent whose entrypoint is the generated **boot script**

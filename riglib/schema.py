@@ -37,7 +37,6 @@ from .config import ConfigError, canonical_dot_path, get_path as _config_get_pat
 from .config import set_path as _config_set_path
 from .harness_skills import HARNESS_INSTRUCTION_FILES, HARNESS_NATIVE_SKILLS, HARNESS_SKILL_DIR_KINDS
 from .layers import GLOBAL, REPO, layer_for_category
-from .tmux import DEFAULT_PANE_TITLES_FORMAT
 
 # The value kinds the wizard knows how to prompt for and coerce. Kept tiny on purpose.
 KIND_BOOL = "bool"
@@ -191,28 +190,18 @@ AREAS: tuple[Area, ...] = (
             _opt("agent_hooks.all", KIND_BOOL, True,
                  "Install ALL guard hooks (vs cherry-picking via items). Recommended on."),
             _opt("agent_hooks.worktree_only", KIND_BOOL, False,
-                 "Opt-IN: enforce the worktree-only workflow. Gates TWO hooks: worktree-only-writes "
-                 "denies an Edit/Write while the checkout sits on the default branch (main/master); "
-                 "pin-primary-worktree denies a git checkout/switch that would move the repo's "
-                 "PRIMARY worktree onto anything but the default branch — authoring happens in a "
-                 "feature-branch worktree instead. Off by default so a repo that legitimately works "
-                 "on main (e.g. 3d-cli) is never blocked. No self-service env bypass — each hook has "
-                 "its OWN hatch var: a deliberate one-off Edit/Write on main is requested via "
-                 "RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES=\"<justification>\"; a one-off git checkout/"
-                 "switch in the primary checkout via "
-                 "RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE=\"<justification>\" "
-                 "(both: tg approval, deny-by-default; bare 1 rejected)."),
+                 "Opt-IN: enforce the worktree-only workflow. The worktree-only-writes hook "
+                 "denies an Edit/Write while the checkout sits on the default branch (main/"
+                 "master) — authoring happens in a feature-branch worktree instead. Off by "
+                 "default so a repo that legitimately works on main (e.g. 3d-cli) is never "
+                 "blocked. Escape hatch: RIG_ALLOW_MAIN_EDIT=1."),
             _opt("agent_hooks.orchestrator_only", KIND_BOOL, True,
-                 "Opt-OUT: keep the orchestrator thin. The orchestrator-stays-thin hook warns on "
-                 "the first inline implementation (Bash / code Edits) by the main thread, "
-                 "delegating to a subagent, then blocks a repeat within its TTL. Read-only "
-                 "inspection (git status/ls/cat/grep/find, git worktree list) is never gated; "
-                 "tg/review are sanctioned orchestration, also never gated. ALL gh is delegated to "
-                 "a subagent too — gh ship, gh pr list/view/checks, gh run, gh api included. On by "
-                 "default — set false to exempt a repo that works inline (e.g. 3d-cli). No "
-                 "self-service env bypass; a one-off is requested via "
-                 "RIG_HATCH_REQUEST_ORCHESTRATOR_STAYS_THIN=\"<justification>\" (tg approval, "
-                 "deny-by-default; bare 1 rejected)."),
+                 "Opt-OUT: keep the orchestrator thin. The orchestrator-stays-thin hook blocks "
+                 "inline implementation (Bash / code Edits) by the main thread, delegating to a "
+                 "subagent, while still allowing read-only inspection and orchestration (gh pr "
+                 "list/view/checks, gh ship, tg, review, git worktree list). On by default — set "
+                 "false to exempt a repo that works inline (e.g. 3d-cli). Escape hatch: "
+                 "ALLOW_ORCHESTRATOR_WORK=1 + reason."),
         ),
     ),
     Area(
@@ -277,19 +266,17 @@ AREAS: tuple[Area, ...] = (
             _opt("permissions.enabled", KIND_BOOL, True,
                  "Provision the per-harness permissions layer: the command allowlist (tg/review/draw/"
                  "3d/rig/task/dev + read-only rg/jq/gitleaks pre-allowed, no per-call prompts) plus "
-                 "the deny/ask rule baselines (claude-code AND opencode; raw PR-merge, force-push, sudo "
-                 "rm, screencapture denied; pkill/killall/git reset --hard prompt). codex gets a "
-                 "safe-command allow + coarse deny via its execpolicy .rules block. Additive — merges "
+                 "the deny/ask rule baselines (claude-code only; raw PR-merge, force-push, sudo rm, "
+                 "screencapture denied; pkill/killall/git reset --hard prompt). Additive — merges "
                  "into the existing lists, never clobbers or removes the user's own entries. Off = "
                  "leave it alone. The target settings file is per-machine; repo-local config is "
                  "still accepted for compatibility."),
             _opt("permissions.kind", KIND_ENUM, None,
                  "Which harness's permissions to provision. opencode is supported for the ALLOWLIST "
-                 "AND deny/ask (its own permission.bash glob dialect) independently of harness.kind. "
+                 "independently of harness.kind (its deny/ask dialect is unverified -> N/A). "
                  "Absent permissions.kind, rig provisions supported harness.kind plus harness.kinds "
-                 "allowlists; codex has no config allowlist (its allow/coarse-deny go via the "
-                 "execpolicy .rules block). The lists (tools/extra/disable, allow/deny/ask) are "
-                 "edited directly in the config file.",
+                 "allowlists; codex has no additively-mergeable allowlist (N/A). The lists "
+                 "(tools/extra/disable, allow/deny/ask) are edited directly in the config file.",
                  choices=("claude-code", "opencode"),
                  null_tokens=("", "null", "none", "~", "unset", "fan-out")),
         ),
@@ -359,17 +346,6 @@ AREAS: tuple[Area, ...] = (
             _opt("tmux.enabled", KIND_BOOL, False,
                  "Manage tmux config declaratively (generate + migrate an existing ~/.tmux.conf). "
                  "Off (default) = leave tmux alone."),
-            _opt("tmux.pane_titles.enabled", KIND_BOOL, True,
-                 "Show a compact pane-border title (session/window, no date/time). "
-                 "On by default whenever tmux.enabled is on."),
-            _opt("tmux.pane_titles.position", KIND_ENUM, "top",
-                 "Where pane-border-status renders the title.", choices=("top", "bottom")),
-            _opt("tmux.pane_titles.format", KIND_STR, DEFAULT_PANE_TITLES_FORMAT,
-                 "pane-border-format value. No date/time token by default; must not contain "
-                 "'\"', '\\\\', '$', or control characters (they can corrupt the generated tmux config)."),
-            _opt("tmux.pane_titles.clear_status_right", KIND_BOOL, True,
-                 "Clear tmux's default clock+date status-right ('%H:%M %d-%b-%y'), separately "
-                 "from pane_titles.enabled, so an existing customized status-right can be kept."),
         ),
     ),
     Area(
