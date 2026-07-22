@@ -111,6 +111,89 @@ def test_wizard_registry_exposes_both_knobs_with_correct_defaults():
     assert worktree_opt.hint and orchestrator_opt.hint
 
 
+def test_both_registries_document_the_tg_hatch_token_not_the_dead_env_bypass():
+    """Both the wizard hints (`schema.py`) and the JSON-schema descriptions (`config_schema.py`)
+    must name the CURRENT deny-by-default tg-hatch env var and must NOT resurrect the removed
+    self-service `=1` bypass. The two registries are hand-copied prose, so this locks the
+    load-bearing contract token against drift (the agent-tools hooks were converted from
+    RIG_ALLOW_MAIN_EDIT / ALLOW_ORCHESTRATOR_WORK to the RIG_HATCH_REQUEST_* form)."""
+    props = _agent_hooks_schema_props()
+    for key, tokens in (
+        # worktree_only gates TWO hooks with TWO separate hatch vars — both must be named, not
+        # just worktree-only-writes's (a single shared var would misdescribe the actual per-hook
+        # contract, the same drift class the AGENTS.md/docs doc-lock test below guards).
+        ("worktree_only", ("RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES", "RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE")),
+        ("orchestrator_only", ("RIG_HATCH_REQUEST_ORCHESTRATOR_STAYS_THIN",)),
+    ):
+        opt = schema.option_for_key(f"agent_hooks.{key}")
+        assert opt is not None
+        for token in tokens:
+            assert token in opt.hint, f"wizard hint for {key} must name {token}"
+            assert token in props[key]["description"], f"schema description for {key} must name {token}"
+    # The dead self-service bypasses must appear in NEITHER registry.
+    for dead in ("RIG_ALLOW_MAIN_EDIT", "ALLOW_ORCHESTRATOR_WORK"):
+        for key in ("worktree_only", "orchestrator_only"):
+            assert dead not in schema.option_for_key(f"agent_hooks.{key}").hint
+            assert dead not in props[key]["description"]
+
+
+def test_hand_copied_docs_document_the_tg_hatch_tokens_not_the_dead_env_bypass():
+    """AGENTS.md and docs/config-schema.md are the SAME hand-copied prose as the wizard/schema
+    registries (they restate the `worktree_only`/`orchestrator_only` contract for a human/agent
+    reader), so they drift independently of `schema.py`/`config_schema.py`. AGENTS.md in
+    particular is the surface an agent actually reads at runtime — precisely where a resurrected
+    dead bypass name would do damage. This locks BOTH docs against the same drift the registry
+    test above locks, and additionally requires the worktree_only doc to name BOTH of its two
+    hooks' hatch vars (`pin-primary-worktree` has its OWN `RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE`,
+    distinct from `worktree-only-writes`'s `RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES` — a single
+    shared var would misdescribe the actual per-hook hatch contract)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    agents_md = (repo_root / "AGENTS.md").read_text()
+    config_schema_md = (repo_root / "docs" / "config-schema.md").read_text()
+    live_tokens = (
+        "RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES",
+        "RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE",
+        "RIG_HATCH_REQUEST_ORCHESTRATOR_STAYS_THIN",
+    )
+    dead_tokens = ("RIG_ALLOW_MAIN_EDIT", "ALLOW_ORCHESTRATOR_WORK")
+    for doc_name, text in (("AGENTS.md", agents_md), ("docs/config-schema.md", config_schema_md)):
+        for token in live_tokens:
+            assert token in text, f"{doc_name} must name {token}"
+        for dead in dead_tokens:
+            assert dead not in text, f"{doc_name} must not resurrect the dead bypass {dead}"
+
+
+def test_orchestrator_only_gh_delegation_documented_consistently():
+    """The (Alex tg#7103) contract — orchestrator-stays-thin delegates ALL `gh` (incl. `gh ship`,
+    `gh pr`) to a subagent, and warns on a first offense before blocking a repeat — must be stated
+    the same way across all four hand-copied prose surfaces (a Fable review finding: AGENTS.md
+    once said 'warned-then-blocked' while the other three just said 'blocks', understating the
+    real behavior; someone reverting one surface to the old wording would pass every other check
+    in this file)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    agents_md = (repo_root / "AGENTS.md").read_text()
+    config_schema_md = (repo_root / "docs" / "config-schema.md").read_text()
+    props = _agent_hooks_schema_props()
+    surfaces = {
+        "AGENTS.md": agents_md,
+        "docs/config-schema.md": config_schema_md,
+        "riglib/schema.py (wizard hint)": schema.option_for_key("agent_hooks.orchestrator_only").hint,
+        "riglib/config_schema.py (schema description)": props["orchestrator_only"]["description"],
+    }
+    for doc_name, raw_text in surfaces.items():
+        # Markdown line-wraps a long sentence, so "delegated to a subagent" can land split across
+        # a newline in the checked-in prose (AGENTS.md's 90-col wrapping does exactly this) —
+        # collapse whitespace before the substring check so wrapping doesn't produce a false fail.
+        text = " ".join(raw_text.split())
+        # "gh ship"/"gh pr" alone would also match the OLD (pre-tg#7103) wording, where they meant
+        # the OPPOSITE thing (allowed as inline orchestration) — assert the phrase that only holds
+        # under the NEW contract, so a revert to the old wording actually fails this test.
+        assert "delegated to a subagent" in text and "gh ship" in text and "gh pr" in text, (
+            f"{doc_name} must say gh ship/gh pr are delegated to a subagent, not just mention them"
+        )
+        assert "warn" in text.lower(), f"{doc_name} must describe the warn-first-then-block behavior"
+
+
 def test_wizard_can_toggle_both_knobs():
     """The wizard/`config set` coercion + effective-value path must round-trip both knobs, i.e.
     they are actually settable, not just visible."""

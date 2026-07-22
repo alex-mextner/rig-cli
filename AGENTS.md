@@ -154,10 +154,8 @@ should hard-code agent-tools paths.
 ## Harness workflow guards (worktree-only + orchestrator-only)
 
 `rig apply` installs agent-hooks from THREE hook directories (from agent-tools, via
-`agent_hooks.all`) that provision the harness workflow — though as the `orchestrator_only` entry
-below notes, one of those directories currently only gets HALF its descriptors installed (a
-separate catalog bug, agent-tools#184). Each is configured PER REPO by a boolean in that repo's
-committed `rig.yaml`
+`agent_hooks.all`) that provision the harness workflow. Each is configured PER REPO by a boolean
+in that repo's committed `rig.yaml`
 (the hook scripts self-read `agent_hooks.<key>` at fire time — `rig apply` does not consume the
 value, so changing enforcement needs no re-apply):
 
@@ -177,16 +175,23 @@ value, so changing enforcement needs no re-apply):
   true`); leave it off for repos that legitimately work on main (`3d-cli`). **Caution when
   enrolling a repo**: audit any sanctioned automated flow (release scripts, `gh ship` wrappers)
   for a `git checkout`/`switch` to a non-default branch in the primary checkout FIRST — this
-  guard will block it too, with no special-casing. Escape hatch (both hooks):
-  `RIG_ALLOW_MAIN_EDIT=1`. (Alex tg#5742, tg#6462/tg#6477.)
+  guard will block it too, with no special-casing. No self-service env bypass — each hook has its
+  OWN hatch var, not a shared one: a deliberate one-off Edit/Write on main is requested via
+  `RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES="<justification>"`; a one-off `git checkout`/`switch` in
+  the primary checkout is requested separately via
+  `RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE="<justification>"` (both: tg approval, deny-by-default,
+  bare `1` rejected). (Alex tg#5742, tg#6462/tg#6477.)
 - **`agent_hooks.orchestrator_only`** (default **true**, opt-OUT) — the `orchestrator-stays-thin`
-  hook blocks inline implementation by the main thread while allowing read-only inspection and
-  orchestration (`gh pr list/view/checks`, `gh ship`, `tg`, `review`, `git worktree list`). Set
-  `false` to exempt a repo. Escape hatch: `ALLOW_ORCHESTRATOR_WORK=1` + reason. (Alex tg#5743.)
-  Known gap (agent-tools#184): this hook ships a `pre-write` descriptor alongside its
-  `pre-bash` one, but the catalog's one-descriptor-per-directory scan only ever installs the
-  first alphabetically (`pre-bash`) — the `pre-write` half (inline CODE edits) has never
-  actually been provisioned.
+  hook warns on the first implementation-shaped Bash/code-Edit by the main thread, then blocks a
+  repeat within its TTL (both descriptors, `pre-bash` and `pre-write`, are provisioned — the
+  catalog installs every descriptor a hook directory ships, not just the first alphabetically).
+  Read-only inspection (`git status`/`ls`/`cat`/`grep`/`find`, `git worktree list`) is never
+  gated; `tg`/`review` are sanctioned orchestration, also never gated. **ALL `gh` is delegated to
+  a subagent, not inline orchestrator work** — `gh ship`, `gh pr list/view/checks`, `gh run`,
+  `gh api` included; the main thread issuing any of these is warned-then-blocked the same as any
+  other implementation-shaped Bash. Set `false` to exempt a repo. No self-service env bypass; a
+  one-off is requested via `RIG_HATCH_REQUEST_ORCHESTRATOR_STAYS_THIN="<justification>"` (tg
+  approval, deny-by-default; bare `1` rejected). (Alex tg#5743, tg#7103.)
 
 All three are complementary to the pre-push `protect-main` git-hook: that blocks a *push* to
 main, these block the *authoring* / inline work that precedes it. Scope note: these are Claude
