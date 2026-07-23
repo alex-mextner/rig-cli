@@ -1115,8 +1115,11 @@ _PERMISSIONS_KEYS = {"enabled", "kind", "tools", "extra", "disable", "settings_p
 # (_VALID_HARNESS_KINDS), since opencode HAS an additively-mergeable allowlist even though its
 # auto-mode write is not yet implemented. codex/pi have no such mechanism → recorded N/A
 # (rejected here with a clear message rather than silently writing nothing / breaking the harness).
-_VALID_PERMISSIONS_KINDS = {"claude-code", "opencode"}
-_NA_PERMISSIONS_KINDS = {"codex", "pi"}
+# claude-code/opencode provision permissions via a config allowlist; pi provisions them via the
+# `permission-guard` extension + a rig-written policy file (no config allowlist, but the same
+# deny/ask effect) — all three are VALID targets for permissions.kind.
+_VALID_PERMISSIONS_KINDS = {"claude-code", "opencode", "pi"}
+_NA_PERMISSIONS_KINDS = {"codex"}
 # A pre-allowed tool is a single command token: it must START with an alphanumeric or ``/`` (an
 # absolute path) — never a dash (a leading-dash entry like ``-rf`` / ``--flag`` would render a
 # nonsensical/surprising allowlist entry) — and otherwise contain only letters, digits, and the

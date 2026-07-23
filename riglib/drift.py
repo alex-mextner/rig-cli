@@ -44,6 +44,7 @@ from .actions.runner import (
     desired_permission_specs,
     execpolicy_block_text,
     execpolicy_rules_file,
+    pi_extension_policy_json,
     find_managed_bridge_hook,
     github_actions_state,
     github_ghas_state,
@@ -166,6 +167,8 @@ def detect(
             _check_permissions(action, report, self_merge_owned=permissions_settings_file(action) in self_merge_files)
         elif action.kind == "provision_execpolicy":
             _check_execpolicy(action, report)
+        elif action.kind == "provision_pi_extension":
+            _check_pi_extension(action, report)
         elif action.kind == "register_hook_bridge":
             _check_hook_bridge(action, report)
         elif action.kind == "provision_schedule":
@@ -1209,6 +1212,41 @@ def _report_container_extras(
         if rep_spec.role == "allow" and self_merge_owned:
             extras = [e for e in extras if e not in SELF_MERGE_PERMISSIONS_ALLOW]
         _report_permission_extras(action, rep_spec, extras, config_file, report)
+
+
+def _check_pi_extension(action: Action, report: DriftReport) -> None:
+    """Flag drift for the pi ``permission-guard`` extension provisioning (two managed artifacts).
+
+    missing  — the installed extension dir is absent, OR the policy file is absent. ``rig apply``
+               installs/writes them.
+    modified — the installed extension dir differs from the agent-tools source (stale copy), OR the
+               policy file's content differs from the rig-desired JSON (hand-edited/outdated).
+
+    Uses the SAME serializer (:func:`pi_extension_policy_json`) and identity check the install
+    handler uses, so apply and status never disagree on what rig manages.
+    """
+    ext_name = str(action.options.get("extension", "permission-guard"))
+    if not action.target.is_dir():
+        report.items.append(
+            DriftItem("missing", "permissions", action.item, action.target, f"pi extension '{ext_name}' not installed")
+        )
+    elif not fsutil.dirs_identical(action.source, action.target):
+        report.items.append(
+            DriftItem(
+                "modified", "permissions", action.item, action.target,
+                f"installed pi extension '{ext_name}' differs from the agent-tools source",
+            )
+        )
+    policy_file = Path(str(action.options["policy_file"]))
+    desired = pi_extension_policy_json(action)
+    if not policy_file.is_file():
+        report.items.append(
+            DriftItem("missing", "permissions", action.item, policy_file, "pi permission policy file not written")
+        )
+    elif policy_file.read_text(encoding="utf-8") != desired:
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, policy_file, "pi permission policy file differs from rig-desired")
+        )
 
 
 def _resolve_permission_container(data: dict, ps) -> tuple[object, str | None]:

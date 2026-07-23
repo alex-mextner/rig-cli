@@ -334,6 +334,12 @@ def fake_agent_tools(tmp_path: Path) -> Path:
     # test_fake_catalog_never_fabricates_a_removed_slot guard fails if this regresses.
     _write(root / "mcp" / "fake-mcp" / "README.md", "# fake-mcp\nsynthetic mcp fixture\n")
 
+    # a pi extension: the permission-guard parity mechanism (pi has no built-in permission system).
+    # Requires an index.ts entry to be a discoverable extension; carries a README for its description.
+    _write(root / "pi-extensions" / "permission-guard" / "index.ts", "export default function () {}\n")
+    _write(root / "pi-extensions" / "permission-guard" / "policy.ts", "export const DEFAULT_POLICY = {};\n")
+    _write(root / "pi-extensions" / "permission-guard" / "README.md", "# permission-guard\npi permission enforcement\n")
+
     # the model-freshness checker the `models:` schedule runs (its presence is checked by
     # plan._build_models before it provisions a cron).
     _write(root / "lib" / "checker" / "model_freshness.py", "#!/usr/bin/env python3\n")
