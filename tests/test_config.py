@@ -560,7 +560,7 @@ def test_validate_accepts_all_supported_harness_kinds():
     # ACCEPTED in harness.kind (skills-dir harnesses claude-code/opencode + instruction-file
     # harnesses codex/pi/commandcode). Previously opencode (and the rest) were rejected.
     # gemini is DEPRECATED (removed everywhere) — see the dedicated rejection test below.
-    for kind in ("claude-code", "opencode", "codex", "pi", "commandcode"):
+    for kind in ("claude-code", "opencode", "codex", "pi", "commandcode", "omp"):
         config.validate({"version": 1, "harness": {"kind": kind}})
 
 

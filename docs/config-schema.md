@@ -215,6 +215,7 @@ and harnesses split into three families by *how* they discover skills:
   so a copied skill is already visible and rig links **nothing**. `rig status` reports
   *discovers natively* instead of a pointless symlink:
   - **opencode** → auto-loads `~/.agents/skills` (and `~/.claude/skills`) natively since ≥1.16
+  - **omp** → its built-in `agents` discovery provider auto-loads `~/.agents/skills/<name>/SKILL.md` natively
 - **instruction-file harnesses** have **no** per-skill directory; their guidance comes from a
   single global instruction file, not from a symlink. rig links **nothing** for these (it never
   invents a directory) and `rig status` reports the kind as *N/A — uses `<file>`* so the empty
@@ -484,7 +485,7 @@ are installed in the same apply and catch the dangerous tool calls before the si
 ```yaml
 harness:
   enabled: true
-  kind: claude-code            # skills-dir: claude-code | codex · native: opencode · instruction-file: pi | commandcode
+  kind: claude-code            # skills-dir: claude-code | codex · native: opencode | omp · instruction-file: pi | commandcode
   # kinds: [codex]             # optional additional harnesses to provision alongside kind
   auto_mode: true              # true → auto-accept tool calls; false → interactive prompts (claude-code write only)
   self_merge: true             # auto-mode: let the agent self-merge its OWN PRs via gh ship (permissions.allow ship rules + autoMode.allow carve-out)
@@ -498,7 +499,7 @@ harness:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the harness setting (set `false` to leave the harness config untouched) |
-| `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`) auto-loads `~/.agents/skills`; instruction-file (`pi`, `commandcode`) get their skill discovery via `AGENTS.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
+| `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`, `omp`) auto-loads `~/.agents/skills`; instruction-file (`pi`, `commandcode`) get their skill discovery via `AGENTS.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
 | `kinds` | list | `[]` | additional harnesses to provision alongside `kind`. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, supported hook bridges, and supported permissions allowlists. `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one explicit target; supported bridges stay registered with a descriptor-dir override |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `self_merge` | bool | `true` | auto-mode self-merge unblock. `true` adds the ship allow rules (`Bash(gh ship:*)`, `Bash(*/pr-ship.sh:*)`, `Bash(*/ship.sh:*)`) to `permissions.allow` so the auto-mode Bash gate stops vetoing `gh ship`, AND appends a `$defaults`-preserving carve-out to `autoMode.allow` clearing the Merge-Without-Review + Self-Approval soft blocks for the agent's OWN PRs. Effective only under auto-mode; inert otherwise. The `Bash(gh pr merge:*)` deny and every other classifier rule — notably the anti-exfil hard rule — stay (`gh ship` is still the only merge path) |
@@ -543,7 +544,7 @@ its own PR). An agent cannot write these to its own live settings (that trips th
 soft block) — run `rig apply` yourself to activate it.
 
 **Auto-mode write is claude-code-only (for now).** `kind: opencode` (and `codex`/
-`pi`/`commandcode`) are now **accepted** — rig provisions their **skill discovery** (see
+`pi`/`commandcode`/`omp`) are now **accepted** — rig provisions their **skill discovery** (see
 [Harness skill discovery](#harness-skill-discovery-why-harness_link)). But the auto/permission-
 **mode** write is still implemented only for `claude-code`. If you set `auto_mode`/`mode` on a
 kind without a mode-writer yet, rig **skips that write and says so** in a plan note (its skills
@@ -580,7 +581,7 @@ Claude and Codex bridge commands run `PYTHONPATH=<agent-tools>/lib python3 -m <b
 <Event>` from the harness config; opencode loads the JS plugin, which shells into the Python
 bridge with the same `PYTHONPATH`. The merge/symlink is idempotent and preserves unrelated
 config; `rig status` reports the bridge as missing/stale drift if a managed hook is absent or
-points at an old checkout. Pi and CommandCode still skip the bridge with a note when
+points at an old checkout. Pi, CommandCode, and omp still skip the bridge with a note when
 explicitly enabled.
 
 When `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one custom
@@ -672,7 +673,7 @@ permissions:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the permissions layer (set `false` to leave the harness config untouched) |
-| `kind` | `claude-code` \| `opencode` \| `null` | supported `harness.kind` plus `harness.kinds`, else `claude-code` | which harness's permissions to provision. When absent or `null`, rig fans out to every configured harness kind with a supported additive allowlist and records N/A notes for unsupported kinds. Set `permissions.kind` to target one supported harness explicitly; `codex`/`pi` are rejected (N/A) |
+| `kind` | `claude-code` \| `opencode` \| `null` | supported `harness.kind` plus `harness.kinds`, else `claude-code` | which harness's permissions to provision. When absent or `null`, rig fans out to every configured harness kind with a supported additive allowlist and records N/A notes for unsupported kinds. Set `permissions.kind` to target one supported harness explicitly; `codex`/`pi`/`omp`/`commandcode` are rejected (N/A) |
 | `tools` | str[] | the default set | the command names to pre-allow; **replaces** the default set wholesale |
 | `extra` | str[] | `[]` | command names to ADD on top of the (default or explicit) set |
 | `disable` | str[] | `[]` | command names to drop from rig's **desired** set, so rig won't ADD them. NB: this is additive-only — it does NOT delete an entry already in your allowlist (rig never removes the user's entries; that stays your call) |

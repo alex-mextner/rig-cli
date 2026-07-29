@@ -26,6 +26,11 @@ Each harness expresses "auto-allow command ``foo`` and its subcommands" in a DIF
   additive-array allowlist. Recorded N/A *here* (the allowlist registry); provisioned there.
 - **pi** — N/A. No documented per-command auto-approve allowlist that leaves the toolset intact;
   recorded N/A rather than write a setting that could break the harness.
+- **omp** — N/A. Approval is per-TOOL (``tools.approval.<tool>: allow|deny|prompt`` in
+  ``~/.omp/agent/config.yml``), not a per-command allowlist — there is no command-token list
+  for rig to additively merge.
+- **commandcode** — N/A. No documented per-command auto-approve allowlist; recorded N/A
+  rather than write a setting that could break the harness.
 
 Keeping the per-harness shape behind :data:`HARNESS_ALLOWLISTS` means the plan/runner/drift code
 keys off ``harness.kind`` exactly like the existing skill/hook provisioning, and a new harness is
@@ -160,6 +165,11 @@ HARNESS_ALLOWLIST_NA: dict[str, str] = {
         "mechanism rig does not additively merge"
     ),
     "pi": "no documented command-allowlist mechanism",
+    "omp": (
+        "approval is per-tool (tools.approval.<tool> in ~/.omp/agent/config.yml), not a "
+        "per-command allowlist — no command-token list to merge"
+    ),
+    "commandcode": "no documented command-allowlist mechanism",
 }
 
 

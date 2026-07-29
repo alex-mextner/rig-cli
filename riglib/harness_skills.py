@@ -36,6 +36,9 @@ Harnesses split into three families by HOW they surface skills:
     - **opencode** → auto-loads ``~/.agents/skills`` (and ``~/.claude/skills``) natively since
       ≥1.16. Its older ``~/.config/opencode/skill`` link target was never created on disk and is
       unnecessary when skills install to the default target.
+    - **omp** → its built-in ``agents`` discovery provider auto-loads
+      ``~/.agents/skills/<name>/SKILL.md`` natively (the canonical OMP-native location), so rig
+      links nothing, same as opencode.
 
 - **instruction-file harnesses** — they have NO per-skill discovery directory; agent guidance
   reaches them through a single global INSTRUCTION FILE (``AGENTS.md``), not
@@ -80,8 +83,12 @@ HARNESS_SKILL_DIR_KINDS: tuple[str, ...] = (*HARNESS_SKILL_DIRS, "codex")
 #   - **opencode** — opencode ≥1.16 auto-loads ``~/.agents/skills/<name>/SKILL.md`` (and
 #     ``~/.claude/skills``) with no config. Its older ``~/.config/opencode/skill`` link target was
 #     never created on disk and is unnecessary when skills install to the default target.
+#   - **omp** — omp's built-in ``agents`` discovery provider auto-loads
+#     ``~/.agents/skills/<name>/SKILL.md`` natively (the canonical OMP-native location), so rig
+#     links nothing, same as opencode.
 HARNESS_NATIVE_SKILLS: dict[str, str] = {
     "opencode": "~/.agents/skills",
+    "omp": "~/.agents/skills",
 }
 
 # ── instruction-file harnesses: no per-skill discovery dir; guidance via a global file ───────

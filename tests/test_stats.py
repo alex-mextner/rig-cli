@@ -866,10 +866,10 @@ def test_repo_filter_normalizes_trailing_slash(tmp_path):
 
 
 # ── registry behavior (review finding #21) ───────────────────────────────────────────────
-def test_registry_lists_all_four_in_import_order():
+def test_registry_lists_all_sources_in_import_order():
     from riglib.stats.sources import source_names
 
-    assert source_names() == ["claude-code", "codex", "gemini", "opencode"]
+    assert source_names() == ["claude-code", "codex", "gemini", "omp", "opencode"]
 
 
 def test_register_rejects_nameless_source():

@@ -391,7 +391,7 @@ def _add_stats_parser(sub: "argparse._SubParsersAction") -> None:
         "--harness", action="append", metavar="NAME",
         # kept generic (not an exhaustive list) so it can't drift as parsers are added; the
         # authoritative set is data-driven from the registered sources at run time.
-        help="limit to a harness (repeatable), e.g. claude-code / codex / gemini / opencode",
+        help="limit to a harness (repeatable), e.g. claude-code / codex / gemini / omp / opencode",
     )
     show.add_argument(
         "--repo", action="append", metavar="PATH",

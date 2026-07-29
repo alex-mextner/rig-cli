@@ -96,8 +96,8 @@ when a lifecycle verb actually needs it). The server binds `127.0.0.1` only and 
 - **Per-harness skill/instruction discovery is one registry: `riglib/harness_skills.py`.** It
   maps `harness.kind` to one or more discovery surfaces: skills directories (claude-code →
   `~/.claude/skills`, codex → `~/.codex/skills`; rig symlinks each skill in via a
-  `link_skill_harness` action), native discovery (opencode auto-loads `~/.agents/skills`, so rig
-  records a note and links nothing when skills install to the default target), and global
+  `link_skill_harness` action), native discovery (opencode and omp auto-load `~/.agents/skills`,
+  so rig records a note and links nothing when skills install to the default target), and global
   instruction files (codex/pi/commandcode → `AGENTS.md`). Codex is dual:
   `~/.codex/skills` carries skills and `~/.codex/AGENTS.md` carries global instructions. Add a
   new harness as one entry there — never scatter the path across plan/config/schema. The config
