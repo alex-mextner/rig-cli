@@ -499,6 +499,21 @@ def test_drift_approval_compatible_unmanaged_is_not_drift(fake_agent_tools, tmp_
     assert not [d for d in rep.items if "approval" in d.detail], [d.detail for d in rep.items]
 
 
+def test_drift_approval_unreadable_config_is_modified_not_traceback(fake_agent_tools, tmp_path, monkeypatch):
+    """Invalid UTF-8 in config.yml must surface as modified drift — rig status must not
+    abort with an uncaught UnicodeDecodeError/OSError."""
+    home = tmp_path / "home"
+    cfg_yml = _config_yml(home)
+    cfg_yml.parent.mkdir(parents=True)
+    cfg_yml.write_bytes(b"tools:\n  approvalMode: \xff\xfe\n")  # invalid UTF-8
+    _pin_home(monkeypatch, home)
+    repo = tmp_path / "repo"; repo.mkdir(exist_ok=True)
+    cfg = _omp_cfg(repo, fake_agent_tools)
+    rep = detect(build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown"))
+    assert any(d.direction == "modified" and "unreadable" in d.detail for d in rep.items), \
+        [d.detail for d in rep.items]
+
+
 def test_drift_instruction_policy_missing_and_clean(fake_agent_tools, tmp_path, monkeypatch):
     home, rep = _detect_omp(fake_agent_tools, tmp_path, monkeypatch, kind="pi")
     assert any(d.direction == "missing" and "policy" in d.detail for d in rep.items)

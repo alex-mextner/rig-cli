@@ -1421,6 +1421,12 @@ def _check_harness_approval(action: Action, report: DriftReport) -> None:
         return
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path,
+                      "approval config is unreadable (permissions/encoding) — fix it by hand")
+        )
+        return
     except yaml.YAMLError:
         report.items.append(
             DriftItem("modified", "permissions", action.item, path,
