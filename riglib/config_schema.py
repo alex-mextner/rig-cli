@@ -40,7 +40,7 @@ from .harness_skills import (
 from .project_tools import HAFT_WORKFLOW_MODES
 
 # Every harness kind rig provisions skill/instruction discovery for, listed skills-dir kinds first
-# (claude-code, codex) then native-discovery (opencode) then instruction-file kinds (pi,
+# (claude-code, codex) then native-discovery (opencode, omp) then instruction-file kinds (pi,
 # commandcode) — a stable, readable order for the published JSON-schema enum. Sourced from
 # :mod:`riglib.harness_skills` so the schema enum can never drift from what ``config.validate``
 # accepts.
@@ -376,7 +376,7 @@ _HARNESS_BLOCK = Block(
         "enabled": Leaf("boolean", "provision the harness setting", default=True),
         "kind": Leaf(
             "string",
-            "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode; "
+            "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode/omp; "
             "instruction-file: pi/commandcode; codex is also instruction-file via AGENTS.md). "
             "The auto/permission-MODE write is "
             "claude-code-only today; other kinds still get their skill discovery provisioned.",
@@ -428,7 +428,7 @@ _PERMISSIONS_BLOCK = Block(
             ("string", "null"),
             "which harness's permissions to provision; null/absent means fan out to supported "
             "harness.kind plus harness.kinds",
-            enum=("claude-code", "opencode", None),
+            enum=("claude-code", "opencode", "codex", "omp", "pi", "commandcode", None),
         ),
         "tools": Leaf("array", "command names to pre-allow (replaces the default set)", items_type="string"),
         "extra": Leaf("array", "command names to ADD on top of the set", items_type="string"),

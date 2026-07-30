@@ -26,6 +26,16 @@ Each harness expresses "auto-allow command ``foo`` and its subcommands" in a DIF
   additive-array allowlist. Recorded N/A *here* (the allowlist registry); provisioned there.
 - **pi** — N/A. No documented per-command auto-approve allowlist that leaves the toolset intact;
   recorded N/A rather than write a setting that could break the harness.
+- **omp** — no per-command allowlist (approval is per-TOOL: ``tools.approval.<tool>``
+  with ``allow|deny|prompt`` in ``~/.omp/agent/config.yml``), but command-granular deny/ask IS
+  deliverable: omp auto-discovers TS extensions whose ``tool_call`` handler can block a bash
+  call before execution. rig provisions that surface — a GENERATED guard extension
+  (:data:`HARNESS_GUARD`, the ``install_harness_guard`` action) carrying the deny/ask
+  baseline, plus the declarative approval posture (:data:`HARNESS_APPROVAL`). Recorded N/A
+  *here* (the allowlist registry); provisioned there (rig-cli#202).
+- **commandcode** — N/A. No documented per-command auto-approve allowlist; recorded N/A
+  rather than write a setting that could break the harness. Its deny/ask INTENT ships as an
+  advisory AGENTS.md block (:data:`HARNESS_INSTRUCTION_POLICY`).
 
 Keeping the per-harness shape behind :data:`HARNESS_ALLOWLISTS` means the plan/runner/drift code
 keys off ``harness.kind`` exactly like the existing skill/hook provisioning, and a new harness is
@@ -38,6 +48,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable
+
+from .harness_skills import HARNESS_INSTRUCTION_FILES, omp_agent_root
 
 # ── the default tool list — our ecosystem CLIs + read-only helper tools ─────────────────────
 # CONFIG-DRIVEN: this is the DEFAULT set rig pre-allows; a config ``permissions.tools`` replaces
@@ -160,12 +172,193 @@ HARNESS_ALLOWLIST_NA: dict[str, str] = {
         "mechanism rig does not additively merge"
     ),
     "pi": "no documented command-allowlist mechanism",
+    "omp": (
+        "approval is per-tool (tools.approval.<tool> in ~/.omp/agent/config.yml), not a "
+        "per-command allowlist — no command-token list to merge"
+    ),
+    "commandcode": "no documented command-allowlist mechanism",
 }
 
 
 def harness_supported(kind: str) -> bool:
     """True when rig can provision an allowlist for ``kind`` (else N/A — see HARNESS_ALLOWLIST_NA)."""
     return kind in HARNESS_ALLOWLISTS
+
+
+# ── omp guard rules — the command-granular deny/ask baseline as STRUCTURED data ─────────────
+# The single source the omp TS guard extension is GENERATED from (riglib.omp_guard renders it;
+# nothing is hand-copied). Each rule carries the same INTENT as the claude-code/opencode belts
+# but matches at the ARGV level (the TS hook tokenizes the full command), which is strictly more
+# precise than prefix globs: ``git push --force`` matches the exact ``--force`` token anywhere in
+# the stage's argv, so ``--force-with-lease`` (the safe force) never false-positives, and
+# ``git commit --no-verify`` is caught in ANY flag position — the case the claude glob belt had
+# to leave hook-only.
+#
+# Matcher families (any-of ``flags`` semantics: at least one exact token present):
+#   ``argv_prefix``      — a pipeline stage whose LEADING tokens equal ``tokens`` (after
+#                          stripping leading VAR=val env assignments)
+#   ``subcommand_flags`` — a ``tokens[0] tokens[1]`` stage carrying at least one of ``flags``
+#                          as an exact argv token anywhere
+# ``hint`` is the block/confirm reason: static text, NEVER command contents (a command can
+# carry secrets; reasons must not). KNOWN GAP (documented, same class as the glob belts):
+# wrapper indirection (``sh -c '…'``, ``env -S '…'``, command substitution ``$(…)``,
+# subshells, copied binaries, aliases, ``xargs``) hides the command string from argv
+# matching — the guard covers model-issued tool calls in trusted repositories; it is not
+# a sandbox.
+@dataclass(frozen=True)
+class GuardRule:
+    """One command-granular guard rule — harness-agnostic INTENT, rendered per harness."""
+
+    id: str
+    hint: str
+    matcher: str  # "argv_prefix" | "subcommand_flags" | "flag_value_prefix"
+    tokens: tuple[str, ...] = ()
+    flags: tuple[str, ...] = ()
+    value_prefixes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # shape invariants — the generated TS matcher assumes them, and a silent mis-match
+        # in a security guard is worse than a loud construction error.
+        if self.matcher == "argv_prefix":
+            if not self.tokens or self.flags or self.value_prefixes:
+                raise ValueError(f"guard rule {self.id!r}: argv_prefix needs tokens only")
+        elif self.matcher == "subcommand_flags":
+            if len(self.tokens) != 2 or not self.flags or self.value_prefixes:
+                raise ValueError(
+                    f"guard rule {self.id!r}: subcommand_flags needs exactly 2 tokens + flags"
+                )
+        elif self.matcher == "flag_value_prefix":
+            # tokens[0] is the program; any of ``flags`` whose FOLLOWING token starts with
+            # one of ``value_prefixes`` matches (git -c core.hooksPath=/dev/null …).
+            if len(self.tokens) != 1 or not self.flags or not self.value_prefixes:
+                raise ValueError(
+                    f"guard rule {self.id!r}: flag_value_prefix needs 1 token + flags + value_prefixes"
+                )
+        else:
+            raise ValueError(f"guard rule {self.id!r}: unknown matcher {self.matcher!r}")
+
+
+OMP_GUARD_DENY_RULES: tuple[GuardRule, ...] = (
+    # raw PR merges are banned machine-wide — merges go through `gh ship` (the gated delegator)
+    GuardRule("gh-pr-merge", "raw PR merges are banned — use `gh ship` (the gated delegator)",
+              "argv_prefix", ("gh", "pr", "merge")),
+    # force-push; `--force-with-lease` (the safe force) can never match: it is a DIFFERENT exact
+    # token, so any-of ("--force", "-f") stays precise with no exclusion list needed
+    GuardRule("git-push-force", "force-push is banned — the safe force is --force-with-lease",
+              "subcommand_flags", ("git", "push"), ("--force", "-f")),
+    # hook-bypass commits — caught in ANY flag position (the gap the claude glob belt documents)
+    GuardRule("git-commit-no-verify", "hook-bypass commits are banned (--no-verify skips the gates)",
+              "subcommand_flags", ("git", "commit"), ("--no-verify",)),
+    # config-injection evasion: `git -c core.hooksPath=/dev/null commit` bypasses the hook
+    # gates WITHOUT --no-verify, and `-c alias.x=…` rewrites command semantics — the matcher
+    # treats -c as transparent for matching, so this must be its OWN deny rule
+    GuardRule("git-config-injection", "git -c config overrides that disable hooks or rewrite commands are banned",
+              "flag_value_prefix", ("git",), ("-c", "--config"), ("core.hooksPath=", "alias.")),
+    # no legitimate agent flow removes files as root
+    GuardRule("sudo-rm", "removing files as root is banned",
+              "argv_prefix", ("sudo", "rm")),
+    # screenshots go through Playwright/CDP; `screencapture` black-frames windows on other
+    # Spaces and trips macOS Screen Recording grants (the documented hard rule)
+    GuardRule("screencapture", "screenshots go through Playwright/CDP, not screencapture",
+              "argv_prefix", ("screencapture",)),
+)
+
+# ask = sometimes-legit: confirm with the operator when a UI exists; BLOCK headless (a prompt
+# nobody can answer must never auto-approve).
+OMP_GUARD_ASK_RULES: tuple[GuardRule, ...] = (
+    # broad pattern-kills have nuked OTHER sessions' work before (never-broad-pkill doctrine);
+    # reaping one's OWN strays is legit — hence ask, not deny
+    GuardRule("pkill", "broad pattern-kills have nuked other sessions' work before",
+              "argv_prefix", ("pkill",)),
+    GuardRule("killall", "broad pattern-kills have nuked other sessions' work before",
+              "argv_prefix", ("killall",)),
+    # `git reset --hard` has destroyed uncommitted work before
+    GuardRule("git-reset-hard", "git reset --hard has destroyed uncommitted work before",
+              "subcommand_flags", ("git", "reset"), ("--hard",)),
+)
+
+
+@dataclass(frozen=True)
+class HarnessGuard:
+    """How ONE harness receives a GENERATED command-granular guard (omp TS extension).
+
+    ``extension_name`` is the wholly rig-owned file written under the harness's
+    auto-discovered extensions dir (``<agent root>/extensions/``); ``root`` resolves that
+    agent root (unexpanded), so the plan never hard-codes a harness's env contract. The
+    content is codegen'd from :data:`OMP_GUARD_DENY_RULES` / :data:`OMP_GUARD_ASK_RULES` by
+    :mod:`riglib.omp_guard` — one registry, one renderer, no hand-copied lists.
+    """
+
+    kind: str
+    extension_name: str
+    root: Callable[[], str]
+
+
+HARNESS_GUARD: dict[str, HarnessGuard] = {
+    "omp": HarnessGuard(kind="omp", extension_name="rig-permissions-guard.ts", root=omp_agent_root),
+}
+
+
+def guard_supported(kind: str) -> bool:
+    """True when rig can provision a generated guard extension for ``kind`` (omp today)."""
+    return kind in HARNESS_GUARD
+
+
+def guard_extension_path_for(kind: str) -> str:
+    """The ONE canonical (unexpanded) guard extension path for ``kind`` — plan, the runner's
+    interlock fallback, and drift all derive from this so they can never resolve differently."""
+    spec = HARNESS_GUARD[kind]
+    return f"{spec.root()}/extensions/{spec.extension_name}"
+
+
+@dataclass(frozen=True)
+class HarnessApproval:
+    """The declarative approval posture rig merges into a harness's config file.
+
+    ``config_name`` is relative to the harness's agent root (``root`` resolves it,
+    unexpanded); ``keys`` are ``(dotted_key_path, desired_scalar)`` pairs merged ADDITIVELY
+    (set only when absent — a user's differing value is drift, never clobbered; a matching
+    value without rig's receipt is 'compatible unmanaged', adopted not rewritten).
+    """
+
+    kind: str
+    config_name: str
+    keys: tuple[tuple[tuple[str, ...], str], ...]
+    root: Callable[[], str]
+
+
+# omp: approvalMode made EXPLICIT so the posture is declarative and drift-checkable. Parity
+# with claude-code is auto_mode:true + the guard belt — NOT a prompt-per-bash floor (owner
+# decision, rig-cli#202): the guard extension is the enforcement layer; the YAML is posture.
+HARNESS_APPROVAL: dict[str, HarnessApproval] = {
+    "omp": HarnessApproval(
+        kind="omp",
+        config_name="config.yml",
+        keys=((("tools", "approvalMode"), "yolo"),),
+        root=omp_agent_root,
+    ),
+}
+
+
+def approval_supported(kind: str) -> bool:
+    """True when rig can provision a declarative approval posture for ``kind`` (omp today)."""
+    return kind in HARNESS_APPROVAL
+
+
+# Instruction-file harnesses get the deny/ask INTENT as an ADVISORY managed block in their
+# global instruction file — worded as advisory, never claimed as execution-layer enforcement.
+# Membership is EXPLICIT (NOT "every harness with an instruction file"): adding an entry to
+# HARNESS_INSTRUCTION_FILES must never silently start splicing policy into a tier-1 harness's
+# file. Paths are sourced from the harness_skills registry (one owner of the file locations).
+HARNESS_INSTRUCTION_POLICY: dict[str, str] = {
+    "pi": HARNESS_INSTRUCTION_FILES["pi"],
+    "commandcode": HARNESS_INSTRUCTION_FILES["commandcode"],
+}
+
+
+def instruction_policy_supported(kind: str) -> bool:
+    """True when rig can provision an advisory instruction policy for ``kind`` (pi/commandcode)."""
+    return kind in HARNESS_INSTRUCTION_POLICY
 
 
 # ── deny / ask baselines — the OUTER enforcement belt (rig-cli#100) ──────────────────────────
@@ -434,3 +627,33 @@ def execpolicy_rule_lines(kind: str, tools: list[str]) -> list[str]:
             lines.append(line)
     lines.extend(_render_codex_deny(p) for p in spec.deny_rules)
     return lines
+
+
+# ── enforcement tiers — the honest per-harness permissions vocabulary (rig-cli#202) ──────────
+# Replaces the flat N/A in the permissions matrix: EVERY known harness has a tier, and "N/A"
+# is only ever a CELL (one mechanism a harness lacks), never a harness verdict.
+#   1 = command-granular ENFORCED (deny/ask belt executed below the model)
+#   2 = tool-granular (approval per tool, no command granularity) — reserved; no harness today
+#   3 = ADVISORY (intent recorded in the instruction file; the agent self-enforces)
+def _derive_permission_tiers() -> dict[str, int]:
+    """The tier of every known kind, DERIVED from registry membership (never hand-maintained —
+    a kind listed tier 1 without a real enforcement surface would be a silent lie):
+    allowlist / execpolicy / guard surfaces → 1; approval posture WITHOUT a guard → 2;
+    advisory instruction policy → 3."""
+    tiers: dict[str, int] = {}
+    for kind in (*HARNESS_ALLOWLISTS, *HARNESS_EXECPOLICY, *HARNESS_GUARD):
+        tiers[kind] = 1
+    for kind in HARNESS_APPROVAL:
+        tiers.setdefault(kind, 2)  # tool-granular only when no command-granular guard
+    for kind in HARNESS_INSTRUCTION_POLICY:
+        tiers[kind] = 3
+    return tiers
+
+
+HARNESS_PERMISSION_TIERS: dict[str, int] = _derive_permission_tiers()
+
+TIER_LABELS: dict[int, str] = {
+    1: "command-granular enforced",
+    2: "tool-granular",
+    3: "advisory",
+}

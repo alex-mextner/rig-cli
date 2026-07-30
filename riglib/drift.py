@@ -166,6 +166,12 @@ def detect(
             _check_permissions(action, report, self_merge_owned=permissions_settings_file(action) in self_merge_files)
         elif action.kind == "provision_execpolicy":
             _check_execpolicy(action, report)
+        elif action.kind == "install_harness_guard":
+            _check_harness_guard(action, report)
+        elif action.kind == "provision_harness_approval":
+            _check_harness_approval(action, report)
+        elif action.kind == "provision_instruction_policy":
+            _check_instruction_policy(action, report)
         elif action.kind == "register_hook_bridge":
             _check_hook_bridge(action, report)
         elif action.kind == "provision_schedule":
@@ -1350,6 +1356,183 @@ def _check_execpolicy(action: Action, report: DriftReport) -> None:
         report.items.append(
             DriftItem("modified", "permissions", action.item, path,
                       "rig-managed execpolicy block is stale (apply rewrites it)")
+        )
+
+
+def _check_harness_guard(action: Action, report: DriftReport) -> None:
+    """Flag drift between the generated omp guard extension and the on-disk file.
+
+    missing  — the extension file is absent (apply writes it, atomically).
+    modified — the content differs (apply backs up and regenerates), OR the guard's own
+               runtime self-check fired: the ``.incompatible`` marker next to it means omp's
+               event contract changed and the guard is blocking fail-closed — a loud,
+               self-reported signal, not a silent no-op.
+    """
+    from .actions.runner import desired_guard_content, guard_extension_file
+    from .omp_guard import INCOMPATIBLE_MARKER_NAME
+
+    path = guard_extension_file(action)
+    if not path.is_file():
+        report.items.append(
+            DriftItem("missing", "permissions", action.item, path, "guard extension not written")
+        )
+        return
+    try:
+        current = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path, f"cannot read {path}: {exc}")
+        )
+        return
+    if current != desired_guard_content(action):
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path,
+                      "guard extension differs (apply backs up and regenerates)")
+        )
+    marker = path.parent / INCOMPATIBLE_MARKER_NAME
+    if marker.exists():
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, marker,
+                      "guard self-check fired: incompatible omp event shape — the guard is "
+                      "blocking fail-closed; re-run `rig apply` and check the omp version")
+        )
+
+
+def _check_harness_approval(action: Action, report: DriftReport) -> None:
+    """Flag drift between the desired approval posture and the harness config.
+
+    missing  — the config file is absent, or a managed key is not set (apply adds it).
+    modified — the file is malformed, a parent is non-dict, or a managed key carries a
+               DIFFERENT value (the user's call — apply never clobbers; surfaced so status
+               isn't a silent green).
+    A matching value WITHOUT rig's receipt is 'compatible unmanaged' — first-class, NOT drift.
+    Shares :func:`_approval_lookup` with the install handler so apply and status can never
+    disagree on what a key state means.
+    """
+    import yaml  # lazy, like the rest of the config stack
+
+    from .actions.runner import approval_config_file, approval_desired_keys, approval_lookup
+
+    path = approval_config_file(action)
+    if not path.is_file():
+        report.items.append(
+            DriftItem("missing", "permissions", action.item, path, "approval config not written")
+        )
+        return
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path,
+                      "approval config is unreadable (permissions/encoding) — fix it by hand")
+        )
+        return
+    except yaml.YAMLError:
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path,
+                      "approval config is malformed YAML")
+        )
+        return
+    if not isinstance(data, dict) and data is not None:
+        # apply HARD-ERRORS here ("fix it by hand") — drift must not promise an apply-set.
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path,
+                      "approval config is not a YAML mapping — fix it by hand")
+        )
+        return
+    data = data if isinstance(data, dict) else {}
+    try:
+        keys = approval_desired_keys(action)
+    except ValueError as exc:
+        report.items.append(DriftItem("modified", "permissions", action.item, path, str(exc)))
+        return
+    for key_path, scalar in keys:
+        state, value = approval_lookup(data, key_path)
+        dotted = ".".join(key_path)
+        if state == "shape":
+            report.items.append(
+                DriftItem("modified", "permissions", action.item, path,
+                          f"{dotted} parent '{value}' is not an object — fix it by hand")
+            )
+        elif state == "missing":
+            report.items.append(
+                DriftItem("missing", "permissions", action.item, path,
+                          f"approval posture {dotted} not provisioned (apply sets {scalar!r})")
+            )
+        elif value != scalar:
+            report.items.append(
+                DriftItem("modified", "permissions", action.item, path,
+                          f"{dotted} is {value!r} (rig wants {scalar!r}; apply never clobbers — "
+                          "change it by hand or remove the key)")
+            )
+    # Correlate the interlock's two halves: a RELAXED posture with the guard belt gone or
+    # drifted is the most dangerous combined state — never render it as routine drift.
+    if all(approval_lookup(data, kp)[1] == scalar for kp, scalar in keys):
+        # the interlock's other half, via the SAME resolver the runner uses — the most
+        # dangerous combined state must not depend on the plan's option wiring.
+        from .actions.runner import expected_guard_content, resolve_guard_target
+
+        gpath = resolve_guard_target(action)
+        if gpath is not None:
+            try:
+                gcontent = gpath.read_text(encoding="utf-8", errors="replace") if gpath.is_file() else None
+            except OSError:
+                gcontent = None
+            if gcontent != expected_guard_content(gpath):
+                report.items.append(
+                    DriftItem("modified", "permissions", action.item, gpath,
+                              "approval posture is relaxed but the guard belt is missing or "
+                              "drifted — enforcement is OFF (re-run `rig apply`)")
+                )
+
+
+def _check_instruction_policy(action: Action, report: DriftReport) -> None:
+    """Flag drift between the advisory instruction policy block and the instruction file.
+
+    missing/modified mirror the execpolicy checker exactly (same splice resolver)."""
+    from .actions.runner import (
+        INSTRUCTION_POLICY_BEGIN_MARKER,
+        INSTRUCTION_POLICY_END_MARKER,
+        _splice_managed_block,
+        instruction_policy_block_text,
+    )
+
+    desired = instruction_policy_block_text(action)
+    path = action.target
+    if not path.is_file():
+        report.items.append(
+            DriftItem("missing", "permissions", action.item, path,
+                      "instruction policy file not written")
+        )
+        return
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError as exc:
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path, f"cannot read {path}: {exc}")
+        )
+        return
+    _, state, _detail = _splice_managed_block(
+        content, desired, INSTRUCTION_POLICY_BEGIN_MARKER, INSTRUCTION_POLICY_END_MARKER
+    )
+    if state == "ok":
+        return
+    if state == "create":
+        report.items.append(
+            DriftItem("missing", "permissions", action.item, path,
+                      "no rig-managed instruction policy block (apply adds it)")
+        )
+    elif state == "conflict":
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path,
+                      "unbalanced/misordered rig-managed instruction policy markers — reconcile "
+                      "by hand, then re-run")
+        )
+    else:  # update
+        report.items.append(
+            DriftItem("modified", "permissions", action.item, path,
+                      "rig-managed instruction policy block is stale (apply rewrites it)")
         )
 
 

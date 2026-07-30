@@ -391,7 +391,7 @@ def _add_stats_parser(sub: "argparse._SubParsersAction") -> None:
         "--harness", action="append", metavar="NAME",
         # kept generic (not an exhaustive list) so it can't drift as parsers are added; the
         # authoritative set is data-driven from the registered sources at run time.
-        help="limit to a harness (repeatable), e.g. claude-code / codex / gemini / opencode",
+        help="limit to a harness (repeatable), e.g. claude-code / codex / gemini / omp / opencode",
     )
     show.add_argument(
         "--repo", action="append", metavar="PATH",
@@ -1996,6 +1996,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(_bold(f"rig doctor — {report.os.pretty}") + _dim(f"  (pkg manager: {report.os.package_manager or 'none detected'})"))
     print()
     _print_dep_statuses(report)
+    # probes run AFTER the dependency list prints: an opted-in probe is a network model
+    # call (tens of seconds) and must not stall a silent screen.
+    from .probes import any_probe_enabled, run_probes
+
+    if any_probe_enabled():  # cheap gate — no model call unless opted in
+        print(_dim("  running activation probe(s) (opted in)…"))
+    report.probes = run_probes()
+    for probe in report.probes:
+        if probe.ok is None:
+            print(f"  {_dim('⊘')} {probe.name}: {_dim(probe.detail)}")
+        elif probe.ok:
+            print(f"  {_ok('✔')} {probe.name}: {probe.detail}")
+        else:
+            print(f"  {_err('✗')} {probe.name}: {probe.detail}")
 
     # repo corruption: a working checkout with core.bare=true silently breaks every git op +
     # ship. This is the most severe class — surface it (and --fix it) ahead of any dep shortfall.
@@ -2012,6 +2026,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     missing_req = report.missing_required
     only_deps_clean = not missing_req and not (args.optional and report.missing_optional)
+    # an explicitly opted-into probe that FAILED must never end in the clean-bill success
+    # path, and it outranks merely-OPTIONAL dep shortfalls; a missing REQUIRED dep keeps its
+    # (more actionable) guidance path — the probe line is already printed above either way.
+    failed_probes = [p for p in report.probes if p.ok is False]
     # repo corruption is the top-precedence failure: a broken .git makes every other git-backed
     # check unreliable. An UNFIXED corruption is non-zero regardless of the dependency picture.
     if repo_corrupt:
@@ -2024,6 +2042,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             print(_err("\n  fix the corrupted core.bare above (or re-run `rig doctor --fix`) — git is broken there"))
         return errors.EXIT_REPO_CORRUPT
+    if failed_probes and not missing_req:
+        print(_err("\n  an activation probe above FAILED — the claimed enforcement channel does not work"))
+        return errors.EXIT_PROBE_FAILED
     if only_deps_clean and not dead_targets:
         print(_ok("\n  all required dependencies present"))
         return 0

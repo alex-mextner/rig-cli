@@ -62,6 +62,9 @@ BASELINE_ALIASES: dict[str, str] = {
     "apply_patch": "Edit",
     "update_plan": "TodoWrite",
     "view_image": "Read",
+    # omp native tools (lowercase names; read/bash/grep/… fold via case-insensitive match)
+    "todo": "TodoWrite",
+    "web_search": "WebSearch",
     # opencode native tools (lowercase built-ins, confirmed on-disk)
     "read": "Read",
     "write": "Write",

@@ -215,6 +215,7 @@ and harnesses split into three families by *how* they discover skills:
   so a copied skill is already visible and rig links **nothing**. `rig status` reports
   *discovers natively* instead of a pointless symlink:
   - **opencode** → auto-loads `~/.agents/skills` (and `~/.claude/skills`) natively since ≥1.16
+  - **omp** → its built-in `agents` discovery provider auto-loads `~/.agents/skills/<name>/SKILL.md` natively
 - **instruction-file harnesses** have **no** per-skill directory; their guidance comes from a
   single global instruction file, not from a symlink. rig links **nothing** for these (it never
   invents a directory) and `rig status` reports the kind as *N/A — uses `<file>`* so the empty
@@ -484,7 +485,7 @@ are installed in the same apply and catch the dangerous tool calls before the si
 ```yaml
 harness:
   enabled: true
-  kind: claude-code            # skills-dir: claude-code | codex · native: opencode · instruction-file: pi | commandcode
+  kind: claude-code            # skills-dir: claude-code | codex · native: opencode | omp · instruction-file: pi | commandcode
   # kinds: [codex]             # optional additional harnesses to provision alongside kind
   auto_mode: true              # true → auto-accept tool calls; false → interactive prompts (claude-code write only)
   self_merge: true             # auto-mode: let the agent self-merge its OWN PRs via gh ship (permissions.allow ship rules + autoMode.allow carve-out)
@@ -498,7 +499,7 @@ harness:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the harness setting (set `false` to leave the harness config untouched) |
-| `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`) auto-loads `~/.agents/skills`; instruction-file (`pi`, `commandcode`) get their skill discovery via `AGENTS.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
+| `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`, `omp`) auto-loads `~/.agents/skills`; instruction-file (`pi`, `commandcode`) get their skill discovery via `AGENTS.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
 | `kinds` | list | `[]` | additional harnesses to provision alongside `kind`. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, supported hook bridges, and supported permissions allowlists. `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one explicit target; supported bridges stay registered with a descriptor-dir override |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `self_merge` | bool | `true` | auto-mode self-merge unblock. `true` adds the ship allow rules (`Bash(gh ship:*)`, `Bash(*/pr-ship.sh:*)`, `Bash(*/ship.sh:*)`) to `permissions.allow` so the auto-mode Bash gate stops vetoing `gh ship`, AND appends a `$defaults`-preserving carve-out to `autoMode.allow` clearing the Merge-Without-Review + Self-Approval soft blocks for the agent's OWN PRs. Effective only under auto-mode; inert otherwise. The `Bash(gh pr merge:*)` deny and every other classifier rule — notably the anti-exfil hard rule — stay (`gh ship` is still the only merge path) |
@@ -543,7 +544,7 @@ its own PR). An agent cannot write these to its own live settings (that trips th
 soft block) — run `rig apply` yourself to activate it.
 
 **Auto-mode write is claude-code-only (for now).** `kind: opencode` (and `codex`/
-`pi`/`commandcode`) are now **accepted** — rig provisions their **skill discovery** (see
+`pi`/`commandcode`/`omp`) are now **accepted** — rig provisions their **skill discovery** (see
 [Harness skill discovery](#harness-skill-discovery-why-harness_link)). But the auto/permission-
 **mode** write is still implemented only for `claude-code`. If you set `auto_mode`/`mode` on a
 kind without a mode-writer yet, rig **skips that write and says so** in a plan note (its skills
@@ -580,7 +581,7 @@ Claude and Codex bridge commands run `PYTHONPATH=<agent-tools>/lib python3 -m <b
 <Event>` from the harness config; opencode loads the JS plugin, which shells into the Python
 bridge with the same `PYTHONPATH`. The merge/symlink is idempotent and preserves unrelated
 config; `rig status` reports the bridge as missing/stale drift if a managed hook is absent or
-points at an old checkout. Pi and CommandCode still skip the bridge with a note when
+points at an old checkout. Pi, CommandCode, and omp still skip the bridge with a note when
 explicitly enabled.
 
 When `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one custom
@@ -672,7 +673,7 @@ permissions:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the permissions layer (set `false` to leave the harness config untouched) |
-| `kind` | `claude-code` \| `opencode` \| `null` | supported `harness.kind` plus `harness.kinds`, else `claude-code` | which harness's permissions to provision. When absent or `null`, rig fans out to every configured harness kind with a supported additive allowlist and records N/A notes for unsupported kinds. Set `permissions.kind` to target one supported harness explicitly; `codex`/`pi` are rejected (N/A) |
+| `kind` | `claude-code` \| `opencode` \| `codex` \| `omp` \| `pi` \| `commandcode` \| `null` | supported `harness.kind` plus `harness.kinds`, else `claude-code` | which harness's permissions to provision. Every known harness has a surface, so every kind is pinnable: allowlist kinds get the additive merge, omp gets the generated guard extension + approval posture (tier 1), codex the execpolicy block (tier 1), pi/commandcode the advisory instruction policy (tier 3). When absent or `null`, rig fans out to every configured harness kind |
 | `tools` | str[] | the default set | the command names to pre-allow; **replaces** the default set wholesale |
 | `extra` | str[] | `[]` | command names to ADD on top of the (default or explicit) set |
 | `disable` | str[] | `[]` | command names to drop from rig's **desired** set, so rig won't ADD them. NB: this is additive-only — it does NOT delete an entry already in your allowlist (rig never removes the user's entries; that stays your call) |
@@ -741,6 +742,40 @@ forbidden would over-block ALL pushes — the coarse deny is therefore kept to u
 full-command bans only, and every flag-position guard stays in the PreToolUse hook bridge (same
 split as claude-code). The block is idempotent, backup-noted, preserves any lines outside its
 markers, and `rig status` surfaces it as `missing`/`modified` drift.
+
+**omp guard extension + approval posture (tier 1, rig-cli#202).** omp has no per-command
+allowlist (its approval is per-tool), but it auto-discovers TS extensions under
+`~/.omp/agent/extensions/` whose `tool_call` handler can block a bash call before execution.
+rig writes the wholly rig-owned, GENERATED `rig-permissions-guard.ts` there — codegen'd from
+the single structured rule registry in `riglib/permissions.py` (`riglib/omp_guard.py`
+renders it; never a hand-copied list). The guard tokenizes the full command and matches at
+the argv level per pipeline stage, so it is MORE precise than the glob belts:
+`git commit --no-verify` is caught in ANY flag position and `--force-with-lease` never
+false-positives (exact-token matching). The deny baseline blocks outright; the ask baseline
+confirm-gates via the harness UI and BLOCKS headless (a prompt nobody can answer never
+auto-approves). A runtime event-shape self-check fails closed with a loud
+`rig-permissions-guard.incompatible` marker if omp ever renames the `tool_call` contract.
+Block reasons carry rule ids + static hints only — never command contents (secrets). The
+write is atomic (temp + rename), idempotent on byte-compare, and backed up before any
+replace. Alongside it, `provision_harness_approval` merges `tools.approvalMode: yolo` into
+`~/.omp/agent/config.yml` ADDITIVELY (parity with claude-code's `auto_mode: true` — the
+guard is the enforcement layer, the YAML is posture), tracked by a sidecar receipt
+(`.rig-permissions-receipt.json`: managed keys, previous values, backup identity); a
+matching value without the receipt is 'compatible unmanaged' — adopted, never clobbered —
+and a differing user value is drift, never overwritten. An opt-in ACTIVATION probe
+(`RIG_OMP_PROBE=1 rig doctor`) proves the block channel end-to-end with a temporary
+nonce-blocking fixture extension; it stays out of the apply path (apply is
+offline/declarative). Known gap, documented: the guard covers model-issued tool calls in
+trusted repositories — wrapper indirection (`sh -c '…'`, command substitution `$(…)`,
+subshells, copied binaries, aliases) hides the command string from argv matching; it is not
+a sandbox.
+
+**pi/commandcode advisory instruction policy (tier 3).** These instruction-file harnesses
+have no execution-layer mechanism at all, so rig splices a marker-delimited ADVISORY block
+(deny/ask intent, from the same rule registry) into their global `AGENTS.md` — truthfully
+tensed "advisory policy — not enforced at the execution layer", terse (it rides every
+turn's context). Idempotent, additive, backup-noted, drift-surfaced like the execpolicy
+block.
 
 **What gets written, per harness (keyed off `permissions.kind`, else supported `harness.kind` plus `harness.kinds`).**
 

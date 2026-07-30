@@ -916,11 +916,11 @@ def test_instruction_file_harness_with_explicit_dir_does_link(fake_agent_tools, 
     assert (harness / "naming").resolve() == (repo / "skills-out" / "naming").resolve()
 
 
+@pytest.mark.parametrize("kind", ["opencode", "omp"])
 def test_native_discovery_harness_links_nothing_when_target_is_native(
-    fake_agent_tools, tmp_path, monkeypatch
+    fake_agent_tools, tmp_path, monkeypatch, kind
 ):
     """A native-discovery harness with the default target needs no harness symlink."""
-    kind = "opencode"
     repo = tmp_path / "repo"
     repo.mkdir()
     home = tmp_path / "home"
@@ -941,8 +941,9 @@ def test_native_discovery_harness_links_nothing_when_target_is_native(
     assert not report.errors, [r.detail for r in report.errors]
 
 
+@pytest.mark.parametrize("kind", ["opencode", "omp"])
 def test_native_discovery_harness_custom_target_links_back_to_native_root(
-    fake_agent_tools, tmp_path, monkeypatch
+    fake_agent_tools, tmp_path, monkeypatch, kind
 ):
     """A native-discovery harness still sees skills when skills_target is customized."""
     repo = tmp_path / "repo"
@@ -952,13 +953,13 @@ def test_native_discovery_harness_custom_target_links_back_to_native_root(
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     cat = Catalog.scan(str(fake_agent_tools))
 
-    plan = build(_harness_skill_cfg(repo, fake_agent_tools, "opencode"), cat, project_type="unknown")
+    plan = build(_harness_skill_cfg(repo, fake_agent_tools, kind), cat, project_type="unknown")
 
     links = [a for a in plan.actions if a.kind == "link_skill_harness"]
     assert links
     assert {a.target for a in links} == {home / ".agents" / "skills" / "naming"}
     notes = " ".join(plan.notes)
-    assert "opencode" in notes and "skills_target" in notes and "native discovery dir" in notes
+    assert kind in notes and "skills_target" in notes and "native discovery dir" in notes
     report = run_plan(plan)
     assert not report.errors, [r.detail for r in report.errors]
     link = home / ".agents" / "skills" / "naming"
@@ -966,7 +967,29 @@ def test_native_discovery_harness_custom_target_links_back_to_native_root(
     assert link.resolve() == (repo / "skills-out" / "naming").resolve()
 
 
-@pytest.mark.parametrize("kind", ["opencode", "codex", "pi", "commandcode"])
+def test_two_native_kinds_sharing_one_root_do_not_duplicate_links(
+    fake_agent_tools, tmp_path, monkeypatch
+):
+    """opencode + omp share the SAME native root (``~/.agents/skills``). With a custom
+    skills_target, both kinds want the identical link-back symlink — the plan must emit it
+    ONCE per skill, not one conflicting action per kind."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _harness_skill_cfg(repo, fake_agent_tools, "opencode")
+    cfg.data["harness"]["kinds"] = ["omp"]
+    plan = build(cfg, cat, project_type="unknown")
+    targets = [a.target for a in plan.actions if a.kind == "link_skill_harness"]
+    assert targets, "expected link-back actions for the custom target"
+    assert len(targets) == len(set(targets)), f"duplicate link targets: {targets}"
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+
+
+@pytest.mark.parametrize("kind", ["opencode", "codex", "pi", "commandcode", "omp"])
 def test_auto_mode_on_non_claude_kind_skips_write_with_note(fake_agent_tools, tmp_path, kind):
     """A kind with no auto/permission-MODE writer self-skips the write — but says so, not silently.
 
@@ -985,7 +1008,7 @@ def test_auto_mode_on_non_claude_kind_skips_write_with_note(fake_agent_tools, tm
     assert any("auto-mode write skipped" in n and kind in n for n in plan.notes), plan.notes
 
 
-@pytest.mark.parametrize("kind", ["pi", "commandcode"])
+@pytest.mark.parametrize("kind", ["pi", "commandcode", "omp"])
 def test_explicit_hook_bridge_on_non_claude_kind_notes_skip(fake_agent_tools, tmp_path, kind):
     """Explicitly enabling hook_bridge on an unsupported kind is reported skipped, not silently dropped."""
     repo = tmp_path / "repo"

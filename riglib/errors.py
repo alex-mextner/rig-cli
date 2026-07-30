@@ -37,6 +37,7 @@ EXIT_MISSING_TARGET = 5  # config references a path/binary that's gone on disk
 EXIT_NOT_A_REPO = 6  # a repo-scoped command run outside a git repository
 EXIT_REPO_CORRUPT = 7  # a managed checkout's git config is corrupted (e.g. core.bare=true)
 EXIT_CODEX_UPDATE = 8  # Codex update failed or rollback needs attention
+EXIT_PROBE_FAILED = 9  # an opt-in activation probe FAILED (the claimed channel does not work)
 EXIT_MISSING_DEP = 127  # a required external tool/binary isn't installed (shell convention)
 
 

@@ -1,4 +1,4 @@
-"""Shared shell-tool helpers for the harness parsers (kept DRY across all four sources).
+"""Shared shell-tool helpers for the harness parsers (kept DRY across the sources).
 
 Every harness exposes some shell tool under a different name (``Bash`` / ``exec_command`` /
 ``run_shell_command`` / ``bash``). These two helpers normalize that so each parser feeds the

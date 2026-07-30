@@ -17,6 +17,10 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .probes import ProbeResult
 
 from .detect import OsInfo, detect_os, install_command
 
@@ -97,6 +101,10 @@ class DepStatus:
 class DoctorReport:
     os: OsInfo
     statuses: list[DepStatus] = field(default_factory=list)
+    #: opt-in ACTIVATION probes (``RIG_OMP_PROBE=1``) — filled by the doctor COMMAND
+    #: (``diagnose()`` itself stays a pure offline report builder; the probe spawns a real
+    #: model turn and must never ride along with every diagnose() caller).
+    probes: list["ProbeResult"] = field(default_factory=list)
 
     @property
     def missing_required(self) -> list[DepStatus]:

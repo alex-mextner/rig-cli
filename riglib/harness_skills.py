@@ -36,6 +36,9 @@ Harnesses split into three families by HOW they surface skills:
     - **opencode** → auto-loads ``~/.agents/skills`` (and ``~/.claude/skills``) natively since
       ≥1.16. Its older ``~/.config/opencode/skill`` link target was never created on disk and is
       unnecessary when skills install to the default target.
+    - **omp** → its built-in ``agents`` discovery provider auto-loads
+      ``~/.agents/skills/<name>/SKILL.md`` natively (the canonical OMP-native location), so rig
+      links nothing, same as opencode.
 
 - **instruction-file harnesses** — they have NO per-skill discovery directory; agent guidance
   reaches them through a single global INSTRUCTION FILE (``AGENTS.md``), not
@@ -80,8 +83,12 @@ HARNESS_SKILL_DIR_KINDS: tuple[str, ...] = (*HARNESS_SKILL_DIRS, "codex")
 #   - **opencode** — opencode ≥1.16 auto-loads ``~/.agents/skills/<name>/SKILL.md`` (and
 #     ``~/.claude/skills``) with no config. Its older ``~/.config/opencode/skill`` link target was
 #     never created on disk and is unnecessary when skills install to the default target.
+#   - **omp** — omp's built-in ``agents`` discovery provider auto-loads
+#     ``~/.agents/skills/<name>/SKILL.md`` natively (the canonical OMP-native location), so rig
+#     links nothing, same as opencode.
 HARNESS_NATIVE_SKILLS: dict[str, str] = {
     "opencode": "~/.agents/skills",
+    "omp": "~/.agents/skills",
 }
 
 # ── instruction-file harnesses: no per-skill discovery dir; guidance via a global file ───────
@@ -125,6 +132,44 @@ def codex_home() -> str:
     See :func:`codex_config_root` for the stats/test variant where explicit ``home=`` wins.
     """
     return os.environ.get("RIG_CODEX_HOME") or "~/.codex"
+
+
+def omp_config_root(home: Path | None = None) -> Path:
+    """omp's agent dir as a concrete path — the ONE owner of the PI_* env contract.
+
+    An explicit ``home`` is a sandbox boundary and wins over every env var (the stats
+    source's explicit-home case). Otherwise ``PI_CODING_AGENT_DIR`` is a FULL override (omp
+    profiles re-point the agent dir through it) and ``PI_CONFIG_DIR`` renames the ``.omp``
+    config-root dirname under home. Used by the stats source (:mod:`riglib.stats.sources.omp`)
+    and by rig's own provisioning targets (via :func:`omp_agent_root`)."""
+    if home is not None:
+        return home / ".omp" / "agent"
+    return expand_user_path(omp_agent_root())
+
+
+def omp_agent_root() -> str:
+    """omp's agent dir (unexpanded), honoring ``PI_CODING_AGENT_DIR`` / ``PI_CONFIG_DIR``.
+
+    Ambient resolver for rig's provisioning targets; the sandbox-aware variant is
+    :func:`omp_config_root`."""
+    override = os.environ.get("PI_CODING_AGENT_DIR")
+    if override:
+        # normalize to an absolute/~-anchored form so every consumer (plan ``_expand``,
+        # runner fallback ``expand_user_path``) resolves the SAME path — a relative value
+        # must not diverge between them.
+        p = expand_user_path(override)
+        if p.is_absolute():
+            return str(p)
+        return f"~/{override}"
+    config_dir = os.environ.get("PI_CONFIG_DIR")
+    if config_dir:
+        # documented as a DIRNAME under home, but tolerate ~/absolute forms (a raw join
+        # would turn a tilde value into a junk path).
+        p = expand_user_path(config_dir)
+        if p.is_absolute():
+            return str(p / "agent")
+        return f"~/{config_dir}/agent"
+    return "~/.omp/agent"
 
 
 def codex_config_root(home: Path | None = None) -> Path:

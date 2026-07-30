@@ -157,7 +157,8 @@ rig stats show --harness claude-code --repo /path/to/repo   # filter by harness 
 **Harnesses parsed:** Claude Code (`~/.claude/projects/<enc>/<session>.jsonl` — the richest
 source), Codex (`~/.codex/sessions/.../rollout-*.jsonl`, or
 `$RIG_CODEX_HOME/sessions/.../rollout-*.jsonl`), Gemini
-(`~/.gemini/tmp/<hash>/chats/session-*.json`), and opencode
+(`~/.gemini/tmp/<hash>/chats/session-*.json`), omp
+(`~/.omp/agent/sessions/<enc>/**/*.jsonl`, or `$PI_CODING_AGENT_DIR/sessions/...`), and opencode
 (`~/.local/share/opencode/storage/`). The supported-harness list is data-driven: each
 parser self-registers, and a harness whose logs aren't on the machine is reported as
 "not found" rather than failing. Adding a harness is one file in `riglib/stats/sources/`.
@@ -223,7 +224,7 @@ so autonomy is part of the reproducible config — not a manual per-machine togg
 ```yaml
 harness:
   enabled: true
-  kind: claude-code          # skills-dir: claude-code|codex · native: opencode · instruction-file: pi|commandcode (codex also reads AGENTS.md)
+  kind: claude-code          # skills-dir: claude-code|codex · native: opencode|omp · instruction-file: pi|commandcode (codex also reads AGENTS.md)
   auto_mode: true            # RECOMMENDED: writes permissions.defaultMode=auto (user scope)
   hook_bridge: { enabled: true }   # wire the agents-hooks/v1 → harness dispatcher (default ON)
 ```
@@ -351,7 +352,7 @@ riglib/
     fsutil.py         conflict-policy + idempotency + backup helpers
   stats/            tool-adoption analytics (`rig stats show`) — a 3-stage pipeline
     sources/          one pluggable parser per harness (@register); CC / codex / gemini /
-                      opencode → a normalized ToolInvocation stream
+                      omp / opencode → a normalized ToolInvocation stream
     taxonomy.py       the data-driven baseline / ours / external-advertised / other rules
     aggregate.py      pure reductions → counts / breakdowns / day+week trend series
     render/           json (canonical) / tui (rich, lazy) / web (http.server + inline SVG)

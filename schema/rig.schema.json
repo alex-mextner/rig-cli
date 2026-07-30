@@ -650,11 +650,12 @@
         },
         "kind": {
           "type": "string",
-          "description": "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode; instruction-file: pi/commandcode; codex is also instruction-file via AGENTS.md). The auto/permission-MODE write is claude-code-only today; other kinds still get their skill discovery provisioned.",
+          "description": "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode/omp; instruction-file: pi/commandcode; codex is also instruction-file via AGENTS.md). The auto/permission-MODE write is claude-code-only today; other kinds still get their skill discovery provisioned.",
           "enum": [
             "claude-code",
             "codex",
             "opencode",
+            "omp",
             "pi",
             "commandcode"
           ],
@@ -669,6 +670,7 @@
               "claude-code",
               "codex",
               "opencode",
+              "omp",
               "pi",
               "commandcode"
             ]
@@ -730,6 +732,10 @@
           "enum": [
             "claude-code",
             "opencode",
+            "codex",
+            "omp",
+            "pi",
+            "commandcode",
             null
           ]
         },
