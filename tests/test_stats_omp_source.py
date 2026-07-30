@@ -374,6 +374,26 @@ def test_omp_agent_dir_override_wins_over_config_dir(tmp_path, monkeypatch):
     assert len(invs) == 1
 
 
+def test_omp_parser_honors_absolute_pi_config_dir(tmp_path, monkeypatch):
+    """PI_CONFIG_DIR also tolerates an absolute path (the resolver must not join it under home)."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
+    custom = tmp_path / "omp-abs"
+    monkeypatch.setenv("PI_CONFIG_DIR", str(custom))
+    d = custom / "agent" / "sessions" / "-x"
+    d.mkdir(parents=True)
+    (d / "s.jsonl").write_text(
+        "\n".join([_omp_session_event("/r"),
+                   _omp_tool_event("2026-07-29T10:01:00Z", [{"name": "read", "arguments": {}}])]) + "\n",
+        encoding="utf-8",
+    )
+
+    invs, supported, _ = collect(harnesses=["omp"])
+
+    assert supported == ["omp"]
+    assert len(invs) == 1
+
+
 def test_omp_parser_expands_pi_coding_agent_dir_tilde(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))

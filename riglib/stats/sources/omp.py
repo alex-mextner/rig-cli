@@ -51,20 +51,13 @@ class OmpSource(LogSource):
 
     def root(self) -> Path:
         # Honor PI_CODING_AGENT_DIR / PI_CONFIG_DIR for REAL runs (omp profiles re-point the
-        # agent dir through them). We consult os.environ only when no sandbox ``home=`` was
-        # passed, so a HOME-isolated test is never contaminated by the developer's own vars.
-        if not self._home_explicit:
-            override = os.environ.get("PI_CODING_AGENT_DIR")
-            if override:
-                return expand_user_path(override) / "sessions"
-            config_dir = os.environ.get("PI_CONFIG_DIR")
-            if config_dir:
-                # documented as a DIRNAME under home, but tolerate ~/absolute forms too
-                # (a raw join would turn a tilde value into a junk path).
-                p = expand_user_path(config_dir)
-                config_root = p if p.is_absolute() else self.home / p
-                return config_root / "agent" / "sessions"
-        return self.home / ".omp" / "agent" / "sessions"
+        # agent dir through them) via the single resolver in harness_skills; an explicit
+        # sandbox ``home=`` always wins (a HOME-isolated test is never contaminated by the
+        # developer's own vars).
+        from ...harness_skills import omp_config_root
+
+        home = self.home if self._home_explicit else None
+        return omp_config_root(home) / "sessions"
 
     def _decode_dir(self, encoded: str) -> str:
         """Best-effort fallback when no ``session`` event carries the real ``cwd``. omp

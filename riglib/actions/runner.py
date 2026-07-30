@@ -1399,6 +1399,409 @@ def _splice_managed_block(
     return "".join(out), "update", ""
 
 
+# ── omp guard extension provisioning (~/.omp/agent/extensions/rig-permissions-guard.ts) ──────
+# omp AUTO-DISCOVERS TS extensions; a tool_call handler returning {block, reason} blocks a bash
+# call before execution (verified live, rig-cli#202). rig owns the whole file: the content is
+# GENERATED from the single rule registry (riglib.permissions) by riglib.omp_guard, written
+# ATOMICALLY (temp + rename), idempotent on byte-compare, and backed up before any replace.
+def guard_extension_file(action: Action) -> Path:
+    """The extension file an ``install_harness_guard`` action targets (shared with drift)."""
+    return action.target
+
+
+def desired_guard_content(action: Action) -> str:
+    """The exact TS content rig owns for this action (shared by apply + drift, byte-for-byte).
+
+    The incompatible-marker dir is baked from the action's install dir, so the guard's
+    fail-closed signal always lands where drift looks for it — including PI_* override roots.
+    One computation, one public name — this is the Action-typed spelling of
+    :func:`expected_guard_content`."""
+    return expected_guard_content(guard_extension_file(action))
+
+
+def resolve_guard_target(action: Action) -> Path | None:
+    """The guard extension path for this action — from the action's option when the plan
+    wired it, else derived from the registry (fail closed: a guard-bearing kind NEVER
+    depends on the option wiring). Shared by the interlock and drift's correlation so the
+    two can never resolve differently. ``None`` for kinds without a guard surface."""
+    from ..paths import expand_user_path
+    from ..permissions import HARNESS_GUARD, guard_extension_path_for
+
+    if action.options.get("guard_target"):
+        return Path(str(action.options["guard_target"]))
+    kind = str(action.options.get("kind", ""))
+    if kind not in HARNESS_GUARD:
+        return None
+    return expand_user_path(guard_extension_path_for(kind))
+
+
+def expected_guard_content(guard_path: Path) -> str:
+    """The rig-generated guard content for a given install path (marker dir baked from it)."""
+    from ..omp_guard import render_guard_ts
+
+    return render_guard_ts(marker_dir=str(guard_path.parent))
+
+
+def _guard_in_place(action: Action) -> str | None:
+    """None when the guard belt for this action's kind is correctly installed, else the reason.
+
+    The approval-posture write is INTERLOCKED on this: rig never relaxes a harness to
+    auto-approve without the enforcement layer verifiably in place (a guard write that
+    errored, or a tampered guard left by on_conflict=skip, must not end in yolo)."""
+    path = resolve_guard_target(action)
+    if path is None:
+        return None  # no guard surface for this kind — nothing to interlock on
+    if not path.is_file():
+        return f"guard extension not installed at {path}"
+    try:
+        current = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"cannot read guard extension {path}: {exc}"
+    if current != expected_guard_content(path):
+        return f"guard extension at {path} is drifted (not the rig-generated content)"
+    return None
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Temp-file + rename in the same dir: a crash never leaves a half-written guard.
+    mkstemp (collision-free, same dir) and an explicit 0o644 — the guard is code omp loads,
+    so its mode is deliberate, never umask-lottery."""
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.rig-tmp-", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        tmp.chmod(0o644)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _clear_incompatible_marker(guard_path: Path) -> bool:
+    """Remove a stale fail-closed marker next to a healthy guard (apply IS the recovery path
+    the drift message points at — a byte-current guard should not flag forever)."""
+    from ..omp_guard import INCOMPATIBLE_MARKER_NAME
+
+    marker = guard_path.parent / INCOMPATIBLE_MARKER_NAME
+    if marker.exists():
+        marker.unlink()
+        return True
+    return False
+
+
+def _do_install_harness_guard(action: Action, on_conflict: str) -> ActionResult:
+    """Write the generated guard extension — atomic, idempotent, backup-before-replace.
+
+    The file is wholly rig-owned: a DIFFERING on-disk file (hand edit or foreign file at the
+    rig path) is backed up and replaced under ``on_conflict=backup``/``overwrite``, and left
+    untouched (drift stays visible) under ``skip``. A byte-identical file is a true no-op.
+    """
+    from ..omp_guard import GUARD_TEMPLATE_VERSION, INCOMPATIBLE_MARKER_NAME, guard_provenance
+
+    desired = desired_guard_content(action)
+    path = guard_extension_file(action)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        _atomic_write(path, desired)
+        cleared = _clear_incompatible_marker(path)
+        note = f"; cleared stale {INCOMPATIBLE_MARKER_NAME}" if cleared else ""
+        return ActionResult(action, "created", f"guard/{action.item}: wrote {path}{note}")
+    try:
+        current = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return ActionResult(action, "error", f"guard/{action.item}: cannot read {path}: {exc}")
+    if current == desired:
+        cleared = _clear_incompatible_marker(path)
+        note = f"; cleared stale {INCOMPATIBLE_MARKER_NAME}" if cleared else ""
+        return ActionResult(action, "skipped", f"guard/{action.item}: already current in {path}{note}")
+    if on_conflict == "skip":
+        return ActionResult(
+            action, "skipped",
+            f"guard/{action.item}: {path} differs but on_conflict=skip — left unchanged (drift NOT reconciled)",
+        )
+    backup_note = ""
+    if _should_backup(on_conflict):
+        bak = fsutil.backup_path(path)
+        shutil.copy2(str(path), str(bak))
+        backup_note = f" (backed up prior → {bak})"
+    prov = guard_provenance(current)
+    origin = f"rig template v{prov['template']}" if prov else "foreign file"
+    _atomic_write(path, desired)
+    cleared = _clear_incompatible_marker(path)
+    cleared_note = f"; cleared stale {INCOMPATIBLE_MARKER_NAME}" if cleared else ""
+    status = "backed_up" if backup_note else "updated"
+    return ActionResult(
+        action, status,
+        f"guard/{action.item}: regenerated {path} (was {origin}, now v{GUARD_TEMPLATE_VERSION}){backup_note}{cleared_note}",
+    )
+
+
+# ── declarative approval posture provisioning (omp ~/.omp/agent/config.yml) ─────────────────
+# Additive key merge with a sidecar RECEIPT: YAML survives no comment, so the receipt records
+# what rig manages, the PREVIOUS values (the deprovision/restore story), the backup identity,
+# and the template version. A matching value WITHOUT a receipt is 'compatible unmanaged' —
+# first-class, never clobbered; apply ADOPTS it (writes only the receipt). A DIFFERING user
+# value is drift and is never overwritten.
+APPROVAL_RECEIPT_NAME = ".rig-permissions-receipt.json"
+
+
+def approval_config_file(action: Action) -> Path:
+    """The config file a ``provision_harness_approval`` action targets (shared with drift)."""
+    return action.target
+
+
+def approval_receipt_file(action: Action) -> Path:
+    return approval_config_file(action).parent / APPROVAL_RECEIPT_NAME
+
+
+def approval_desired_keys(action: Action) -> tuple[tuple[tuple[str, ...], str], ...]:
+    from ..permissions import HARNESS_APPROVAL
+
+    kind = str(action.options.get("kind", ""))
+    try:
+        return HARNESS_APPROVAL[kind].keys
+    except KeyError:
+        raise ValueError(f"no approval-posture mechanism for harness kind {kind!r}") from None
+
+
+def approval_lookup(data: dict, key_path: tuple[str, ...]) -> tuple[str, object]:
+    """READ-ONLY probe of one managed key. Returns ``("missing"|"present"|"shape", value)`` —
+    ``shape`` when an intermediate parent exists as a non-dict (value is the offending segment).
+    Never mutates ``data`` (the check phase must not create empty parents it may never fill)."""
+    cur: object = data
+    for seg in key_path[:-1]:
+        if not isinstance(cur, dict):
+            return "shape", seg
+        cur = cur.get(seg)
+        if cur is None:
+            return "missing", None  # explicit null parent == no parent (the write creates it)
+        if not isinstance(cur, dict):
+            return "shape", seg
+    if not isinstance(cur, dict):
+        return "missing", None
+    return (("present", cur[key_path[-1]]) if key_path[-1] in cur else ("missing", None))
+
+
+def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionResult:
+    """Merge the approval posture into the harness config — ADDITIVE, receipt-tracked.
+
+    Sets each managed key ONLY when absent; preserves every sibling key. Writes the sidecar
+    receipt (managed paths, previous values, backup identity) — the data a FOLLOW-UP
+    deprovision flow restores from (no deprovision action exists yet; the receipt's
+    existence also drives the adopt-vs-current idempotency). Never clobbers a differing
+    user value (skipped + drift); adopts a compatible unmanaged one. A MALFORMED config is
+    a hard error (fix by hand) — rig refuses to rewrite a file it cannot parse, exactly
+    like the unbalanced-markers discipline. NOTE: the YAML is re-serialized (comments in
+    it are not preserved) — the receipt is the provenance channel.
+    """
+    import yaml  # lazy, like the rest of the config stack
+
+    try:
+        keys = approval_desired_keys(action)
+    except ValueError as exc:
+        return ActionResult(action, "error", f"approval/{action.item}: {exc}")
+    config_file = approval_config_file(action)
+
+    guard_reason = _guard_in_place(action)
+    if guard_reason is not None:
+        return ActionResult(
+            action, "error",
+            f"approval/{action.item}: {guard_reason} — refusing to relax the approval "
+            "posture without the guard belt in place; apply the guard action first",
+        )
+
+    data: dict = {}
+    existed = config_file.is_file()
+    if existed:
+        try:
+            loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            return ActionResult(
+                action, "error",
+                f"approval/{action.item}: {config_file} is malformed YAML ({exc.__class__.__name__}) — "
+                "fix it by hand; rig never rewrites a config it cannot parse",
+            )
+        if loaded is not None and not isinstance(loaded, dict):
+            return ActionResult(
+                action, "error",
+                f"approval/{action.item}: {config_file} is not a YAML mapping — fix it by hand",
+            )
+        data = loaded or {}
+
+    missing: list[tuple[tuple[str, ...], str]] = []
+    conflicts: list[str] = []
+    for key_path, scalar in keys:
+        state, value = approval_lookup(data, key_path)
+        dotted = ".".join(key_path)
+        if state == "shape":
+            conflicts.append(f"{dotted} parent '{value}' is not an object")
+        elif state == "missing":
+            missing.append((key_path, scalar))
+        elif value != scalar:
+            conflicts.append(f"{dotted} is {value!r} (rig wants {scalar!r})")
+
+    if conflicts:
+        return ActionResult(
+            action, "skipped",
+            f"approval/{action.item}: user-set value differs, left untouched (drift visible): "
+            + "; ".join(conflicts),
+        )
+
+    receipt_file = approval_receipt_file(action)
+    if not missing:
+        if receipt_file.exists():
+            return ActionResult(action, "skipped", f"approval/{action.item}: already current in {config_file}")
+        # 'compatible unmanaged': the values already match but rig never recorded them —
+        # adopt by writing ONLY the receipt (the config file is never rewritten). Same schema
+        # as the merge path (backup: null — nothing was rewritten, nothing to restore).
+        receipt = {
+            "template": 1,
+            "kind": str(action.options.get("kind", "")),
+            "managed": {
+                ".".join(kp): {"previous": scalar, "installed": scalar, "adopted": True}
+                for kp, scalar in keys
+            },
+            "backup": None,
+        }
+        receipt_file.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        receipt_file.chmod(0o600)
+        return ActionResult(
+            action, "updated",
+            f"approval/{action.item}: adopted compatible unmanaged value(s) in {config_file} "
+            f"(receipt → {receipt_file}; config untouched)",
+        )
+
+    # Re-serializing an EXISTING yaml destroys its comments/formatting — a conflict-class
+    # mutation, not a splice (unlike the execpolicy append, which preserves the rest of the
+    # file byte-for-byte). Under ``skip`` that means: leave the file alone and keep the drift.
+    if existed and on_conflict == "skip":
+        return ActionResult(
+            action, "skipped",
+            f"approval/{action.item}: {config_file} would be rewritten (yaml comments are not "
+            "preserved) but on_conflict=skip — left unchanged (drift NOT reconciled)",
+        )
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    backup_note = ""
+    backup_identity = None
+    if existed and _should_backup(on_conflict):
+        bak = fsutil.backup_path(config_file)
+        shutil.copy2(str(config_file), str(bak))
+        backup_identity = str(bak)
+        backup_note = f" (backed up prior → {bak})"
+    managed: dict[str, dict] = {}
+    for key_path, scalar in missing:
+        cur = data
+        for seg in key_path[:-1]:
+            nxt = cur.get(seg)
+            if not isinstance(nxt, dict):  # absent or an explicit null — both mean "no parent yet"
+                nxt = {}
+                cur[seg] = nxt
+            cur = nxt
+        cur[key_path[-1]] = scalar
+        managed[".".join(key_path)] = {"previous": None, "installed": scalar}
+    # keys that already matched (unmanaged) are ADOPTED into the same receipt — the managed
+    # map must cover every managed key, not just the ones this run changed.
+    for key_path, scalar in keys:
+        dotted = ".".join(key_path)
+        if dotted not in managed:
+            managed[dotted] = {"previous": scalar, "installed": scalar, "adopted": True}
+    config_file.write_text(
+        yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    receipt = {
+        "template": 1,
+        "kind": str(action.options.get("kind", "")),
+        "managed": managed,
+        "backup": backup_identity,
+    }
+    receipt_file.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    receipt_file.chmod(0o600)
+    status = "backed_up" if backup_note else ("updated" if existed else "created")
+    added = ", ".join(".".join(kp) for kp, _ in missing)
+    return ActionResult(
+        action, status,
+        f"approval/{action.item}: set {added} in {config_file}{backup_note} "
+        "(posture relaxed — enforcement is unverified until the activation probe passes: "
+        "RIG_OMP_PROBE=1 rig doctor)",
+    )
+
+
+# ── advisory instruction policy provisioning (pi/commandcode AGENTS.md) ─────────────────────
+# Instruction-file harnesses have NO execution-layer mechanism; rig records the deny/ask INTENT
+# as a marker-delimited ADVISORY block in the global instruction file — truthfully tensed ("not
+# enforced"), terse (it rides every turn's context). Rendered from the SAME rule registry the
+# omp guard extension is generated from.
+INSTRUCTION_POLICY_BEGIN_MARKER = "# >>> rig-managed instruction policy (do not edit) >>>"
+INSTRUCTION_POLICY_END_MARKER = "# <<< rig-managed instruction policy (do not edit) <<<"
+
+
+def _rule_pattern(rule) -> str:
+    """The command shape a GuardRule targets, e.g. ``git push --force|-f`` (policy prose)."""
+    base = " ".join(rule.tokens)
+    if rule.flags:
+        base += " " + "|".join(rule.flags)
+    return base
+
+
+def instruction_policy_block_text(action: Action) -> str:
+    """The exact marker-delimited advisory block rig owns (shared by apply + drift)."""
+    from ..permissions import OMP_GUARD_ASK_RULES, OMP_GUARD_DENY_RULES
+
+    deny = " · ".join(_rule_pattern(r) for r in OMP_GUARD_DENY_RULES)
+    ask = " · ".join(_rule_pattern(r) for r in OMP_GUARD_ASK_RULES)
+    return "\n".join([
+        INSTRUCTION_POLICY_BEGIN_MARKER,
+        "# advisory policy — not enforced at the execution layer. This harness has no",
+        "# command-granular permission mechanism rig can provision, so these rules are INTENT",
+        "# the agent must self-enforce (the same baseline other harnesses enforce below the model):",
+        f"# DENY: {deny}",
+        f"# ASK (confirm with the operator first): {ask}",
+        INSTRUCTION_POLICY_END_MARKER,
+    ])
+
+
+def _do_provision_instruction_policy(action: Action, on_conflict: str) -> ActionResult:
+    """Splice the advisory policy block into the instruction file — idempotent, additive.
+
+    Same reconcile discipline as the execpolicy block: append when absent (user content
+    preserved), collapse duplicates to one, no-op a current block; ``skip`` leaves a stale
+    block untouched; unbalanced/misordered markers are a hard error rig refuses to guess at.
+    """
+    desired = instruction_policy_block_text(action)
+    path = action.target
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(desired + "\n", encoding="utf-8")
+        return ActionResult(action, "created", f"policy/{action.item}: wrote {path}")
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError as exc:
+        return ActionResult(action, "error", f"policy/{action.item}: cannot read {path}: {exc}")
+    new_content, state, detail = _splice_managed_block(
+        content, desired, INSTRUCTION_POLICY_BEGIN_MARKER, INSTRUCTION_POLICY_END_MARKER
+    )
+    if state == "conflict":
+        return ActionResult(action, "error", f"policy/{action.item}: {detail}")
+    if state == "ok":
+        return ActionResult(action, "skipped", f"policy/{action.item}: already current in {path}")
+    backup_note = ""
+    if state == "update":
+        if on_conflict == "skip":
+            return ActionResult(
+                action, "skipped",
+                f"policy/{action.item}: {path} block differs but on_conflict=skip — left unchanged (drift NOT reconciled)",
+            )
+        if _should_backup(on_conflict):
+            bak = fsutil.backup_path(path)
+            shutil.copy2(str(path), str(bak))
+            backup_note = f" (backed up prior → {bak})"
+    path.write_text(new_content, encoding="utf-8")
+    status = "backed_up" if backup_note else "updated"
+    verb = "appended block to" if state == "create" else "reconciled block in"
+    return ActionResult(action, status, f"policy/{action.item}: {verb} {path}{backup_note}")
+
+
 # ── agents-hooks/v1 → harness bridge registration ───────────────────────────────────
 # A managed bridge candidate is identified by this module substring; the in-sync shape
 # still requires type="command" plus the exact command we would write.
@@ -6245,6 +6648,9 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "apply_harness": _do_apply_harness,
     "provision_permissions": _do_provision_permissions,
     "provision_execpolicy": _do_provision_execpolicy,
+    "install_harness_guard": _do_install_harness_guard,
+    "provision_harness_approval": _do_provision_harness_approval,
+    "provision_instruction_policy": _do_provision_instruction_policy,
     "register_hook_bridge": _do_register_hook_bridge,
     "provision_schedule": _do_provision_schedule,
     "provision_agents_symlink": _do_provision_agents_symlink,

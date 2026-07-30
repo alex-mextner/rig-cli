@@ -673,7 +673,7 @@ permissions:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the permissions layer (set `false` to leave the harness config untouched) |
-| `kind` | `claude-code` \| `opencode` \| `null` | supported `harness.kind` plus `harness.kinds`, else `claude-code` | which harness's permissions to provision. When absent or `null`, rig fans out to every configured harness kind with a supported additive allowlist and records N/A notes for unsupported kinds. Set `permissions.kind` to target one supported harness explicitly; `codex`/`pi`/`omp`/`commandcode` are rejected (N/A) |
+| `kind` | `claude-code` \| `opencode` \| `codex` \| `omp` \| `pi` \| `commandcode` \| `null` | supported `harness.kind` plus `harness.kinds`, else `claude-code` | which harness's permissions to provision. Every known harness has a surface, so every kind is pinnable: allowlist kinds get the additive merge, omp gets the generated guard extension + approval posture (tier 1), codex the execpolicy block (tier 1), pi/commandcode the advisory instruction policy (tier 3). When absent or `null`, rig fans out to every configured harness kind |
 | `tools` | str[] | the default set | the command names to pre-allow; **replaces** the default set wholesale |
 | `extra` | str[] | `[]` | command names to ADD on top of the (default or explicit) set |
 | `disable` | str[] | `[]` | command names to drop from rig's **desired** set, so rig won't ADD them. NB: this is additive-only — it does NOT delete an entry already in your allowlist (rig never removes the user's entries; that stays your call) |
@@ -742,6 +742,40 @@ forbidden would over-block ALL pushes — the coarse deny is therefore kept to u
 full-command bans only, and every flag-position guard stays in the PreToolUse hook bridge (same
 split as claude-code). The block is idempotent, backup-noted, preserves any lines outside its
 markers, and `rig status` surfaces it as `missing`/`modified` drift.
+
+**omp guard extension + approval posture (tier 1, rig-cli#202).** omp has no per-command
+allowlist (its approval is per-tool), but it auto-discovers TS extensions under
+`~/.omp/agent/extensions/` whose `tool_call` handler can block a bash call before execution.
+rig writes the wholly rig-owned, GENERATED `rig-permissions-guard.ts` there — codegen'd from
+the single structured rule registry in `riglib/permissions.py` (`riglib/omp_guard.py`
+renders it; never a hand-copied list). The guard tokenizes the full command and matches at
+the argv level per pipeline stage, so it is MORE precise than the glob belts:
+`git commit --no-verify` is caught in ANY flag position and `--force-with-lease` never
+false-positives (exact-token matching). The deny baseline blocks outright; the ask baseline
+confirm-gates via the harness UI and BLOCKS headless (a prompt nobody can answer never
+auto-approves). A runtime event-shape self-check fails closed with a loud
+`rig-permissions-guard.incompatible` marker if omp ever renames the `tool_call` contract.
+Block reasons carry rule ids + static hints only — never command contents (secrets). The
+write is atomic (temp + rename), idempotent on byte-compare, and backed up before any
+replace. Alongside it, `provision_harness_approval` merges `tools.approvalMode: yolo` into
+`~/.omp/agent/config.yml` ADDITIVELY (parity with claude-code's `auto_mode: true` — the
+guard is the enforcement layer, the YAML is posture), tracked by a sidecar receipt
+(`.rig-permissions-receipt.json`: managed keys, previous values, backup identity); a
+matching value without the receipt is 'compatible unmanaged' — adopted, never clobbered —
+and a differing user value is drift, never overwritten. An opt-in ACTIVATION probe
+(`RIG_OMP_PROBE=1 rig doctor`) proves the block channel end-to-end with a temporary
+nonce-blocking fixture extension; it stays out of the apply path (apply is
+offline/declarative). Known gap, documented: the guard covers model-issued tool calls in
+trusted repositories — wrapper indirection (`sh -c '…'`, command substitution `$(…)`,
+subshells, copied binaries, aliases) hides the command string from argv matching; it is not
+a sandbox.
+
+**pi/commandcode advisory instruction policy (tier 3).** These instruction-file harnesses
+have no execution-layer mechanism at all, so rig splices a marker-delimited ADVISORY block
+(deny/ask intent, from the same rule registry) into their global `AGENTS.md` — truthfully
+tensed "advisory policy — not enforced at the execution layer", terse (it rides every
+turn's context). Idempotent, additive, backup-noted, drift-surfaced like the execpolicy
+block.
 
 **What gets written, per harness (keyed off `permissions.kind`, else supported `harness.kind` plus `harness.kinds`).**
 

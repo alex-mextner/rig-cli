@@ -86,16 +86,29 @@ def test_na_harnesses_have_no_allowlist():
 
 
 def test_config_and_permissions_kind_sets_cannot_drift():
-    """config.py derives its permissions-kind sets from this module's registries, and the
-    supported ∪ N/A partition must cover EVERY harness kind rig knows — a kind added to
-    harness_skills without an allowlist classification falls through the fan-out silently."""
+    """config.py derives its permissions-kind sets from this module's registries, and every
+    known harness must be provisionable SOMEHOW (allowlist / execpolicy / guard / advisory)
+    or recorded N/A — a kind added to harness_skills without a classification falls through
+    the fan-out silently."""
     from riglib.config import _NA_PERMISSIONS_KINDS, _VALID_PERMISSIONS_KINDS
     from riglib.harness_skills import KNOWN_HARNESS_KINDS
-    from riglib.permissions import HARNESS_ALLOWLISTS
+    from riglib.permissions import (
+        HARNESS_ALLOWLISTS,
+        HARNESS_EXECPOLICY,
+        HARNESS_GUARD,
+        HARNESS_INSTRUCTION_POLICY,
+    )
 
-    assert _VALID_PERMISSIONS_KINDS == set(HARNESS_ALLOWLISTS)
-    assert _NA_PERMISSIONS_KINDS == set(HARNESS_ALLOWLIST_NA)
-    assert set(HARNESS_ALLOWLISTS) | set(HARNESS_ALLOWLIST_NA) == set(KNOWN_HARNESS_KINDS)
+    # pinned-kind validation: every kind with a permissions surface is accepted; the N/A
+    # set is whatever remains (empty today — every known kind has a surface).
+    provisionable = (
+        set(HARNESS_ALLOWLISTS) | set(HARNESS_EXECPOLICY)
+        | set(HARNESS_GUARD) | set(HARNESS_INSTRUCTION_POLICY)
+    )
+    assert _VALID_PERMISSIONS_KINDS == provisionable
+    assert _NA_PERMISSIONS_KINDS == set(HARNESS_ALLOWLIST_NA) - provisionable
+    # every known kind has SOME permissions surface (or an explicit allowlist N/A record).
+    assert provisionable == set(KNOWN_HARNESS_KINDS)
 
 
 # ── validation (fail-closed) ───────────────────────────────────────────────────────
@@ -362,24 +375,22 @@ def test_permissions_kind_override_targets_opencode(fake_agent_tools, tmp_path):
 
 
 def test_validate_permissions_kind_na_and_unknown_rejected():
-    with pytest.raises(ConfigError):
-        validate({"version": 1, "permissions": {"kind": "codex"}})   # N/A harness
-    with pytest.raises(ConfigError, match="no additively-mergeable"):
-        validate({"version": 1, "permissions": {"kind": "omp"}})     # N/A harness (per-tool approval)
-    with pytest.raises(ConfigError, match="no additively-mergeable"):
-        validate({"version": 1, "permissions": {"kind": "commandcode"}})  # N/A harness (no mechanism)
     with pytest.raises(ConfigError, match="no longer supported"):
         validate({"version": 1, "permissions": {"kind": "gemini"}})  # deprecated/removed harness
     with pytest.raises(ConfigError):
         validate({"version": 1, "permissions": {"kind": "bogus"}})   # unknown
-    validate({"version": 1, "permissions": {"kind": "opencode"}})    # supported
+    validate({"version": 1, "permissions": {"kind": "opencode"}})    # allowlist kind
     validate({"version": 1, "permissions": {"kind": "claude-code"}})
+    validate({"version": 1, "permissions": {"kind": "omp"}})         # guard + approval policy (rig-cli#202)
+    validate({"version": 1, "permissions": {"kind": "codex"}})       # execpolicy surface
+    validate({"version": 1, "permissions": {"kind": "pi"}})          # advisory instruction policy
+    validate({"version": 1, "permissions": {"kind": "commandcode"}}) # advisory instruction policy
     validate({"version": 1, "permissions": {"kind": None}})          # explicit unpinned/fan-out
 
 
-def test_permissions_fan_out_records_omp_na_note(fake_agent_tools, tmp_path, monkeypatch):
-    """harness.kind: omp with no permissions.kind fans out → no action, an N/A note (not an
-    error): omp's approval is per-tool, there is no command allowlist to provision."""
+def test_permissions_fan_out_provisions_omp_guard_and_approval(fake_agent_tools, tmp_path, monkeypatch):
+    """harness.kind: omp with no permissions.kind fans out → the guard extension + approval
+    policy actions (tier 1 enforcement), NOT a bare N/A skip (rig-cli#202)."""
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
@@ -399,15 +410,16 @@ def test_permissions_fan_out_records_omp_na_note(fake_agent_tools, tmp_path, mon
     plan = build(cfg, Catalog.scan(str(fake_agent_tools)), project_type="unknown")
 
     assert not [a for a in plan.actions if a.kind == "provision_permissions"]
-    assert any(
-        "harness 'omp' has no allowlist to provision" in note and "per-tool" in note
-        for note in plan.notes
-    ), plan.notes
+    guards = [a for a in plan.actions if a.kind == "install_harness_guard"]
+    assert [a.options["kind"] for a in guards] == ["omp"]
+    approvals = [a for a in plan.actions if a.kind == "provision_harness_approval"]
+    assert [a.options["kind"] for a in approvals] == ["omp"]
+    assert any("omp" in note and "tier 1" in note for note in plan.notes), plan.notes
 
 
-def test_permissions_fan_out_mixed_supported_and_na_kinds(fake_agent_tools, tmp_path, monkeypatch):
-    """kind: claude-code + kinds: [omp] in ONE build: claude-code gets its provision action
-    AND omp gets its N/A note — neither eats the other."""
+def test_permissions_fan_out_mixed_supported_and_guard_kinds(fake_agent_tools, tmp_path, monkeypatch):
+    """kind: claude-code + kinds: [omp] in ONE build: claude-code gets its allowlist action
+    AND omp gets its guard + approval actions — neither eats the other."""
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
@@ -428,9 +440,8 @@ def test_permissions_fan_out_mixed_supported_and_na_kinds(fake_agent_tools, tmp_
 
     perm = [a for a in plan.actions if a.kind == "provision_permissions"]
     assert [a.options["kind"] for a in perm] == ["claude-code"]
-    assert any(
-        "harness 'omp' has no allowlist to provision" in note for note in plan.notes
-    ), plan.notes
+    assert [a.options["kind"] for a in plan.actions if a.kind == "install_harness_guard"] == ["omp"]
+    assert [a.options["kind"] for a in plan.actions if a.kind == "provision_harness_approval"] == ["omp"]
 
 
 def test_opencode_drift_object_form(fake_agent_tools, tmp_path):

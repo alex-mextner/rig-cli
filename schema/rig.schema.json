@@ -732,6 +732,10 @@
           "enum": [
             "claude-code",
             "opencode",
+            "codex",
+            "omp",
+            "pi",
+            "commandcode",
             null
           ]
         },

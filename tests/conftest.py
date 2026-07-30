@@ -37,6 +37,11 @@ def _isolate_home(monkeypatch, tmp_path):
     # suite-wide so default-path assertions stay deterministic; override inline where needed.
     # Ambient CODEX_HOME is ignored by design, so it needs no suite-wide clear.
     monkeypatch.delenv("RIG_CODEX_HOME", raising=False)
+    # omp provisioning/stats honor PI_CODING_AGENT_DIR (full override) and PI_CONFIG_DIR
+    # (config-root rename). Clear both suite-wide so a developer running an omp profile
+    # doesn't get false target-assertion failures; override inline where needed.
+    monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
+    monkeypatch.delenv("PI_CONFIG_DIR", raising=False)
 
 
 @pytest.fixture(autouse=True)

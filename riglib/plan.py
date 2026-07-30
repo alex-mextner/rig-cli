@@ -99,7 +99,7 @@ def _agent_hooks_target_for_kind(kind: str) -> str | None:
 class Action:
     """A single planned install step. ``kind`` selects the runner in ``actions/``."""
 
-    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | provision_execpolicy | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_project_tool | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes | provision_spotlight
+    kind: str  # copy_skill | link_skill_harness | install_agent_hook | install_dispatcher | install_ci | register_mcp | apply_harness | provision_permissions | provision_execpolicy | install_harness_guard | provision_harness_approval | provision_instruction_policy | register_hook_bridge | provision_schedule | provision_agents_symlink | provision_project_tool | provision_github_ruleset | provision_github_merge | provision_github_ghas | provision_github_actions | provision_github_browser | provision_tmux | provision_global_excludes | provision_spotlight
     category: str
     item: str
     source: Path  # carrier path in the agent-tools checkout
@@ -825,6 +825,7 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     _build_mode(config, plan)
     _build_permissions(config, plan)
     _build_execpolicy(config, plan)
+    _build_guard_policy(config, plan)
 
     # ── hook bridge (make agents-hooks/v1 descriptors FIRE in the harness) ─────────
     _build_hook_bridge(config, catalog, plan)
@@ -1004,19 +1005,40 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
                 f"supported harness only ({kinds[0]}); skipped {', '.join(skipped)}"
             )
 
-    from .permissions import execpolicy_supported
+    from .permissions import (
+        HARNESS_PERMISSION_TIERS,
+        TIER_LABELS,
+        execpolicy_supported,
+        guard_supported,
+        instruction_policy_supported,
+    )
 
     for kind in kinds:
         if not harness_supported(kind):
-            # No config-array allowlist to merge — but the effect is still delivered by other
-            # surfaces, so describe what IS achieved rather than a bare "skipped". codex: safe-command
-            # allow + coarse deny via the execpolicy .rules block (planned separately below) plus
-            # flag-position denies via the PreToolUse hook bridge. gemini/pi: N/A (no mechanism).
+            # No config-array allowlist to merge — but every known harness has an enforcement
+            # TIER and the effect is delivered by another surface, so describe what IS
+            # achieved (and its tier) rather than a bare "skipped". codex: execpolicy .rules +
+            # hook bridge. omp: the generated guard extension + approval posture (planned
+            # separately below). pi/commandcode: the advisory instruction policy.
+            tier = HARNESS_PERMISSION_TIERS.get(kind)
+            tier_note = f" (tier {tier}: {TIER_LABELS[tier]})" if tier else ""
             if execpolicy_supported(kind):
                 plan.notes.append(
-                    f"permissions: harness '{kind}' has no config allowlist — safe-command allow + "
-                    "coarse deny are provisioned via the execpolicy .rules block, and flag-position "
-                    "denies via the PreToolUse hook bridge"
+                    f"permissions: harness '{kind}' has no config allowlist{tier_note} — "
+                    "safe-command allow + coarse deny are provisioned via the execpolicy .rules "
+                    "block, and flag-position denies via the PreToolUse hook bridge"
+                )
+            elif guard_supported(kind):
+                plan.notes.append(
+                    f"permissions: harness '{kind}' has no config allowlist{tier_note} — "
+                    "deny/ask are enforced by the generated guard extension (tool_call block) "
+                    "plus the declarative approval posture"
+                )
+            elif instruction_policy_supported(kind):
+                plan.notes.append(
+                    f"permissions: harness '{kind}' has no enforcement mechanism{tier_note} — "
+                    "the deny/ask intent is provisioned as an advisory instruction-file policy "
+                    "block (not enforced at the execution layer)"
                 )
             else:
                 reason = HARNESS_ALLOWLIST_NA.get(kind, "no command-allowlist mechanism")
@@ -1114,6 +1136,121 @@ def _build_execpolicy(config: LoadedConfig, plan: InstallPlan) -> None:
                 options={"kind": kind, "tools": tools},
             )
         )
+
+
+def _build_guard_policy(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the guard-extension / approval-posture / advisory-policy provisioning (rig-cli#202).
+
+    Part of the ``permissions`` feature (gated by the same ``permissions.enabled`` and, when
+    set, ``permissions.kind`` selection). Three ATOMIC actions, one per surface — never an
+    overloaded container:
+
+    * ``install_harness_guard`` (omp) — the wholly rig-owned GENERATED TS guard extension
+      (``<agent root>/extensions/<name>``), codegen'd from the single rule registry in
+      :mod:`riglib.permissions` by :mod:`riglib.omp_guard`. deny blocks outright; ask
+      confirm-gates with a UI, blocks headless.
+    * ``provision_harness_approval`` (omp) — the declarative approval posture merged
+      additively into the harness config (never a differing user value clobbered).
+    * ``provision_instruction_policy`` (pi/commandcode) — the deny/ask INTENT as an
+      ADVISORY managed block in the harness's global instruction file (truthfully tensed:
+      not enforced at the execution layer).
+    """
+    from .permissions import (
+        HARNESS_APPROVAL,
+        HARNESS_INSTRUCTION_POLICY,
+        approval_supported,
+        guard_extension_path_for,
+        guard_supported,
+        instruction_policy_supported,
+    )
+
+    p = config.data.get("permissions")
+    if p is None:
+        p = {}
+    if not isinstance(p, dict):
+        return
+    if p.get("enabled") is False:
+        # rig-managed permissions artifacts are left in place (rig never auto-deletes), but
+        # a relaxed posture with the feature OFF must not be silent — note ONLY when there
+        # is evidence something was actually provisioned (no noise on fresh machines).
+        from .permissions import (
+            HARNESS_APPROVAL,
+            HARNESS_INSTRUCTION_POLICY,
+            guard_extension_path_for,
+        )
+
+        for kind in _permissions_kinds(config, p):
+            leftovers = []
+            if kind in HARNESS_APPROVAL:
+                leftovers.append(_expand(guard_extension_path_for(kind), config.repo_root))
+                leftovers.append(
+                    _expand(f"{HARNESS_APPROVAL[kind].root()}/{HARNESS_APPROVAL[kind].config_name}",
+                            config.repo_root)
+                )
+            if kind in HARNESS_INSTRUCTION_POLICY:
+                leftovers.append(_expand(HARNESS_INSTRUCTION_POLICY[kind], config.repo_root))
+            if any(p_.exists() for p_ in leftovers):
+                plan.notes.append(
+                    f"permissions: disabled — rig-managed guard/approval artifacts for '{kind}' "
+                    "stay on disk (rig never auto-deletes); remove them by hand to fully relax"
+                )
+        return
+
+    # the allowlist knobs are INERT for kinds without an allowlist surface (guard/advisory/
+    # execpolicy) — say so instead of silently ignoring a user's custom rules.
+    _inert_note_kinds = {"tools", "extra", "disable", "allow", "deny", "ask"}
+    configured_knobs = sorted(k for k in _inert_note_kinds if p.get(k))
+    for kind in _permissions_kinds(config, p):
+        guard_target: Path | None = None
+        if guard_supported(kind):
+            guard_target = _expand(guard_extension_path_for(kind), config.repo_root)
+            plan.actions.append(
+                Action(
+                    kind="install_harness_guard",
+                    category="permissions",
+                    item=kind,
+                    source=config.repo_root,  # no carrier in agent-tools; anchor on the repo
+                    target=guard_target,
+                    options={"kind": kind},
+                )
+            )
+        if (guard_supported(kind) or instruction_policy_supported(kind)) and configured_knobs:
+            plan.notes.append(
+                f"permissions: {', '.join(configured_knobs)} "
+                f"{'is' if len(configured_knobs) == 1 else 'are'} inert for harness '{kind}' "
+                "(no allowlist surface — the rules come from the baked baseline registry)"
+            )
+        if approval_supported(kind):
+            # The approval posture relaxes the harness to auto-approve — it may ONLY land
+            # when the guard belt for the same kind is in place (the runner re-verifies the
+            # guard target's content before writing; see the action handler).
+            options: dict[str, Any] = {"kind": kind}
+            if guard_target is not None:
+                options["guard_target"] = str(guard_target)
+            plan.actions.append(
+                Action(
+                    kind="provision_harness_approval",
+                    category="permissions",
+                    item=kind,
+                    source=config.repo_root,
+                    target=_expand(
+                        f"{HARNESS_APPROVAL[kind].root()}/{HARNESS_APPROVAL[kind].config_name}",
+                        config.repo_root,
+                    ),
+                    options=options,
+                )
+            )
+        if instruction_policy_supported(kind):
+            plan.actions.append(
+                Action(
+                    kind="provision_instruction_policy",
+                    category="permissions",
+                    item=kind,
+                    source=config.repo_root,
+                    target=_expand(HARNESS_INSTRUCTION_POLICY[kind], config.repo_root),
+                    options={"kind": kind},
+                )
+            )
 
 
 def _permissions_kinds(config: LoadedConfig, p: dict[str, Any]) -> list[str]:

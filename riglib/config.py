@@ -25,7 +25,13 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .harness_skills import KNOWN_HARNESS_KINDS as _KNOWN_HARNESS_KINDS
-from .permissions import HARNESS_ALLOWLIST_NA, HARNESS_ALLOWLISTS
+from .permissions import (
+    HARNESS_ALLOWLIST_NA,
+    HARNESS_ALLOWLISTS,
+    HARNESS_EXECPOLICY,
+    HARNESS_GUARD,
+    HARNESS_INSTRUCTION_POLICY,
+)
 from .project_tools import (
     HAFT_KEYS,
     HAFT_WORKFLOW_KEYS,
@@ -1113,16 +1119,17 @@ def _validate_mode(m: dict[str, Any]) -> None:
 # consistent with every other block).
 _PERMISSIONS_KEYS = {"enabled", "kind", "tools", "extra", "disable", "settings_path",
                      "allow", "deny", "ask"}
-# Harness kinds the ALLOWLIST provisioning supports — broader than the auto-mode write
-# (_VALID_HARNESS_KINDS), since opencode HAS an additively-mergeable allowlist even though its
-# auto-mode write is not yet implemented. Derived from :mod:`riglib.permissions` (the allowlist
-# single source of truth) so the validator and the plan's fan-out can never drift: codex/pi/
-# commandcode have no such mechanism, and omp's approval is per-tool (``tools.approval.<tool>``
-# in ``~/.omp/agent/config.yml``), not a per-command allowlist — so there is nothing for rig's
-# command-token allowlist model to merge → all recorded N/A (rejected here with a clear message
-# rather than silently writing nothing / breaking the harness).
-_VALID_PERMISSIONS_KINDS = set(HARNESS_ALLOWLISTS)
-_NA_PERMISSIONS_KINDS = set(HARNESS_ALLOWLIST_NA)
+# Harness kinds the permissions capability provisions when PINNED — any kind with a real
+# permissions SURFACE: the allowlist kinds, the execpolicy kind (codex), the guard kind (omp),
+# and the advisory instruction-policy kinds (pi/commandcode). Derived from
+# :mod:`riglib.permissions` (the single source of truth) so the validator and the plan's
+# fan-out can never drift. A kind with NO surface at all lands in the (currently empty) N/A
+# set — rejected with a clear message rather than silently writing nothing.
+_VALID_PERMISSIONS_KINDS = (
+    set(HARNESS_ALLOWLISTS) | set(HARNESS_EXECPOLICY)
+    | set(HARNESS_GUARD) | set(HARNESS_INSTRUCTION_POLICY)
+)
+_NA_PERMISSIONS_KINDS = set(HARNESS_ALLOWLIST_NA) - _VALID_PERMISSIONS_KINDS
 # A pre-allowed tool is a single command token: it must START with an alphanumeric or ``/`` (an
 # absolute path) — never a dash (a leading-dash entry like ``-rf`` / ``--flag`` would render a
 # nonsensical/surprising allowlist entry) — and otherwise contain only letters, digits, and the

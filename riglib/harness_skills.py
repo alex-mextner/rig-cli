@@ -134,6 +134,44 @@ def codex_home() -> str:
     return os.environ.get("RIG_CODEX_HOME") or "~/.codex"
 
 
+def omp_config_root(home: Path | None = None) -> Path:
+    """omp's agent dir as a concrete path — the ONE owner of the PI_* env contract.
+
+    An explicit ``home`` is a sandbox boundary and wins over every env var (the stats
+    source's explicit-home case). Otherwise ``PI_CODING_AGENT_DIR`` is a FULL override (omp
+    profiles re-point the agent dir through it) and ``PI_CONFIG_DIR`` renames the ``.omp``
+    config-root dirname under home. Used by the stats source (:mod:`riglib.stats.sources.omp`)
+    and by rig's own provisioning targets (via :func:`omp_agent_root`)."""
+    if home is not None:
+        return home / ".omp" / "agent"
+    return expand_user_path(omp_agent_root())
+
+
+def omp_agent_root() -> str:
+    """omp's agent dir (unexpanded), honoring ``PI_CODING_AGENT_DIR`` / ``PI_CONFIG_DIR``.
+
+    Ambient resolver for rig's provisioning targets; the sandbox-aware variant is
+    :func:`omp_config_root`."""
+    override = os.environ.get("PI_CODING_AGENT_DIR")
+    if override:
+        # normalize to an absolute/~-anchored form so every consumer (plan ``_expand``,
+        # runner fallback ``expand_user_path``) resolves the SAME path — a relative value
+        # must not diverge between them.
+        p = expand_user_path(override)
+        if p.is_absolute():
+            return str(p)
+        return f"~/{override}"
+    config_dir = os.environ.get("PI_CONFIG_DIR")
+    if config_dir:
+        # documented as a DIRNAME under home, but tolerate ~/absolute forms (a raw join
+        # would turn a tilde value into a junk path).
+        p = expand_user_path(config_dir)
+        if p.is_absolute():
+            return str(p / "agent")
+        return f"~/{config_dir}/agent"
+    return "~/.omp/agent"
+
+
 def codex_config_root(home: Path | None = None) -> Path:
     """Codex's user config root as a concrete path.
 
