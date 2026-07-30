@@ -689,6 +689,13 @@ const cases: Case[] = [
   ["command prefix denied", { toolName: "bash", input: { command: "command gh pr merge" } }, noUI, "gh-pr-merge"],
   ["command -v probe allowed", { toolName: "bash", input: { command: "command -v gh" } }, noUI, "allow"],
   ["non-bash tool ignored", { toolName: "read", input: { command: "gh pr merge" } }, noUI, "allow"],
+  ["comment hides operator stage", { toolName: "bash", input: { command: "echo ok # note; git reset --hard" } }, noUI, "allow"],
+  ["comment to end of input", { toolName: "bash", input: { command: "ls # git push --force" } }, noUI, "allow"],
+  ["comment after real command still matches", { toolName: "bash", input: { command: "git reset --hard # careful" } }, noUI, "git-reset-hard"],
+  ["newline after comment revives parsing", { toolName: "bash", input: { command: "echo ok # note\ngit push --force" } }, noUI, "git-push-force"],
+  ["hash mid-word is literal", { toolName: "bash", input: { command: "echo a#b" } }, noUI, "allow"],
+  ["line-continuation before comment", { toolName: "bash", input: { command: "echo ok \\\n# note; git reset --hard" } }, noUI, "allow"],
+  ["quoted hash is literal", { toolName: "bash", input: { command: "echo '# x; git reset --hard'" } }, noUI, "allow"],
   ["missing toolName fail-closed", { input: { command: "ls" } }, noUI, "incompatible"],
   ["missing command fail-closed", { toolName: "bash", input: {} }, noUI, "incompatible"],
 ];

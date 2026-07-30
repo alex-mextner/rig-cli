@@ -119,7 +119,9 @@ const ASK: Rule[] = [
 
 // Quote-aware tokenizer: single/double quotes group, backslash escapes outside single
 // quotes. Shell stage operators (&&, ||, |, ;, &, |&) split EVEN UNSPACED — a real shell
-// parses `git push --force&&true` as two stages, so the guard must too.
+// parses `git push --force&&true` as two stages, so the guard must too. An unquoted `#`
+// at a word start opens a comment through end-of-line — the shell never sees
+// `echo ok # note; git reset --hard`'s "second stage", so the guard must not either.
 const OPS = new Set(["&&", "||", "|", ";", "&", "|&"]);
 function tokenize(command: string): string[] {
   const out: string[] = [];
@@ -131,7 +133,12 @@ function tokenize(command: string): string[] {
     const c = command[i];
     if (quote === "") {
       if (c === "'" || c === '"') { quote = c; has = true; continue; }
+      if (c === "\\" && i + 1 < command.length && command[i + 1] === "\n") { i++; continue; } // line continuation: bash removes it pre-tokenization
       if (c === "\\" && i + 1 < command.length) { cur += command[++i]; has = true; continue; }
+      if (c === "#" && !has) { // comment: skip through (not including) the newline
+        while (i + 1 < command.length && command[i + 1] !== "\n") i++;
+        continue;
+      }
       if (c === "\n") { flush(); out.push(";"); continue; } // a newline is a command separator too
       if (c === ">" || c === "<") { // redirections end a token: git push --force>/dev/null still matches
         flush();
