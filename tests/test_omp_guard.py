@@ -568,6 +568,32 @@ def test_probe_fails_when_block_reason_never_appears(tmp_path, monkeypatch):
     assert not list((home / ".omp" / "agent" / "extensions").glob("rig-probe-*.ts"))
 
 
+def test_probe_fails_when_blocked_and_executed_both_signal(tmp_path, monkeypatch):
+    """omp invoking the handler but IGNORING its block decision leaves both markers —
+    executed must win over blocked (and over a narrated block string), or doctor would
+    certify a broken guard channel as working."""
+    from riglib.omp_probe import probe_omp_guard
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    script = tmp_path / "omp"
+    script.write_text(
+        "#!/bin/sh\n"
+        "nonce=$(echo \"$@\" | grep -o 'echo [a-f0-9]*' | cut -d' ' -f2)\n"
+        f"if [ -f \"{home}/.omp/agent/extensions/rig-probe-$nonce.ts\" ]; then\n"
+        f"  touch \"{home}/.omp/agent/extensions/rig-probe-$nonce.blocked\"\n"
+        f"  touch \"{home}/.omp/agent/extensions/rig-probe-$nonce.executed\"\n"
+        "  echo \"rig probe block $nonce\"\n"  # even the narrated block string must lose
+        "fi\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    res = probe_omp_guard(omp_bin=str(script), timeout=10)
+    assert res.ok is False and "NOT working" in res.detail
+    # the FAIL early-return must still clean up fixture and both markers
+    assert not list((home / ".omp" / "agent" / "extensions").glob("rig-probe-*"))
+
+
 def test_run_probes_empty_without_opt_in(monkeypatch):
     from riglib.probes import run_probes
 
@@ -1162,28 +1188,6 @@ def test_install_guard_unreadable_file_is_an_error(fake_agent_tools, tmp_path, m
         assert res.status == "error" and "cannot read" in res.detail
     finally:
         path.chmod(0o644)
-
-
-def test_probe_blocked_wins_when_both_signals_present(tmp_path, monkeypatch):
-    """A block whose side-channel lands AND a post-exec record (both somehow present):
-    the block verdict always wins — the tier-1 claim stands on the block evidence."""
-    from riglib.omp_probe import probe_omp_guard
-
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    script = tmp_path / "omp"
-    script.write_text(
-        "#!/bin/sh\n"
-        "nonce=$(echo \"$@\" | grep -o 'echo [a-f0-9]*' | cut -d' ' -f2)\n"
-        f"touch \"{home}/.omp/agent/extensions/rig-probe-$nonce.blocked\"\n"
-        f"touch \"{home}/.omp/agent/extensions/rig-probe-$nonce.executed\"\n"
-        "echo \"mixed signals\"\n",
-        encoding="utf-8",
-    )
-    script.chmod(0o755)
-    res = probe_omp_guard(omp_bin=str(script), timeout=10)
-    assert res.ok is True, res.detail
-    assert not list((home / ".omp" / "agent" / "extensions").glob("rig-probe-*"))
 
 
 def test_drift_instruction_policy_unbalanced_markers(fake_agent_tools, tmp_path, monkeypatch):

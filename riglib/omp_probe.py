@@ -114,16 +114,19 @@ def probe_omp_guard(*, model: str | None = None, timeout: int = 180, omp_bin: st
         finally:
             blocked_file.unlink(missing_ok=True)
             executed_file.unlink(missing_ok=True)
-        if blocked or f"rig probe block {nonce}" in out:
-            return ProbeResult(
-                PROBE_NAME, True,
-                f"extension block channel verified — the fixture blocked the nonce command (model {model})",
-            )
+        # executed is checked FIRST: if omp invoked the handler but ignored its block
+        # decision, BOTH markers exist — the command ran, so the channel is broken no
+        # matter what the blocked marker (or a narrated block string) claims.
         if executed:
             return ProbeResult(
                 PROBE_NAME, False,
                 "the nonce command EXECUTED unblocked (tool_result observed) — the extension "
                 "block channel is NOT working; the tier-1 guard claim does not hold",
+            )
+        if blocked or f"rig probe block {nonce}" in out:
+            return ProbeResult(
+                PROBE_NAME, True,
+                f"extension block channel verified — the fixture blocked the nonce command (model {model})",
             )
         # neither handler fired: the model never issued the call, or omp errored before any
         # tool call (creds/quota/unknown model) — environmental, SKIPPED by this module's
