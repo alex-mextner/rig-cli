@@ -1515,6 +1515,11 @@ tmux:
     position: top                # "top" or "bottom"
     format: "#{session_name} #{window_index}:#{window_name}#{window_flags}"
     clear_status_right: true    # separately clear tmux's default clock+date status-right
+  focus_events:
+    enabled: true                # set -g focus-events on — report terminal focus in/out
+                                  # events to programs running inside panes (some editors/
+                                  # tools need this). A plain terminal-capability toggle, no
+                                  # interaction with the resurrect/continuum/tpm ordering.
 ```
 
 | Key | Type | Default | Meaning |
@@ -1543,6 +1548,7 @@ tmux:
 | `pane_titles.clear_status_right` | bool | `true` | when `pane_titles.enabled` is also true, additionally clear tmux's built-in `status-right` default — which is otherwise a clock+date (`%H:%M %d-%b-%y`), wasted space once the pane title carries the session/window context. A SEPARATE toggle from `enabled` (not independent of it): set this `false` to keep the border title while preserving an existing custom `status-right`. |
 | `login_shell.enabled` | bool | `true` | set a **login-shell** `default-command` so restored panes source `~/.zprofile`/PATH (resurrect otherwise restores a non-login shell with a broken env) |
 | `login_shell.shell` | str | `""` | login shell path. `""` resolves the user's `$SHELL` at apply (falling back to `/bin/zsh` then `/bin/sh`); a non-empty override **must be an absolute path** to the shell binary (a relative name or a command-with-args is rejected, so it can't silently produce a broken `default-command`) and is used verbatim. The path is **baked at generation** — NOT a tmux `${SHELL}` reference, because tmux rejects `${VAR:-default}` and would abort the whole config |
+| `focus_events.enabled` | bool | `true` | `set -g focus-events` on/off — tmux reports terminal focus in/out events to programs running inside panes (needed by editors/tools that react to focus). A plain capability toggle: it carries none of the resurrect/continuum/tpm ordering constraints below (it's placed first in the generated file purely for readability, not because position is load-bearing here). Like every other modeled boolean, `false` emits an explicit `set -g focus-events off` rather than omitting the line. |
 
 **Apply mechanism — import-preferred, managed-block fallback.**
 

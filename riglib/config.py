@@ -2120,6 +2120,7 @@ _TMUX_TOP_KEYS = {
     "login_shell",
     "autosave",
     "pane_titles",
+    "focus_events",
 }
 _TMUX_SUBKEYS = {
     "resurrect": {"processes", "capture_pane_contents"},
@@ -2131,6 +2132,7 @@ _TMUX_SUBKEYS = {
     "login_shell": {"enabled", "shell"},
     "autosave": {"enabled", "label", "stale_after"},
     "pane_titles": {"enabled", "position", "format", "clear_status_right"},
+    "focus_events": {"enabled"},
 }
 
 
@@ -2213,7 +2215,16 @@ def _validate_tmux(t: dict[str, Any]) -> None:
                 f"tmux.continuum.save_interval must be an int >= 1, got {interval!r}"
             )
 
-    for sub in ("moshi", "cc_restore", "anti_sprawl", "boot", "login_shell", "autosave", "pane_titles"):
+    for sub in (
+        "moshi",
+        "cc_restore",
+        "anti_sprawl",
+        "boot",
+        "login_shell",
+        "autosave",
+        "pane_titles",
+        "focus_events",
+    ):
         block = t.get(sub, {})
         if isinstance(block, dict):
             value = block.get("enabled")

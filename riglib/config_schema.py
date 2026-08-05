@@ -810,6 +810,10 @@ _TMUX_BLOCK = Block(
                 "clear_status_right": Leaf("boolean", "when `enabled` is on, also clear tmux's default clock+date status-right; a SEPARATE toggle (nested under `enabled`) so status-right can be left alone while keeping the border title", default=True),
             },
         ),
+        "focus_events": Block(
+            doc="report terminal focus in/out events to programs running inside panes (tmux's `focus-events` option) — needed by editors/tools that react to focus.",
+            leaves={"enabled": Leaf("boolean", "tmux's focus-events option (set -g focus-events on/off)", default=True)},
+        ),
     },
 )
 

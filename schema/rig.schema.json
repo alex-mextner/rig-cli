@@ -1260,6 +1260,18 @@
             }
           },
           "additionalProperties": false
+        },
+        "focus_events": {
+          "type": "object",
+          "description": "report terminal focus in/out events to programs running inside panes (tmux's `focus-events` option) — needed by editors/tools that react to focus.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "tmux's focus-events option (set -g focus-events on/off)",
+              "default": true
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

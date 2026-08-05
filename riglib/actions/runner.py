@@ -3168,6 +3168,7 @@ def tmux_plan_from_action(action: Action):
         login_shell=dict(opts.get("login_shell", {}) or {}),
         autosave=dict(opts.get("autosave", {}) or {}),
         pane_titles=dict(opts.get("pane_titles", {}) or {}),
+        focus_events=dict(opts.get("focus_events", {}) or {}),
     )
 
 
