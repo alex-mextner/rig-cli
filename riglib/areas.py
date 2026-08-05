@@ -73,6 +73,7 @@ AREAS: tuple[Area, ...] = (
     Area("permissions", "harness permissions (allow / deny / ask)", GLOBAL, ("permissions",)),
     Area("mode", "agent operating mode", GLOBAL, ("mode",)),
     Area("tmux", "tmux config", GLOBAL, ("tmux",)),
+    Area("env", "shell environment variables", GLOBAL, ("env",)),
     Area("models", "model-freshness cron", GLOBAL, ("models",)),
     Area("tg_ctl", "tg-ctl inbound daemon", GLOBAL, ("tg_ctl",)),
     Area("tools", "personal CLI ecosystem (tg/review/task/draw/…)", GLOBAL, ("tools",)),

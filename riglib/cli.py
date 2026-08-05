@@ -1607,6 +1607,32 @@ def cmd_status(args: argparse.Namespace) -> int:
             ),
             report,
         )
+    # disabled-but-installed shell env vars: config opted the env category out, but a prior
+    # apply may have left rig.env.sh + its live source line in rc_path. apply won't remove
+    # them, so surface as disk→config drift (mirrors the disabled-global-excludes scan above;
+    # also a GLOBAL, machine-wide artifact). A higher-consequence orphan than a stale tmux conf
+    # — the vars keep applying to every shell, not just tmux sessions — so worth the extra scan
+    # even though tmux itself has no equivalent check.
+    env_cfg = loaded.data.get("env")
+    if isinstance(env_cfg, dict) and env_cfg.get("enabled") is False:
+        from .drift import check_disabled_env
+        from .plan import env_options_from_config
+
+        env_disabled_options = env_options_from_config(env_cfg, loaded.repo_root)
+        check_disabled_env(
+            Action(
+                kind="provision_env",
+                category="env",
+                item="vars",
+                source=loaded.repo_root,
+                # matches `_build_env`'s own target (rc_path) — the scan derives everything
+                # from `options` regardless, but keeping the two constructions of this action
+                # kind identical avoids a needless divergence (review).
+                target=Path(env_disabled_options["rc_path"]),
+                options=env_disabled_options,
+            ),
+            report,
+        )
     # AREA SUMMARY — the headline: every reconciled area (grouped by layer) with its in-sync vs
     # drift counts, so the user sees the FULL picture of what rig manages, not a skill-dominated
     # wall of drift lines. Printed in BOTH the in-sync and drift cases (the per-item drift dump

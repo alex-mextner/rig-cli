@@ -40,6 +40,7 @@ from .project_tools import (
     SERENA_KEYS,
     SVERKLO_KEYS,
 )
+from .shell_env import ENV_VAR_KEY_PATTERN as _ENV_VAR_KEY_PATTERN
 
 CONFIG_FILENAME = "rig.yaml"
 
@@ -62,6 +63,7 @@ _VALID_TOP_KEYS = {
     "agents_md",
     "github",
     "tmux",
+    "env",
     "gitignore",
     "spotlight",
     "tools",
@@ -599,6 +601,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_agents_md(data.get("agents_md", {}))
     _validate_github(data.get("github", {}))
     _validate_tmux(data.get("tmux", {}))
+    _validate_env(data.get("env", {}))
     _validate_gitignore(data.get("gitignore", {}))
     _validate_spotlight(data.get("spotlight", {}))
     _validate_tools(data.get("tools", {}))
@@ -1858,6 +1861,90 @@ def _validate_project_tools(pt: dict[str, Any]) -> None:
                 )
         for key in ("enabled", "register", "reindex"):
             _check_bool(sverklo, key, f"project_tools.sverklo.{key}")
+
+
+def _validate_env(e: dict[str, Any]) -> None:
+    """Validate the ``env`` block — rig-managed shell environment variables (GLOBAL, machine-wide).
+
+    rig owns a GENERATED file (``<generated_dir>/rig.env.sh``, one ``export KEY=value`` line per
+    ``vars`` entry) and ensures ONE ``source '<generated file>'`` line is present in ``rc_path``
+    (default ``~/.zshenv`` — sourced by EVERY zsh invocation, login or not, interactive or not).
+    A PRESENT block opts in (mirrors ``tmux``: even an empty ``env: {}`` is accepted, yielding a
+    harmless header-only generated file); only an ABSENT key or ``enabled: false`` is a no-op.
+    Fail-closed, consistent with every other block, on: a non-mapping block, an unknown key (typo
+    guard), a non-bool ``enabled``, a non-string ``rc_path``/``generated_dir``, a non-mapping
+    ``vars``, a non-string value inside ``vars``, and a ``vars`` key that is not a valid POSIX
+    shell identifier (``_ENV_VAR_KEY_PATTERN`` — required because the key is interpolated
+    UNQUOTED into ``rig.env.sh``, a file ``source``d by every zsh invocation on the machine; see
+    that constant's comment).
+    """
+    if not isinstance(e, dict):
+        raise ConfigError("env must be a mapping", schema_path="env")
+    if not e:
+        return
+    _reject_unknown_keys(e, "env")
+    enabled = e.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"env.enabled must be a bool, got {enabled!r}", schema_path="env.enabled")
+    for pathkey in ("rc_path", "generated_dir"):
+        if pathkey not in e:
+            continue
+        pathval = e[pathkey]
+        if not isinstance(pathval, str):
+            raise ConfigError(
+                f"env.{pathkey} must be a string, got {pathval!r}", schema_path=f"env.{pathkey}"
+            )
+        if not pathval:
+            # an empty string is technically a str (passes the isinstance check above) but
+            # resolves to `Path(".")` — for `generated_dir` that writes rig.env.sh into the
+            # resolved repo-root/CWD instead of the intended machine-wide location, and for
+            # `rc_path` it errors at apply. A machine-wide GLOBAL artifact should reject this
+            # footgun at validate time rather than let it reach `Path("")` (review finding).
+            raise ConfigError(
+                f"env.{pathkey} must not be empty", schema_path=f"env.{pathkey}"
+            )
+        if "\n" in pathval or "\r" in pathval:
+            # same threat model as the single-quote hardening in `ShellEnvPlan.import_line`
+            # (repo-committed rig.yaml is treated as a possibly-adversarial source for these
+            # values) — `shlex.quote` keeps a newline literal (no shell-injection), but the
+            # splice/drift layer is LINE-oriented: `desired_rc_text`'s `current_present` check
+            # compares against a single physical line, so a multi-line `import_line()` can
+            # never match any one line — every apply appends a fresh copy, forever, and
+            # `is_rig_env_import_line`'s `shlex.split` on the (now unterminated-quote) first
+            # physical line raises internally and returns False, so the stale-drop pass can
+            # never recognize or remove the accumulating copies either (review finding: a
+            # correctness bug — non-idempotency — not an injection, but real).
+            raise ConfigError(
+                f"env.{pathkey} must not contain a newline", schema_path=f"env.{pathkey}"
+            )
+    vars_block = e.get("vars")
+    if vars_block is not None:
+        if not isinstance(vars_block, dict):
+            raise ConfigError("env.vars must be a mapping", schema_path="env.vars")
+        for var_key, var_value in vars_block.items():
+            if not isinstance(var_key, str) or not var_key:
+                raise ConfigError(
+                    f"env.vars keys must be non-empty strings, got {var_key!r}",
+                    schema_path="env.vars",
+                )
+            if not _ENV_VAR_KEY_PATTERN.match(var_key):
+                raise ConfigError(
+                    f"env.vars key {var_key!r} is not a valid shell identifier",
+                    why=(
+                        "the key is written UNQUOTED into `export {key}=...` in the generated "
+                        "rig.env.sh, which is sourced by every zsh invocation on the machine — "
+                        "an invalid key (a space, `;`, `=`, `$(...)`, a newline, …) would inject "
+                        "arbitrary shell text into that file"
+                    ),
+                    fix="use only letters, digits, and underscores; the first character must "
+                        "not be a digit (e.g. COLORTERM, MY_FLAG)",
+                    schema_path=f"env.vars.{var_key}",
+                )
+            if not isinstance(var_value, str):
+                raise ConfigError(
+                    f"env.vars.{var_key} must be a string, got {var_value!r}",
+                    schema_path=f"env.vars.{var_key}",
+                )
 
 
 def _validate_gitignore(gi: dict[str, Any]) -> None:

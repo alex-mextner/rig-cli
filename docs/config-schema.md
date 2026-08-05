@@ -1695,6 +1695,87 @@ boot-from-cold path can only be fully proven by an actual reboot.
 
 ---
 
+## `env`
+
+Provisions **rig-managed shell environment variables** — a var like `COLORTERM` that must be
+visible to **every** shell invocation on the machine, not just an interactive login shell: a
+mosh/SSH non-interactive command shell (`ssh host 'some-command'`), a cron/launchd job, or
+`zsh -l -c '...'`. This is **GLOBAL config** (the shell startup file rig sources into is
+HOME-anchored, not repo-relative) — it belongs in `~/.config/rig/config.yaml`.
+
+Mirrors `tmux`'s "own a generated file, splice one import line" shape — rig owns
+`<generated_dir>/rig.env.sh` (wholesale rewrite each apply, one `export KEY=value` per `vars`
+entry, sorted by key) and ensures **one** `source '<generated file>'` line is present in
+`rc_path` — every other line in that file is left untouched. Unlike `tmux` there is no dual
+import/block mode and no neutralization of unrelated inline content: a plain exported var has
+no equivalent of tmux's `@plugin`/`@continuum-*` declarations that need detecting and
+superseding, so the splice is a simple idempotent "ensure this one line is present" append.
+
+**Position-tolerant — deliberately NOT end-anchored like `tmux`.** `tmux`'s import line is
+always re-appended at the very END on every apply, dropping any existing copy first, because
+tmux's ordering guarantee genuinely depends on position (continuum's `run-shell` init must be
+LAST). A plain exported var has no such hazard, so `env` takes the opposite default: if rig's
+CURRENT import line already appears **anywhere** in `rc_path` — including above the user's own
+exports, e.g. so *their* values win — that line's POSITION is left exactly where the user put
+it, and every OTHER line is untouched. This is NOT unconditionally "byte-for-byte untouched",
+though: a coexisting STALE line (an old `generated_dir`, left over from before a config change)
+is always dropped even when the current line is already present and correctly placed elsewhere
+— position-tolerance for the CURRENT line must not become an excuse to leave an orphaned old
+`rig.env.sh` silently sourced forever. Only when the current line is truly absent everywhere
+(first apply, or only that stale copy existed) does `env` append the current line once, at the
+end. `rig status` shares this exact predicate, so it can never disagree with what `rig apply`
+would do.
+
+**No teardown on `enabled: false`.** Like every other rig-managed artifact ("`rig apply` NEVER
+deletes on-disk extras"), turning `env` off stops rig from RECONCILING `rig.env.sh` and the
+import line, but does not remove them — the vars keep applying to every shell until you delete
+`<generated_dir>/rig.env.sh` and the `source` line yourself. `rig status` DOES surface this one
+specifically — unlike `tmux`, which has no equivalent — checking BOTH halves independently (a
+leftover `rig.env.sh`, and separately a leftover `source` line in `rc_path`, since either can
+survive without the other: a hand-deleted `rig.env.sh` with the source line still present makes
+every shell invocation on the machine print a "no such file or directory" error at startup).
+**This coverage fires ONLY for an explicit `env: { enabled: false }`** — REMOVING the `env:`
+block entirely (the more natural way to "turn a feature off", and the one actually described
+above as "the real leave-shell-env-vars-alone case") runs no scan at all, so the same
+still-active artifacts would report as in sync in that case. Only `gitignore`/`git_hooks`
+get an equivalent "still installed but now disabled" check elsewhere in rig; extending any of
+them to also cover full block-removal is a known, tracked gap, not implemented here.
+
+**Why `~/.zshenv` by default, not `~/.zshrc`/`~/.zprofile`.** zsh's startup order makes
+`~/.zshenv` the only file sourced **unconditionally** in every mode — login or not, interactive
+or not (`~/.zshrc` is interactive-only; `~/.zprofile`/`~/.zlogin` are login-only). A var that
+must reach `zsh -l -c '...'` (a login but **non-interactive** shell — `-c` means it never
+becomes interactive, so `.zshrc` is never sourced) has to live in `.zshenv` or `.zprofile`;
+`.zshenv` is the more universal of the two (it also reaches plain non-login non-interactive
+invocations). Same reasoning as `tmux.login_shell` treating `~/.zprofile` as the login-env
+source of truth, one file more universal.
+
+A PRESENT `env:` block opts in (mirrors `tmux`: even an explicit empty mapping `env: {}` is
+accepted, yielding a harmless header-only generated file); only an ABSENT key or
+`enabled: false` is a no-op.
+
+```yaml
+env:
+  enabled: true                    # provision the rig-managed shell env vars (opt-in)
+  rc_path: ~/.zshenv                # the shell startup file rig sources the generated file from
+  generated_dir: ~/.config/rig/env  # where rig writes rig.env.sh
+  vars:
+    COLORTERM: truecolor            # exported KEY=value pairs
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | — (see below) | opts OUT when explicitly `false`. There is no fixed default for this key alone — a PRESENT `env:` block with `enabled` unset already opts IN (mirrors `tmux`); it is the BLOCK's presence, not this key's own default, that decides. An entirely ABSENT `env:` block is the real "leave shell env vars alone" case. |
+| `rc_path` | path | `~/.zshenv` | the shell startup file rig sources the generated env file from |
+| `generated_dir` | path | `~/.config/rig/env` | where rig writes `rig.env.sh` |
+| `vars` | map[str,str] | `{}` | exported `KEY=value` pairs. Keys must be valid POSIX shell identifiers (`[A-Za-z_][A-Za-z0-9_]*` — they are interpolated UNQUOTED into `export {key}=...`, a file sourced by every shell invocation on the machine, so an invalid key is rejected at validate time rather than reaching that file). Values are shell-quoted at render time, safe for spaces/quotes/`$`/backticks/anything. |
+
+Idempotent: a re-apply that finds both the generated file and the import line already current is
+a `skipped` no-op. `rig status` flags drift on the generated file's content and the import line's
+presence — never on any other line in `rc_path` (that file is otherwise entirely the user's own).
+
+---
+
 ## `gitignore`
 
 Maintains a **rig-managed block** in git's **GLOBAL excludes file** (`core.excludesfile`) so
