@@ -1448,6 +1448,30 @@
       },
       "additionalProperties": false
     },
+    "internal_dev": {
+      "type": "object",
+      "description": "internal development of the rig-ecosystem tools themselves (rig, tg-cli, review-cli, …): a per-repo COMMITTED opt-in that installs a post-commit git hook so a commit touching the daemon's source gracefully reloads the running daemon (tg-ctl restart) — zero manual restart.",
+      "properties": {
+        "auto_reload_on_commit": {
+          "type": "boolean",
+          "description": "install a post-commit hook that reloads the daemon when a commit touches a daemon-source path (opt-in)",
+          "default": false
+        },
+        "daemon_source_paths": {
+          "type": "array",
+          "description": "repo-relative shell-glob patterns (POSIX `case`, `*` spans `/`) whose change in a commit triggers the reload",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reload_command": {
+          "type": "string",
+          "description": "the graceful reload command the hook runs on a match",
+          "default": "tg-ctl restart"
+        }
+      },
+      "additionalProperties": false
+    },
     "ship_delegator": {
       "type": "object",
       "description": "a per-repo .claude/scripts/pr-ship.sh delegator so `gh ship` works in this repo (ignored in .git/info/exclude).",

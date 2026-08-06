@@ -2097,6 +2097,54 @@ to a Linear ticket:
 
 ---
 
+## `internal_dev`
+
+For internal development of the rig-ecosystem tools themselves (rig, tg-cli, review-cli, …): when a
+repo is developed IN PLACE — the checked-out files ARE the running binary (a live symlink) or a
+long-running daemon reads them — a code change only takes effect after the daemon is restarted. This
+block wires that restart to the commit: an opt-in `post-commit` git hook that, when a commit touches
+the configured daemon-source paths, runs a graceful reload command (`tg-ctl restart` by default).
+This is a per-REPO, **committed** concern (the enablement + source paths travel with the repo's
+`rig.yaml`, exactly like `agent_hooks.worktree_only`) — **not** the global config. **Default OFF**
+(an absent or empty `internal_dev:` block installs nothing).
+
+```yaml
+internal_dev:
+  auto_reload_on_commit: true                       # opt-in; default false
+  daemon_source_paths: ["src/daemon/*", "bin/tg-ctl"] # POSIX `case` globs, repo-relative
+  reload_command: "tg-ctl restart"                   # default shown; any shell command
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `auto_reload_on_commit` | bool | `false` | install a `post-commit` hook that reloads the daemon when a commit touches a daemon-source path |
+| `daemon_source_paths` | array of str | `[]` | repo-relative shell-glob patterns (POSIX `case`, a `*` spans `/`) whose change in a commit triggers the reload |
+| `reload_command` | str | `tg-ctl restart` | the graceful reload command the hook runs on a match |
+
+**What rig writes.** The repo-local `<git-dir>/hooks/post-commit` (worktree-correct — resolved via
+`git rev-parse --git-common-dir`, not assumed to be `<repo>/.git`; a linked worktree's hooks live in
+the repo's COMMON dir, not its private per-worktree admin dir). When a global `core.hooksPath`
+composer shadows repo-local hooks (the rig global-hook dispatcher sets one machine-wide), rig also
+writes a generic `post-commit` COMPOSER trampoline into that composer dir — the agent-tools
+dispatcher ships no `post-commit` of its own, so without the trampoline a composer-shadowed
+repo-local hook would never fire.
+
+**The reload never blocks a commit.** `post-commit` runs after the commit is recorded; a failed
+reload is reported and swallowed — a broken daemon must never wedge a developer's commit.
+
+**Idempotent, marker-keyed, backup-on-conflict** — like every other rig-managed artifact
+(`on_conflict` applies to both the hook and the composer).
+
+**Drift.** `rig status` flags a missing or modified `post-commit` hook under the `internal_dev`
+category (REPO layer).
+
+**Dry-run seam.** `RIG_DEV_RELOAD_DRY_RUN=1` (mirrors `RIG_TG_CTL_DRY_RUN` / `RIG_TMUX_DRY_RUN`):
+the hook reads it at FIRE time and skips the real reload; the runner reads it at APPLY time and
+skips writing the machine-global composer (the one live/global mutation) — so tests/CI never fire a
+real reload nor touch the real global hooks dir.
+
+---
+
 ## Editing this config — `rig setup` (wizard) and `rig config get|set`
 
 `rig setup` is the **interactive configuration wizard**. In a terminal it (1) SHOWS what is
