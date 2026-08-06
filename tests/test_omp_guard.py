@@ -659,8 +659,20 @@ const cases: Case[] = [
   ["deny push --force", { toolName: "bash", input: { command: "git push --force" } }, noUI, "git-push-force"],
   ["deny push -f mid", { toolName: "bash", input: { command: "git push origin main -f" } }, noUI, "git-push-force"],
   ["safe force-with-lease", { toolName: "bash", input: { command: "git push origin main --force-with-lease" } }, noUI, "allow"],
+  // rig-cli#187 regression pin: the joined `flag=value` check (added for `rg --pre=cmd`) is
+  // PER-FLAG (`flags_with_value`), not family-wide — `git-push-force` never opts in, so it
+  // keeps its original exact-token-only behavior. `--force-with-lease=<ref>` stays safe either
+  // way; `--force=x` is now correctly ALLOWED too (an unrecognized flag reaching git is not
+  // this guard's problem — the earlier draft of this fix over-denied it defensively, which
+  // review correctly flagged as an unintended, untested widening of a DIFFERENT rule).
+  ["safe force-with-lease with ref value", { toolName: "bash", input: { command: "git push origin main --force-with-lease=origin/main:abc123" } }, noUI, "allow"],
+  ["force=x now allowed (git-push-force never opted into flags_with_value)", { toolName: "bash", input: { command: "git push origin main --force=x" } }, noUI, "allow"],
   ["no-verify any position", { toolName: "bash", input: { command: "git commit -m 'x' --no-verify" } }, noUI, "git-commit-no-verify"],
   ["no-verify inside message ok", { toolName: "bash", input: { command: 'git commit -m "mentions --no-verify"' } }, noUI, "allow"],
+  // the actual bug this per-flag redesign fixes: git-commit-no-verify never opts into
+  // flags_with_value either, so a message that merely STARTS WITH "--no-verify=" must stay
+  // allowed — the family-wide draft of this fix would have wrongly denied this
+  ["no-verify= inside message still ok (the bug this redesign fixes)", { toolName: "bash", input: { command: 'git commit -m "--no-verify=disable it"' } }, noUI, "allow"],
   ["deny sudo rm", { toolName: "bash", input: { command: "sudo rm -rf /" } }, noUI, "sudo-rm"],
   ["sudo cat ok", { toolName: "bash", input: { command: "sudo cat /etc/hosts" } }, noUI, "allow"],
   ["deny screencapture", { toolName: "bash", input: { command: "screencapture /tmp/x.png" } }, noUI, "screencapture"],
@@ -713,6 +725,27 @@ const cases: Case[] = [
   ["quoted hash is literal", { toolName: "bash", input: { command: "echo '# x; git reset --hard'" } }, noUI, "allow"],
   ["missing toolName fail-closed", { input: { command: "ls" } }, noUI, "incompatible"],
   ["missing command fail-closed", { toolName: "bash", input: {} }, noUI, "incompatible"],
+  // rig-cli#187: rg --pre is arbitrary preprocessor execution
+  ["rg --pre space form denied", { toolName: "bash", input: { command: "rg --pre cat pattern" } }, noUI, "rg-pre"],
+  ["rg --pre later position denied", { toolName: "bash", input: { command: "rg pattern --pre cat" } }, noUI, "rg-pre"],
+  ["rg --pre bare trailing token denied", { toolName: "bash", input: { command: "rg pattern --pre" } }, noUI, "rg-pre"],
+  // the claimed advantage of this argv guard over the glob belts: ordinary quotes are stripped
+  // by the shell before argv, so a QUOTED flag still tokenizes to the exact string --pre and is
+  // caught here — unlike the claude-code globs, which match literal text and see the quotes
+  ["rg quoted --pre still denied (the omp guard's claimed edge over the glob belts)", { toolName: "bash", input: { command: "rg '--pre' cat pattern" } }, noUI, "rg-pre"],
+  ["rg --pre= joined form flag-first denied", { toolName: "bash", input: { command: "rg --pre=cat pattern" } }, noUI, "rg-pre"],
+  ["rg --pre= joined form later position denied", { toolName: "bash", input: { command: "rg pattern --pre=cat" } }, noUI, "rg-pre"],
+  // --pre-glob is deliberately absent from the omp rule too (consistent with the glob belts):
+  // it's a no-op without --pre, and every dangerous combination is already caught by --pre
+  // alone, so denying bare --pre-glob would just be a false positive with no security value.
+  ["rg --pre-glob alone allowed (no-op without --pre, consistent with glob belts)", { toolName: "bash", input: { command: "rg --pre-glob '*.md' pattern" } }, noUI, "allow"],
+  ["rg --pre-glob= alone allowed", { toolName: "bash", input: { command: "rg --pre-glob=*.md pattern" } }, noUI, "allow"],
+  ["rg --pretty safe (different token) ok", { toolName: "bash", input: { command: "rg --pretty pattern src" } }, noUI, "allow"],
+  ["rg plain search ok", { toolName: "bash", input: { command: "rg pattern src" } }, noUI, "allow"],
+  // gap (3) verification: RIPGREP_CONFIG_PATH INLINE on the same command line is argv-visible
+  // and still caught HERE (because --pre itself is also on argv) — the true blind spot is a
+  // config file supplying --pre with NO flag on the command line at all, not this shape.
+  ["RIPGREP_CONFIG_PATH inline with --pre still denied (env-assignment stripped, but --pre itself is on argv)", { toolName: "bash", input: { command: "RIPGREP_CONFIG_PATH=/tmp/cfg rg --pre cat pattern" } }, noUI, "rg-pre"],
 ];
 let failures = 0;
 for (const [name, event, ctx, expect] of cases) {
@@ -1029,6 +1062,7 @@ def test_guard_rules_cover_the_same_intents_as_the_glob_belts():
         "git-commit-no-verify": "--no-verify",
         "sudo-rm": "sudo rm",
         "screencapture": "screencapture",
+        "rg-pre": "--pre",
     }
     ask_intents = {"pkill": "pkill", "killall": "killall", "git-reset-hard": "--hard"}
     # belt intents are the shared subset; argv-precision EXTRAS the glob dialects cannot
@@ -1165,10 +1199,10 @@ def test_cmd_doctor_failed_probe_yields_to_missing_required_dep(tmp_path, monkey
 
 
 def test_guard_provenance_corrupt_header_returns_none():
-    from riglib.omp_guard import guard_provenance, render_guard_ts
+    from riglib.omp_guard import GUARD_TEMPLATE_VERSION, guard_provenance, render_guard_ts
 
     ts = render_guard_ts()
-    corrupted = ts.replace('"template": 1', '"template": {', 1)
+    corrupted = ts.replace(f'"template": {GUARD_TEMPLATE_VERSION}', '"template": {', 1)
     assert guard_provenance(corrupted) is None
     assert guard_provenance("// no header at all\n") is None
 
@@ -1192,12 +1226,17 @@ def test_drift_reports_shape_conflict_for_non_dict_parent(fake_agent_tools, tmp_
 def test_install_guard_reports_template_upgrade_origin(fake_agent_tools, tmp_path, monkeypatch):
     """A rig-generated file from an OLDER template is named as such in the apply detail
     (the provenance header's purpose), not lumped with a foreign file."""
+    from riglib.omp_guard import GUARD_TEMPLATE_VERSION
+
+    old_version = GUARD_TEMPLATE_VERSION - 1
     home, _, _ = _apply_guard(fake_agent_tools, tmp_path, monkeypatch)
     path = _guard_path(home)
-    old = path.read_text(encoding="utf-8").replace('"template": 1', '"template": 0', 1)
+    old = path.read_text(encoding="utf-8").replace(
+        f'"template": {GUARD_TEMPLATE_VERSION}', f'"template": {old_version}', 1
+    )
     path.write_text(old, encoding="utf-8")
     _, res, _ = _apply_guard(fake_agent_tools, tmp_path, monkeypatch)
-    assert "was rig template v0" in res.detail, res.detail
+    assert f"was rig template v{old_version}" in res.detail, res.detail
 
 
 def test_install_guard_unreadable_file_is_an_error(fake_agent_tools, tmp_path, monkeypatch):

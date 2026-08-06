@@ -197,14 +197,37 @@ def harness_supported(kind: str) -> bool:
 # Matcher families (any-of ``flags`` semantics: at least one exact token present):
 #   ``argv_prefix``      — a pipeline stage whose LEADING tokens equal ``tokens`` (after
 #                          stripping leading VAR=val env assignments)
-#   ``subcommand_flags`` — a ``tokens[0] tokens[1]`` stage carrying at least one of ``flags``
-#                          as an exact argv token anywhere
+#   ``subcommand_flags`` — a stage LED by ``tokens`` (``tokens[0]`` alone for a flat command
+#                          like ``rg``, or ``tokens[0] tokens[1]`` for a subcommand shape like
+#                          ``git push``) carrying at least one of ``flags`` as an exact argv
+#                          token anywhere. ``flags_with_value`` (a SUBSET of ``flags``, added
+#                          for rig-cli#187) ALSO matches those specific flags as a joined
+#                          ``flag=value`` single token (e.g. ``rg --pre=cat``) via an exact
+#                          ``flag + "="`` prefix check. Deliberately PER-FLAG, not family-wide:
+#                          ``git-commit-no-verify`` matches ``--no-verify`` as an exact token
+#                          ANYWHERE (by design, so a commit MESSAGE mentioning the flag doesn't
+#                          false-positive) — a family-wide ``=`` check would newly deny a
+#                          message token that merely STARTS WITH ``--no-verify=`` (e.g.
+#                          ``git commit -m "--no-verify=disable it"``), silently widening that
+#                          rule's false-positive surface. Only flags that actually take an
+#                          ``=``-joinable value (``rg --pre``) opt in via ``flags_with_value``.
 # ``hint`` is the block/confirm reason: static text, NEVER command contents (a command can
-# carry secrets; reasons must not). KNOWN GAP (documented, same class as the glob belts):
-# wrapper indirection (``sh -c '…'``, ``env -S '…'``, command substitution ``$(…)``,
+# carry secrets; reasons must not). KNOWN GAPS (documented, same class as the glob belts):
+# (1) wrapper indirection (``sh -c '…'``, ``env -S '…'``, command substitution ``$(…)``,
 # subshells, copied binaries, aliases, ``xargs``) hides the command string from argv
 # matching — the guard covers model-issued tool calls in trusted repositories; it is not
-# a sandbox.
+# a sandbox. (2) ANSI-C quoting (``rg $'--pre' cmd``) tokenizes to the LITERAL string
+# ``$--pre``, not ``--pre`` — ordinary single/double quotes ARE caught (the shell strips them
+# before argv sees the token), but this one quoting FORM is not; this is a pre-existing
+# tokenizer limitation (equally true of every other ``subcommand_flags`` rule today, e.g.
+# ``git push $'--force'``), not specific to ``rg-pre``. (3) specific to ``rg-pre``
+# (rig-cli#187): ``RIPGREP_CONFIG_PATH=cfg rg pattern`` as ONE command IS visible in argv as a
+# leading env assignment, but ``argv_prefix``/``subcommand_flags`` both match against the
+# ``stripEnv``'d stage (env assignments are stripped as noise before matching), so this rule
+# does not special-case it back in; a config file supplying ``--pre`` via an ALREADY-exported
+# env var (set in a shell profile before the agent's command ever runs) is a true blind spot no
+# argv check can see. Neither is fixed here — left as documented follow-up tickets, not silent
+# gaps (see the PR description for #187).
 @dataclass(frozen=True)
 class GuardRule:
     """One command-granular guard rule — harness-agnostic INTENT, rendered per harness."""
@@ -215,24 +238,35 @@ class GuardRule:
     tokens: tuple[str, ...] = ()
     flags: tuple[str, ...] = ()
     value_prefixes: tuple[str, ...] = ()
+    flags_with_value: tuple[str, ...] = ()  # subset of `flags` that ALSO matches `flag=value`
 
     def __post_init__(self) -> None:
         # shape invariants — the generated TS matcher assumes them, and a silent mis-match
         # in a security guard is worse than a loud construction error.
         if self.matcher == "argv_prefix":
-            if not self.tokens or self.flags or self.value_prefixes:
+            if not self.tokens or self.flags or self.value_prefixes or self.flags_with_value:
                 raise ValueError(f"guard rule {self.id!r}: argv_prefix needs tokens only")
         elif self.matcher == "subcommand_flags":
-            if len(self.tokens) != 2 or not self.flags or self.value_prefixes:
+            if len(self.tokens) not in (1, 2) or not self.flags or self.value_prefixes:
                 raise ValueError(
-                    f"guard rule {self.id!r}: subcommand_flags needs exactly 2 tokens + flags"
+                    f"guard rule {self.id!r}: subcommand_flags needs 1 or 2 tokens + flags"
+                )
+            if not set(self.flags_with_value) <= set(self.flags):
+                raise ValueError(
+                    f"guard rule {self.id!r}: flags_with_value must be a subset of flags"
                 )
         elif self.matcher == "flag_value_prefix":
             # tokens[0] is the program; any of ``flags`` whose FOLLOWING token starts with
             # one of ``value_prefixes`` matches (git -c core.hooksPath=/dev/null …).
-            if len(self.tokens) != 1 or not self.flags or not self.value_prefixes:
+            if (
+                len(self.tokens) != 1
+                or not self.flags
+                or not self.value_prefixes
+                or self.flags_with_value
+            ):
                 raise ValueError(
-                    f"guard rule {self.id!r}: flag_value_prefix needs 1 token + flags + value_prefixes"
+                    f"guard rule {self.id!r}: flag_value_prefix needs 1 token + flags + "
+                    "value_prefixes (no flags_with_value — that's a subcommand_flags concept)"
                 )
         else:
             raise ValueError(f"guard rule {self.id!r}: unknown matcher {self.matcher!r}")
@@ -261,6 +295,18 @@ OMP_GUARD_DENY_RULES: tuple[GuardRule, ...] = (
     # Spaces and trips macOS Screen Recording grants (the documented hard rule)
     GuardRule("screencapture", "screenshots go through Playwright/CDP, not screencapture",
               "argv_prefix", ("screencapture",)),
+    # rig-cli#187: `rg --pre` runs an arbitrary preprocessor command — argv matching catches it
+    # in ANY position with no false positive on `--pretty` (a DIFFERENT exact token), the gap
+    # the claude-code/opencode glob belts can only approximate. `--pre-glob` is deliberately
+    # NOT in `flags` here either — same reasoning as the glob belts (it's a no-op without
+    # `--pre`, and every dangerous combination is already caught by `--pre` alone), kept
+    # consistent across ALL belts this time (an earlier draft denied bare `--pre-glob` here as
+    # "defense in depth," which review correctly called out as paying the exact false-positive
+    # cost the claude-code comment argues against, with a misleading block-reason message on a
+    # genuinely harmless command).
+    GuardRule("rg-pre", "rg --pre runs an arbitrary preprocessor command",
+              "subcommand_flags", ("rg",), ("--pre",),
+              flags_with_value=("--pre",)),
 )
 
 # ask = sometimes-legit: confirm with the operator when a UI exists; BLOCK headless (a prompt
@@ -408,6 +454,36 @@ CLAUDE_CODE_DENY_RULES: tuple[str, ...] = (
     # screenshots go through Playwright/CDP; `screencapture` black-frames windows on other
     # Spaces and trips macOS Screen Recording grants (the documented hard rule)
     "Bash(screencapture:*)",
+    # `rg --pre <CMD>` / `--pre=<CMD>` runs CMD as an arbitrary preprocessor on every matched
+    # file — the default `Bash(rg:*)` allow grant is meant for read-only search, not arbitrary
+    # subprocess execution (rig-cli#187). rg's arg parser allows flags in any position (unlike
+    # git's subcommand-first shape), so both value forms (space, `=`) are covered flag-first AND
+    # in a later position; `=` is a literal boundary character (not a space), so it needs its own
+    # pattern — `Bash(rg --pre:*)` alone does not match `--pre=CMD` (see the module note above on
+    # the `:*` word-boundary semantics). `--pre-glob` is DELIBERATELY NOT globbed here (or
+    # anywhere, including the omp ARGV guard below): per rg's docs it has no effect unless
+    # `--pre` is also set, and `--pre` is caught on its own by every belt, so denying bare
+    # `--pre-glob` anywhere would only add pattern bloat + false-positive surface for zero
+    # security gain.
+    #
+    # DIFFERENT CALL than `--no-verify` above, on purpose, not "the same gap accepted twice": for
+    # `--no-verify` the flag-anywhere form was REJECTED because a false positive there is a commit
+    # MESSAGE merely mentioning the flag (noise, no security value in blocking it). Here a false
+    # positive is a literal-text SEARCH for `--pre` (`rg -e --pre .`) — rare, and the asymmetry
+    # (missing a real preprocessor-exec vector vs. over-denying a rare literal search) favors
+    # keeping the later-position form. UNLIKE `--no-verify`, though, `rg-pre` has no
+    # claude-code-specific argv-precise hook backstopping this glob belt yet (`--no-verify`'s is
+    # `block-no-verify` in agent-tools) — the omp guard's ARGV matcher ("rg-pre") only covers the
+    # omp harness, not claude-code, and is itself not entirely free of this false-positive class
+    # (it doesn't honor `--` end-of-options, so `rg -- --pre .` is still denied there too, a
+    # pre-existing tokenizer gap shared with every other `subcommand_flags` rule, e.g.
+    # `git reset -- --hard`, not specific to `rg-pre`). An analogous claude-code `block-rg-pre`
+    # agent-hook is a real, tracked follow-up (agent-tools side), not attempted in this fix.
+    "Bash(rg --pre:*)",
+    "Bash(rg * --pre *)",
+    "Bash(rg * --pre)",
+    "Bash(rg --pre=*)",
+    "Bash(rg * --pre=*)",
 )
 
 # ask = sometimes-legit: force a prompt (tg-ctl relays it to the operator's phone), don't block.
@@ -441,6 +517,17 @@ OPENCODE_DENY_RULES: tuple[str, ...] = (
     "git commit --no-verify*",
     "sudo rm*",
     "screencapture*",
+    # rig-cli#187: `rg --pre` runs an arbitrary preprocessor command. A single `rg*--pre*` entry
+    # was REJECTED (review finding): opencode's `*` has no word boundary, so it would also deny
+    # the legitimate, read-only `--pretty` flag (`--pretty` contains the substring `--pre`).
+    # `--pre-glob` is deliberately NOT globbed here (or anywhere) — see the claude-code belt's
+    # comment (no effect without `--pre`, which is caught on its own everywhere).
+    # A trailing bare-end form (`rg*--pre`, `--pre` as the literal last token, no value) mirrors
+    # claude-code's `Bash(rg * --pre)` — `--pretty` never ends a command at exactly `--pre`, so
+    # this stays safe (`"rg --pretty".endswith("--pre")` is false).
+    "rg*--pre *",
+    "rg*--pre=*",
+    "rg*--pre",
 )
 OPENCODE_ASK_RULES: tuple[str, ...] = (
     "pkill*",
@@ -570,12 +657,26 @@ def desired_entries(kind: str, tools: list[str]) -> list[str]:
 #
 # FIDELITY GAP (deliberate): ``prefix_rule`` matches a LEADING-token prefix, so a coarse
 # ``("git", "push")`` forbidden would over-block ALL pushes. The deny set is therefore kept to
-# unambiguous full-command bans only; every flag-position guard (force-push, --no-verify anywhere)
-# stays in the PreToolUse hook bridge (same split as claude-code).
+# unambiguous full-command bans only; every LATER-position flag-guard (force-push, --no-verify
+# anywhere, and — as of rig-cli#187 — ``rg --pre`` in a non-leading position, or the joined
+# ``--pre=CMD`` form) stays in the PreToolUse hook bridge (same split as claude-code). codex has
+# NO such bridge today (unlike omp's generated guard, :data:`HARNESS_GUARD` has no codex entry),
+# so codex is left with the SAME pre-existing exposure it already has for later-position
+# force-push/--no-verify — not a regression this fix introduces, but real and tracked (see the PR
+# description for #187), not silently absent. ``rg --pre`` in the FLAG-FIRST, space-separated
+# position IS an unambiguous 2-token leading prefix, though (``rg --pre`` can never legitimately
+# lead a read-only search), so it gets the same coarse treatment as the other full-command bans —
+# a cheap partial mitigation, not full coverage. UNLIKE the other three entries, this one
+# OVERLAPS an existing allow prefix (``rg`` is in the default allow set) — verified against the
+# real ``codex execpolicy check`` CLI (not assumed) that the more-specific forbidden rule wins
+# over the broader allow (see ``tests/test_execpolicy.py``,
+# ``test_generated_block_passes_codex_execpolicy_check``): this is real coverage, not dead code
+# shadowed by the allow rule.
 CODEX_DENY_RULES: tuple[tuple[str, ...], ...] = (
     ("gh", "pr", "merge"),
     ("sudo", "rm"),
     ("screencapture",),
+    ("rg", "--pre"),
 )
 
 

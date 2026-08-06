@@ -74,6 +74,11 @@ def test_execpolicy_rule_lines_allow_then_deny():
     assert any('["screencapture"]' in ln for ln in lines)
     # coarse-deny stays MINIMAL: no bare git/gh forbidden (would over-block all pushes/commands)
     assert not any('["git"], decision="forbidden"' in ln for ln in lines)
+    # rig-cli#187: flag-first `rg --pre` is an unambiguous 2-token leading prefix (partial
+    # mitigation only — later-position and joined `=` forms stay a documented, pre-existing gap
+    # shared with force-push/--no-verify, since codex's execpolicy can't express flag-anywhere)
+    assert any('["rg", "--pre"], decision="forbidden"' in ln for ln in lines)
+    assert not any('["rg"], decision="forbidden"' in ln for ln in lines)  # never bare-ban rg
     assert len([ln for ln in lines if 'decision="forbidden"' in ln]) == len(CODEX_DENY_RULES)
 
 
@@ -345,3 +350,20 @@ def test_generated_block_passes_codex_execpolicy_check(fake_agent_tools, tmp_pat
         capture_output=True, text=True, timeout=30,
     )
     assert json.loads(allow.stdout).get("decision") == "allow"
+    # rig-cli#187: `rg` is BOTH allowed (`prefix_rule(["rg"], allow)`) AND has a more-specific
+    # `prefix_rule(["rg", "--pre"], forbidden)` — this is the FIRST codex deny rule that overlaps
+    # an allow prefix (gh/sudo/screencapture never collide with the allow set), so nothing
+    # previously proved which decision wins. Verified here against the REAL codex CLI, not
+    # assumed: codex resolves the more-specific/forbidden match, so the mitigation is real, not
+    # dead code shadowed by the broader allow.
+    rg_pre = subprocess.run(
+        ["codex", "execpolicy", "check", "--rules", str(rules), "rg", "--pre", "cat", "x"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert json.loads(rg_pre.stdout).get("decision") == "forbidden", rg_pre.stdout
+    # plain rg search stays allowed — the forbidden rule doesn't shadow the whole tool
+    rg_plain = subprocess.run(
+        ["codex", "execpolicy", "check", "--rules", str(rules), "rg", "pattern", "x"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert json.loads(rg_plain.stdout).get("decision") == "allow", rg_plain.stdout

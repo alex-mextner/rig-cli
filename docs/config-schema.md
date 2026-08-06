@@ -712,16 +712,30 @@ flag-first, mid AND end-anchored positions; `--force-with-lease` is NOT matched 
 boundary excludes it), `Bash(git commit --no-verify:*)` (flag-first only: the flag-anywhere form
 cannot be pattern-matched without false-positiving on commit messages that merely mention the
 flag — the `block-no-verify` agent-hook remains the authoritative argv-level guard),
-`Bash(sudo rm:*)`, and `Bash(screencapture:*)` (screenshots go through Playwright/CDP). Ask
-(prompt, don't block): `Bash(pkill:*)`, `Bash(killall:*)`, `Bash(git reset --hard:*)` +
-`Bash(git reset * --hard *)` + `Bash(git reset * --hard)`. The full annotated list lives in
-`riglib/permissions.py`.
+`Bash(sudo rm:*)`, `Bash(screencapture:*)` (screenshots go through Playwright/CDP), and five
+`Bash(rg --pre...)` forms (rig-cli#187: `rg --pre` runs an arbitrary preprocessor command
+underneath the read-only `Bash(rg:*)` search grant — flag-first, later position, and both the
+space/`=` value shapes; a documented fidelity gap in the later-position forms can false-positive
+on a search for the literal text `--pre` — a DIFFERENT call than `--no-verify`'s, made on purpose:
+see `riglib/permissions.py` for why the two gaps are handled oppositely. `--pre-glob` is
+deliberately denied NOWHERE, not even by the omp ARGV guard — see `riglib/permissions.py` (it
+has no effect without `--pre`, which is caught on its own; a bare `--pre-glob` deny is a false
+positive with no security value). UNLIKE `--no-verify`, this belt has no `block-rg-pre`
+argv-level hook backstopping it yet, so it stops accidental use, not a deliberate bypass —
+`rg '--pre' cmd` (quoted) or `rg --pre<TAB>cmd` (tab, not space) match none of these five
+patterns (a literal SPACE is required); a claude-code argv hook is a tracked follow-up, not yet
+built). Ask (prompt, don't block): `Bash(pkill:*)`,
+`Bash(killall:*)`, `Bash(git reset --hard:*)` + `Bash(git reset * --hard *)` +
+`Bash(git reset * --hard)`. The full annotated list lives in `riglib/permissions.py`.
 
 **Baked deny/ask baselines (opencode).** opencode now gets its OWN deny/ask baseline written into
 the `permission.bash` object (values `"deny"`/`"ask"`), hand-written in opencode's glob dialect
 (`*` = zero-or-more chars, `?` = one char, **last matching key wins**). Deny: `"gh pr merge*"`,
 `"git push*--force*"`, `"git push -f*"`, `"git commit --no-verify*"`, `"sudo rm*"`,
-`"screencapture*"`. Ask: `"pkill*"`, `"killall*"`, `"git reset*--hard*"`. rig emits these AFTER
+`"screencapture*"`, `"rg*--pre *"` + `"rg*--pre=*"` + `"rg*--pre"` (value-shaped / end-anchored,
+so they don't also deny the legitimate `--pretty` flag — a single substring-only `"rg*--pre*"`
+entry was rejected for exactly that regression). Ask: `"pkill*"`, `"killall*"`, `"git reset*--hard*"`.
+rig emits these AFTER
 the allow keys so they sit past any broad `"*"`/allow (last-match-wins ordering discipline). Two
 deliberate **fidelity gaps**, documented: (1) opencode `*` has NO word boundary, so
 `"git push*--force*"` also matches `--force-with-lease` (the safe force) that the claude-code
@@ -736,12 +750,16 @@ claude-shaped rule written as an opencode glob key would never match). The tool-
 marker-delimited managed block of Starlark `prefix_rule(...)` lines into
 `~/.codex/rules/rig-managed.rules` (codex auto-scans `~/.codex/rules/*.rules` at startup — no
 `config.toml` reference needed). The resolved tool set becomes `decision="allow"` prefix rules; a
-MINIMAL coarse deny (`gh pr merge`, `sudo rm`, `screencapture`) becomes `decision="forbidden"`.
-**Fidelity gap:** `prefix_rule` matches a leading-token prefix, so a coarse `["git","push"]`
-forbidden would over-block ALL pushes — the coarse deny is therefore kept to unambiguous
-full-command bans only, and every flag-position guard stays in the PreToolUse hook bridge (same
-split as claude-code). The block is idempotent, backup-noted, preserves any lines outside its
-markers, and `rig status` surfaces it as `missing`/`modified` drift.
+MINIMAL coarse deny (`gh pr merge`, `sudo rm`, `screencapture`, and — rig-cli#187 — the flag-first
+2-token `rg --pre`) becomes `decision="forbidden"`. **Fidelity gap:** `prefix_rule` matches a
+leading-token prefix, so a coarse `["git","push"]` forbidden would over-block ALL pushes — the
+coarse deny is therefore kept to unambiguous full-command (or unambiguous flag-first) bans only;
+every LATER-position flag-guard (force-push, `--no-verify` anywhere, `rg --pre` in a non-leading
+or joined `=` position) stays in the PreToolUse hook bridge (same split as claude-code) — but
+codex has NO such bridge today, so those later-position forms are a real, tracked, pre-existing
+gap here, not silently absent (see `riglib/permissions.py`, `CODEX_DENY_RULES`). The block is
+idempotent, backup-noted, preserves any lines outside its markers, and `rig status` surfaces it
+as `missing`/`modified` drift.
 
 **omp guard extension + approval posture (tier 1, rig-cli#202).** omp has no per-command
 allowlist (its approval is per-tool), but it auto-discovers TS extensions under
