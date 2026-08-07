@@ -1599,6 +1599,20 @@
       },
       "additionalProperties": false
     },
+    "task": {
+      "type": "object",
+      "description": "a repo-unique task-code prefix, consumed by ship.sh's review-quorum gate.",
+      "properties": {
+        "code_prefix": {
+          "type": "string",
+          "description": "set when this repo's task-cli backend is GitHub Issues (bare #NNN, no ticket-code convention of its own). `rig apply` writes it into .ship-config's SHIP_TASK_CODE_PREFIX line, which ship.sh synthesizes into <PREFIX>-NNN from a bare #NNN in the branch name/PR body — never the bare number itself (review-cli's review-quorum store is a single global file keyed only by the code string, with no per-repo scoping, so two repos both deriving bare \"#346\" would collide). Must be 1-40 uppercase letters/digits — ship.sh ignores the whole .ship-config file otherwise. Unset = bare issue numbers are never picked up as task codes.",
+          "not": {
+            "pattern": "[^A-Z0-9]|^.{41,}$"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "scope": {
       "type": "string",
       "description": "removed legacy key (tolerated, ignored)",

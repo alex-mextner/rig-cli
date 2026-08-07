@@ -411,6 +411,24 @@ AREAS: tuple[Area, ...] = (
         ),
     ),
     Area(
+        "task", "task-cli code prefix", "A repo-unique task-code prefix, consumed by ship.sh's review-quorum gate.",
+        (
+            _opt("task.code_prefix", KIND_STR, None,
+                 "Set when this repo's task-cli backend is GitHub Issues (bare #NNN, no ticket-"
+                 "code convention of its own). `rig apply` writes it into `.ship-config`'s "
+                 "SHIP_TASK_CODE_PREFIX line, which ship.sh's review-quorum gate uses to "
+                 "synthesize `<PREFIX>-NNN` from a bare #NNN found in the branch name/PR body — "
+                 "never the bare number itself. review-cli's review-quorum store is a single "
+                 "GLOBAL file keyed only by the task-code string with no per-repo scoping, so two "
+                 "repos both deriving bare \"#346\" would silently share (and falsely satisfy) "
+                 "each other's review-iteration count; the prefix is what keeps it unique per "
+                 "repo. Must be 1-40 uppercase letters/digits (no hyphen/whitespace/other "
+                 "punctuation — it is spliced directly in front of \"-<n>\"), or ship.sh ignores "
+                 "the whole .ship-config file. Unset (default) = bare issue numbers are never "
+                 "picked up as task codes (HYP-123/XX-123 codes are unaffected either way)."),
+        ),
+    ),
+    Area(
         "project_tools", "project tools (Haft / Serena / Sverklo)",
         "Repo-local carriers and registrations for code-intelligence/governance tools.",
         (

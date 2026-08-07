@@ -60,7 +60,7 @@ from ..github_ruleset import (
 )
 from ..logging import log_event
 from ..paths import expand_user_path
-from ..plan import Action, InstallPlan
+from ..plan import SHIP_TASK_CODE_PREFIX_RE, Action, InstallPlan
 from .. import project_tools
 from . import fsutil
 
@@ -5132,6 +5132,85 @@ def _do_provision_ship_delegator(action: Action, on_conflict: str) -> ActionResu
     return ActionResult(action, status, f"ship-delegator: {file_note}; {exclude_note}{env_suffix}", backup)
 
 
+# ── .ship-config's SHIP_TASK_CODE_PREFIX line (from rig.yaml's task.code_prefix) ──────
+def _do_provision_ship_task_prefix(action: Action, on_conflict: str) -> ActionResult:
+    """Upsert the ``SHIP_TASK_CODE_PREFIX=<prefix>`` line into ``<repo>/.ship-config``.
+
+    Merges into any EXISTING ``.ship-config`` content (``SHIP_LOCAL_TEST_DIR``/
+    ``SHIP_LOCAL_TEST_CMD``, comments, ...) rather than replacing the file — this is the only
+    rig-managed key in a file whose other two keys are hand-committed per the header doc in
+    ``ci/ship/ship.sh``, so a whole-file overwrite would silently drop a human's local-test
+    override.
+
+    ``on_conflict`` semantics are KEYED, like :func:`_do_register_mcp`'s ``mcpServers.<name>``
+    merge — the conflict is "the managed LINE exists with a different value", never "the FILE
+    exists". A file with unrelated hand-committed content (or no managed line at all) is not a
+    conflict: the line is simply added, under EVERY ``on_conflict`` policy, exactly as a new
+    MCP server entry is added to an existing config. Routing this through
+    ``fsutil.write_file``'s whole-file comparison (as an earlier version of this function did)
+    would make ``on_conflict=skip`` silently refuse to EVER provision the prefix into any repo
+    that already has a hand-committed ``.ship-config`` — the precise repo shape the merge
+    design exists to support — leaving ``rig status`` reporting ``missing`` forever with no way
+    for ``rig apply`` to converge it.
+    """
+    prefix = str(action.options.get("code_prefix", "")).strip()
+    if not prefix:
+        return ActionResult(action, "skipped", "ship-task-prefix: task.code_prefix not set, .ship-config untouched")
+    # Defense-in-depth: plan.py's builder already refuses a malformed prefix before this action
+    # is ever created, but re-check the SAME shared pattern here too — this runner is the last
+    # gate before the value lands in a file ship.sh sources as shell, and a future caller could
+    # construct the action directly, bypassing the plan builder's check entirely.
+    if not SHIP_TASK_CODE_PREFIX_RE.fullmatch(prefix):
+        return ActionResult(action, "error", f"ship-task-prefix: {prefix!r} is not 1-40 uppercase letters/digits (malformed action)")
+    path = action.target / ".ship-config"
+    try:
+        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError as exc:
+        return ActionResult(action, "error", f"ship-task-prefix: could not read {path}: {exc}")
+    new_line = f"SHIP_TASK_CODE_PREFIX={prefix}"
+    current = [line for line in existing.splitlines() if line.startswith("SHIP_TASK_CODE_PREFIX=")]
+    if current == [new_line]:
+        return ActionResult(action, "skipped", f"ship-task-prefix: identical: {path}")
+    if current and any(c != new_line for c in current) and on_conflict == "skip":
+        # The MANAGED LINE itself conflicts (not just "the file exists") — this is the one
+        # real conflict case skip should honor.
+        return ActionResult(
+            action, "skipped", f"ship-task-prefix: SHIP_TASK_CODE_PREFIX= line exists (on_conflict=skip), left untouched: {path}"
+        )
+    out_lines: list[str] = []
+    replaced = False
+    for line in existing.splitlines():
+        if line.startswith("SHIP_TASK_CODE_PREFIX="):
+            # Collapse to exactly ONE managed line — a pre-existing hand-committed duplicate
+            # (or one left over from an older rig version) must not accumulate; only the FIRST
+            # match is rewritten in place, every subsequent match is dropped rather than kept
+            # as a second copy shell sourcing would silently let win/lose depending on order.
+            if not replaced:
+                out_lines.append(new_line)
+                replaced = True
+        else:
+            out_lines.append(line)
+    if not replaced:
+        out_lines.append(new_line)
+    new_content = "\n".join(out_lines) + "\n"
+    backup: Path | None = None
+    detail_suffix = ""
+    if current and any(c != new_line for c in current) and on_conflict == "backup":
+        # ANY line other than the exact desired one — a differing value OR a stale duplicate
+        # alongside the correct line — is being rewritten/dropped, so back up the whole file
+        # first, same as every other conflict-backed action. Checking current[0] only (an
+        # earlier version of this fix) missed the case where the CORRECT line happens to be
+        # first and a stale duplicate follows it: the duplicate would be silently dropped with
+        # no backup, even though drift correctly flags that exact state as "modified".
+        backup = fsutil.backup_path(path)
+        shutil.copy2(str(path), str(backup))
+        detail_suffix = f" (backed up prior → {backup})"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_content, encoding="utf-8")
+    status = "backed_up" if backup is not None else ("created" if not existing else "updated")
+    return ActionResult(action, status, f"ship-task-prefix: wrote → {path}{detail_suffix}", backup)
+
+
 # ── machine-global `gh ship` alias (the entry point the delegator serves) ──────────
 def _do_provision_gh_ship_alias(action: Action, on_conflict: str) -> ActionResult:
     """Provision/reconcile the machine-global ``gh ship`` alias (idempotent, drift-parity).
@@ -6656,6 +6735,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_agents_symlink": _do_provision_agents_symlink,
     "provision_ship_delegator": _do_provision_ship_delegator,
     "provision_gh_ship_alias": _do_provision_gh_ship_alias,
+    "provision_ship_task_prefix": _do_provision_ship_task_prefix,
     "provision_linter_config": _do_provision_linter_config,
     "provision_project_tool": _do_provision_project_tool,
     "provision_github_ruleset": _do_provision_github_ruleset,
