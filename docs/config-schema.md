@@ -1179,6 +1179,47 @@ detection would need a managed manifest (a tracked follow-up).
 
 ---
 
+## `task`
+
+A repo-unique **task-code prefix**, consumed by `ci/ship/ship.sh`'s review-quorum gate. That
+gate only recognizes `HYP-123`/`XX-123` style task codes out of the box — a repo whose task-cli
+backend is GitHub Issues (bare `#NNN`, no ticket-code convention of its own) can never derive a
+task code and is permanently refused by the gate. Setting `code_prefix` fixes that: `rig apply`
+writes it into the repo's `.ship-config` as `SHIP_TASK_CODE_PREFIX=<PREFIX>`, and `ship.sh`
+synthesizes `<PREFIX>-NNN` from a bare `#NNN` found in the branch name or PR body — **never**
+the bare `#NNN` itself.
+
+```yaml
+task:
+  code_prefix: RIG   # 1-40 uppercase letters/digits; unset = feature off
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `code_prefix` | string | *(unset)* | the repo-unique prefix spliced in front of a bare issue number (`<PREFIX>-NNN`); must be 1-40 uppercase letters/digits |
+
+**Why a prefix, not the bare number.** review-cli's review-quorum store is a single **global**
+file keyed only by the task-code string, with no per-repo scoping. Two different repos both
+deriving bare `#346` (e.g. `agent-tools#346` and `rig-cli#346`) would silently share — and
+falsely satisfy — each other's review-iteration count. The prefix is what keeps the synthesized
+code collision-free per repo.
+
+**Merge, not overwrite.** `rig apply` merges the `SHIP_TASK_CODE_PREFIX=` line into any existing
+`.ship-config` content — a hand-committed `SHIP_LOCAL_TEST_DIR`/`SHIP_LOCAL_TEST_CMD` override is
+never clobbered.
+
+**Fail-closed on a malformed prefix.** `ship.sh` validates `SHIP_TASK_CODE_PREFIX` itself at
+read time (1-40 uppercase letters/digits) and ignores the **whole** `.ship-config` file if it
+doesn't match — same policy as an unsafe `SHIP_LOCAL_TEST_DIR`. `HYP-`/`XX-` style codes are
+unaffected either way and still take precedence when present.
+
+**One-way drift (a known limit, same as `linters` above).** Removing `code_prefix` from
+`rig.yaml` does not remove the `SHIP_TASK_CODE_PREFIX=` line it previously wrote — `rig apply`
+emits no action for an unset prefix, so the stale line is never revisited, and `rig status`
+reports clean. Delete the line from `.ship-config` by hand if you turn the feature off.
+
+---
+
 ## `project_tools`
 
 Provisions repo-local carriers for the project-intelligence tools used by the agent ecosystem:

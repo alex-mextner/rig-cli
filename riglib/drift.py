@@ -206,6 +206,8 @@ def detect(
             _check_tg_ctl(action, report)
         elif action.kind == "provision_spotlight":
             _check_spotlight(action, report)
+        elif action.kind == "provision_ship_task_prefix":
+            _check_ship_task_prefix(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -470,6 +472,44 @@ def _check_ship_env_file(canonical: Path, report: DriftReport) -> None:
                       "machine env file with AGENT_TOOLS_ROOT absent/stale (apply rewrites it; "
                       "a delegator with no $AGENT_TOOLS_ROOT and no repo-local ship.sh exits 127)")
         )
+
+
+def _check_ship_task_prefix(action: Action, report: DriftReport) -> None:
+    """Flag drift on ``.ship-config``'s ``SHIP_TASK_CODE_PREFIX=`` line.
+
+    Recomputes the expected line from ``action.options["code_prefix"]`` — the SAME value
+    :func:`_do_provision_ship_task_prefix` (actions/runner.py) merges in — so status and apply
+    read one classification, per the repo's "drift is surfaced both ways, never silently
+    reconciled" rule: a hand-edited or deleted line must not report clean.
+    """
+    prefix = str(action.options.get("code_prefix", "")).strip()
+    if not prefix:
+        return  # nothing to provision (mirrors the runner's own skip on an unset prefix)
+    path = action.target / ".ship-config"
+    expected = f"SHIP_TASK_CODE_PREFIX={prefix}"
+    if not path.is_file():
+        report.items.append(DriftItem("missing", "task", "code_prefix", path, f"{path} does not exist"))
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        report.items.append(DriftItem("modified", "task", "code_prefix", path, f"could not read {path}: {exc}"))
+        return
+    found = [line for line in lines if line.startswith("SHIP_TASK_CODE_PREFIX=")]
+    if not found:
+        report.items.append(DriftItem("missing", "task", "code_prefix", path, "SHIP_TASK_CODE_PREFIX= line is absent"))
+    elif found != [expected]:
+        # Anything OTHER than exactly one line matching `expected` is drift — not just a wrong
+        # value. `_do_provision_ship_task_prefix` (runner.py) collapses a pre-existing DUPLICATE
+        # managed line to one on the next apply, so `found == [expected, "SHIP_TASK_CODE_PREFIX=
+        # OLD"]` (the correct line present ALONGSIDE a stale extra one) must not report clean —
+        # `expected in found` alone would miss that apply is still about to rewrite the file.
+        detail = (
+            f"SHIP_TASK_CODE_PREFIX line is {found[0]!r}, expected {expected!r}"
+            if len(found) == 1
+            else f"found {len(found)} SHIP_TASK_CODE_PREFIX= lines {found!r}, expected exactly one {expected!r}"
+        )
+        report.items.append(DriftItem("modified", "task", "code_prefix", path, detail))
 
 
 def _check_ship_delegator(action: Action, report: DriftReport) -> None:

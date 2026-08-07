@@ -56,6 +56,7 @@ _CATEGORY_LAYER = {
     "project_tools": REPO,
     "agents_md": REPO,
     "github": REPO,
+    "task": REPO,
 }
 
 

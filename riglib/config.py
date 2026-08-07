@@ -69,6 +69,7 @@ _VALID_TOP_KEYS = {
     "ship_delegator",
     "linters",
     "project_tools",
+    "task",
     "scripts",
     "dev",
 }
@@ -606,6 +607,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_ship_delegator(data.get("ship_delegator", {}))
     _validate_linters(data.get("linters", {}))
     _validate_project_tools(data.get("project_tools", {}))
+    _validate_task(data.get("task", {}))
 
 
 def _validate_stack(data: dict[str, Any]) -> None:
@@ -1600,6 +1602,22 @@ def _validate_ship_delegator(sd: dict[str, Any]) -> None:
             f"ship_delegator.enabled must be a bool, got {sd['enabled']!r}",
             schema_path="ship_delegator.enabled",
         )
+
+
+def _validate_task(task: dict[str, Any]) -> None:
+    """Validate the ``task`` block — currently just ``code_prefix`` (see ``plan.py``'s
+    ``_build_ship_task_prefix`` for what it's used for and its own value/character-class
+    re-check at plan-build time). Fail-closed, consistent with every other block, on a
+    non-mapping block or an unknown key (typo guard) — ``code_prefix``'s OWN type/format is
+    re-validated at plan-build time rather than here, matching every other leaf whose full
+    contract also lives at plan-build time (see the ``config_schema.py:870`` comment on why
+    validate() checks structure, not every leaf's declared type).
+    """
+    if not isinstance(task, dict):
+        raise ConfigError("task must be a mapping", schema_path="task")
+    if not task:
+        return
+    _reject_unknown_keys(task, "task")
 
 
 # ── linters ──────────────────────────────────────────────────────────────────────
