@@ -78,6 +78,7 @@ from .actions.runner import (
     skill_harness_link_target,
     tg_ctl_plan_from_action,
     tmux_plan_from_action,
+    env_plan_from_action,
 )
 from .config import GITIGNORE_BEGIN_MARKER, linter_path_escapes_repo
 from .github_ruleset import DEFAULT_RULESET_NAME
@@ -198,6 +199,8 @@ def detect(
             pass  # the agent-browser backend has no cheap read-back; status doesn't probe the UI
         elif action.kind == "provision_tmux":
             _check_tmux(action, report)
+        elif action.kind == "provision_env":
+            _check_env(action, report)
         elif action.kind == "provision_global_excludes":
             _check_global_excludes(action, report)
         elif action.kind == "provision_tools":
@@ -1873,6 +1876,186 @@ def _check_spotlight(action: Action, report: DriftReport) -> None:
             DriftItem("missing", "spotlight", action.item, plist,
                       f"launchd re-sweep agent '{label}' not loaded")
         )
+
+
+def _check_env(action: Action, report: DriftReport) -> None:
+    """Flag drift on the rig-managed shell-env-vars artifacts (never the user's other rc lines).
+
+    missing  — the generated ``rig.env.sh`` is absent, OR rig's ``source <generated file>``
+               import line is entirely absent from ``rc_path`` (whether never installed, or
+               only a STALE copy from an old ``generated_dir`` lingers there).
+    modified — the generated ``rig.env.sh`` on disk differs from the desired render (a hand
+               edit of rig's own file, or the configured ``vars`` changed), OR the current
+               import line IS present but a STALE copy also coexists with it and needs
+               dropping.
+
+    The ``rc_path`` check reuses :func:`riglib.shell_env.desired_rc_text` — apply's EXACT,
+    POSITION-TOLERANT predicate — rather than a separate one. A user who relocated rig's own,
+    still byte-identical, import line (e.g. above their own exports) is genuinely IN SYNC: apply
+    leaves a relocated line alone too (see that function's docstring), so status must not flag
+    it either. Sharing one predicate makes divergence between apply and status impossible by
+    construction (review finding: an earlier end-anchoring version disagreed with a looser
+    drift check here — this one instead shares the exact rule apply itself follows).
+
+    Both file reads (and the defense-in-depth key check inside ``render_env_file``) are guarded
+    LOCALLY: a non-UTF-8 or concurrently-removed file, or an invalid var key that somehow
+    bypassed ``config.validate``, is reported as a ``modified`` drift item rather than crashing
+    the whole `rig status` command (review finding — apply already had this hardening; status
+    did not).
+    """
+    from .shell_env import desired_rc_text
+
+    plan = env_plan_from_action(action)
+    render_failed = False
+    try:
+        desired_file: str | None = plan.render_env_file()
+    except ValueError as exc:
+        # nothing to COMPARE the generated file against, but the rc_path check below (step 2)
+        # doesn't depend on this render at all (only on `plan.import_line()`) — so it still
+        # runs; only the generated-file comparison itself is skipped (review: an earlier
+        # version `return`ed here, silently skipping rc_path too).
+        report.items.append(
+            DriftItem("modified", "env", action.item, plan.generated_file_path,
+                      f"configured vars cannot be rendered: {exc}")
+        )
+        desired_file = None
+        render_failed = True
+
+    # 1) the generated rig.env.sh. Existence is checked regardless of whether the render
+    # succeeded (a render failure means "can't compare CONTENT", not "can't tell if it exists")
+    # — UNLESS the render already failed, in which case that single item is enough; reporting
+    # BOTH "cannot be rendered" AND "not installed" for the SAME target double-counts one
+    # artifact in the drift totals (review finding).
+    if render_failed:
+        pass
+    elif not plan.generated_file_path.is_file():
+        report.items.append(
+            DriftItem("missing", "env", action.item, plan.generated_file_path,
+                      "generated rig.env.sh not installed")
+        )
+    elif desired_file is not None:
+        try:
+            on_disk = plan.generated_file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            report.items.append(
+                DriftItem("modified", "env", action.item, plan.generated_file_path,
+                          f"could not read: {exc}")
+            )
+            on_disk = None
+        if on_disk is not None and on_disk != desired_file:
+            report.items.append(
+                DriftItem("modified", "env", action.item, plan.generated_file_path,
+                          "generated rig.env.sh differs from configured vars")
+            )
+
+    # 2) rc_path — the SAME predicate `_do_provision_env` uses to decide whether to write.
+    # Position-tolerance means a differing text has TWO distinct causes, reported distinctly
+    # (review finding: an earlier version always said "missing" even when the line was actually
+    # present alongside a stale copy — the opposite of the truth):
+    #   missing  — the current import line is absent everywhere (never installed, or only a
+    #              stale copy from an old generated_dir exists).
+    #   modified — the current line IS present, but a STALE copy (old generated_dir) coexists
+    #              with it and still needs dropping.
+    # KNOWN LIMITATION (accepted, review round 9): "present" here is an EXACT string match
+    # against `plan.import_line()`, same as `desired_rc_text`'s own `current_present` check.
+    # A line that is functionally equivalent but not byte-identical — hand-quoted differently
+    # (`source "..."` vs the canonical bare/`'...'` form `shlex.quote` produces), or written
+    # with `$HOME` instead of the literal path — reads as "missing" here even though the file
+    # IS being sourced. Only reachable by hand-editing an already-correct line (rig's own
+    # output is deterministic and always canonical); apply self-heals it to the canonical form
+    # on the next run, so this is a one-time inaccurate STATUS MESSAGE, never a functional bug
+    # or a perpetual-drift loop. Narrowing this to semantic (full-path, not just the basename
+    # `is_rig_env_import_line` matches) equivalence was judged not worth the added complexity
+    # for a hand-edit-only, self-healing edge case.
+    if not plan.rc_path.is_file():
+        rc_text: str | None = ""
+    else:
+        try:
+            rc_text = plan.rc_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            report.items.append(
+                DriftItem("modified", "env", action.item, plan.rc_path, f"could not read: {exc}")
+            )
+            rc_text = None
+    if rc_text is not None and desired_rc_text(rc_text, plan) != rc_text:
+        import_line = plan.import_line()
+        if any(ln.strip() == import_line for ln in rc_text.splitlines()):
+            report.items.append(
+                DriftItem("modified", "env", action.item, plan.rc_path,
+                          f"the current import line is present in {plan.rc_path}, but a STALE "
+                          "copy (an old generated_dir) also lingers there and needs dropping")
+            )
+        else:
+            report.items.append(
+                DriftItem("missing", "env", action.item, plan.rc_path,
+                          f"source import line missing from {plan.rc_path}")
+            )
+
+
+def check_disabled_env(action: Action, report: DriftReport) -> None:
+    """Flag a still-installed ``rig.env.sh`` and/or a still-live ``rc_path`` import line when
+    the config disables the ``env`` category (only fires for an EXPLICIT ``enabled: false`` —
+    see the note at the end).
+
+    apply never deletes; so a machine that previously provisioned shell env vars keeps some or
+    all of ``rig.env.sh`` / the live ``source`` line in ``rc_path`` even after the config turns
+    the category off. With the action gone from the plan, ``_check_env`` never runs — so without
+    this scan the leftover would report as "in sync" (mirrors
+    :func:`check_disabled_global_excludes`). A HIGHER-consequence orphan than a stale tmux conf
+    (env vars keep silently applying to every shell invocation on the machine, not just tmux
+    sessions), so — unlike tmux, which has no equivalent check — this one is worth the extra
+    scan (review, raised across three rounds).
+
+    Checks BOTH halves of the pair independently — a review finding on an earlier version that
+    checked only the generated file: the INVERSE orphan (the generated file was deleted by hand
+    but a stale ``source`` line survives in ``rc_path``) is arguably worse, since every zsh
+    invocation on the machine then prints a "no such file or directory" error at startup, and
+    was previously invisible to this scan.
+
+    Known gap (documented, not fixed here — see ``docs/config-schema.md#env``): this fires ONLY
+    for an explicit ``env: {enabled: false}``. Removing the ``env:`` block ENTIRELY — arguably
+    the more natural way to "turn a feature off" — runs no scan at all here (``cmd_status``'s
+    caller only triggers this on ``enabled is False``), so the same still-active artifacts would
+    report as in sync in that case. Probing a fixed default path with no config presence at all
+    would need a broader design change (no other disabled-check in this codebase does that
+    either); left as a known limitation rather than special-cased here.
+    """
+    from .shell_env import is_rig_env_import_line
+
+    plan = env_plan_from_action(action)
+    generated_exists = plan.generated_file_path.is_file()
+    if generated_exists:
+        report.items.append(
+            DriftItem("extra", "env", action.item, plan.generated_file_path,
+                      f"env disabled in config but rig.env.sh is still present and (if "
+                      f"{plan.rc_path} still sources it) its vars keep applying to every "
+                      f"shell — remove {plan.generated_file_path} and its source line to "
+                      "fully turn it off")
+        )
+
+    if not plan.rc_path.is_file():
+        return
+    try:
+        rc_text = plan.rc_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # a non-UTF-8/permission-denied/concurrently-removed rc_path must not crash `rig
+        # status` (review finding — the same hardening this diff already applies to the three
+        # OTHER rc_path reads in `_do_provision_env`/`_check_env`; this fourth one was missed).
+        # The generated-file check above already ran and reported independently; silently
+        # skipping the rc_path half here is the same "can't inspect it, don't crash" choice
+        # `_check_env` makes (there it reports a `modified` item instead — this scan has none
+        # of that item's target-uniqueness bookkeeping to hang a matching item off, so it just
+        # skips, consistent with returning early on a missing file just above).
+        return
+    generated_name = plan.generated_file_path.name
+    if any(is_rig_env_import_line(ln, plan.import_line(), generated_name) for ln in rc_text.splitlines()):
+        detail = (
+            f"env disabled in config but {plan.rc_path} still sources rig.env.sh"
+            + ("" if generated_exists else f" — {plan.generated_file_path} is GONE, so every "
+               "shell invocation now errors at startup ('no such file or directory')")
+            + f" — remove the source line from {plan.rc_path} to fully turn it off"
+        )
+        report.items.append(DriftItem("extra", "env", action.item, plan.rc_path, detail))
 
 
 def _check_tmux(action: Action, report: DriftReport) -> None:

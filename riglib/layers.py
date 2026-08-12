@@ -39,6 +39,7 @@ _CATEGORY_LAYER = {
     "gitignore": GLOBAL,
     "spotlight": GLOBAL,
     "tmux": GLOBAL,
+    "env": GLOBAL,
     "tg_ctl": GLOBAL,
     "tools": GLOBAL,
     # the machine-level agent-tools/env file (AGENT_TOOLS_ROOT). The CHECK runs from the

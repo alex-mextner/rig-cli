@@ -1260,6 +1260,46 @@
             }
           },
           "additionalProperties": false
+        },
+        "focus_events": {
+          "type": "object",
+          "description": "report terminal focus in/out events to programs running inside panes (tmux's `focus-events` option) — needed by editors/tools that react to focus.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "tmux's focus-events option (set -g focus-events on/off)",
+              "default": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "env": {
+      "type": "object",
+      "description": "rig-managed shell environment variables (GLOBAL, machine-wide): a generated file (`<generated_dir>/rig.env.sh`, one `export KEY=value` per `vars` entry) sourced by ONE spliced line in `rc_path`. Default `rc_path` is `~/.zshenv`, sourced by EVERY zsh invocation (login or not, interactive or not) so a var reaches non-interactive shells too.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "provision the rig-managed shell env vars — see the block's own doc for the opt-in rule (block PRESENCE, not this key's default, decides)"
+        },
+        "rc_path": {
+          "type": "string",
+          "description": "the shell startup file rig sources the generated env file from",
+          "default": "~/.zshenv"
+        },
+        "generated_dir": {
+          "type": "string",
+          "description": "where rig writes rig.env.sh",
+          "default": "~/.config/rig/env"
+        },
+        "vars": {
+          "type": "object",
+          "description": "exported KEY=value pairs",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

@@ -264,6 +264,10 @@ class TmuxPlan:
     autosave_enabled: bool
     autosave_label: str
     autosave_stale_after: int  # minutes; the freshness threshold rig doctor/status checks.
+    # tmux's `focus-events` option — reports terminal focus in/out to programs running inside
+    # panes (needed by editors/tools that react to focus). A plain terminal-capability toggle,
+    # independent of the resurrect/continuum/tpm ordering surface. Default-on (Alex, 2026-08-05).
+    focus_events_enabled: bool
 
     # ── resolved artifact paths ──────────────────────────────────────────────────────
     @property
@@ -374,6 +378,9 @@ class TmuxPlan:
         """The rig-owned ``rig.tmux.conf`` — generated with GUARANTEED ordering.
 
         Section order is load-bearing:
+          0. basic terminal options (``focus-events``) — a plain capability toggle, independent
+             of the resurrect/continuum/tpm surface below, so it carries no ordering constraint;
+             placed first purely for readability
           1. plugin DECLARATIONS (tpm + resurrect + continuum)
           2. resurrect/continuum OPTIONS (processes incl. claude, capture-pane, restore,
              save-interval, boot)
@@ -397,6 +404,12 @@ class TmuxPlan:
             "# rig-managed tmux configuration — GENERATED from rig.yaml. Do not hand-edit;",
             "# `rig apply` rewrites this file wholesale. Edit the `tmux:` block in rig.yaml",
             "# instead, then re-apply. (rig owns this file; your ~/.tmux.conf sources it.)",
+            "",
+            "# ── basic terminal options ───────────────────────────────────────────────────",
+            # Explicit on/off (never just-omit-when-false) — same rationale as every other
+            # modeled boolean below: the generated tail must OVERRIDE a preserved inline value
+            # from a migrated conf, not merely fail to re-assert it.
+            f"set -g focus-events {'on' if self.focus_events_enabled else 'off'}",
             "",
             "# ── plugins (tpm + resurrect + continuum) ─────────────────────────────────",
             "set -g @plugin 'tmux-plugins/tpm'",
@@ -1130,6 +1143,7 @@ def build_tmux(
     login_shell: dict | None = None,
     autosave: dict | None = None,
     pane_titles: dict | None = None,
+    focus_events: dict | None = None,
 ) -> TmuxPlan:
     """Resolve the desired :class:`TmuxPlan` from the (already-validated) tmux config block.
 
@@ -1137,7 +1151,7 @@ def build_tmux(
     HOME-relative ``conf_path`` / ``generated_dir`` are expanded against it. Every nested
     knob defaults to the safe, root-cause-fixing value; an empty block yields the full default
     config (claude in resurrect, capture-pane on, continuum restore+boot, Moshi off, cc-restore
-    on, anti-sprawl on, boot on, login-shell default-command on).
+    on, anti-sprawl on, boot on, login-shell default-command on, focus-events on).
     """
     resurrect = resurrect or {}
     continuum = continuum or {}
@@ -1146,6 +1160,7 @@ def build_tmux(
     anti_sprawl = anti_sprawl or {}
     boot = boot or {}
     login_shell = login_shell or {}
+    focus_events = focus_events or {}
     autosave = autosave or {}
     pane_titles = pane_titles or {}
 
@@ -1199,6 +1214,7 @@ def build_tmux(
         pane_titles_position=_resolve_pane_titles_position(pane_titles),
         pane_titles_format=_resolve_pane_titles_format(pane_titles),
         pane_titles_clear_status_right=bool(_knob(pane_titles, "clear_status_right", True)),
+        focus_events_enabled=bool(_knob(focus_events, "enabled", True)),
     )
 
 

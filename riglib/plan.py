@@ -860,6 +860,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── tmux (rig-managed tmux configuration) ──────────────────────────────────────
     _build_tmux(config, plan)
 
+    # ── env (rig-managed shell environment variables) ──────────────────────────────
+    _build_env(config, plan)
+
     # ── gitignore (rig-managed block in the GLOBAL git excludes file) ──────────────
     _build_global_excludes(config, plan)
 
@@ -2175,9 +2178,63 @@ def _build_tmux(config: LoadedConfig, plan: InstallPlan) -> None:
                 "login_shell": login_shell,
                 "autosave": autosave,
                 "pane_titles": dict(t.get("pane_titles", {}) or {}),
+                "focus_events": dict(t.get("focus_events", {}) or {}),
             },
         )
         )
+
+
+def env_options_from_config(e: dict[str, Any], repo_root: Path) -> dict[str, Any]:
+    """Resolve an ``env:`` config block into the exact ``options`` dict a ``provision_env``
+    ``Action`` carries (``rc_path``/``generated_dir`` expanded + baked absolute, ``vars``
+    stringified). The ONE place this resolution happens — ``_build_env`` below AND the
+    disabled-env status scan (``cli.py``, which needs the same resolved paths to know WHERE to
+    look for a leftover ``rig.env.sh`` when the config has since turned the block off) both call
+    this instead of each re-deriving the same defaults/``_expand`` calls independently, which
+    would risk silently diverging if this resolution ever changes (review finding).
+    """
+    from .shell_env import DEFAULT_GENERATED_DIR, DEFAULT_RC_PATH
+
+    rc_path = _expand(str(e.get("rc_path", DEFAULT_RC_PATH)), repo_root)
+    generated_dir = _expand(str(e.get("generated_dir", DEFAULT_GENERATED_DIR)), repo_root)
+    vars_block = dict(e.get("vars", {}) or {})
+    return {
+        "rc_path": str(rc_path),
+        "generated_dir": str(generated_dir),
+        "vars": {str(k): str(v) for k, v in vars_block.items()},
+    }
+
+
+def _build_env(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the rig-managed shell-environment-variables provisioning, if an ``env`` block enables it.
+
+    Mirrors ``_build_tmux``'s opt-in shape exactly: a PRESENT ``env:`` block opts in (including an
+    explicit empty mapping ``env: {}``, which yields a harmless header-only generated file); only an
+    ABSENT key or ``enabled: false`` is a no-op. This is a per-MACHINE concern (the shell startup
+    file rig sources into is HOME-anchored, not repo-relative), so the block lives in the GLOBAL
+    layer (``~/.config/rig/config.yaml``) — but it cascades into the merged config the same way.
+
+    ``rc_path``/``generated_dir`` are resolved by :func:`env_options_from_config` against the
+    repo root (mirrors every other action's target resolution — never re-resolved against CWD by
+    the runner) so a relative path stays anchored to the ``-C`` repo and ``~/`` stays home-anchored.
+    """
+    e = config.data.get("env")
+    if e is None or not isinstance(e, dict):
+        return
+    if e.get("enabled") is False:
+        return
+
+    options = env_options_from_config(e, config.repo_root)
+    plan.actions.append(
+        Action(
+            kind="provision_env",
+            category="env",
+            item="vars",
+            source=config.repo_root,  # no carrier; rig generates the file itself
+            target=Path(options["rc_path"]),
+            options=options,
+        )
+    )
 
 
 def _build_spotlight(config: LoadedConfig, plan: InstallPlan) -> None:

@@ -810,6 +810,31 @@ _TMUX_BLOCK = Block(
                 "clear_status_right": Leaf("boolean", "when `enabled` is on, also clear tmux's default clock+date status-right; a SEPARATE toggle (nested under `enabled`) so status-right can be left alone while keeping the border title", default=True),
             },
         ),
+        "focus_events": Block(
+            doc="report terminal focus in/out events to programs running inside panes (tmux's `focus-events` option) — needed by editors/tools that react to focus.",
+            leaves={"enabled": Leaf("boolean", "tmux's focus-events option (set -g focus-events on/off)", default=True)},
+        ),
+    },
+)
+
+_ENV_BLOCK = Block(
+    doc=(
+        "rig-managed shell environment variables (GLOBAL, machine-wide): a generated file "
+        "(`<generated_dir>/rig.env.sh`, one `export KEY=value` per `vars` entry) sourced by ONE "
+        "spliced line in `rc_path`. Default `rc_path` is `~/.zshenv`, sourced by EVERY zsh "
+        "invocation (login or not, interactive or not) so a var reaches non-interactive shells too."
+    ),
+    leaves={
+        # No `default=` here (deliberately, review): the effective default isn't a fixed
+        # boolean — it depends on BLOCK PRESENCE. An ABSENT `env:` block is a no-op; a
+        # PRESENT block with `enabled` unset opts in (true); only an explicit `enabled: false`
+        # opts out. That three-way behavior can't be represented as one scalar default without
+        # misleading whichever reading is wrong — see the prose above and in
+        # `docs/config-schema.md#env` for the actual rule.
+        "enabled": Leaf("boolean", "provision the rig-managed shell env vars — see the block's own doc for the opt-in rule (block PRESENCE, not this key's default, decides)"),
+        "rc_path": Leaf("string", "the shell startup file rig sources the generated env file from", default="~/.zshenv"),
+        "generated_dir": Leaf("string", "where rig writes rig.env.sh", default="~/.config/rig/env"),
+        "vars": Leaf("object", "exported KEY=value pairs", additional_properties_type="string"),
     },
 )
 
@@ -991,6 +1016,7 @@ BLOCKS: dict[str, Block] = {
     "agents_md": _AGENTS_MD_BLOCK,
     "github": _GITHUB_BLOCK,
     "tmux": _TMUX_BLOCK,
+    "env": _ENV_BLOCK,
     "gitignore": _GITIGNORE_BLOCK,
     "spotlight": _SPOTLIGHT_BLOCK,
     "tools": _TOOLS_BLOCK,

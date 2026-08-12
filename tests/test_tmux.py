@@ -59,6 +59,7 @@ def test_tmux_full_block_accepted():
                 "cc_restore": {"enabled": True},
                 "anti_sprawl": {"enabled": True, "session": "main"},
                 "boot": {"enabled": True},
+                "focus_events": {"enabled": True},
             },
         }
     )
@@ -109,6 +110,21 @@ def test_tmux_save_interval_must_be_positive_int():
 def test_tmux_unknown_nested_key_rejected():
     with pytest.raises(ConfigError):
         validate({"version": 1, "tmux": {"moshi": {"enable": True}}})  # typo: enable
+
+
+def test_tmux_focus_events_block_accepted():
+    validate({"version": 1, "tmux": {"focus_events": {"enabled": True}}})
+    validate({"version": 1, "tmux": {"focus_events": {"enabled": False}}})
+
+
+def test_tmux_focus_events_enabled_must_be_bool():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"focus_events": {"enabled": "yes"}}})
+
+
+def test_tmux_focus_events_unknown_key_rejected():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tmux": {"focus_events": {"enable": True}}})  # typo: enable
 
 
 def test_tmux_boot_label_must_be_string():
@@ -394,6 +410,23 @@ def test_render_disabled_booleans_emit_explicit_off():
     assert "set -g @continuum-restore 'off'" in conf
     assert "set -g @continuum-boot 'off'" in conf
     assert "set -g @resurrect-capture-pane-contents 'off'" in conf
+
+
+def test_render_focus_events_default_on():
+    """focus-events is a plain terminal-capability toggle, default-on (Alex, 2026-08-05):
+    absent a `tmux.focus_events` block, the generated conf must report focus in/out events."""
+    conf = _plan().render_rig_conf()
+    assert "set -g focus-events on" in conf
+
+
+def test_render_focus_events_off_is_explicit():
+    """Same explicit-off contract as every other modeled boolean: `enabled: false` must emit
+    'off' (not omit the line), so it overrides a preserved inline value from a migrated conf."""
+    conf = tmux.build_tmux(
+        repo_home=Path("/home/u"), focus_events={"enabled": False}
+    ).render_rig_conf()
+    assert "set -g focus-events off" in conf
+    assert "set -g focus-events on" not in conf
 
 
 def test_cc_save_avoids_ls_head_pipe():
@@ -895,6 +928,29 @@ def test_tmux_plan_from_action_on_pre_upgrade_action_defaults_to_new_pane_titles
     conf = tmux_plan_from_action(action).render_rig_conf()
     assert "set -g pane-border-status top" in conf
     assert "set -g status-right ''" in conf
+
+
+def test_tmux_plan_from_action_on_pre_upgrade_action_defaults_to_focus_events_on():
+    """Same drift-check-replay contract as pane_titles above, for `focus_events`: a persisted
+    Action from before this feature existed (no `focus_events` key) must still render
+    `focus-events on` — the same default a freshly-built plan gets."""
+    from riglib.actions.runner import tmux_plan_from_action
+    from riglib.plan import Action
+
+    action = Action(
+        kind="provision_tmux",
+        category="tmux",
+        item="config",
+        source=Path("/repo"),
+        target=Path("/home/u/.tmux.conf"),
+        options={
+            "conf_path": "/home/u/.tmux.conf",
+            "generated_dir": "/home/u/.config/rig/tmux",
+            # no "focus_events" key — a pre-upgrade persisted action.
+        },
+    )
+    conf = tmux_plan_from_action(action).render_rig_conf()
+    assert "set -g focus-events on" in conf
 
 
 def test_render_moshi_on_guards_under_moshi_client():
@@ -2046,6 +2102,39 @@ def test_plan_to_render_round_trip_carries_pane_titles_format_and_clear_status_r
     conf = tmux_plan_from_action(a).render_rig_conf()
     assert 'pane-border-format "#{pane_index}: #{pane_title}"' in conf
     assert "status-right ''" not in conf
+
+
+def test_plan_carries_focus_events_block(fake_agent_tools, tmp_path):
+    plan = _build(
+        {"tmux": {"enabled": True, "focus_events": {"enabled": False}}}, tmp_path, fake_agent_tools
+    )
+    a = [a for a in plan.actions if a.kind == "provision_tmux"][0]
+    assert a.options["focus_events"] == {"enabled": False}
+
+
+def test_plan_defaults_focus_events_to_empty_dict_when_absent(fake_agent_tools, tmp_path):
+    plan = _build({"tmux": {"enabled": True}}, tmp_path, fake_agent_tools)
+    a = [a for a in plan.actions if a.kind == "provision_tmux"][0]
+    assert a.options["focus_events"] == {}
+
+
+def test_plan_to_render_round_trip_carries_focus_events_disabled(fake_agent_tools, tmp_path):
+    """rig.yaml -> plan action -> runner's tmux_plan_from_action -> render, end to end.
+
+    Exercises the FULL pass-through chain (`plan.py`'s options dict, then
+    `runner.tmux_plan_from_action`'s kwarg) for the disabled case specifically — the other
+    focus-events tests either call `tmux.build_tmux` directly (bypassing `plan.py`/`runner.py`)
+    or only assert the default-on value, so a typo'd/missing pass-through in either layer
+    would silently keep rendering 'on' and slip past every other test here undetected."""
+    from riglib.actions.runner import tmux_plan_from_action
+
+    plan = _build(
+        {"tmux": {"enabled": True, "focus_events": {"enabled": False}}}, tmp_path, fake_agent_tools
+    )
+    a = next(act for act in plan.actions if act.kind == "provision_tmux")
+    conf = tmux_plan_from_action(a).render_rig_conf()
+    assert "set -g focus-events off" in conf
+    assert "set -g focus-events on" not in conf
 
 
 def test_plan_disables_autosave_off_darwin(fake_agent_tools, tmp_path, monkeypatch):

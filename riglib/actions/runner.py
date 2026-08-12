@@ -3168,6 +3168,7 @@ def tmux_plan_from_action(action: Action):
         login_shell=dict(opts.get("login_shell", {}) or {}),
         autosave=dict(opts.get("autosave", {}) or {}),
         pane_titles=dict(opts.get("pane_titles", {}) or {}),
+        focus_events=dict(opts.get("focus_events", {}) or {}),
     )
 
 
@@ -6516,6 +6517,152 @@ def _resolve_excludes_target(action: Action) -> tuple[Path, bool, str | None]:
     return expand_user_path(xdg_default), True, xdg_default
 
 
+def env_plan_from_action(action: Action):
+    """Rebuild the pure :class:`~riglib.shell_env.ShellEnvPlan` an action describes.
+
+    Shared by the install handler and the drift check so both agree on the exact desired
+    artifacts from the action's options. ``Path.home()`` is the resolved HOME at apply time (a
+    test monkeypatches it to a tmp HOME). Lazy import keeps the actions package import-light.
+
+    UNLIKE ``tmux_plan_from_action``, ``rc_path``/``generated_dir`` are REQUIRED here — a
+    ``KeyError`` for a missing one is a programmer error, not a runtime condition to paper over.
+    ``env`` is a brand-new action kind (unlike ``tmux``, which has genuinely pre-dated some of
+    its options across real upgrades), so there is no real "action persisted by an older rig"
+    scenario for a bare-default fallback to serve; ``_build_env`` (``riglib/plan.py``) is the
+    ONE place that resolves the defaults (including the ``~/.config`` -> ``$XDG_CONFIG_HOME``
+    special case) and it always writes both keys into ``Action.options`` — so a duplicate
+    fallback default here would only ever be exercised by a caller NOT going through
+    ``_build_env``, and would then risk resolving differently than the plan builder did (review
+    finding, discovered via exactly that divergence). Failing loudly beats resolving quietly
+    wrong.
+    """
+    from ..shell_env import build_shell_env
+
+    opts = action.options
+    return build_shell_env(
+        repo_home=Path.home(),
+        rc_path=str(opts["rc_path"]),
+        generated_dir=str(opts["generated_dir"]),
+        vars=dict(opts.get("vars", {}) or {}),
+    )
+
+
+def _do_provision_env(action: Action, on_conflict: str) -> ActionResult:
+    """Generate the rig-managed shell-env-vars file and ensure it is sourced from ``rc_path``.
+
+    What it writes:
+      - ``<generated_dir>/rig.env.sh`` — the rig-owned file (wholesale rewrite; one
+        ``export KEY=value`` line per configured var).
+      - ``rc_path`` (default ``~/.zshenv``) — POSITION-TOLERANT: if rig's CURRENT import line
+        already appears anywhere, ``rc_path`` is untouched (even a user-relocated line is left
+        where they put it); otherwise it is appended at the end, dropping any STALE copy (an
+        old ``generated_dir``) first. Nothing but rig's own recognizable line is ever touched —
+        see :func:`riglib.shell_env.desired_rc_text` for the exact predicate, shared verbatim
+        with the drift check so apply and status can never disagree.
+
+    Both writes go through :func:`riglib.actions.fsutil.write_file` — same ``on_conflict``
+    policy, same backup-on-replace, same error-to-``ActionResult`` conversion for BOTH files.
+    ``rc_path`` is the user's own, possibly irreplaceable file (unlike the freely-regenerable
+    ``rig.env.sh``), so it gets the SAME safety treatment, not less (review finding: an earlier
+    version wrote it with a bare ``write_text`` — no backup, and only ``OSError`` was caught,
+    so a non-UTF-8 ``rc_path`` raised ``UnicodeDecodeError`` — a ``ValueError`` — right through
+    apply uncaught).
+
+    Idempotent: a re-apply that finds both artifacts already current is a ``skipped`` no-op.
+    """
+    from ..shell_env import desired_rc_text
+
+    plan = env_plan_from_action(action)
+
+    changed = False
+    details: list[str] = []
+    # conflict-skipped rc_path splice (on_conflict=skip left it untouched though it needed
+    # reconciling) — surfaced in the result detail but NOT counted as a change (nothing was
+    # written): unresolved drift, matching tmux's `skipped_conflicts` convention.
+    unresolved: list[str] = []
+    backup: Path | None = None
+
+    # 1) the generated rig.env.sh (wholesale, idempotent on identical bytes).
+    #
+    # `render_env_file()`'s key check should never actually raise — `config.validate` already
+    # rejects an invalid var key before a plan is ever built — but it is a defense-in-depth
+    # invariant, not a caller contract every path is guaranteed to have gone through (review),
+    # so a violation is still reported as a clean ActionResult error rather than an uncaught
+    # ValueError. Same for the mkdir: a file blocking `generated_dir` (or a permissions issue)
+    # must not propagate raw either.
+    try:
+        plan.generated_dir.mkdir(parents=True, exist_ok=True)
+        rendered = plan.render_env_file()
+    except (OSError, ValueError) as exc:
+        return ActionResult(action, "error", f"env: failed to prepare {plan.generated_file_path}: {exc}")
+    env_out = fsutil.write_file(plan.generated_file_path, rendered, on_conflict)
+    if env_out.status == "error":
+        return ActionResult(action, "error", f"env: {env_out.detail}")
+    if env_out.backup:
+        backup = env_out.backup
+    if env_out.status != "skipped":
+        changed = True
+        details.append(f"generated {plan.generated_file_path.name}")
+    elif not env_out.detail.startswith("identical"):
+        # `on_conflict=skip` left a HAND-EDITED (or otherwise differing) rig.env.sh untouched —
+        # the SAME unresolved-conflict class as the rc_path branch below, so it needs the SAME
+        # surfacing: without this, `changed` would stay False here while the file genuinely
+        # differs from the desired render, and a run where nothing else changed either would
+        # report "already current" — asserting currency that isn't true, while `rig status`
+        # simultaneously (and correctly) reports it as modified (review finding: the rc_path
+        # side got this disambiguation, the generated-file side did not).
+        unresolved.append(
+            f"{plan.generated_file_path.name} differs and on_conflict=skip — NOT regenerated"
+        )
+
+    # 2) ensure the import line in rc_path. The read (to compute `desired`) can fail the same
+    # ways the write can — a vanished/unreadable file, or non-UTF-8 content (`UnicodeDecodeError`
+    # is a `ValueError`, not an `OSError` — both are caught so neither propagates raw).
+    try:
+        existing = plan.rc_path.read_text(encoding="utf-8") if plan.rc_path.is_file() else ""
+    except (OSError, UnicodeDecodeError) as exc:
+        return ActionResult(action, "error", f"env: failed to read {plan.rc_path}: {exc}", backup)
+
+    desired = desired_rc_text(existing, plan)
+    if desired != existing:
+        try:
+            plan.rc_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return ActionResult(
+                action, "error", f"env: failed to create {plan.rc_path.parent}: {exc}", backup
+            )
+        rc_out = fsutil.write_file(plan.rc_path, desired, on_conflict)
+        if rc_out.status == "error":
+            return ActionResult(action, "error", f"env: {rc_out.detail}", backup)
+        if rc_out.backup:
+            # `ActionResult.backup` is a single slot; if BOTH artifacts got backed up this run,
+            # rc_path's backup deliberately wins (overwrites the generated-file one) — rc_path
+            # is the irreplaceable file, the generated one is trivially regenerable from config.
+            # Both backups still exist on disk either way; only the headline pointer is singular.
+            backup = rc_out.backup
+        if rc_out.status != "skipped":
+            changed = True
+            details.append(f"added import line to {plan.rc_path}")
+        elif not rc_out.detail.startswith("identical"):
+            # `on_conflict=skip` left rc_path UNCHANGED even though `desired != existing` — the
+            # import line was NOT added, so `rig.env.sh` exists but nothing sources it yet: the
+            # vars silently never take effect. Must not be indistinguishable from a full,
+            # successful "updated"/"skipped: already current" (review finding — SURFACE it
+            # explicitly; `changed` correctly stays False here since nothing was WRITTEN, but
+            # the unresolved-conflict text must still reach the caller, not be discarded by the
+            # `not changed` branch below returning a hardcoded "already current").
+            unresolved.append(
+                f"import line NOT added to {plan.rc_path} (on_conflict=skip) — the "
+                "generated vars are not yet sourced; re-run with backup/overwrite to wire it"
+            )
+
+    if not changed:
+        if unresolved:
+            return ActionResult(action, "skipped", "env: " + "; ".join(unresolved), backup)
+        return ActionResult(action, "skipped", "env: already current", backup)
+    return ActionResult(action, "updated", "env: " + "; ".join(details + unresolved), backup)
+
+
 def _do_provision_global_excludes(action: Action, on_conflict: str) -> ActionResult:
     """Provision/reconcile rig's managed block in the GLOBAL git ``core.excludesfile``.
 
@@ -6664,6 +6811,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_github_actions": _do_provision_github_actions,
     "provision_github_browser": _do_provision_github_browser,
     "provision_tmux": _do_provision_tmux,
+    "provision_env": _do_provision_env,
     "provision_global_excludes": _do_provision_global_excludes,
     "provision_spotlight": _do_provision_spotlight,
     "provision_tools": _do_provision_tools,
