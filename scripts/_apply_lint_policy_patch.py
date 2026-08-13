@@ -31,7 +31,10 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 
 def regex_once(text: str, pattern: str, replacement: str, label: str) -> str:
-    out, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+    # Use a callable replacement. Passing a string directly makes re.sub interpret backslash
+    # escapes in generated source (for example the literal ``\\r\\n`` becomes a physical CRLF),
+    # which can corrupt Python code even though the replacement template itself is correct.
+    out, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=re.S)
     if count != 1:
         raise RuntimeError(f"{label}: expected exactly one regex match, found {count}")
     return out
@@ -377,7 +380,6 @@ def patch_runner() -> None:
 
 def refresh_schema() -> None:
     # Import only after source patches are on disk.
-    import importlib.util
     import sys
 
     sys.path.insert(0, str(ROOT))
