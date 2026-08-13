@@ -1,128 +1,128 @@
-# Rig linter bundles
+# Rig reusable linter carriers
 
-Status: implementation contract for `linters.bundles`.
+Status: implementation contract for directory `linters.bundles` plus source-file-backed `linters.items`.
 
 ## Problem
 
-The existing `linters.items` reconciler is file-oriented: one item declares a tool, role, repo-relative path, and exact text content. That works for linter/formatter configs but not for a local plugin intentionally vendored as a directory tree.
+Today's `linters.items` embeds exact text in `rig.yaml`. That is fine for a one-off config but poor for organization-wide presets. It also cannot represent a vendored local plugin directory such as anti-slop.
 
-`anti-slop` is the motivating case. `agent-tools` pins the reviewed fork as `vendor/anti-slop`; target projects should receive the plugin's supported vendoring payload, not import the remote repository at lint time and not embed every TypeScript file into `rig.yaml`.
+`agent-tools` now has two canonical source forms:
+
+- `vendor/anti-slop/skills/install-anti-slop/assets/anti-slop/` — pinned subrepo directory payload;
+- `linters/oxc/` — canonical Oxlint/Oxfmt config files.
+
+Rig should reconcile both without network downloads and without duplicating their bytes into every project YAML.
 
 ## Contract
 
 ```yaml
 linters:
   enabled: true
+
   bundles:
     anti-slop:
       source: vendor/anti-slop/skills/install-anti-slop/assets/anti-slop
       target: tools/oxlint/anti-slop
+
   items:
     oxlint:
       tool: oxlint
       role: linter
       path: oxlint.config.ts
-      content: |
-        # exact-content Oxc config
+      source: linters/oxc/oxlint.config.ts
+
+    oxfmt:
+      tool: oxfmt
+      role: formatter
+      path: .oxfmtrc.jsonc
+      source: linters/oxc/.oxfmtrc.jsonc
 ```
 
-Each enabled `bundles.<label>` has:
+### `linters.bundles.<label>`
 
-- `source` — a relative directory under resolved `agent_tools_source`; no absolute path, `..`, backslash, `.git`, or symlink traversal;
-- `target` — a repo-relative destination directory with the same containment restrictions;
-- `enabled` — optional bool, default true.
+- `source`: required repo-relative directory under resolved `agent_tools_source`;
+- `target`: required repo-relative destination directory under the target repo;
+- `enabled`: optional bool, default true.
 
-The source is anchored to `agent_tools_source`. A committed project config cannot copy arbitrary machine directories. If the anti-slop Git subrepo has not been initialized, the source is missing and apply fails closed with an actionable error; an empty/missing source must never produce an empty target.
+### `linters.items.<label>`
 
-## Desired state
+Keep today's `tool`, `role`, `path`, `enabled`. Desired bytes may come from **exactly one** of:
 
-A bundle is a deterministic tree of regular files. Directories are implicit. Symlinks, device files, sockets, and other non-regular source entries are rejected.
+- `content`: existing inline exact text;
+- `source`: a repo-relative regular file under resolved `agent_tools_source`.
 
-- missing target → copy bundle;
-- exact target → no-op;
-- differing target → apply `defaults.on_conflict`;
-- target symlink or symlink in any parent → error;
-- source/target escape or `.git` component → validation error plus apply-time defense in depth.
+Require one and only one of `content`/`source`. This preserves backward compatibility while allowing reusable presets.
 
-Exact means the complete regular-file tree matches. Extra target files are drift so a removed rule cannot remain executable forever.
+All source paths are anchored to `agent_tools_source`. A committed project config cannot read arbitrary machine files.
+
+## Safety and desired state
+
+For both source files and bundles reject absolute paths, `..`, backslashes, `.git`, leading/trailing whitespace, and symlink traversal. Missing source is an error. For anti-slop specifically, an uninitialized Git subrepo therefore fails closed instead of silently creating an empty plugin.
+
+A bundle is a deterministic regular-file tree. Symlinks, device files, sockets, and other non-regular entries are invalid. Exact means the complete tree matches, including absence of extra target files.
+
+A source-file item reads exact bytes from its declared source and otherwise uses the existing `provision_linter_config` conflict/drift semantics.
 
 ## Conflict semantics
 
-- `skip` — leave a differing target untouched and keep drift visible;
-- `overwrite` — replace the full differing target so stale files disappear;
-- `backup` — move the full prior target to a unique `.rig-bak-<UTC>` sibling, then copy the desired tree.
+Both carrier forms use Rig's existing `skip | overwrite | backup` policy.
 
-A correct re-apply is a true no-op and creates no backup. Rig never follows source or target symlinks.
+For bundles, the directory is one conflict unit: `backup` moves the complete previous target to a unique sibling and then copies the source; `overwrite` replaces the whole tree so stale files disappear; `skip` leaves drift visible.
+
+For source-file items, existing file behavior remains unchanged. A correct re-apply is a no-op and creates no backup.
 
 ## Plan / apply / status parity
 
-Add one `provision_linter_bundle` action per enabled bundle. Apply and drift share one classifier, mirroring `provision_linter_config`.
-
-Status reports missing, modified, unsafe/unreadable, or in-sync. Disabling a bundle does not surprise-delete an existing target.
+- source-file items still emit `provision_linter_config`; plan resolves their source bytes once and carries the desired content, so apply/status compare the same bytes;
+- bundles emit `provision_linter_bundle` with a shared apply/drift classifier;
+- disabling a carrier never surprise-deletes the old target.
 
 ## Schema
 
-`linters` remains closed except for its two named maps:
+`linters` stays closed with named `items` and `bundles` maps. Bundle items are closed. Linter items add optional `source` and change the requirement from mandatory `content` to an exclusive `content XOR source` semantic validation.
 
-```yaml
-linters:
-  enabled: boolean
-  items:   # existing exact-content config files
-  bundles: # vendored directory payloads
-```
-
-Each bundle item is closed, requires non-empty `source` and `target`, and accepts optional boolean `enabled`.
-
-The current schema `Block` supports one `open_map`; model `items` and `bundles` as explicit nested map blocks or extend the representation to multiple named open maps. Prefer the smallest representation that keeps the canonical schema emitter, runtime validator, and published schema in lockstep.
+The published JSON schema should express this with `oneOf` where practical, while runtime validation remains authoritative and fail-closed.
 
 ## anti-slop + Oxc consumer
 
-The source of truth is the pinned subrepo:
-
 ```text
 agent-tools/
-  vendor/anti-slop/                     # git subrepo
+  vendor/anti-slop/
     skills/install-anti-slop/assets/anti-slop/
-      index.ts
-      rules/
-      shared/
+  linters/oxc/
+    oxlint.config.ts
+    .oxfmtrc.jsonc
 ```
 
-Rig copies that supported payload to:
+becomes:
 
 ```text
 target-repo/
   tools/oxlint/anti-slop/
   oxlint.config.ts
-  .oxfmtrc.jsonc   # optional team formatting config
+  .oxfmtrc.jsonc
 ```
 
-The standard JS/TS toolchain is Oxc: Oxlint + Oxfmt, not Biome. The Oxlint config enables the complete anti-slop plugin and type-aware mode, including:
-
-- `typescript/no-unsafe-type-assertion`
-- `typescript/no-unnecessary-type-assertion`
-- `typescript/no-non-null-assertion`
-- `typescript/ban-ts-comment` with `@ts-ignore`/`@ts-nocheck` banned and `@ts-expect-error` description required.
-
-`tsc --noEmit` remains a separate compiler gate.
+The standard JS/TS toolchain is Oxc: Oxlint + Oxfmt. The canonical Oxlint preset enables every anti-slop rule, type-aware mode, `typescript/no-unsafe-type-assertion`, `typescript/no-unnecessary-type-assertion`, `typescript/no-non-null-assertion`, and strict `typescript/ban-ts-comment`. `tsc --noEmit` remains a separate compiler gate.
 
 ## Non-goals
 
 - no global binaries;
-- no package-manager mutation inside the directory-copy action;
+- no package-manager mutation in linter carriers;
 - no network download during apply;
 - no anti-slop special case in Rig core;
-- no arbitrary AST merge of an existing Oxlint config.
+- no AST merge of arbitrary existing Oxlint config.
 
 ## Tests required before merge
 
-- validation: valid bundle; bad scalar/map types; unknown item key; missing/empty source/target; non-bool enabled;
-- containment: POSIX/Windows absolute paths, `..`, backslashes, `.git`, whitespace-padded paths;
-- source safety: missing source, source file instead of directory, source symlink, nested symlink, non-regular entry, uninitialized subrepo;
-- apply: create nested tree, binary/text bytes preserved, exact re-apply no-op;
-- conflict: skip/overwrite/backup on changed file, extra target file, missing target file;
-- target safety: leaf/parent symlinks and non-directory parents;
-- drift: missing/modified/io-error parity with apply;
-- plan: area disabled, bundle disabled, one action per enabled bundle;
-- full round-trip under temporary HOME;
+- validation for both carriers, including `content XOR source`;
+- POSIX/Windows containment and `.git` rejection;
+- missing/uninitialized subrepo and nested source symlink rejection;
+- source-file create/update/skip/backup and byte parity;
+- bundle create, exact no-op, binary/text preservation, extra/missing/changed file drift;
+- bundle skip/overwrite/backup conflict behavior;
+- target leaf/parent symlink rejection;
+- apply/status classifier parity;
+- area/item/bundle disable gating;
+- clean-room round trip under temporary HOME;
 - published JSON schema sync.
