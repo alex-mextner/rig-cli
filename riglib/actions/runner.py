@@ -33,6 +33,10 @@ from ..config import (
     SHIP_DELEGATOR_EXCLUDE_COMMENT,
     SHIP_DELEGATOR_EXCLUDE_END_MARKER,
     SHIP_DELEGATOR_REL_PATH,
+    WORKTREES_DIR_NAME,
+    WORKTREES_EXCLUDE_BEGIN_MARKER,
+    WORKTREES_EXCLUDE_COMMENT,
+    WORKTREES_EXCLUDE_END_MARKER,
     linter_path_escapes_repo,
 )
 from ..github_actions import (
@@ -4769,14 +4773,17 @@ def repo_info_exclude_path(repo_root: Path) -> Path | None:
     """Resolve the repo's git exclude file (``info/exclude``), worktree-aware.
 
     In a plain repo this is ``<repo>/.git/info/exclude``. In a git WORKTREE, ``<repo>/.git`` is a
-    FILE pointing at that worktree's private gitdir (``<common>/.git/worktrees/<name>``), and
-    ``info/exclude`` is PER-WORKTREE — it lives in that private gitdir, NOT in the common dir (only
-    things like ``HEAD``/objects are shared). A naive ``<repo>/.git/info/exclude`` would therefore
-    fail in a worktree (``.git`` is a file, not a dir). We ask git for the canonical path
-    (``git -C <repo> rev-parse --git-path info/exclude``), which returns the correct per-layout file
-    — so ignoring the delegator in a worktree affects ONLY that worktree, exactly right. Returns
-    ``None`` when the path is not a git repo (git errors) so the caller treats "no git" as
-    nothing-to-ignore, never a crash.
+    FILE pointing at that worktree's private gitdir (``<common>/.git/worktrees/<name>``), so a
+    naive ``<repo>/.git/info/exclude`` string join would fail there (``.git`` is a file, not a
+    dir). ``info/exclude`` itself, however, is one of the files git keeps in the COMMON gitdir and
+    SHARES across every worktree (unlike ``HEAD``/the index, which really are per-worktree) —
+    verified empirically: `git -C <linked-worktree> rev-parse --git-path info/exclude` names the
+    SAME physical file as the primary checkout's `.git/info/exclude`, not a private copy. We ask
+    git for the canonical path (``git -C <repo> rev-parse --git-path info/exclude``) purely to get
+    a working path from ANY worktree layout, not to isolate one worktree's ignores from another's
+    — ignoring the delegator from inside a worktree affects `git status` in every worktree of the
+    repo. Returns ``None`` when the path is not a git repo (git errors) so the caller treats "no
+    git" as nothing-to-ignore, never a crash.
     """
     try:
         res = subprocess.run(
@@ -5007,6 +5014,110 @@ def _atomic_write_exclude(path: Path, content: str) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+# ── `rig worktree create` — per-repo ``.worktrees/`` git-exclude registration ───────
+# `rig worktree create` (riglib/worktree.py) standardizes WHERE a new agent worktree lands
+# (`<repo>/.worktrees/<name>`) and, immediately after `git worktree add` succeeds, calls
+# `reconcile_worktrees_exclude` below so the new directory never shows up as an untracked file in
+# `git status` for the primary checkout. Lives here (not in worktree.py) because it reuses the same
+# marker-splice primitives (`_find_marker_lines`, `_atomic_write_exclude`) and the same worktree-
+# aware `repo_info_exclude_path` resolver as the ship-delegator/opencode-bridge excludes above —
+# one home for every "register a rig-owned entry in .git/info/exclude" reconciler.
+def worktrees_exclude_block_text() -> str:
+    """The exact marker-delimited block rig owns for the ``.worktrees/`` entry."""
+    return "\n".join(
+        [
+            WORKTREES_EXCLUDE_BEGIN_MARKER,
+            WORKTREES_EXCLUDE_COMMENT,
+            f"/{WORKTREES_DIR_NAME}/",
+            WORKTREES_EXCLUDE_END_MARKER,
+        ]
+    )
+
+
+def reconcile_worktrees_exclude(repo_root: Path) -> tuple[bool, str]:
+    """Idempotently ensure ``.worktrees/`` is ignored in ``repo_root``'s ``.git/info/exclude``.
+
+    Returns ``(ok, note)``. Mirrors :func:`_reconcile_ship_exclude` byte-for-byte (collapse a
+    prior non-idempotent write back to one block, refuse an unbalanced/misordered marker pair
+    rather than guess, preserve every other line verbatim) — the same contract every managed
+    per-repo exclude entry in this file honors. ``exclude_path`` comes from
+    :func:`repo_info_exclude_path`, so this resolves correctly when called from a freshly created
+    linked worktree too — ``info/exclude`` lives in the repo's COMMON gitdir and is SHARED by
+    every worktree (verified: `git -C <linked-worktree> rev-parse --git-path info/exclude`
+    names the primary checkout's `.git/info/exclude`, not a private per-worktree copy), so one
+    reconcile call keeps `git status` clean in every worktree of the repo, not only the one being
+    created. ``repo_info_exclude_path`` is still needed rather than a naive ``<repo>/.git/info/
+    exclude`` string join, because ``.git`` is a FILE (not a directory) inside a linked worktree.
+    A repo with no git (``exclude_path is None``) is a no-op — ``ok=True``, nothing to reconcile.
+    ``ok=False`` means the ignore could NOT be established (unreadable/unwritable exclude, or a
+    marker conflict) — the caller must surface this as a real problem, not a misleading success,
+    since an un-ignored ``.worktrees/`` dirties `git status` the moment a worktree is created
+    under it.
+    """
+    exclude_path = repo_info_exclude_path(repo_root)
+    if exclude_path is None:
+        return True, "no git repo — .worktrees/ not registered (nothing to reconcile)"
+    desired = worktrees_exclude_block_text()
+    if not exclude_path.is_file():
+        if not exclude_path.exists():
+            try:
+                exclude_path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_exclude(exclude_path, desired + "\n")
+            except OSError as exc:
+                return False, f"could not write {exclude_path}: {exc}"
+            return True, f"registered .worktrees/ in {exclude_path}"
+    try:
+        with exclude_path.open(encoding="utf-8", newline="") as fh:
+            content = fh.read()
+    except OSError as exc:
+        return False, f"could not read {exclude_path}: {exc}"
+    begins = _find_marker_lines(content, WORKTREES_EXCLUDE_BEGIN_MARKER)
+    ends = _find_marker_lines(content, WORKTREES_EXCLUDE_END_MARKER)
+    if len(begins) != len(ends):
+        return False, f"{exclude_path} has unbalanced rig worktrees markers — reconcile by hand"
+    if not begins:
+        # Preserve existing content verbatim; append the block with exactly one leading newline.
+        if not content:
+            new_content = f"{desired}\n"
+        else:
+            lead = content if content.endswith("\n") else content + "\n"
+            new_content = f"{lead}{desired}\n"
+    else:
+        markers = sorted(
+            [(b[0], b[1], "begin") for b in begins] + [(e[0], e[1], "end") for e in ends]
+        )
+        pairs: list[tuple[int, int]] = []
+        expect = "begin"
+        pending = -1
+        for start, line_end, kind in markers:
+            if kind != expect:
+                return False, f"{exclude_path} has misordered rig worktrees markers — reconcile by hand"
+            if kind == "begin":
+                pending = start
+                expect = "end"
+            else:
+                pairs.append((pending, line_end))
+                expect = "begin"
+        if len(pairs) == 1 and content[pairs[0][0] : pairs[0][1]] == desired:
+            return True, f"already registered in {exclude_path}"
+        out: list[str] = []
+        cursor = 0
+        for idx, (r_start, r_end) in enumerate(pairs):
+            out.append(content[cursor:r_start])
+            if idx == 0:
+                out.append(desired)
+            elif content[r_end : r_end + 1] == "\n":
+                r_end += 1
+            cursor = r_end
+        out.append(content[cursor:])
+        new_content = "".join(out)
+    try:
+        _atomic_write_exclude(exclude_path, new_content)
+    except OSError as exc:
+        return False, f"could not write {exclude_path}: {exc}"
+    return True, f"registered .worktrees/ in {exclude_path}"
 
 
 def _do_provision_ship_delegator(action: Action, on_conflict: str) -> ActionResult:
