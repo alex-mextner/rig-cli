@@ -25,6 +25,18 @@ machine to it (idempotently, with backups), and surfaces drift in both direction
 
 ![rig apply converges the repo to rig.yaml; rig status reports drift both ways](./docs/img/reconcile.svg)
 
+## One development culture, from one control plane
+
+Rig treats development setup and engineering policy as one declarative system rather than a pile of unrelated dotfiles. A global machine layer can establish defaults; committed `rig.yaml` files make repository-specific differences reviewable and reproducible. The same engine previews, applies, verifies, and reports drift.
+
+That control plane already spans coding-agent skills and hooks, git hooks, CI gates, MCP servers, harness permissions/auto-mode, GitHub/repository settings, project-tool integrations, model/tool maintenance, and now JS/TS lint/format policy through Oxlint/Oxfmt + anti-slop. The intent is that humans and coding agents encounter the same constraints and preferred practices instead of each harness or repository inventing its own culture.
+
+Where the surrounding tool exposes a preventative boundary, Rig installs a guardrail; where it cannot, CI/status/verification can still detect drift or unsafe state. The next cross-domain enforcement/advise model is tracked in [#225](https://github.com/alex-mextner/rig-cli/issues/225), with consistent better-practice recommendations in [#229](https://github.com/alex-mextner/rig-cli/issues/229).
+
+This is useful for a team, but also for one developer with many repos and several agents: one policy source reduces setup drift, makes a new checkout predictable, and makes agent behavior less dependent on whichever harness happened to start the session. A dedicated onboarding/attestation command is tracked in [#228](https://github.com/alex-mextner/rig-cli/issues/228).
+
+Today Rig already has machine-wide global defaults plus per-repository overrides. The broader “change once everywhere” layer is explicit roadmap work rather than a hidden promise: fleet reconciliation [#222](https://github.com/alex-mextner/rig-cli/issues/222), repository/stack/tag targeting [#227](https://github.com/alex-mextner/rig-cli/issues/227) and [#233](https://github.com/alex-mextner/rig-cli/issues/233), shareable team policy packs [#223](https://github.com/alex-mextner/rig-cli/issues/223), and cross-domain `rig rules` / explain [#224](https://github.com/alex-mextner/rig-cli/issues/224). The goal is to change lint, CI, hooks, agent capabilities, skills, MCP and other development policy globally—or only for the relevant stacks/projects—with one previewable operation.
+
 ## Install
 
 **One-liner** (installs deps, links `rig` into PATH, registers the skill):
@@ -64,7 +76,7 @@ Or run straight from a checkout without installing — `uv run bin/rig …` / `p
 | `rig doctor` | Detect + (offer to) install every tool rig/agent-tools need, across brew / apt / dnf / pacman / zypper. `--yes` installs non-interactively. |
 | `rig export` | Write a starter `rig.yaml` from detected defaults without a TUI (recommends **auto-mode on**). |
 | `rig setup` | **The interactive configuration wizard.** In a terminal it shows what is enabled across every reconciled area, lets you change any option (with an inline hint per option) in the local `rig.yaml` AND the global `~/.config/rig/config.yaml`, then applies. Non-interactive (piped / no TTY) it prints usage for `init`/`apply`/`config get\|set`. |
-| `rig config get\|set` | **The headless counterpart to the wizard** — read/edit ONE nested key by **dot path**, then reconcile. `get <dot.path>` reads one key from the single target file (`./rig.yaml`, or `--global`); `--json` emits the raw value, a subtree prints as YAML. `set <dot.path> <value>` coerces the value conservatively (`true`/`false`/int/float/null; `09`/`1e3`/underscored/Unicode-digit values stay strings), writes it, then runs the **same apply engine** as `rig apply` (full rollback if the write or the catalog-backed plan build fails). `--global` targets `~/.config/rig/config.yaml`; `--no-apply` writes the key and prints the plan only. |
+| `rig config get\|set` | **The headless counterpart to the wizard.** `get` reads one nested key. `set <dot.path> <value>` is **preview-by-default**: it validates the prospective config entirely in memory, shows the config change + resulting reconcile plan, and writes nothing. Add **`--commit`** to write the change and execute that same validated plan; `--no-apply` is the explicit legacy write-only mode. `--global` targets `~/.config/rig/config.yaml`. |
 | `rig config-web` | **The web counterpart to the wizard** — a local browser UI to view + edit the reconciled config. Renders every area with its live effective value (the cascade of the global `~/.config/rig/config.yaml` + the repo `./rig.yaml`), tagged with the layer an edit lands in; a change routes to the **owning layer** and is written by the **same engine** as `rig config set`/the wizard (fail-closed validation, no `rig apply` — you reconcile explicitly). Lifecycle is the shared `agenttools-service` manager: `run` (foreground) / `start` (background daemon) / `status` / `stop` / `enable` (install launchd-macOS / systemd-`--user`-Linux autostart + start) / `disable`. Binds `127.0.0.1` only, with a same-origin (CSRF) + Host (DNS-rebinding) guard. A bare `rig config-web` prints help, never launches. `--port`, `-C <repo>`. **The lifecycle verbs need the `agenttools-service` lib** (an agent-tools nested lib, not on PyPI): `uv pip install --python <rig's interpreter> -e <agent-tools>/lib/agenttools_daemon -e <agent-tools>/lib/agenttools_service` (the `--python` target makes the libs land where rig imports them; the error message prints the exact interpreter path). Without it, `rig --help` and every other command still work; a lifecycle verb fails closed with that install hint. |
 | `rig evolve` | **Project evolution portal.** Serve a local browser UI with a git activity histogram, proportional file treemap, clickable selection, and provider health. The first slice is file-level and read-only; symbol/LSP/provider overlays build on the same API. Lifecycle uses the shared `agenttools-service` verbs: `run` / `start` / `status` / `stop` / `enable` / `disable`. A bare `rig evolve` prints help, never launches. `--port`, `-C <repo>`. |
 | `rig install-skill` | Register the `rig` agent skill so skills-directory harnesses auto-discover it (currently Claude Code and Codex). |
@@ -117,8 +129,8 @@ every reconciled area (the `rig status` rows), lets you toggle/change any option
 and why — then applies the change on the spot. Run from a non-TTY (a pipe/redirect) it prints
 usage for the core commands instead of a half-wizard. For scripted single-value edits use its
 headless counterpart `rig config get <dot.path>` / `rig config set <dot.path> <value>` — a
-dot-path editor that reads/edits one nested key then reconciles (`--global` targets the global
-config, `--no-apply` writes without converging).
+dot-path editor whose writes are previewed by default. Add `--commit` to write + reconcile;
+`--global` targets the global config and `--no-apply` is explicit write-only mode.
 
 Headless / agent path (no TUI):
 

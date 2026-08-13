@@ -463,6 +463,7 @@ def load(
     explicit_config: Path | None = None,
     include_global: bool = True,
     include_repo: bool = True,
+    layer_overrides: dict[Path, dict[str, Any]] | None = None,
 ) -> LoadedConfig:
     """Cascade-load config for ``repo_root``.
 
@@ -472,6 +473,7 @@ def load(
     - The result is validated (fail-closed) before return.
     """
     repo_root = repo_root.resolve()
+    overrides = {Path(path).resolve(): dict(data) for path, data in (layer_overrides or {}).items()}
     merged: dict[str, Any] = {}
     layers: list[str] = []
     gpath: Path | None = None
@@ -489,7 +491,8 @@ def load(
         ``_deep_merge`` returns a fresh dict rather than mutating in place.
         """
         nonlocal merged
-        data = read_yaml_file(path)
+        resolved_path = path.resolve()
+        data = dict(overrides[resolved_path]) if resolved_path in overrides else read_yaml_file(path)
         if label == "repo" and "mode" in data:
             raise ConfigError(
                 "mode is a global-only config block",
@@ -504,19 +507,19 @@ def load(
 
     if include_global:
         gpath = global_config_path()
-        if gpath.is_file():
+        if gpath.is_file() or gpath.resolve() in overrides:
             _merge_layer(gpath, "global")
 
     if include_repo:
         if explicit_config is not None:
             rpath = explicit_config.resolve()
-            if not rpath.is_file():
+            if not rpath.is_file() and rpath not in overrides:
                 raise ConfigError(f"--config file not found: {rpath}")
             label = "repo" if rpath == repo_config_path(repo_root).resolve() else "config"
             _merge_layer(rpath, label)
         else:
             rpath = repo_config_path(repo_root)
-            if rpath.is_file():
+            if rpath.is_file() or rpath.resolve() in overrides:
                 _merge_layer(rpath, "repo")
 
     validate(merged)
