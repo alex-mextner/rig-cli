@@ -1,0 +1,34 @@
+name: Finalize lint config guidance
+on: [push]
+permissions:
+  contents: write
+jobs:
+  finish:
+    if: github.ref == 'refs/heads/fix/linter-readiness-detection'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: {ref: fix/linter-readiness-detection}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Apply documentation and schema guidance only
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('riglib/config_schema.py'); t=p.read_text();
+          repl=[('doc="Rig-owned rule selection; inherited through global config and refined by rig.yaml.",','doc="Rig-owned rule selection. Built-in defaults are inherited through global config and rig.yaml; inspect the effective result with `rig lint rules`.",'),('"all": Leaf("boolean", "enable every known applicable rule", default=False),','"all": Leaf("boolean", "enable every applicable known policy concept after provider selection/dedup; per-rule severity still wins", default=False),'),('"enable": Leaf("array", "individual rules to enable", items_type="string"),','"enable": Leaf("array", "individual rules to enable without enabling all", items_type="string"),'),('"disable": Leaf("array", "individual rules to disable", items_type="string"),','"disable": Leaf("array", "individual rules to disable after defaults/groups/all", items_type="string"),'),('"severity": Leaf("object", "final per-rule off|warn|error overrides", additional_properties_type="string"),','"severity": Leaf("object", "final per-rule off|warn|error overrides; highest-precedence rule-policy setting", additional_properties_type="string"),'),('doc="rule-group toggles keyed by group name",','doc="rule-group toggles keyed by group name; `anti-slop: true` uses audited per-rule defaults rather than forcing every rule to error",')]
+          for a,b in repl: t=t.replace(a,b,1)
+          p.write_text(t)
+          p=Path('riglib/lint_rules_cli.py'); t=p.read_text(); old='''    if not data:\n        return 0\n    widths = {key: max(len(key), *(len(row[key]) for row in data)) for key in ("effective", "default", "all", "group", "provider")}'''; new='''    if not data:\n        return 0\n    print("Effective Rig lint policy (built-in defaults < groups/all < enable/disable < severity).")\n    print("Change it in global Rig config or rig.yaml; generated Oxlint files are outputs, not policy inputs.\\n")\n    widths = {key: max(len(key), *(len(row[key]) for row in data)) for key in ("effective", "default", "all", "group", "provider")}''';
+          if old in t: p.write_text(t.replace(old,new,1))
+          p=Path('docs/config-schema.md'); t=p.read_text(); marker='\n---\n\n## `skills`\n'; section='''\n---\n\n## `linters`\n\n`linters.rules` is the source of truth for Rig-managed lint policy; generated `oxlint.config.ts` is only the resolved output. The built-in JS/TS policy includes audited Oxlint + anti-slop defaults. Inspect the exact effective rule, provider and reason with `rig lint rules` (or one exact rule name).\n\n```yaml\nlinters:\n  enabled: true\n  rules:\n    groups:\n      anti-slop: true       # audited defaults: individual rules may be error, warn, or off\n    all: false              # true = all applicable concepts after provider deduplication\n    enable: []              # enable individual rules\n    disable: []             # disable individual rules\n    severity:               # final authority; off | warn | error\n      anti-slop/no-module-mocking: error\n      anti-slop/no-runtime-typeof: off\n```\n\nGlobal config supplies machine-wide defaults; repository `rig.yaml` refines them. `severity` is the final per-rule authority. `all: true` does not load every implementation from every source: Rig first chooses the applicable canonical provider for each policy concept, then enables those concepts.\n\n`rig init` does not force this block into repositories whose local Oxc toolchain is not ready; use `rig config set linters.rules.groups.anti-slop true` when adopting it. If an explicitly requested lint/formatter target lacks a required local Oxc dependency, it is reported as `BLOCKED`; that target fails visibly but the executor continues reconciling independent Rig targets.\n''';
+          if '## `linters`' not in t: p.write_text(t.replace(marker,section+marker,1))
+          PY
+          pip install -e '.[test]' pyyaml
+          python -m riglib.cli schema --write
+          python -m pytest -q
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add riglib/config_schema.py riglib/lint_rules_cli.py docs/config-schema.md schema/rig.schema.json
+          git diff --cached --quiet || git commit -m 'docs: surface lint policy controls in config and CLI'
+          git push
