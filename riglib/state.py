@@ -225,10 +225,13 @@ class SetupState:
         # rules `rig apply` enforces. `rig validate`/`rig schema` keep the file in sync.
         header = (
             "# yaml-language-server: $schema=schema/rig.schema.json\n"
-            "# rig.yaml — declarative setup for this repo, applied by `rig apply commit`.\n"
-            "# COMMITTED BY DEFAULT: this file is the reproducible source of truth.\n"
-            "# Global defaults live at ~/.config/rig/config.yaml; this file overrides them.\n"
-            "# See: rig status (drift), rig apply commit (converge). Schema: docs/config-schema.md\n\n"
+            "# rig.yaml — declarative development policy for this repository. COMMITTED BY DEFAULT.\n"
+            "# Source of truth: global defaults in ~/.config/rig/config.yaml, then this file overrides them.\n"
+            "# Rig manages lint/format, CI, git/agent hooks, skills, MCP, harness permissions, GitHub settings, tools, and more.\n"
+            "# Inspect before changing: `rig status`; lint policy: `rig lint rules`; all option semantics: docs/config-schema.md.\n"
+            "# Safe edit: `rig config set <dot.path> <value>` previews config + reconcile impact without writing.\n"
+            "# Commit intentionally with `rig config set <dot.path> <value> --commit`; converge manual edits with `rig apply commit`.\n"
+            "# Generated/carried target files are outputs; make durable policy changes here or in the global layer.\n\n"
         )
         path.write_text(header + self.to_yaml(), encoding="utf-8")
         return path
