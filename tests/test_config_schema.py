@@ -222,7 +222,7 @@ def test_dev_schema_models_server_and_e2e_metadata():
         ("models.schedule", {"time", "label"}),
         ("agents_md", {"enabled", "symlink"}),
         ("gitignore", {"enabled", "entries", "excludesfile"}),
-        ("linters", {"enabled", "preview", "rules", "items"}),
+        ("linters", {"enabled", "preview", "rules", "items", "bundles"}),
         ("project_tools", config.PROJECT_TOOLS_KEYS),
         ("project_tools.haft", config.HAFT_KEYS),
         ("project_tools.haft.workflow", config.HAFT_WORKFLOW_KEYS),

@@ -10,7 +10,7 @@ Subcommands:
     rig init     first-run onboarding — scaffold rig.yaml + wire the catalog in (the front door)
     rig apply    PREVIEW the reconcile (bare = `apply info`); `apply commit` executes it
     rig setup    interactive config wizard (no TTY → usage for init/apply/config)
-    rig config   get/set ONE config key by dot path, then reconcile (get|set)
+    rig config   get/set ONE config key by dot path; set previews by default, --commit reconciles
     rig status   detect + report drift in BOTH directions (config↔disk)
     rig doctor   detect + (offer to) install required/optional dependencies
     rig export   serialize default/current config to rig.yaml without a TUI
@@ -327,6 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     evolve_service.register(sub)
 
+    _add_lint_parser(sub)
     _add_stats_parser(sub)
     _add_codex_parser(sub)
 
@@ -344,7 +345,7 @@ def _add_config_parser(sub: "argparse._SubParsersAction") -> None:
     ~/.config/rig/config.yaml; --json (get) emits the JSON value; --no-apply (set) writes the
     key and prints the plan only. The dot-path engine lives in riglib.config.
     """
-    cp = sub.add_parser("config", help="get/set a single config key (dot path), then reconcile")
+    cp = sub.add_parser("config", help="get/set one config key; set previews by default")
     cp.set_defaults(_config_parser=cp)
     csub = cp.add_subparsers(dest="config_command", metavar="<get|set>")
 
@@ -362,16 +363,31 @@ def _add_config_parser(sub: "argparse._SubParsersAction") -> None:
     _add_config_target_args(cg)
     cg.add_argument("--json", action="store_true", help="emit the value as JSON")
 
-    cs = csub.add_parser("set", help="write a nested config key, then reconcile (apply)")
+    cs = csub.add_parser("set", help="preview a nested config change; --commit writes + reconciles")
     cs.add_argument("path", help="dot path into the config tree (e.g. harness.auto_mode)")
     cs.add_argument("value", help="value to set (coerced: true/false/int/float/null, else string)")
     _add_config_target_args(cs)
-    cs.add_argument("--no-apply", action="store_true",
-                    help="write the key but skip the reconcile (print the resulting plan only)")
+    set_mode = cs.add_mutually_exclusive_group()
+    set_mode.add_argument("--commit", action="store_true",
+                          help="write the validated config change and execute the resulting reconcile")
+    set_mode.add_argument("--no-apply", action="store_true",
+                          help="write the validated config change but do not reconcile (legacy write-only mode)")
     cs.add_argument(
         "--plan", action="store_true",
         help="list every planned action (default: a per-carrier summary for a large plan)",
     )
+
+
+def _add_lint_parser(sub: "argparse._SubParsersAction") -> None:
+    """`rig lint rules` — lint-domain policy introspection; top-level `rig rules` stays cross-domain."""
+    lp = sub.add_parser("lint", help="lint/format policy inspection")
+    lp.set_defaults(_lint_parser=lp)
+    lsub = lp.add_subparsers(dest="lint_command", metavar="<action>")
+    rp = lsub.add_parser("rules", help="show the effective lint rule policy and provider selection")
+    rp.add_argument("rule", nargs="?", help="show one exact rule name")
+    rp.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
+    rp.add_argument("--config", help="config file (default: ./rig.yaml + global)")
+    rp.add_argument("--json", action="store_true", help="emit machine-readable JSON")
 
 
 def _add_stats_parser(sub: "argparse._SubParsersAction") -> None:
@@ -463,6 +479,7 @@ def main(argv: list[str] | None = None) -> int:
         "setup": cmd_setup_wizard,  # setup = the interactive config wizard (distinct from init)
         "config-web": cmd_config_web,  # web UI over the config engine; lifecycle via agenttools-service
         "evolve": cmd_evolve,  # project evolution portal; lifecycle via agenttools-service
+        "lint": cmd_lint,
         "stats": cmd_stats,
         "codex": cmd_codex,
     }
@@ -481,6 +498,7 @@ def _load_plan(
     project_type_override: str | None = None,
     *,
     allow_repo_autodiscovery_in_non_git: bool = True,
+    layer_overrides: dict[Path, dict] | None = None,
 ):
     """Load config + catalog + build a plan. Returns (plan, loaded, env)."""
     from .catalog import Catalog
@@ -491,7 +509,9 @@ def _load_plan(
     env = detect_environment(Path(cwd).resolve())
     explicit = _resolve_explicit_config(env, config)
     include_repo = _include_repo_config(env, explicit, allow_repo_autodiscovery_in_non_git)
-    loaded = load(env.repo_root, explicit_config=explicit, include_repo=include_repo)
+    loaded = load(
+        env.repo_root, explicit_config=explicit, include_repo=include_repo, layer_overrides=layer_overrides
+    )
     catalog = Catalog.scan(loaded.agent_tools_source)
     ptype = project_type_override or env.project_type
     plan = build(loaded, catalog, project_type=ptype)
@@ -524,7 +544,9 @@ def _is_global_action(action) -> bool:
     return _layer_for_category(action.category) == _GLOBAL
 
 
-def _validate_layer_in_isolation(layer_path: Path) -> None:
+def _validate_layer_in_isolation(
+    layer_path: Path, *, data_override: dict | None = None
+) -> None:
     """Build a plan over ONE config file alone (no cascade), so a catalog-backed value the file
     DECLARES can't be masked by a layer that merges over it.
 
@@ -546,7 +568,12 @@ def _validate_layer_in_isolation(layer_path: Path) -> None:
     from .config import load
     from .plan import build
 
-    loaded = load(layer_path.parent, explicit_config=layer_path, include_global=False)
+    loaded = load(
+        layer_path.parent,
+        explicit_config=layer_path,
+        include_global=False,
+        layer_overrides=({layer_path.resolve(): data_override} if data_override is not None else None),
+    )
     if loaded.agent_tools_source is None:
         return  # no own catalog coordinate to mask — schema validation already ran in load()
     catalog = Catalog.scan(loaded.agent_tools_source)
@@ -2308,72 +2335,67 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         print(_err(f"error: {type(exc).__name__}: {exc}"))
         return 2
 
-    # Capture the previous bytes BEFORE writing so a write IO error OR a SECOND, deeper
-    # validation failure (catalog-backed: a bad agent_tools_source or an unknown CI item —
-    # these live in plan.build(), not config.validate()) can fully ROLL BACK. The file must be
-    # untouched on ANY failure, exactly as the docs promise. The repo file carries the
-    # committed-source-of-truth header; the global file is a plain machine-wide dump.
-    original = target.read_text(encoding="utf-8") if target.is_file() else None
-    parent_existed = target.parent.exists()  # so rollback only removes a dir WE created
-
-    def _rollback() -> bool:
-        """Restore the file to its pre-set state. Returns True on success, False if the restore
-        itself failed (so the caller can tell the user the file is NOT actually untouched,
-        rather than printing a false reassurance)."""
-        try:
-            if original is None:
-                target.unlink(missing_ok=True)  # we created the file; remove our partial write
-                # only remove the parent if WE created it (a fresh ~/.config/rig for --global) —
-                # never rmdir a pre-existing dir like the repo root.
-                if not parent_existed:
-                    with contextlib.suppress(OSError):
-                        target.parent.rmdir()  # no-op if non-empty (e.g. a repo root has .git)
-            else:
-                target.write_text(original, encoding="utf-8")  # restore prior contents
-        except OSError:
-            return False
-        return True
-
-    # Write, then second gate: build the plan from the on-disk cascade (so a --global edit is
-    # validated together with the repo layer it merges into). A write IO error or a plan
-    # failure means the edit didn't take → roll back and fail closed.
+    # PLAN THE PROSPECTIVE CHANGE IN MEMORY FIRST. Preview is the default and MUST NOT
+    # transiently write the config just to learn the resulting plan. The same validated plan is
+    # later executed by --commit, so preview and execution cannot resolve different policy.
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        state = SetupState.from_dict(data)
         if args.is_global:
-            target.write_text(state.to_yaml(), encoding="utf-8")
-            # Validate the global file ALONE first: the cascade plan below merges the repo
-            # overlay over it, which can mask a catalog-backed error in the global layer (a repo
-            # `rig.yaml` overriding the just-broken key). Check the written file in isolation so a
-            # globally-broken config never persists just because THIS repo happens to override it.
-            _validate_layer_in_isolation(target)
-        else:
-            state.write(target)
-        plan, _loaded, _env = _load_plan(args.cwd, config=None)
+            _validate_layer_in_isolation(target, data_override=data)
+        plan, _loaded, _env = _load_plan(
+            args.cwd, config=None, layer_overrides={target.resolve(): data}
+        )
     except Exception as exc:  # noqa: BLE001
-        # the write happened (or partially did) — ANY failure from here (catalog/plan rejection,
-        # a write IO error, or a serializer error on data the first gate let through) must roll
-        # the file back and fail closed. Never leave a written-but-unreconcilable config behind.
-        restored = _rollback()
-        # A ConfigError (e.g. the isolated-global validation) renders 3-part with the schema path;
-        # a known catalog/plan/OS error stays one-line; an unexpected one is name-prefixed.
         if isinstance(exc, ConfigError):
             print(_err_block(exc))
         else:
             kind = "" if isinstance(exc, (CatalogError, PlanError, OSError)) else f"{type(exc).__name__}: "
             print(_err(f"error: {kind}{exc}"))
+        return 2
+
+    if not args.commit and not args.no_apply:
+        print(_bold(f"Would set {config_path} = {_fmt_scalar(value)}  → {target}"))
+        _print_plan(plan, full=getattr(args, "plan", False), preview=True)
+        print(_dim("\n(preview only: config and disk are unchanged; add --commit to write + reconcile)"))
+        return 0
+
+    # Explicit mutation path. Capture the previous bytes so a write/serialization failure can be
+    # rolled back. (A later reconcile error does not revert a valid committed policy change.)
+    original = target.read_text(encoding="utf-8") if target.is_file() else None
+    parent_existed = target.parent.exists()
+
+    def _rollback() -> bool:
+        try:
+            if original is None:
+                target.unlink(missing_ok=True)
+                if not parent_existed:
+                    with contextlib.suppress(OSError):
+                        target.parent.rmdir()
+            else:
+                target.write_text(original, encoding="utf-8")
+        except OSError:
+            return False
+        return True
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        state = SetupState.from_dict(data)
+        if args.is_global:
+            target.write_text(state.to_yaml(), encoding="utf-8")
+        else:
+            state.write(target)
+    except Exception as exc:  # noqa: BLE001
+        restored = _rollback()
+        if isinstance(exc, ConfigError):
+            print(_err_block(exc))
+        else:
+            print(_err(f"error: {type(exc).__name__}: {exc}"))
         if restored:
             print(_dim(f"  (config not changed — {target} left untouched)"))
         else:
-            # the restore itself failed — be honest: the file may hold the rejected edit.
             print(_err(f"  WARNING: could not restore {target} — it may contain the rejected edit"))
         return 2
 
     print(_ok(f"set {config_path} = {_fmt_scalar(value)}  → {target}"))
-
-    # RECONCILE: a config change only matters once the disk reflects it. Run the SAME apply
-    # engine `rig apply` uses (scoped to the repo in front of you — a --global edit still has
-    # to converge this repo). --no-apply writes the key and prints the plan only.
     _print_plan(plan, full=getattr(args, "plan", False))
     if args.no_apply:
         print(_dim("\n(--no-apply: config written, nothing reconciled)"))
@@ -2437,6 +2459,11 @@ def cmd_evolve(args: argparse.Namespace) -> int:
     from .evolve import service as evolve_service
 
     return evolve_service.dispatch_cli(args)
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    from .lint_rules_cli import run
+    return run(args)
 
 
 def cmd_stats(args: argparse.Namespace) -> int:

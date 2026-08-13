@@ -1,8 +1,8 @@
-"""`rig config get|set` — the targeted read/edit-then-reconcile command.
+"""`rig config get|set` — targeted reads and preview-by-default config transactions.
 
 Covers the pure dot-path engine (split/get/set/coerce in riglib.config) and the CLI
 front-end (riglib.cli) end to end: get a nested key, scalar coercion on set, intermediate
-key creation, the --global target, fail-closed validation, and that `set` triggers the same
+key creation, the --global target, fail-closed validation, and that `set --commit` triggers the same
 plan+apply reconcile `rig apply` runs (mocked so no real install touches disk).
 """
 
@@ -271,7 +271,7 @@ def test_cli_set_scalar_coercion_writes_bool(tmp_path, capsys, fake_agent_tools,
         "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n"
         "harness: {auto_mode: true}\n",
     )
-    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo)])
+    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo), "--commit"])
     assert rc == 0
     written = config.load(repo)
     assert written.data["harness"]["auto_mode"] is False  # real bool, not the string "false"
@@ -289,7 +289,7 @@ def test_cli_set_registered_list_option_writes_list(tmp_path, fake_agent_tools, 
         "harness: {kind: claude-code}\n",
     )
 
-    rc = main(["config", "set", "harness.kinds", "codex,opencode", "-C", str(repo)])
+    rc = main(["config", "set", "harness.kinds", "codex,opencode", "-C", str(repo), "--commit"])
 
     assert rc == 0
     written = config.load(repo)
@@ -310,7 +310,7 @@ def test_cli_set_whitespace_wrapped_path_writes_canonical_key(
         "harness: {auto_mode: true}\n",
     )
 
-    rc = main(["config", "set", " harness . auto_mode ", "false", "-C", str(repo)])
+    rc = main(["config", "set", " harness . auto_mode ", "false", "-C", str(repo), "--commit"])
 
     assert rc == 0
     captured = capsys.readouterr()
@@ -336,7 +336,7 @@ def test_cli_set_whitespace_wrapped_registered_option_uses_schema_coercion(
         "harness: {kind: claude-code}\n",
     )
 
-    rc = main(["config", "set", " harness . kinds ", "codex,opencode", "-C", str(repo)])
+    rc = main(["config", "set", " harness . kinds ", "codex,opencode", "-C", str(repo), "--commit"])
 
     assert rc == 0
     written = config.load(repo)
@@ -355,7 +355,7 @@ def test_cli_set_registered_list_error_is_clean(tmp_path, capsys, fake_agent_too
         "harness: {kind: claude-code}\n",
     )
 
-    rc = main(["config", "set", "harness.kinds", "[codex, 42]", "-C", str(repo)])
+    rc = main(["config", "set", "harness.kinds", "[codex, 42]", "-C", str(repo), "--commit"])
 
     captured = capsys.readouterr()
     assert rc == 2
@@ -378,7 +378,7 @@ def test_cli_set_nullable_registered_option_writes_explicit_null(
         "permissions: {enabled: true, kind: claude-code}\n",
     )
 
-    rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo)])
+    rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo), "--commit"])
 
     assert rc == 0
     capsys.readouterr()
@@ -408,7 +408,7 @@ def test_cli_set_nullable_registered_option_overrides_global_pin_with_null(
         "permissions: {enabled: true}\n",
     )
 
-    rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo)])
+    rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo), "--commit"])
 
     assert rc == 0
     written = config.load(repo)
@@ -428,7 +428,7 @@ def test_cli_set_nullable_rejects_null_intermediate_without_clobber(
     )
     _w(repo / "rig.yaml", original)
 
-    rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo)])
+    rc = main(["config", "set", "permissions.kind", "~", "-C", str(repo), "--commit"])
 
     assert rc == 2
     assert "not a mapping" in capsys.readouterr().out
@@ -458,7 +458,7 @@ def test_cli_set_rejects_global_only_key_without_global_flag(
         "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\n",
     )
 
-    rc = main(["config", "set", path, value, "-C", str(repo)])
+    rc = main(["config", "set", path, value, "-C", str(repo), "--commit"])
 
     assert rc == 2
     captured = capsys.readouterr()
@@ -482,7 +482,7 @@ def test_cli_set_rejects_whitespace_wrapped_global_only_key_without_global_flag(
     )
     _w(rig, original)
 
-    rc = main(["config", "set", " gitignore . enabled ", "false", "-C", str(repo)])
+    rc = main(["config", "set", " gitignore . enabled ", "false", "-C", str(repo), "--commit"])
 
     assert rc == 2
     captured = capsys.readouterr()
@@ -505,7 +505,7 @@ def test_cli_set_malformed_path_errors_to_stderr(
     )
     _w(repo / "rig.yaml", original)
 
-    rc = main(["config", "set", "harness. .auto_mode", "false", "-C", str(repo)])
+    rc = main(["config", "set", "harness. .auto_mode", "false", "-C", str(repo), "--commit"])
 
     assert rc == 2
     captured = capsys.readouterr()
@@ -525,7 +525,7 @@ def test_cli_set_creates_intermediate_keys(tmp_path, capsys, fake_agent_tools, m
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n",
     )
     # ci.items.secret-scan.tier — none of items/secret-scan exist yet
-    rc = main(["config", "set", "ci.items.secret-scan.tier", "warn", "-C", str(repo)])
+    rc = main(["config", "set", "ci.items.secret-scan.tier", "warn", "-C", str(repo), "--commit"])
     assert rc == 0
     written = config.load(repo)
     assert written.data["ci"]["items"]["secret-scan"]["tier"] == "warn"
@@ -536,7 +536,7 @@ def test_cli_set_validation_rejects_bad_value(tmp_path, capsys, monkeypatch, _mo
     repo = tmp_path / "repo"
     original = "version: 1\nci: {items: {secret-scan: {tier: block}}}\n"
     _w(repo / "rig.yaml", original)
-    rc = main(["config", "set", "ci.items.secret-scan.tier", "loud", "-C", str(repo)])
+    rc = main(["config", "set", "ci.items.secret-scan.tier", "loud", "-C", str(repo), "--commit"])
     assert rc == 2
     assert "tier" in capsys.readouterr().out
     # fail-closed: the bad value never reached disk
@@ -550,7 +550,7 @@ def test_cli_set_bad_value_prints_three_part_error_with_schema_path(tmp_path, ca
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     repo = tmp_path / "repo"
     _w(repo / "rig.yaml", "version: 1\nci: {items: {secret-scan: {tier: block}}}\n")
-    rc = main(["config", "set", "ci.items.secret-scan.tier", "loud", "-C", str(repo)])
+    rc = main(["config", "set", "ci.items.secret-scan.tier", "loud", "-C", str(repo), "--commit"])
     assert rc == 2
     out = capsys.readouterr().out
     assert "why:" in out and "fix:" in out
@@ -570,7 +570,7 @@ def test_cli_set_unknown_key_rejected_with_accepted_keys(tmp_path, capsys, fake_
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\nharness: {auto_mode: true}\n"
     )
     _w(repo / "rig.yaml", original)
-    rc = main(["config", "set", "harness.aut_mode", "false", "-C", str(repo)])
+    rc = main(["config", "set", "harness.aut_mode", "false", "-C", str(repo), "--commit"])
     assert rc == 2
     out = capsys.readouterr().out
     assert "unknown harness key: aut_mode" in out
@@ -590,7 +590,7 @@ def test_cli_set_rejects_version_bool(tmp_path, capsys, fake_agent_tools, monkey
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
     )
     _w(repo / "rig.yaml", original)
-    rc = main(["config", "set", "version", "true", "-C", str(repo)])
+    rc = main(["config", "set", "version", "true", "-C", str(repo), "--commit"])
     assert rc == 2
     assert "version must be an int" in capsys.readouterr().out
     assert (repo / "rig.yaml").read_text(encoding="utf-8") == original
@@ -604,7 +604,7 @@ def test_cli_set_repo_refuses_when_no_config_exists(tmp_path, capsys, monkeypatc
     repo = tmp_path / "repo"
     repo.mkdir()
     assert not (repo / "rig.yaml").exists()
-    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo)])
+    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo), "--commit"])
     out = capsys.readouterr().out
     assert rc == 2
     assert "rig init" in out
@@ -633,7 +633,7 @@ def test_cli_set_apply_error_keeps_config_and_returns_1(tmp_path, capsys, fake_a
         "agent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\nharness: {auto_mode: true}\n",
     )
-    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo)])
+    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo), "--commit"])
     assert rc == 1  # apply reported an error
     # the valid config was NOT reverted — the edit persists
     assert config.load(repo).data["harness"]["auto_mode"] is False
@@ -670,7 +670,7 @@ def test_cli_set_refuses_to_set_removed_scope_key(tmp_path, capsys, fake_agent_t
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
     )
     _w(repo / "rig.yaml", original)
-    rc = main(["config", "set", "scope", "both", "-C", str(repo)])
+    rc = main(["config", "set", "scope", "both", "-C", str(repo), "--commit"])
     assert rc == 2
     assert "removed setting" in capsys.readouterr().err
     assert (repo / "rig.yaml").read_text(encoding="utf-8") == original  # untouched
@@ -689,7 +689,7 @@ def test_cli_set_refuses_to_set_whitespace_wrapped_removed_scope_key(
     )
     _w(repo / "rig.yaml", original)
 
-    rc = main(["config", "set", " scope ", "both", "-C", str(repo)])
+    rc = main(["config", "set", " scope ", "both", "-C", str(repo), "--commit"])
 
     assert rc == 2
     assert "removed setting" in capsys.readouterr().err
@@ -709,7 +709,7 @@ def test_cli_set_drops_legacy_scope_key(tmp_path, capsys, fake_agent_tools, monk
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
         "harness: {auto_mode: true}\n",
     )
-    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo)])
+    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo), "--commit"])
     assert rc == 0
     import yaml
 
@@ -733,7 +733,7 @@ def test_cli_set_rejects_when_existing_typo_in_strict_section(tmp_path, capsys, 
         "harness: {auto_mode: true, aut_mode: true}\n",  # aut_mode is a typo — now REJECTED
     )
     before = (repo / "rig.yaml").read_text(encoding="utf-8")
-    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo)])
+    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo), "--commit"])
     assert rc == 2
     out = capsys.readouterr().out
     assert "unknown harness key" in out and "aut_mode" in out
@@ -751,7 +751,7 @@ def test_cli_set_global_targets_xdg_config(tmp_path, capsys, fake_agent_tools, m
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n",
     )
-    rc = main(["config", "set", "defaults.on_conflict", "overwrite", "-C", str(repo), "--global"])
+    rc = main(["config", "set", "defaults.on_conflict", "overwrite", "-C", str(repo), "--global", "--commit"])
     assert rc == 0
     gpath = config.global_config_path()
     assert gpath.is_file()
@@ -784,7 +784,7 @@ def test_cli_set_global_bad_value_not_masked_by_repo_override(
     )
     bad = tmp_path / "not-a-checkout"
     bad.mkdir()
-    rc = main(["config", "set", "agent_tools_source", str(bad), "-C", str(repo), "--global"])
+    rc = main(["config", "set", "agent_tools_source", str(bad), "-C", str(repo), "--global", "--commit"])
     assert rc == 2
     out = capsys.readouterr().out
     assert "is not an agent-tools checkout" in out
@@ -832,7 +832,7 @@ def test_cli_set_global_preserves_neighbors_and_stays_minimal(
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n",
     )
-    rc = main(["config", "set", "defaults.on_conflict", "overwrite", "-C", str(repo), "--global"])
+    rc = main(["config", "set", "defaults.on_conflict", "overwrite", "-C", str(repo), "--global", "--commit"])
     assert rc == 0
     import yaml
 
@@ -858,7 +858,7 @@ def test_cli_set_rolls_back_on_catalog_failure(tmp_path, capsys, monkeypatch, _m
     _w(repo / "rig.yaml", original)
     # on_conflict=overwrite is schema-valid, so validate() passes; the bad agent_tools_source
     # only blows up at plan build → must roll back.
-    rc = main(["config", "set", "defaults.on_conflict", "overwrite", "-C", str(repo)])
+    rc = main(["config", "set", "defaults.on_conflict", "overwrite", "-C", str(repo), "--commit"])
     assert rc == 2
     assert (repo / "rig.yaml").read_text(encoding="utf-8") == original  # rolled back
     assert len(_mock_apply) == 0  # never reconciled
@@ -877,7 +877,7 @@ def test_cli_set_repo_file_stays_minimal(tmp_path, capsys, fake_agent_tools, mon
         "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false, all: false}\n"
         "harness: {auto_mode: true}\n",
     )
-    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo)])
+    rc = main(["config", "set", "harness.auto_mode", "false", "-C", str(repo), "--commit"])
     assert rc == 0
     import yaml
 
@@ -906,7 +906,7 @@ def test_cli_set_global_fresh_file_rolled_back_on_failure(tmp_path, capsys, monk
     )
     gpath = config.global_config_path()
     assert not gpath.exists()  # no global file yet → set will CREATE it
-    rc = main(["config", "set", "defaults.on_conflict", "overwrite", "-C", str(repo), "--global"])
+    rc = main(["config", "set", "defaults.on_conflict", "overwrite", "-C", str(repo), "--global", "--commit"])
     assert rc == 2
     assert not gpath.exists()  # the freshly-created file was removed
     assert not gpath.parent.exists()  # and the rig/ dir we created was cleaned up
@@ -928,7 +928,7 @@ def test_cli_set_global_bad_value_caught_by_second_gate(tmp_path, capsys, monkey
         "mcp: {enabled: false}\ngit_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n",
     )
     original = gpath.read_text(encoding="utf-8")
-    rc = main(["config", "set", "agent_tools_source", "/nonexistent/agent-tools", "-C", str(repo), "--global"])
+    rc = main(["config", "set", "agent_tools_source", "/nonexistent/agent-tools", "-C", str(repo), "--global", "--commit"])
     assert rc == 2
     assert "not an agent-tools checkout" in capsys.readouterr().out
     assert gpath.read_text(encoding="utf-8") == original  # global file rolled back

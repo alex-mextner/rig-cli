@@ -1476,37 +1476,37 @@
         },
         "rules": {
           "type": "object",
-          "description": "Rig-owned rule selection; inherited through global config and refined by rig.yaml.",
+          "description": "Rig-owned rule selection. Built-in defaults are inherited through global config and rig.yaml; inspect the effective result with `rig lint rules`.",
           "properties": {
             "all": {
               "type": "boolean",
-              "description": "enable every known applicable rule",
+              "description": "enable every applicable known policy concept after provider selection/dedup; per-rule severity still wins",
               "default": false
             },
             "enable": {
               "type": "array",
-              "description": "individual rules to enable",
+              "description": "individual rules to enable without enabling all",
               "items": {
                 "type": "string"
               }
             },
             "disable": {
               "type": "array",
-              "description": "individual rules to disable",
+              "description": "individual rules to disable after defaults/groups/all",
               "items": {
                 "type": "string"
               }
             },
             "severity": {
               "type": "object",
-              "description": "final per-rule off|warn|error overrides",
+              "description": "final per-rule off|warn|error overrides; highest-precedence rule-policy setting",
               "additionalProperties": {
                 "type": "string"
               }
             },
             "groups": {
               "type": "object",
-              "description": "rule-group toggles keyed by group name",
+              "description": "rule-group toggles keyed by group name; `anti-slop: true` uses audited per-rule defaults rather than forcing every rule to error",
               "properties": {},
               "additionalProperties": {
                 "type": "boolean"
@@ -1514,6 +1514,31 @@
             }
           },
           "additionalProperties": false
+        },
+        "bundles": {
+          "type": "object",
+          "description": "directory bundles keyed by label",
+          "properties": {},
+          "additionalProperties": {
+            "type": "object",
+            "description": "one deterministic directory bundle copied from agent-tools",
+            "properties": {
+              "source": {
+                "type": "string",
+                "description": "agent-tools-relative source directory"
+              },
+              "target": {
+                "type": "string",
+                "description": "repo-relative destination directory"
+              },
+              "enabled": {
+                "type": "boolean",
+                "description": "provision this bundle",
+                "default": true
+              }
+            },
+            "additionalProperties": false
+          }
         },
         "items": {
           "type": "object",
@@ -1554,6 +1579,28 @@
               }
             },
             "additionalProperties": false,
+            "oneOf": [
+              {
+                "required": [
+                  "content"
+                ],
+                "not": {
+                  "required": [
+                    "source"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "source"
+                ],
+                "not": {
+                  "required": [
+                    "content"
+                  ]
+                }
+              }
+            ],
             "required": [
               "tool",
               "path"

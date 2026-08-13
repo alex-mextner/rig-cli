@@ -1096,6 +1096,10 @@ delegator-enabled plan). Provenance points at the config layer that declares the
 
 ---
 
+### `rig config set` preview/commit contract
+
+`rig config set <path> <value>` validates the prospective target layer and builds the resulting reconcile plan **without writing the config file**. Add `--commit` to write the already-validated change and execute that plan. `--no-apply` remains an explicit write-only compatibility mode. This mirrors `rig apply`: inspection is safe by default; mutation requires explicit intent.
+
 ## `linters`
 
 Provisions this repo's **linter + formatter config files** — the same reconciled-area treatment

@@ -156,6 +156,7 @@ class Block:
     open_map_item: Block | None = None
     open_map_item_required: tuple[str, ...] = ()
     additional_properties: Any | None = None
+    schema_extra: dict[str, Any] = field(default_factory=dict)
     closed: bool = True
 
     def child_keys(self) -> set[str]:
@@ -192,6 +193,7 @@ class Block:
             node["additionalProperties"] = self.additional_properties
         else:
             node["additionalProperties"] = False if self.closed else True
+        node.update(self.schema_extra)
         return node
 
 
@@ -879,19 +881,36 @@ _LINTERS_ITEM_BLOCK = Block(
         "source": Leaf("string", "agent-tools-relative canonical source file; mutually exclusive with content"),
         "enabled": Leaf("boolean", "provision this one file", default=True),
     },
+    schema_extra={"oneOf": [
+        {"required": ["content"], "not": {"required": ["source"]}},
+        {"required": ["source"], "not": {"required": ["content"]}},
+    ]},
+)
+
+_LINTERS_BUNDLE_ITEM_BLOCK = Block(
+    doc="one deterministic directory bundle copied from agent-tools",
+    leaves={
+        "source": Leaf("string", "agent-tools-relative source directory"),
+        "target": Leaf("string", "repo-relative destination directory"),
+        "enabled": Leaf("boolean", "provision this bundle", default=True),
+    },
+)
+_LINTERS_BUNDLES_BLOCK = Block(
+    doc="directory bundles keyed by label",
+    additional_properties=_LINTERS_BUNDLE_ITEM_BLOCK.to_node(),
 )
 
 _LINTERS_RULES_BLOCK = Block(
-    doc="Rig-owned rule selection; inherited through global config and refined by rig.yaml.",
+    doc="Rig-owned rule selection. Built-in defaults are inherited through global config and rig.yaml; inspect the effective result with `rig lint rules`.",
     leaves={
-        "all": Leaf("boolean", "enable every known applicable rule", default=False),
-        "enable": Leaf("array", "individual rules to enable", items_type="string"),
-        "disable": Leaf("array", "individual rules to disable", items_type="string"),
-        "severity": Leaf("object", "final per-rule off|warn|error overrides", additional_properties_type="string"),
+        "all": Leaf("boolean", "enable every applicable known policy concept after provider selection/dedup; per-rule severity still wins", default=False),
+        "enable": Leaf("array", "individual rules to enable without enabling all", items_type="string"),
+        "disable": Leaf("array", "individual rules to disable after defaults/groups/all", items_type="string"),
+        "severity": Leaf("object", "final per-rule off|warn|error overrides; highest-precedence rule-policy setting", additional_properties_type="string"),
     },
     nested={
         "groups": Block(
-            doc="rule-group toggles keyed by group name",
+            doc="rule-group toggles keyed by group name; `anti-slop: true` uses audited per-rule defaults rather than forcing every rule to error",
             additional_properties={"type": "boolean"},
         ),
     },
@@ -903,7 +922,7 @@ _LINTERS_BLOCK = Block(
         "enabled": Leaf("boolean", "provision lint/format policy", default=True),
         "preview": Leaf("boolean", "show before/after lint finding counts when policy changes", default=True),
     },
-    nested={"rules": _LINTERS_RULES_BLOCK},
+    nested={"rules": _LINTERS_RULES_BLOCK, "bundles": _LINTERS_BUNDLES_BLOCK},
     open_map="items",
     open_map_doc=(
         "extra config files keyed by label; each uses `{ tool, role, path, content|source, enabled }`."

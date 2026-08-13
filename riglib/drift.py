@@ -183,8 +183,18 @@ def detect(
             _check_ship_delegator(action, report)
         elif action.kind == "provision_gh_ship_alias":
             _check_gh_ship_alias(action, report)
+        elif action.kind == "lint_policy_blocked":
+            report.items.append(DriftItem("modified", "linters", action.item, action.target, str(action.options.get("reason") or "lint policy prerequisites are blocked")))
+        elif action.kind == "format_policy_blocked":
+            report.items.append(DriftItem("modified", "linters", action.item, action.target, str(action.options.get("reason") or "formatter policy prerequisites are blocked")))
         elif action.kind == "provision_linter_config":
             _check_linter_config(action, report)
+        elif action.kind == "provision_linter_bundle":
+            from .linter_carriers import resolve_bundle
+            r = resolve_bundle(action.source, action.target, str(action.options.get("source_rel") or ""), str(action.options.get("target_rel") or ""))
+            if r.state != "ok":
+                direction = "missing" if r.state == "create" else "modified"
+                report.items.append(DriftItem(direction, "linters", action.item, r.target, r.detail or f"linter bundle state: {r.state}"))
         elif action.kind == "provision_project_tool":
             _check_project_tool(action, report)
         elif action.kind == "provision_github_ruleset":
