@@ -2129,3 +2129,33 @@ block now enforces its key set, a `set` against a config that already carries a 
 surfaces it (the whole edited tree is validated) — the same strictness a hand-edited `rig.yaml`
 gets on `apply`. After it passes, `set` reconciles (the same plan + apply engine as `rig apply`);
 `--no-apply` writes the key and prints the plan without converging.
+
+
+### `linters` — Rig-owned lint policy
+
+Rig is the policy source for generated linter configuration. The effective configuration is resolved from built-in defaults, then global Rig configuration, then repository `rig.yaml`.
+
+```yaml
+linters:
+  enabled: true
+  preview: true
+  rules:
+    all: false
+    groups:
+      typescript-core: true
+      anti-slop: true
+    enable: []
+    disable: []
+    severity:
+      anti-slop/no-reflect-get: warn
+  items:
+    oxfmt:
+      tool: oxfmt
+      role: formatter
+      path: .oxfmtrc.jsonc
+      source: linters/oxc/.oxfmtrc.jsonc
+```
+
+`rules.all: true` enables every known applicable rule. `enable` and `disable` apply individual overrides; `severity` is the final per-rule `off` / `warn` / `error` authority. `groups` toggles named rule families. `preview` controls the best-effort before/after finding-count summary shown when Rig changes the generated Oxlint policy.
+
+An explicit `linters.items.<name>` sets exactly one of `content` or `source`: `content` is repository-specific literal bytes, while `source` names a reusable file inside the configured agent-tools catalog.

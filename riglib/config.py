@@ -1618,7 +1618,7 @@ def _validate_ship_delegator(sd: dict[str, Any]) -> None:
 #
 # CTO decision #4136.2 ("linter settings must also be provisioned by rig"): linter config is now a
 # first-class reconciled area, not a thing each repo hand-maintains and silently lets drift.
-LINTER_ITEM_KEYS = {"tool", "role", "path", "content", "enabled"}
+LINTER_ITEM_KEYS = {"tool", "role", "path", "content", "source", "enabled"}
 # `role` is DESCRIPTIVE — it is rendered in the apply/drift label (`<role> <tool>:<item>`, see
 # runner._linter_label) so a formatter and a linter read distinctly; both roles reconcile identically
 # (a config file written + drift-compared). A foreign role is rejected so a typo (`role: format`)
@@ -1689,15 +1689,28 @@ def _validate_linters(li: dict[str, Any]) -> None:
         return
     # Only `enabled` and `items` are fixed keys; `items` is the open map. Reject any other top key.
     for key in li:
-        if key not in {"enabled", "items"}:
+        if key not in {"enabled", "preview", "rules", "items"}:
             raise ConfigError(
-                f"unknown linters key {key!r} (expected one of: enabled, items)",
+                f"unknown linters key {key!r} (expected one of: enabled, preview, rules, items)",
                 schema_path="linters",
             )
     if "enabled" in li and not isinstance(li["enabled"], bool):
         raise ConfigError(
             f"linters.enabled must be a bool, got {li['enabled']!r}", schema_path="linters.enabled"
         )
+    if "preview" in li and not isinstance(li["preview"], bool):
+        raise ConfigError(
+            f"linters.preview must be a bool, got {li['preview']!r}", schema_path="linters.preview"
+        )
+    rules = li.get("rules", {})
+    if not isinstance(rules, dict):
+        raise ConfigError("linters.rules must be a mapping", schema_path="linters.rules")
+    try:
+        from .lint_policy import resolve_rule_severities
+
+        resolve_rule_severities(rules)
+    except ValueError as exc:
+        raise ConfigError(str(exc), schema_path="linters.rules") from exc
     items = li.get("items", {})
     if not isinstance(items, dict):
         raise ConfigError("linters.items must be a mapping", schema_path="linters.items")
@@ -1715,15 +1728,35 @@ def _validate_linters(li: dict[str, Any]) -> None:
                     f"unknown {path} key {key!r} (expected one of: {', '.join(sorted(LINTER_ITEM_KEYS))})",
                     schema_path=path,
                 )
-        # tool / path / content are REQUIRED non-empty strings — a config file with no path or no
-        # bytes is meaningless; failing here beats writing a 0-byte file or crashing in the runner.
-        for req in ("tool", "path", "content"):
+        # tool/path are required. Desired bytes come from exactly one of literal `content` or a
+        # canonical agent-tools-relative `source` file.
+        for req in ("tool", "path"):
             val = spec.get(req)
             if not isinstance(val, str) or not val:
                 raise ConfigError(
                     f"{path}.{req} must be a non-empty string, got {val!r}",
                     schema_path=f"{path}.{req}",
                 )
+        content = spec.get("content")
+        source = spec.get("source")
+        if (content is None) == (source is None):
+            raise ConfigError(
+                f"{path} must set exactly one of content or source",
+                fix="use content for repo-specific bytes or source for a reusable agent-tools file",
+                schema_path=path,
+            )
+        desired = content if content is not None else source
+        desired_key = "content" if content is not None else "source"
+        if not isinstance(desired, str) or not desired:
+            raise ConfigError(
+                f"{path}.{desired_key} must be a non-empty string, got {desired!r}",
+                schema_path=f"{path}.{desired_key}",
+            )
+        if source is not None and (source != source.strip() or linter_path_escapes_repo(source)):
+            raise ConfigError(
+                f"{path}.source must be a safe agent-tools-relative path, got {source!r}",
+                schema_path=f"{path}.source",
+            )
         rel = spec["path"]
         # Reject leading/trailing whitespace in `path`: the runner/drift do NOT strip it (they operate
         # on the literal bytes), so ` ../escape` would validate as one filename here yet escape at

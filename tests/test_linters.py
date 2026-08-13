@@ -449,7 +449,7 @@ def test_unknown_item_key_rejected():
         validate(_config(x={"tool": "t", "path": "p", "content": "c", "bogus": 1}))
 
 
-@pytest.mark.parametrize("missing", ["tool", "path", "content"])
+@pytest.mark.parametrize("missing", ["tool", "path"])
 def test_required_string_missing_rejected(missing):
     spec = {"tool": "t", "path": "p", "content": "c"}
     del spec[missing]
