@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot branch patcher for the large Rig integration files.
-
-The GitHub connector can safely create small modules but only replaces whole files. This script is
-committed temporarily and executed in CI against the branch checkout so the large existing modules
-can be changed by narrow, asserted transformations. It deletes itself in the workflow commit.
-"""
+"""One-shot branch patcher for the large Rig integration files."""
 
 from __future__ import annotations
 
@@ -31,9 +26,6 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 
 def regex_once(text: str, pattern: str, replacement: str, label: str) -> str:
-    # Use a callable replacement. Passing a string directly makes re.sub interpret backslash
-    # escapes in generated source (for example the literal ``\\r\\n`` becomes a physical CRLF),
-    # which can corrupt Python code even though the replacement template itself is correct.
     out, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=re.S)
     if count != 1:
         raise RuntimeError(f"{label}: expected exactly one regex match, found {count}")
@@ -187,21 +179,9 @@ def patch_config() -> None:
 def patch_plan() -> None:
     path = "riglib/plan.py"
     text = read(path)
-    text = replace_once(
-        text,
-        "    _build_linters(config, plan)",
-        "    _build_linters(config, catalog, plan)",
-        "build linters call",
-    )
+    text = replace_once(text, "    _build_linters(config, plan)", "    _build_linters(config, catalog, plan)", "build linters call")
     replacement = '''def _build_linters(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) -> None:
-    """Plan Rig-owned lint policy and reusable linter/formatter config carriers.
-
-    Rig, not an Oxc file, is the policy source. TypeScript stacks receive the built-in rule
-    baseline automatically; the merged ``linters.rules`` block applies global/repository
-    overrides. The generated Oxlint config and the selected anti-slop implementation files are
-    ordinary reconciled linter actions, so apply/status retain the same idempotency guarantees as
-    explicit ``linters.items``.
-    """
+    """Plan Rig-owned lint policy and reusable linter/formatter config carriers."""
     li = config.data.get("linters")
     if li is None:
         li = {}
@@ -230,33 +210,15 @@ def patch_plan() -> None:
             if not isinstance(content, str) or not content:
                 continue
             item_paths.add(PurePosixPath(rel_path).as_posix())
-            plan.actions.append(
-                Action(
-                    kind="provision_linter_config",
-                    category="linters",
-                    item=str(name),
-                    source=catalog.source,
-                    target=config.repo_root,
-                    options={
-                        "tool": str(spec.get("tool") or ""),
-                        "role": str(spec.get("role") or "linter"),
-                        "rel_path": rel_path,
-                        "content": content,
-                    },
-                )
-            )
+            plan.actions.append(Action(kind="provision_linter_config", category="linters", item=str(name), source=catalog.source, target=config.repo_root, options={"tool": str(spec.get("tool") or ""), "role": str(spec.get("role") or "linter"), "rel_path": rel_path, "content": content}))
 
     stack_parts = set((config.stack or "").split("/"))
     typescript_stack = bool({"ts", "typescript"} & stack_parts)
     rules_explicit = "rules" in li
     if not typescript_stack and not rules_explicit:
         return
-
     if "oxlint.config.ts" in item_paths:
-        raise PlanError(
-            "linters.items targets oxlint.config.ts while Rig rule policy also owns that file; "
-            "remove the item and configure linters.rules instead"
-        )
+        raise PlanError("linters.items targets oxlint.config.ts while Rig rule policy also owns that file; remove the item and configure linters.rules instead")
 
     rules_cfg = li.get("rules", {})
     if not isinstance(rules_cfg, dict):
@@ -264,34 +226,13 @@ def patch_plan() -> None:
     severities = resolve_rule_severities(rules_cfg)
     generated = render_oxlint_config(rules_cfg)
     summary = rule_policy_summary(rules_cfg)
-    plan.notes.append(
-        "linters: effective rule policy — "
-        f"{summary['error']} error, {summary['warn']} warn, {summary['off']} off"
-    )
-    plan.actions.append(
-        Action(
-            kind="provision_linter_config",
-            category="linters",
-            item="rig-oxlint-policy",
-            source=catalog.source,
-            target=config.repo_root,
-            options={
-                "tool": "oxlint",
-                "role": "linter",
-                "rel_path": "oxlint.config.ts",
-                "content": generated,
-                "preview_findings": li.get("preview") is not False,
-            },
-        )
-    )
+    plan.notes.append("linters: effective rule policy — " f"{summary['error']} error, {summary['warn']} warn, {summary['off']} off")
+    plan.actions.append(Action(kind="provision_linter_config", category="linters", item="rig-oxlint-policy", source=catalog.source, target=config.repo_root, options={"tool": "oxlint", "role": "linter", "rel_path": "oxlint.config.ts", "content": generated, "preview_findings": li.get("preview") is not False}))
 
     if anti_slop_required(severities):
         source_root = catalog.source / "vendor" / "anti-slop" / "src"
         if not source_root.is_dir():
-            raise PlanError(
-                "anti-slop rules are enabled but the pinned vendor/anti-slop/src source is missing; "
-                "initialize/update the agent-tools submodule"
-            )
+            raise PlanError("anti-slop rules are enabled but the pinned vendor/anti-slop/src source is missing; initialize/update the agent-tools submodule")
         for source_file in sorted(source_root.rglob("*.ts")):
             if source_file.name.endswith(".test.ts"):
                 continue
@@ -301,30 +242,11 @@ def patch_plan() -> None:
                 content = source_file.read_text(encoding="utf-8").replace("\\r\\n", "\\n").replace("\\r", "\\n")
             except (OSError, UnicodeDecodeError) as exc:
                 raise PlanError(f"cannot read anti-slop source {source_file}: {exc}") from exc
-            plan.actions.append(
-                Action(
-                    kind="provision_linter_config",
-                    category="linters",
-                    item=f"anti-slop/{rel}",
-                    source=source_file,
-                    target=config.repo_root,
-                    options={
-                        "tool": "anti-slop",
-                        "role": "linter",
-                        "rel_path": target_rel,
-                        "content": content,
-                    },
-                )
-            )
+            plan.actions.append(Action(kind="provision_linter_config", category="linters", item=f"anti-slop/{rel}", source=source_file, target=config.repo_root, options={"tool": "anti-slop", "role": "linter", "rel_path": target_rel, "content": content}))
 
 
 '''
-    text = regex_once(
-        text,
-        r"def _build_linters\(config: LoadedConfig, plan: InstallPlan\) -> None:.*?(?=def _build_global_excludes)",
-        replacement,
-        "plan _build_linters",
-    )
+    text = regex_once(text, r"def _build_linters\(config: LoadedConfig, plan: InstallPlan\) -> None:.*?(?=def _build_global_excludes)", replacement, "plan _build_linters")
     write(path, text)
 
 
@@ -332,63 +254,121 @@ def patch_runner() -> None:
     path = "riglib/actions/runner.py"
     text = read(path)
     replacement = '''def _do_provision_linter_config(action: Action, on_conflict: str) -> ActionResult:
-    """Provision/reconcile one Rig-managed linter/formatter file.
-
-    For the generated Oxlint policy action, a best-effort finding preview runs before the write and
-    is appended to the result: current errors/warnings → desired errors/warnings. Preview failures
-    never block policy convergence.
-    """
-    rel_path = action.options.get("rel_path")
+    """Provision/reconcile one Rig-managed linter/formatter config file."""
+    rel_path = str(action.options.get("rel_path", ""))
     content = action.options.get("content")
     tool = str(action.options.get("tool") or "")
     role = str(action.options.get("role") or "linter")
-    label = _linter_label(role, tool, action.item)
-    if not isinstance(rel_path, str) or not rel_path:
-        return ActionResult(action, "error", f"{label}: missing rel_path")
-    if not isinstance(content, str):
-        return ActionResult(action, "error", f"{label}: missing content")
+    label = _linter_label(role, tool, str(action.item))
+    if not rel_path or not isinstance(content, str) or not content:
+        return ActionResult(action, "error", f"linter-config ({label}): malformed action (missing rel_path/content)")
+    if linter_path_escapes_repo(rel_path):
+        return ActionResult(action, "error", f"linter-config ({label}): path {rel_path!r} escapes the repo (refusing to write)")
 
     r = resolve_linter_config(action.target, rel_path, content)
     if r.state == "io_error":
-        return ActionResult(action, "error", f"{label}: {r.detail}")
+        return ActionResult(action, "error", f"linter-config ({label}): {r.detail}")
     if r.state == "ok":
-        return ActionResult(action, "skipped", f"{label}: already correct")
+        return ActionResult(action, "skipped", f"linter-config ({label}): {r.target_path.name} already correct")
 
     preview = ""
     if action.options.get("preview_findings") and tool == "oxlint":
         try:
             from ..lint_preview import preview_oxlint_policy
-
-            impact = preview_oxlint_policy(action.target, content, rel_path)
+            impact = preview_oxlint_policy(action.target, r.content, rel_path)
             preview = f"; {impact.render()}"
-        except Exception as exc:  # preview is informative, never a provisioning gate
+        except Exception as exc:
             preview = f"; lint finding preview skipped: {type(exc).__name__}: {exc}"
 
-    out = fsutil.write_file(r.target, content, on_conflict)
-    return ActionResult(action, out.status, f"{label}: {out.detail}{preview}", out.backup)
+    out = fsutil.write_file(r.target_path, r.content, on_conflict)
+    return ActionResult(action, out.status, f"linter-config ({label}): {out.detail}{preview}", out.backup)
 
 
 '''
-    text = regex_once(
+    text = regex_once(text, r"def _do_provision_linter_config\(action: Action, on_conflict: str\) -> ActionResult:.*?(?=def _do_provision_project_tool)", replacement, "runner linter handler")
+    write(path, text)
+
+
+def patch_tests() -> None:
+    path = "tests/test_linters.py"
+    text = read(path)
+    text = replace_once(
         text,
-        r"def _do_provision_linter_config\(action: Action, on_conflict: str\) -> ActionResult:.*?(?=def [A-Za-z_])",
-        replacement,
-        "runner linter handler",
+        '@pytest.mark.parametrize("missing", ["tool", "path", "content"])',
+        '@pytest.mark.parametrize("missing", ["tool", "path"])',
+        "required linter item fields test",
     )
+    marker = '''def test_required_string_missing_rejected(missing):
+    spec = {"tool": "t", "path": "p", "content": "c"}
+    del spec[missing]
+    with pytest.raises(ConfigError, match=f"linters.items.x.{missing} must be a non-empty string"):
+        _validate({"linters": {"items": {"x": spec}}})
+'''
+    extra = marker + '''
+
+def test_linter_item_requires_exactly_one_content_or_source():
+    with pytest.raises(ConfigError, match="exactly one of content or source"):
+        _validate({"linters": {"items": {"x": {"tool": "t", "path": "p"}}}})
+    with pytest.raises(ConfigError, match="exactly one of content or source"):
+        _validate({"linters": {"items": {"x": {"tool": "t", "path": "p", "content": "c", "source": "preset"}}}})
+    _validate({"linters": {"items": {"x": {"tool": "t", "path": "p", "source": "linters/oxc/.oxfmtrc.jsonc"}}}})
+'''
+    text = replace_once(text, marker, extra, "source xor content tests")
+    write(path, text)
+
+    path = "tests/test_config_schema.py"
+    text = read(path)
+    text = replace_once(text, 'assert set(item["required"]) == {"tool", "path", "content"}', 'assert set(item["required"]) == {"tool", "path"}', "schema required fields")
+    text = replace_once(text, '("linters", {"enabled", "items"}),', '("linters", {"enabled", "preview", "rules", "items"}),', "registry linters keys")
+    text = replace_once(text, '"tool", "role", "path", "content", "enabled",', '"tool", "role", "path", "content", "source", "enabled",', "schema item keys")
+    write(path, text)
+
+
+def patch_docs() -> None:
+    path = "docs/config-schema.md"
+    text = read(path)
+    addition = '''
+
+### `linters` — Rig-owned lint policy
+
+Rig is the policy source for generated linter configuration. The effective configuration is resolved from built-in defaults, then global Rig configuration, then repository `rig.yaml`.
+
+```yaml
+linters:
+  enabled: true
+  preview: true
+  rules:
+    all: false
+    groups:
+      typescript-core: true
+      anti-slop: true
+    enable: []
+    disable: []
+    severity:
+      anti-slop/no-reflect-get: warn
+  items:
+    oxfmt:
+      tool: oxfmt
+      role: formatter
+      path: .oxfmtrc.jsonc
+      source: linters/oxc/.oxfmtrc.jsonc
+```
+
+`rules.all: true` enables every known applicable rule. `enable` and `disable` apply individual overrides; `severity` is the final per-rule `off` / `warn` / `error` authority. `groups` toggles named rule families. `preview` controls the best-effort before/after finding-count summary shown when Rig changes the generated Oxlint policy.
+
+An explicit `linters.items.<name>` sets exactly one of `content` or `source`: `content` is repository-specific literal bytes, while `source` names a reusable file inside the configured agent-tools catalog.
+'''
+    if "### `linters` — Rig-owned lint policy" not in text:
+        text += addition
     write(path, text)
 
 
 def refresh_schema() -> None:
-    # Import only after source patches are on disk.
     import sys
-
     sys.path.insert(0, str(ROOT))
     from riglib import config_schema
-
     schema = config_schema.json_schema()
-    (ROOT / config_schema.SCHEMA_REL_PATH).write_text(
-        json.dumps(schema, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    (ROOT / config_schema.SCHEMA_REL_PATH).write_text(json.dumps(schema, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -396,6 +376,8 @@ def main() -> None:
     patch_config()
     patch_plan()
     patch_runner()
+    patch_tests()
+    patch_docs()
     refresh_schema()
     print("lint policy integration patch applied")
 
