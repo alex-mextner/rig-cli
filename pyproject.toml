@@ -33,7 +33,7 @@ test = ["pytest", "tomli; python_version < '3.11'"]
 #   pip install -e <agent-tools>/lib/agenttools_daemon <agent-tools>/lib/agenttools_service
 
 [project.scripts]
-rig = "riglib.entrypoint:main"
+rig = "riglib.fleet_entrypoint:main"
 
 [project.urls]
 Homepage = "https://github.com/alex-mextner/rig-cli"
