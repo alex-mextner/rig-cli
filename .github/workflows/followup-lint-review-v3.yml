@@ -1,0 +1,63 @@
+name: Finish lint review compatibility
+on:
+  push:
+    branches: [fix/linter-readiness-detection]
+permissions:
+  contents: write
+jobs:
+  finish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/linter-readiness-detection
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reapply follow-up patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          wf = Path('.github/workflows/followup-lint-review.yml').read_text().splitlines()
+          start = next(i for i,l in enumerate(wf) if "python - <<'PY'" in l) + 1
+          end = next(i for i in range(start, len(wf)) if wf[i].strip() == 'PY')
+          lines = wf[start:end]
+          indent = min(len(x) - len(x.lstrip()) for x in lines if x.strip())
+          Path('/tmp/patch.py').write_text('\n'.join(x[indent:] for x in lines) + '\n')
+          PY
+          python /tmp/patch.py
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('riglib/managed_config.py')
+          text = p.read_text()
+          text = text.replace('f"Managed by Rig (generated). Source of truth: {source}."', 'f"Managed by Rig. Class: generated. Source of truth: {source}."')
+          text = text.replace('f"Managed by Rig (source-backed). Canonical source: {source}."', 'f"Managed by Rig. Class: source-backed. Canonical source: {source}."')
+          text = text.replace('f"Partially managed by Rig (marker-managed). Policy source: {source}."', 'f"Managed by Rig. Class: marker-managed (partial). Policy source: {source}."')
+          p.write_text(text)
+
+          p = Path('tests/test_config_schema.py')
+          text = p.read_text()
+          old = '("linters", {"enabled", "preview", "rules", "items"}),' 
+          if old in text:
+              text = text.replace(old, '("linters", {"enabled", "preview", "rules", "items", "bundles"}),', 1)
+          p.write_text(text)
+          PY
+      - name: Install and regenerate schema
+        run: |
+          pip install -e '.[test]' pyyaml
+          python - <<'PY'
+          from riglib.config_schema import write_schema_file
+          write_schema_file()
+          PY
+      - name: Validate
+        run: |
+          python -m pytest -q tests/test_lint_followups.py tests/test_managed_config.py tests/test_linters.py tests/test_linter_carriers.py tests/test_config_schema.py
+          python -m pytest -q
+      - name: Commit result
+        run: |
+          rm -f .github/workflows/followup-lint-review.yml .github/workflows/followup-lint-review-v2.yml .github/workflows/followup-lint-review-v3.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "fix: address merged lint-policy review findings"
+          git push origin HEAD:fix/linter-readiness-detection
