@@ -64,6 +64,8 @@ def run(args) -> int:
         return 0
     if not data:
         return 0
+    print("Effective Rig lint policy (built-in defaults < groups/all < enable/disable < severity).")
+    print("Change it in global Rig config or rig.yaml; generated Oxlint files are outputs, not policy inputs.\n")
     widths = {key: max(len(key), *(len(row[key]) for row in data)) for key in ("effective", "default", "all", "group", "provider")}
     for row in data:
         print(

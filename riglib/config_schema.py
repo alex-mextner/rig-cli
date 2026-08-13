@@ -901,16 +901,16 @@ _LINTERS_BUNDLES_BLOCK = Block(
 )
 
 _LINTERS_RULES_BLOCK = Block(
-    doc="Rig-owned rule selection; inherited through global config and refined by rig.yaml.",
+    doc="Rig-owned rule selection. Built-in defaults are inherited through global config and rig.yaml; inspect the effective result with `rig lint rules`.",
     leaves={
-        "all": Leaf("boolean", "enable every known applicable rule", default=False),
-        "enable": Leaf("array", "individual rules to enable", items_type="string"),
-        "disable": Leaf("array", "individual rules to disable", items_type="string"),
-        "severity": Leaf("object", "final per-rule off|warn|error overrides", additional_properties_type="string"),
+        "all": Leaf("boolean", "enable every applicable known policy concept after provider selection/dedup; per-rule severity still wins", default=False),
+        "enable": Leaf("array", "individual rules to enable without enabling all", items_type="string"),
+        "disable": Leaf("array", "individual rules to disable after defaults/groups/all", items_type="string"),
+        "severity": Leaf("object", "final per-rule off|warn|error overrides; highest-precedence rule-policy setting", additional_properties_type="string"),
     },
     nested={
         "groups": Block(
-            doc="rule-group toggles keyed by group name",
+            doc="rule-group toggles keyed by group name; `anti-slop: true` uses audited per-rule defaults rather than forcing every rule to error",
             additional_properties={"type": "boolean"},
         ),
     },
