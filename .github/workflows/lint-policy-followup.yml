@@ -1,0 +1,36 @@
+name: Integrate lint policy follow-up
+
+on:
+  push:
+    branches: [feat/linter-bundles]
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: ${{ !contains(github.event.head_commit.message, '[lint-followup-integrated]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feat/linter-bundles
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Integrate follow-up
+        run: python scripts/_apply_lint_policy_followup.py
+      - name: Validate
+        run: |
+          python -m pip install -e '.[test]' pyyaml
+          python -m pytest -q tests/test_lint_policy.py tests/test_linter_carriers.py tests/test_linters.py tests/test_config_schema.py
+          python -m pytest -q
+      - name: Commit integrated source
+        run: |
+          rm scripts/_apply_lint_policy_followup.py .github/workflows/lint-policy-followup.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: gate Rig lint policy on Oxc readiness [lint-followup-integrated]"
+          git push origin HEAD:feat/linter-bundles
