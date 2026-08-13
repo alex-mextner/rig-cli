@@ -870,28 +870,46 @@ _SHIP_DELEGATOR_BLOCK = Block(
 # required keys + `role` enum the Python validator does (an editor flags a missing `content` / a bad
 # `role` before `rig apply` ever runs). `closed=True` → an unknown per-item key is rejected too.
 _LINTERS_ITEM_BLOCK = Block(
-    doc="one linter/formatter config file rig writes/reconciles.",
+    doc="one explicit linter/formatter config file rig writes/reconciles.",
     leaves={
-        "tool": Leaf("string", "the tool name (informational; drives the status/log label)"),
-        "role": Leaf("string", "linter | formatter (status label only)", enum=("linter", "formatter"), default="linter"),
-        "path": Leaf("string", "repo-relative path of the config file (no leading '/' or '..')"),
-        "content": Leaf("string", "the exact bytes rig writes/reconciles"),
+        "tool": Leaf("string", "the tool name (drives status/log labels)"),
+        "role": Leaf("string", "linter | formatter", enum=("linter", "formatter"), default="linter"),
+        "path": Leaf("string", "repo-relative target config path"),
+        "content": Leaf("string", "literal desired content; mutually exclusive with source"),
+        "source": Leaf("string", "agent-tools-relative canonical source file; mutually exclusive with content"),
         "enabled": Leaf("boolean", "provision this one file", default=True),
     },
 )
 
-_LINTERS_BLOCK = Block(
-    doc="per-repo linter + formatter config files rig provisions/reconciles (tool + content per repo).",
+_LINTERS_RULES_BLOCK = Block(
+    doc="Rig-owned rule selection; inherited through global config and refined by rig.yaml.",
     leaves={
-        "enabled": Leaf("boolean", "provision the declared linter/formatter config files", default=True),
+        "all": Leaf("boolean", "enable every known applicable rule", default=False),
+        "enable": Leaf("array", "individual rules to enable", items_type="string"),
+        "disable": Leaf("array", "individual rules to disable", items_type="string"),
+        "severity": Leaf("object", "final per-rule off|warn|error overrides", additional_properties_type="string"),
     },
+    nested={
+        "groups": Block(
+            doc="rule-group toggles keyed by group name",
+            additional_properties={"type": "boolean"},
+        ),
+    },
+)
+
+_LINTERS_BLOCK = Block(
+    doc="Rig-owned lint/format policy plus explicit reusable config carriers.",
+    leaves={
+        "enabled": Leaf("boolean", "provision lint/format policy", default=True),
+        "preview": Leaf("boolean", "show before/after lint finding counts when policy changes", default=True),
+    },
+    nested={"rules": _LINTERS_RULES_BLOCK},
     open_map="items",
     open_map_doc=(
-        "the config files keyed by a label; each is `{ tool, role, path, content, enabled }` "
-        "(e.g. an `oxfmt` formatter writing `.oxfmtrc.jsonc`, a `ruff` linter writing `ruff.toml`)."
+        "extra config files keyed by label; each uses `{ tool, role, path, content|source, enabled }`."
     ),
     open_map_item=_LINTERS_ITEM_BLOCK,
-    open_map_item_required=("tool", "path", "content"),
+    open_map_item_required=("tool", "path"),
 )
 
 _PROJECT_TOOLS_BLOCK = Block(

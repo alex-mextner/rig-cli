@@ -840,7 +840,7 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     _build_ship_delegator(config, catalog, plan)
 
     # ── linters (per-repo linter/formatter config files) ──────────────────────────
-    _build_linters(config, plan)
+    _build_linters(config, catalog, plan)
 
     # ── project_tools (Haft / Serena / Sverklo repo integrations) ─────────────────
     _build_project_tools(config, plan)
@@ -1707,52 +1707,168 @@ def _build_ship_delegator(config: LoadedConfig, catalog: Catalog, plan: InstallP
     )
 
 
-def _build_linters(config: LoadedConfig, plan: InstallPlan) -> None:
-    """Plan the per-repo linter/formatter config-file provisioning (the ``linters`` block).
+def _build_linters(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) -> None:
+    """Plan generic config carriers plus Rig-owned Oxc rule policy.
 
-    Default **ON**: every declared, enabled item becomes one idempotent action that writes its
-    config file at the repo-relative ``path`` with the exact ``content`` from config (CTO decision
-    #4136.2 — linter settings are provisioned by rig like every other reconciled area). The tool +
-    path + content are PER-REPO config; the plan hardcodes no specific linter. Opt out of the whole
-    area with ``linters: { enabled: false }`` or a single item with ``items.<name>.enabled: false``.
-
-    One action per item (``item`` is the config label), anchored at the repo root. The
-    create/repair/never-clobber-without-backup write + the byte-compare drift live in ``actions/``
-    and ``drift.py`` (they depend on what is on disk), so this only resolves the desired files.
-    ``validate()`` already fail-closed on a malformed block, so the structural re-checks here are
-    belt-and-suspenders for a hand-built plan.
+    Explicit ``linters.items`` remain generic and can be provisioned regardless of the active lint
+    engine. Rule policy is different: Rig only emits Oxc policy/plugin actions when the repository
+    is ready to execute them. A foreign/no-linter repository gets one loud blocked action containing
+    a copy-ready migration prompt while the rest of ``rig apply`` can continue.
     """
     li = config.data.get("linters")
     if li is None:
         li = {}
-    if not isinstance(li, dict):
-        return  # validate() already fail-closed on a non-mapping block
-    if li.get("enabled") is False:
+    if not isinstance(li, dict) or li.get("enabled") is False:
         return
+
+    from .lint_policy import anti_slop_required, render_oxlint_config, resolve_rule_severities, rule_policy_summary
+    from .linter_carriers import read_source_text
+    from .linter_environment import inspect_linter_environment
+    from .managed_config import with_managed_header
+
     items = li.get("items", {})
-    if not isinstance(items, dict):
+    item_paths: set[str] = set()
+    if isinstance(items, dict):
+        for name, spec in items.items():
+            if not isinstance(spec, dict) or spec.get("enabled") is False:
+                continue
+            rel_path = spec.get("path")
+            if not isinstance(rel_path, str) or not rel_path:
+                continue
+            content = spec.get("content")
+            source_rel = spec.get("source")
+            source_backed = isinstance(source_rel, str) and bool(source_rel)
+            if source_backed:
+                try:
+                    content = read_source_text(catalog.source, source_rel)
+                except ValueError as exc:
+                    raise PlanError(f"linters.items.{name}.source: {exc}") from exc
+            if not isinstance(content, str) or not content:
+                continue
+            if source_backed:
+                content = with_managed_header(
+                    rel_path,
+                    content,
+                    source=f"agent-tools/{source_rel} + rig.yaml selection",
+                )
+            item_paths.add(PurePosixPath(rel_path).as_posix())
+            plan.actions.append(
+                Action(
+                    kind="provision_linter_config",
+                    category="linters",
+                    item=str(name),
+                    source=catalog.source,
+                    target=config.repo_root,
+                    options={
+                        "tool": str(spec.get("tool") or ""),
+                        "role": str(spec.get("role") or "linter"),
+                        "rel_path": rel_path,
+                        "content": content,
+                    },
+                )
+            )
+
+    stack_parts = set((config.stack or "").split("/"))
+    typescript_stack = bool({"ts", "typescript"} & stack_parts)
+    rules_explicit = "rules" in li
+    if not typescript_stack and not rules_explicit:
         return
-    for name, spec in items.items():
-        if not isinstance(spec, dict):
-            continue
-        if spec.get("enabled") is False:
-            continue
-        rel_path = spec.get("path")
-        content = spec.get("content")
-        if not isinstance(rel_path, str) or not isinstance(content, str) or not rel_path or not content:
-            continue  # validate() rejects this; skip rather than emit a broken action
-        tool = str(spec.get("tool") or "")
-        role = str(spec.get("role") or "linter")
+    if "oxlint.config.ts" in item_paths:
+        raise PlanError(
+            "linters.items targets oxlint.config.ts while Rig rule policy also owns that file; "
+            "remove the item and configure linters.rules instead"
+        )
+
+    rules_cfg = li.get("rules", {})
+    if not isinstance(rules_cfg, dict):
+        rules_cfg = {}
+    severities = resolve_rule_severities(rules_cfg)
+    summary = rule_policy_summary(rules_cfg)
+    plan.notes.append(
+        "linters: effective rule policy — "
+        f"{summary['error']} error, {summary['warn']} warn, {summary['off']} off"
+    )
+
+    env = inspect_linter_environment(config.repo_root)
+    blocked_reason = ""
+    if not env.ready:
+        blocked_reason = env.reason
+    elif anti_slop_required(severities) and "@oxlint/plugins" in env.missing_oxc_packages:
+        blocked_reason = (
+            "Rig anti-slop policy is blocked because @oxlint/plugins is not declared in this "
+            "repository; the generated local plugin cannot execute reliably without it."
+        )
+    if blocked_reason:
         plan.actions.append(
             Action(
-                kind="provision_linter_config",
+                kind="lint_policy_blocked",
                 category="linters",
-                item=str(name),
-                source=config.repo_root,
+                item="rules",
+                source=catalog.source,
                 target=config.repo_root,
-                options={"tool": tool, "role": role, "rel_path": rel_path, "content": content},
+                options={"reason": blocked_reason, "agent_prompt": env.agent_prompt},
             )
         )
+        return
+
+    if env.foreign_linters:
+        plan.notes.append(
+            "linters: Oxlint is available alongside "
+            + ", ".join(env.foreign_linters)
+            + "; Rig applies Oxc policy but the repository should avoid duplicate/conflicting lint scripts"
+        )
+
+    generated = render_oxlint_config(rules_cfg)
+    plan.actions.append(
+        Action(
+            kind="provision_linter_config",
+            category="linters",
+            item="rig-oxlint-policy",
+            source=catalog.source,
+            target=config.repo_root,
+            options={
+                "tool": "oxlint",
+                "role": "linter",
+                "rel_path": "oxlint.config.ts",
+                "content": generated,
+                "preview_findings": li.get("preview") is not False,
+                "rig_owned": True,
+            },
+        )
+    )
+
+    if anti_slop_required(severities):
+        source_root = catalog.source / "vendor" / "anti-slop" / "src"
+        if not source_root.is_dir():
+            raise PlanError(
+                "anti-slop rules are enabled but vendor/anti-slop/src is missing; initialize/update "
+                "the pinned agent-tools submodule"
+            )
+        for source_file in sorted(source_root.rglob("*.ts")):
+            if source_file.name.endswith(".test.ts"):
+                continue
+            rel = source_file.relative_to(source_root).as_posix()
+            target_rel = f"tools/oxlint/anti-slop/{rel}"
+            try:
+                content = source_file.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise PlanError(f"cannot read anti-slop source {source_file}: {exc}") from exc
+            plan.actions.append(
+                Action(
+                    kind="provision_linter_config",
+                    category="linters",
+                    item=f"anti-slop/{rel}",
+                    source=source_file,
+                    target=config.repo_root,
+                    options={
+                        "tool": "anti-slop",
+                        "role": "linter",
+                        "rel_path": target_rel,
+                        "content": content,
+                        "rig_owned": True,
+                    },
+                )
+            )
 
 
 def _build_global_excludes(config: LoadedConfig, plan: InstallPlan) -> None:

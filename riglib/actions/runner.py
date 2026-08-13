@@ -5379,43 +5379,45 @@ def resolve_linter_config(repo_root: Path, rel_path: str, content: str) -> Linte
     return LinterConfigResolution(target, content, "update")
 
 
-def _do_provision_linter_config(action: Action, on_conflict: str) -> ActionResult:
-    """Provision/reconcile ONE per-repo linter/formatter config file (the ``linters`` block).
+def _do_lint_policy_blocked(action: Action, on_conflict: str) -> ActionResult:
+    """Surface a non-mutating lint-policy readiness failure while allowing other Rig areas to run."""
+    reason = str(action.options.get("reason") or "Oxc lint policy prerequisites are not satisfied")
+    prompt = str(action.options.get("agent_prompt") or "").strip()
+    detail = f"lint-policy: BLOCKED — {reason}"
+    if prompt:
+        detail += f"\n\nReady-to-copy migration prompt:\n{prompt}"
+    return ActionResult(action, "error", detail)
 
-    Writes ``<repo>/<rel_path>`` with the exact ``content`` from config ONLY when its bytes differ
-    (a correct file is a true no-op — no spurious ``.rig-bak``). Honors ``on_conflict`` via
-    :func:`fsutil.write_file`: a hand-edited config is BACKED UP before overwrite (default) / left
-    untouched (``skip``) / overwritten (``overwrite``) — rig never clobbers a hand-written file
-    without a backup. apply and drift switch on the SAME :func:`resolve_linter_config` ``state`` so
-    status never misreports. ``io_error`` (a directory/unreadable at the path) is an error, never a
-    silent skip.
-    """
-    # Do NOT strip rel_path — operate on the LITERAL value the validator saw (which rejects
-    # whitespace-padded paths), so apply and validation never disagree on what file is meant.
+
+def _do_provision_linter_config(action: Action, on_conflict: str) -> ActionResult:
+    """Provision/reconcile one Rig-managed linter/formatter config file."""
     rel_path = str(action.options.get("rel_path", ""))
     content = action.options.get("content")
     tool = str(action.options.get("tool") or "")
     role = str(action.options.get("role") or "linter")
     label = _linter_label(role, tool, str(action.item))
-    # Guard a malformed action (a plan-builder regression that dropped a required option). The
-    # validator + builder already fail-closed, so this is defense-in-depth; fail loudly rather than
-    # write a 0-byte / wrong-path file. `not content` rejects an empty string too (mirroring the
-    # plan builder): the validator requires non-empty content, so an empty one means a synthetic /
-    # replayed Action — write_file would otherwise emit the 0-byte file this guard exists to prevent.
     if not rel_path or not isinstance(content, str) or not content:
         return ActionResult(action, "error", f"linter-config ({label}): malformed action (missing rel_path/content)")
-    # Re-enforce repo containment here too (not only at config load): a hand-built / replayed Action
-    # could carry an escaping `rel_path` (`../x`, `/etc/x`) that the validator never saw. Refuse to
-    # write outside the repo — same predicate the validator uses, so the two never disagree.
     if linter_path_escapes_repo(rel_path):
         return ActionResult(action, "error", f"linter-config ({label}): path {rel_path!r} escapes the repo (refusing to write)")
+
     r = resolve_linter_config(action.target, rel_path, content)
     if r.state == "io_error":
         return ActionResult(action, "error", f"linter-config ({label}): {r.detail}")
     if r.state == "ok":
         return ActionResult(action, "skipped", f"linter-config ({label}): {r.target_path.name} already correct")
+
+    preview = ""
+    if action.options.get("preview_findings") and tool == "oxlint":
+        try:
+            from ..lint_preview import preview_oxlint_policy
+            impact = preview_oxlint_policy(action.target, r.content, rel_path)
+            preview = f"; {impact.render()}"
+        except Exception as exc:
+            preview = f"; lint finding preview skipped: {type(exc).__name__}: {exc}"
+
     out = fsutil.write_file(r.target_path, r.content, on_conflict)
-    return ActionResult(action, out.status, f"linter-config ({label}): {out.detail}", out.backup)
+    return ActionResult(action, out.status, f"linter-config ({label}): {out.detail}{preview}", out.backup)
 
 
 def _do_provision_project_tool(action: Action, on_conflict: str) -> ActionResult:
@@ -6803,6 +6805,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_agents_symlink": _do_provision_agents_symlink,
     "provision_ship_delegator": _do_provision_ship_delegator,
     "provision_gh_ship_alias": _do_provision_gh_ship_alias,
+    "lint_policy_blocked": _do_lint_policy_blocked,
     "provision_linter_config": _do_provision_linter_config,
     "provision_project_tool": _do_provision_project_tool,
     "provision_github_ruleset": _do_provision_github_ruleset,

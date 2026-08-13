@@ -1462,27 +1462,73 @@
     },
     "linters": {
       "type": "object",
-      "description": "per-repo linter + formatter config files rig provisions/reconciles (tool + content per repo).",
+      "description": "Rig-owned lint/format policy plus explicit reusable config carriers.",
       "properties": {
         "enabled": {
           "type": "boolean",
-          "description": "provision the declared linter/formatter config files",
+          "description": "provision lint/format policy",
           "default": true
+        },
+        "preview": {
+          "type": "boolean",
+          "description": "show before/after lint finding counts when policy changes",
+          "default": true
+        },
+        "rules": {
+          "type": "object",
+          "description": "Rig-owned rule selection; inherited through global config and refined by rig.yaml.",
+          "properties": {
+            "all": {
+              "type": "boolean",
+              "description": "enable every known applicable rule",
+              "default": false
+            },
+            "enable": {
+              "type": "array",
+              "description": "individual rules to enable",
+              "items": {
+                "type": "string"
+              }
+            },
+            "disable": {
+              "type": "array",
+              "description": "individual rules to disable",
+              "items": {
+                "type": "string"
+              }
+            },
+            "severity": {
+              "type": "object",
+              "description": "final per-rule off|warn|error overrides",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "groups": {
+              "type": "object",
+              "description": "rule-group toggles keyed by group name",
+              "properties": {},
+              "additionalProperties": {
+                "type": "boolean"
+              }
+            }
+          },
+          "additionalProperties": false
         },
         "items": {
           "type": "object",
-          "description": "the config files keyed by a label; each is `{ tool, role, path, content, enabled }` (e.g. an `oxfmt` formatter writing `.oxfmtrc.jsonc`, a `ruff` linter writing `ruff.toml`).",
+          "description": "extra config files keyed by label; each uses `{ tool, role, path, content|source, enabled }`.",
           "additionalProperties": {
             "type": "object",
-            "description": "one linter/formatter config file rig writes/reconciles.",
+            "description": "one explicit linter/formatter config file rig writes/reconciles.",
             "properties": {
               "tool": {
                 "type": "string",
-                "description": "the tool name (informational; drives the status/log label)"
+                "description": "the tool name (drives status/log labels)"
               },
               "role": {
                 "type": "string",
-                "description": "linter | formatter (status label only)",
+                "description": "linter | formatter",
                 "enum": [
                   "linter",
                   "formatter"
@@ -1491,11 +1537,15 @@
               },
               "path": {
                 "type": "string",
-                "description": "repo-relative path of the config file (no leading '/' or '..')"
+                "description": "repo-relative target config path"
               },
               "content": {
                 "type": "string",
-                "description": "the exact bytes rig writes/reconciles"
+                "description": "literal desired content; mutually exclusive with source"
+              },
+              "source": {
+                "type": "string",
+                "description": "agent-tools-relative canonical source file; mutually exclusive with content"
               },
               "enabled": {
                 "type": "boolean",
@@ -1506,8 +1556,7 @@
             "additionalProperties": false,
             "required": [
               "tool",
-              "path",
-              "content"
+              "path"
             ]
           }
         }

@@ -118,7 +118,7 @@ def test_linters_items_schema_enforces_item_shape():
     doc = config_schema.json_schema()
     item = doc["properties"]["linters"]["properties"]["items"]["additionalProperties"]
     assert item["additionalProperties"] is False  # unknown per-item key rejected
-    assert set(item["required"]) == {"tool", "path", "content"}
+    assert set(item["required"]) == {"tool", "path"}
     assert item["properties"]["role"]["enum"] == ["linter", "formatter"]
     assert item["properties"]["content"]["type"] == "string"
     assert item["properties"]["enabled"]["type"] == "boolean"
@@ -222,7 +222,7 @@ def test_dev_schema_models_server_and_e2e_metadata():
         ("models.schedule", {"time", "label"}),
         ("agents_md", {"enabled", "symlink"}),
         ("gitignore", {"enabled", "entries", "excludesfile"}),
-        ("linters", {"enabled", "items"}),
+        ("linters", {"enabled", "preview", "rules", "items"}),
         ("project_tools", config.PROJECT_TOOLS_KEYS),
         ("project_tools.haft", config.HAFT_KEYS),
         ("project_tools.haft.workflow", config.HAFT_WORKFLOW_KEYS),
@@ -241,7 +241,7 @@ def test_registry_tmux_subblock_keys_match_validator():
 
 def test_block_child_keys_can_descend_into_schema_shaped_open_maps():
     assert config_schema.block_child_keys("linters.items") == {
-        "tool", "role", "path", "content", "enabled",
+        "tool", "role", "path", "content", "source", "enabled",
     }
     assert config_schema.block_child_keys("dev.e2e.jobs") == {
         "script", "requires_server", "artifacts_root", "logs_root",
