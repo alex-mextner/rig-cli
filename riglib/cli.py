@@ -327,6 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     evolve_service.register(sub)
 
+    _add_lint_parser(sub)
     _add_stats_parser(sub)
     _add_codex_parser(sub)
 
@@ -372,6 +373,18 @@ def _add_config_parser(sub: "argparse._SubParsersAction") -> None:
         "--plan", action="store_true",
         help="list every planned action (default: a per-carrier summary for a large plan)",
     )
+
+
+def _add_lint_parser(sub: "argparse._SubParsersAction") -> None:
+    """`rig lint rules` — lint-domain policy introspection; top-level `rig rules` stays cross-domain."""
+    lp = sub.add_parser("lint", help="lint/format policy inspection")
+    lp.set_defaults(_lint_parser=lp)
+    lsub = lp.add_subparsers(dest="lint_command", metavar="<action>")
+    rp = lsub.add_parser("rules", help="show the effective lint rule policy and provider selection")
+    rp.add_argument("rule", nargs="?", help="show one exact rule name")
+    rp.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
+    rp.add_argument("--config", help="config file (default: ./rig.yaml + global)")
+    rp.add_argument("--json", action="store_true", help="emit machine-readable JSON")
 
 
 def _add_stats_parser(sub: "argparse._SubParsersAction") -> None:
@@ -463,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         "setup": cmd_setup_wizard,  # setup = the interactive config wizard (distinct from init)
         "config-web": cmd_config_web,  # web UI over the config engine; lifecycle via agenttools-service
         "evolve": cmd_evolve,  # project evolution portal; lifecycle via agenttools-service
+        "lint": cmd_lint,
         "stats": cmd_stats,
         "codex": cmd_codex,
     }
@@ -2437,6 +2451,11 @@ def cmd_evolve(args: argparse.Namespace) -> int:
     from .evolve import service as evolve_service
 
     return evolve_service.dispatch_cli(args)
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    from .lint_rules_cli import run
+    return run(args)
 
 
 def cmd_stats(args: argparse.Namespace) -> int:

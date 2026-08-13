@@ -8,6 +8,7 @@ migration prompt for a human or coding agent.
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,16 @@ _FOREIGN_CONFIG_GLOBS = {
     "TSLint": ("tslint.json",),
 }
 _OXC_PACKAGES = ("oxlint", "oxfmt", "@oxlint/plugins")
+_FOREIGN_FORMATTER_PACKAGES = {
+    "prettier": "Prettier",
+    "@biomejs/biome": "Biome",
+    "dprint": "dprint",
+}
+_FOREIGN_FORMATTER_CONFIG_GLOBS = {
+    "Prettier": (".prettierrc", ".prettierrc.*", "prettier.config.*"),
+    "Biome": ("biome.json", "biome.jsonc"),
+    "dprint": ("dprint.json", "dprint.jsonc"),
+}
 
 
 @dataclass(frozen=True)
@@ -64,6 +75,26 @@ def _script_text(manifest: dict[str, Any]) -> str:
     return "\n".join(value for value in scripts.values() if isinstance(value, str)).lower()
 
 
+def _script_tokens(manifest: dict[str, Any]) -> set[str]:
+    """Executable/package tokens in package scripts; exact tokens avoid `standard-version` false positives."""
+    scripts = manifest.get("scripts")
+    if not isinstance(scripts, dict):
+        return set()
+    out: set[str] = set()
+    for value in scripts.values():
+        if not isinstance(value, str):
+            continue
+        try:
+            parts = shlex.split(value, posix=True)
+        except ValueError:
+            parts = value.split()
+        for part in parts:
+            token = part.strip().lower().replace("\\", "/").rsplit("/", 1)[-1]
+            if token and token not in {"&&", "||", ";", "|"}:
+                out.add(token)
+    return out
+
+
 def _foreign_from_files(repo_root: Path) -> set[str]:
     found: set[str] = set()
     for label, patterns in _FOREIGN_CONFIG_GLOBS.items():
@@ -73,7 +104,7 @@ def _foreign_from_files(repo_root: Path) -> set[str]:
 
 
 def _foreign_from_scripts(manifest: dict[str, Any]) -> set[str]:
-    text = _script_text(manifest)
+    tokens = _script_tokens(manifest)
     found: set[str] = set()
     token_map = {
         "eslint": "ESLint",
@@ -83,7 +114,7 @@ def _foreign_from_scripts(manifest: dict[str, Any]) -> set[str]:
         "tslint": "TSLint",
     }
     for token, label in token_map.items():
-        if token in text:
+        if token in tokens:
             found.add(label)
     return found
 
@@ -103,6 +134,46 @@ def _prompt(*, foreign: tuple[str, ...], missing: tuple[str, ...]) -> str:
         "oxlint.config.ts: Rig owns that file and its rule policy comes from global Rig config plus "
         "rig.yaml."
     )
+
+
+@dataclass(frozen=True)
+class FormatterEnvironment:
+    ready: bool
+    oxfmt_present: bool
+    foreign_formatters: tuple[str, ...]
+    reason: str
+    agent_prompt: str
+
+
+def inspect_formatter_environment(repo_root: Path) -> FormatterEnvironment:
+    """Return repository-local Oxfmt readiness independently of the lint gate."""
+    manifest = _package_manifest(repo_root)
+    packages = _declared_packages(manifest)
+    oxfmt_present = "oxfmt" in packages
+    foreign = {label for pkg, label in _FOREIGN_FORMATTER_PACKAGES.items() if pkg in packages}
+    for label, patterns in _FOREIGN_FORMATTER_CONFIG_GLOBS.items():
+        if any(any(repo_root.glob(pattern)) for pattern in patterns):
+            foreign.add(label)
+    script_tokens = _script_tokens(manifest)
+    for token, label in (("prettier", "Prettier"), ("biome", "Biome"), ("dprint", "dprint")):
+        if token in script_tokens:
+            foreign.add(label)
+    names = tuple(sorted(foreign))
+    if oxfmt_present:
+        reason = "Repository-local Oxfmt is declared; Rig can apply the formatter baseline."
+    elif names:
+        reason = "Rig formatter baseline is blocked because this repository uses " + ", ".join(names) + " but repository-local Oxfmt is not declared."
+    else:
+        reason = "Rig formatter baseline is blocked because no repository-local Oxfmt dependency was detected."
+    prompt = (
+        "Prepare this JS/TS repository for the Rig-managed Oxfmt baseline. "
+        f"Current formatter environment: {', '.join(names) if names else 'no existing formatter'}. "
+        "Install compatible oxfmt as a repository development dependency using the existing package manager; "
+        "migrate format scripts and CI without deleting project-specific formatting semantics; remove obsolete "
+        "formatter configuration only after equivalent behavior is represented; then run `rig apply` again. "
+        "Do not hand-edit the Rig-managed .oxfmtrc.jsonc target; change Rig/agent-tools policy instead."
+    )
+    return FormatterEnvironment(oxfmt_present, oxfmt_present, names, reason, prompt)
 
 
 def inspect_linter_environment(repo_root: Path) -> LinterEnvironment:

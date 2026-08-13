@@ -185,6 +185,8 @@ def detect(
             _check_gh_ship_alias(action, report)
         elif action.kind == "lint_policy_blocked":
             report.items.append(DriftItem("modified", "linters", action.item, action.target, str(action.options.get("reason") or "lint policy prerequisites are blocked")))
+        elif action.kind == "format_policy_blocked":
+            report.items.append(DriftItem("modified", "linters", action.item, action.target, str(action.options.get("reason") or "formatter policy prerequisites are blocked")))
         elif action.kind == "provision_linter_config":
             _check_linter_config(action, report)
         elif action.kind == "provision_linter_bundle":

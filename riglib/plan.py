@@ -1723,7 +1723,7 @@ def _build_linters(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) ->
 
     from .lint_policy import anti_slop_required, render_oxlint_config, resolve_rule_severities, rule_policy_summary
     from .linter_carriers import read_source_text
-    from .linter_environment import inspect_linter_environment
+    from .linter_environment import inspect_formatter_environment, inspect_linter_environment
     from .managed_config import SOURCE_BACKED, with_managed_header
 
     bundles = li.get("bundles", {})
@@ -1802,6 +1802,39 @@ def _build_linters(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) ->
     )
 
     env = inspect_linter_environment(config.repo_root)
+    formatter_env = inspect_formatter_environment(config.repo_root)
+    if ".oxfmtrc.jsonc" not in item_paths:
+        if formatter_env.ready:
+            source_rel = "linters/oxc/.oxfmtrc.jsonc"
+            source_file = catalog.source / source_rel
+            if not source_file.is_file():
+                raise PlanError(f"Oxfmt carrier is missing: {source_file}")
+            try:
+                formatter_content = source_file.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise PlanError(f"cannot read Oxfmt carrier {source_file}: {exc}") from exc
+            formatter_content = with_managed_header(
+                ".oxfmtrc.jsonc", formatter_content,
+                source=f"agent-tools/{source_rel}", management_class=SOURCE_BACKED,
+            )
+            plan.actions.append(Action(
+                kind="provision_linter_config", category="linters", item="rig-oxfmt-baseline",
+                source=source_file, target=config.repo_root,
+                options={"tool": "oxfmt", "role": "formatter", "rel_path": ".oxfmtrc.jsonc",
+                         "content": formatter_content, "rig_owned": True},
+            ))
+            if formatter_env.foreign_formatters:
+                plan.notes.append(
+                    "formatters: Oxfmt is available alongside " + ", ".join(formatter_env.foreign_formatters)
+                    + "; Rig applies the Oxfmt baseline but duplicate/conflicting format scripts should be migrated deliberately"
+                )
+        else:
+            plan.actions.append(Action(
+                kind="format_policy_blocked", category="linters", item="formatter",
+                source=catalog.source, target=config.repo_root,
+                options={"reason": formatter_env.reason, "agent_prompt": formatter_env.agent_prompt},
+            ))
+
     blocked_reason = ""
     if not env.ready:
         blocked_reason = env.reason
