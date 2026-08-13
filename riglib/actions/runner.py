@@ -5379,6 +5379,16 @@ def resolve_linter_config(repo_root: Path, rel_path: str, content: str) -> Linte
     return LinterConfigResolution(target, content, "update")
 
 
+def _do_lint_policy_blocked(action: Action, on_conflict: str) -> ActionResult:
+    """Surface a non-mutating lint-policy readiness failure while allowing other Rig areas to run."""
+    reason = str(action.options.get("reason") or "Oxc lint policy prerequisites are not satisfied")
+    prompt = str(action.options.get("agent_prompt") or "").strip()
+    detail = f"lint-policy: BLOCKED — {reason}"
+    if prompt:
+        detail += f"\n\nReady-to-copy migration prompt:\n{prompt}"
+    return ActionResult(action, "error", detail)
+
+
 def _do_provision_linter_config(action: Action, on_conflict: str) -> ActionResult:
     """Provision/reconcile one Rig-managed linter/formatter config file."""
     rel_path = str(action.options.get("rel_path", ""))
@@ -6795,6 +6805,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_agents_symlink": _do_provision_agents_symlink,
     "provision_ship_delegator": _do_provision_ship_delegator,
     "provision_gh_ship_alias": _do_provision_gh_ship_alias,
+    "lint_policy_blocked": _do_lint_policy_blocked,
     "provision_linter_config": _do_provision_linter_config,
     "provision_project_tool": _do_provision_project_tool,
     "provision_github_ruleset": _do_provision_github_ruleset,
