@@ -30,7 +30,7 @@ def test_config_command_preview_and_commit(tmp_path):
     commit = fleet_config._config_command(
         repo, "ci.enabled", "true", commit=True
     )
-    assert preview[-4:] == ["true", "-C", repo.path]
+    assert preview[-4:] == ["ci.enabled", "true", "-C", repo.path]
     assert "--commit" not in preview
     assert commit[-1] == "--commit"
 
