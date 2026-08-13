@@ -6786,6 +6786,12 @@ def _do_provision_spotlight(action: Action, on_conflict: str) -> ActionResult:
     return ActionResult(action, "created", "; ".join(notes), out.backup)
 
 
+
+def _do_provision_linter_bundle(action: Action, on_conflict: str) -> ActionResult:
+    from ..linter_carriers import apply_bundle
+    out = apply_bundle(action.source, action.target, str(action.options.get("source_rel") or ""), str(action.options.get("target_rel") or ""), on_conflict)
+    return ActionResult(action, out.status, out.detail, out.backup)
+
 _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "record_mode": _do_record_mode,
     "copy_skill": _do_copy_skill,
@@ -6807,6 +6813,7 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_gh_ship_alias": _do_provision_gh_ship_alias,
     "lint_policy_blocked": _do_lint_policy_blocked,
     "provision_linter_config": _do_provision_linter_config,
+    "provision_linter_bundle": _do_provision_linter_bundle,
     "provision_project_tool": _do_provision_project_tool,
     "provision_github_ruleset": _do_provision_github_ruleset,
     "provision_github_merge": _do_provision_github_merge,

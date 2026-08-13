@@ -1619,6 +1619,7 @@ def _validate_ship_delegator(sd: dict[str, Any]) -> None:
 # CTO decision #4136.2 ("linter settings must also be provisioned by rig"): linter config is now a
 # first-class reconciled area, not a thing each repo hand-maintains and silently lets drift.
 LINTER_ITEM_KEYS = {"tool", "role", "path", "content", "source", "enabled"}
+LINTER_BUNDLE_KEYS = {"source", "target", "enabled"}
 # `role` is DESCRIPTIVE — it is rendered in the apply/drift label (`<role> <tool>:<item>`, see
 # runner._linter_label) so a formatter and a linter read distinctly; both roles reconcile identically
 # (a config file written + drift-compared). A foreign role is rejected so a typo (`role: format`)
@@ -1711,6 +1712,25 @@ def _validate_linters(li: dict[str, Any]) -> None:
         resolve_rule_severities(rules)
     except ValueError as exc:
         raise ConfigError(str(exc), schema_path="linters.rules") from exc
+    bundles = li.get("bundles", {})
+    if bundles is not None:
+        if not isinstance(bundles, dict):
+            raise ConfigError("linters.bundles must be a mapping", "linters.bundles")
+        for name, spec in bundles.items():
+            if not isinstance(name, str) or not name or not isinstance(spec, dict):
+                raise ConfigError("linters.bundles entries must be named mappings", f"linters.bundles.{name}")
+            unknown_bundle = sorted(set(spec) - LINTER_BUNDLE_KEYS)
+            if unknown_bundle:
+                raise ConfigError(f"unknown linters.bundles.{name} key: {unknown_bundle[0]}", f"linters.bundles.{name}.{unknown_bundle[0]}")
+            if spec.get("enabled") is not None and not isinstance(spec.get("enabled"), bool):
+                raise ConfigError(f"linters.bundles.{name}.enabled must be a bool", f"linters.bundles.{name}.enabled")
+            for key in ("source", "target"):
+                value = spec.get(key)
+                if not isinstance(value, str) or not value:
+                    raise ConfigError(f"linters.bundles.{name}.{key} is required", f"linters.bundles.{name}.{key}")
+                if linter_path_escapes_repo(value):
+                    raise ConfigError(f"linters.bundles.{name}.{key} must be a safe relative path", f"linters.bundles.{name}.{key}")
+
     items = li.get("items", {})
     if not isinstance(items, dict):
         raise ConfigError("linters.items must be a mapping", schema_path="linters.items")

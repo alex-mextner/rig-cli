@@ -156,6 +156,7 @@ class Block:
     open_map_item: Block | None = None
     open_map_item_required: tuple[str, ...] = ()
     additional_properties: Any | None = None
+    schema_extra: dict[str, Any] = field(default_factory=dict)
     closed: bool = True
 
     def child_keys(self) -> set[str]:
@@ -192,6 +193,7 @@ class Block:
             node["additionalProperties"] = self.additional_properties
         else:
             node["additionalProperties"] = False if self.closed else True
+        node.update(self.schema_extra)
         return node
 
 
@@ -879,6 +881,23 @@ _LINTERS_ITEM_BLOCK = Block(
         "source": Leaf("string", "agent-tools-relative canonical source file; mutually exclusive with content"),
         "enabled": Leaf("boolean", "provision this one file", default=True),
     },
+    schema_extra={"oneOf": [
+        {"required": ["content"], "not": {"required": ["source"]}},
+        {"required": ["source"], "not": {"required": ["content"]}},
+    ]},
+)
+
+_LINTERS_BUNDLE_ITEM_BLOCK = Block(
+    doc="one deterministic directory bundle copied from agent-tools",
+    leaves={
+        "source": Leaf("string", "agent-tools-relative source directory"),
+        "target": Leaf("string", "repo-relative destination directory"),
+        "enabled": Leaf("boolean", "provision this bundle", default=True),
+    },
+)
+_LINTERS_BUNDLES_BLOCK = Block(
+    doc="directory bundles keyed by label",
+    additional_properties=_LINTERS_BUNDLE_ITEM_BLOCK.to_node(),
 )
 
 _LINTERS_RULES_BLOCK = Block(
@@ -903,7 +922,7 @@ _LINTERS_BLOCK = Block(
         "enabled": Leaf("boolean", "provision lint/format policy", default=True),
         "preview": Leaf("boolean", "show before/after lint finding counts when policy changes", default=True),
     },
-    nested={"rules": _LINTERS_RULES_BLOCK},
+    nested={"rules": _LINTERS_RULES_BLOCK, "bundles": _LINTERS_BUNDLES_BLOCK},
     open_map="items",
     open_map_doc=(
         "extra config files keyed by label; each uses `{ tool, role, path, content|source, enabled }`."

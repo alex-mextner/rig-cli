@@ -323,3 +323,20 @@ class Catalog:
 
     def names(self, category: str) -> set[str]:
         return {i.name for i in self.by_category(category)}
+
+_RULE_PROVIDER_CARRIERS = {
+    "anti-slop": "vendor/anti-slop/skills/install-anti-slop/assets/anti-slop",
+}
+
+def rule_provider_carrier(source: Path, provider: str) -> tuple[str, Path]:
+    """Resolve a provider's supported vendored payload; layout knowledge lives in the catalog."""
+    rel = _RULE_PROVIDER_CARRIERS.get(provider)
+    if rel is None:
+        raise CatalogError(f"unknown lint rule provider: {provider}")
+    path = source / rel
+    if not path.is_dir():
+        raise CatalogError(
+            f"lint provider {provider!r} payload is missing at {path}; initialize/update the pinned subrepo"
+        )
+    return rel, path
+

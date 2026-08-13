@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .catalog import Catalog, Item
+from .catalog import Catalog, Item, rule_provider_carrier
 from .config import (
     GITIGNORE_DEFAULT_ENTRIES,
     GITIGNORE_DEFAULT_EXCLUDESFILE,
@@ -1724,7 +1724,18 @@ def _build_linters(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) ->
     from .lint_policy import anti_slop_required, render_oxlint_config, resolve_rule_severities, rule_policy_summary
     from .linter_carriers import read_source_text
     from .linter_environment import inspect_linter_environment
-    from .managed_config import with_managed_header
+    from .managed_config import SOURCE_BACKED, with_managed_header
+
+    bundles = li.get("bundles", {})
+    if isinstance(bundles, dict):
+        for name, spec in bundles.items():
+            if not isinstance(spec, dict) or spec.get("enabled") is False:
+                continue
+            plan.actions.append(Action(
+                kind="provision_linter_bundle", category="linters", item=str(name),
+                source=catalog.source, target=config.repo_root,
+                options={"source_rel": str(spec["source"]), "target_rel": str(spec["target"])},
+            ))
 
     items = li.get("items", {})
     item_paths: set[str] = set()
@@ -1750,6 +1761,7 @@ def _build_linters(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) ->
                     rel_path,
                     content,
                     source=f"agent-tools/{source_rel} + rig.yaml selection",
+                    management_class=SOURCE_BACKED,
                 )
             item_paths.add(PurePosixPath(rel_path).as_posix())
             plan.actions.append(
@@ -1838,37 +1850,16 @@ def _build_linters(config: LoadedConfig, catalog: Catalog, plan: InstallPlan) ->
     )
 
     if anti_slop_required(severities):
-        source_root = catalog.source / "vendor" / "anti-slop" / "src"
-        if not source_root.is_dir():
-            raise PlanError(
-                "anti-slop rules are enabled but vendor/anti-slop/src is missing; initialize/update "
-                "the pinned agent-tools submodule"
-            )
-        for source_file in sorted(source_root.rglob("*.ts")):
-            if source_file.name.endswith(".test.ts"):
-                continue
-            rel = source_file.relative_to(source_root).as_posix()
-            target_rel = f"tools/oxlint/anti-slop/{rel}"
-            try:
-                content = source_file.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
-            except (OSError, UnicodeDecodeError) as exc:
-                raise PlanError(f"cannot read anti-slop source {source_file}: {exc}") from exc
-            plan.actions.append(
-                Action(
-                    kind="provision_linter_config",
-                    category="linters",
-                    item=f"anti-slop/{rel}",
-                    source=source_file,
-                    target=config.repo_root,
-                    options={
-                        "tool": "anti-slop",
-                        "role": "linter",
-                        "rel_path": target_rel,
-                        "content": content,
-                        "rig_owned": True,
-                    },
-                )
-            )
+        try:
+            source_rel, _source_root = rule_provider_carrier(catalog.source, "anti-slop")
+        except Exception as exc:
+            raise PlanError(str(exc)) from exc
+        if not any(a.kind == "provision_linter_bundle" and a.options.get("target_rel") == "tools/oxlint/anti-slop" for a in plan.actions):
+            plan.actions.append(Action(
+                kind="provision_linter_bundle", category="linters", item="anti-slop",
+                source=catalog.source, target=config.repo_root,
+                options={"source_rel": source_rel, "target_rel": "tools/oxlint/anti-slop"},
+            ))
 
 
 def _build_global_excludes(config: LoadedConfig, plan: InstallPlan) -> None:

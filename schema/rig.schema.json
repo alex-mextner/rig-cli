@@ -1515,6 +1515,31 @@
           },
           "additionalProperties": false
         },
+        "bundles": {
+          "type": "object",
+          "description": "directory bundles keyed by label",
+          "properties": {},
+          "additionalProperties": {
+            "type": "object",
+            "description": "one deterministic directory bundle copied from agent-tools",
+            "properties": {
+              "source": {
+                "type": "string",
+                "description": "agent-tools-relative source directory"
+              },
+              "target": {
+                "type": "string",
+                "description": "repo-relative destination directory"
+              },
+              "enabled": {
+                "type": "boolean",
+                "description": "provision this bundle",
+                "default": true
+              }
+            },
+            "additionalProperties": false
+          }
+        },
         "items": {
           "type": "object",
           "description": "extra config files keyed by label; each uses `{ tool, role, path, content|source, enabled }`.",
@@ -1554,6 +1579,28 @@
               }
             },
             "additionalProperties": false,
+            "oneOf": [
+              {
+                "required": [
+                  "content"
+                ],
+                "not": {
+                  "required": [
+                    "source"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "source"
+                ],
+                "not": {
+                  "required": [
+                    "content"
+                  ]
+                }
+              }
+            ],
             "required": [
               "tool",
               "path"
