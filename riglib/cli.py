@@ -329,6 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_stats_parser(sub)
     _add_codex_parser(sub)
+    _add_worktree_parser(sub)
 
     return p
 
@@ -443,6 +444,37 @@ def _add_codex_parser(sub: "argparse._SubParsersAction") -> None:
     )
 
 
+def _add_worktree_parser(sub: "argparse._SubParsersAction") -> None:
+    """`rig worktree create` — the standardized ``.worktrees/<name>`` agent-worktree convention."""
+    wp = sub.add_parser("worktree", help="create a standardized agent worktree under .worktrees/")
+    wp.set_defaults(_worktree_parser=wp)
+    wsub = wp.add_subparsers(dest="worktree_command", metavar="<create>")
+
+    wc = wsub.add_parser(
+        "create",
+        help="create a linked worktree at .worktrees/<name> and register it in .git/info/exclude",
+        description="Idempotently ensure .worktrees/ is ignored in the repo's .git/info/exclude "
+        "— never the committed .gitignore — THEN create a linked git worktree at the "
+        "standardized <repo>/.worktrees/<name> path (replacing the several ad hoc conventions "
+        "this ecosystem had grown), so a new worktree never dirties `git status`.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="exit codes:\n"
+        "  0    success\n"
+        "  1    the exclude reconcile failed, or git worktree add timed out\n"
+        "  2    invalid name/branch/ref, target already exists, or git rejected the request\n"
+        "       (branch collision, bad ref, dirty checkout, …)\n"
+        "  6    not a git repository\n"
+        "  127  git is not installed",
+    )
+    wc.add_argument("name", help="worktree directory name under .worktrees/ (also the default branch name)")
+    wc.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
+    wc.add_argument("--branch", help="branch to create for the worktree (default: <name>)")
+    wc.add_argument(
+        "--from", dest="base_ref", metavar="REF",
+        help="base ref/commit to branch from (default: git's own default, the current HEAD)",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -465,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
         "evolve": cmd_evolve,  # project evolution portal; lifecycle via agenttools-service
         "stats": cmd_stats,
         "codex": cmd_codex,
+        "worktree": cmd_worktree,
     }
     # The single top-level error handler (error-system v2): any structured RigError a command
     # raises is rendered as the consistent what/why/fix block + its stable per-class exit code.
@@ -809,6 +842,39 @@ def cmd_codex(args: argparse.Namespace) -> int:
     if result.backup_path is not None:
         print(_dim(f"last-known-good backup: {result.backup_path}"))
     return result.exit_code
+
+
+def cmd_worktree(args: argparse.Namespace) -> int:
+    if not getattr(args, "worktree_command", None):
+        args._worktree_parser.print_help()
+        return 0
+    if args.worktree_command != "create":
+        args._worktree_parser.print_help()
+        return 2
+    return _cmd_worktree_create(args)
+
+
+def _cmd_worktree_create(args: argparse.Namespace) -> int:
+    from . import errors as errors_module
+    from . import worktree as worktree_mod
+    from .detect import detect_environment
+
+    env = detect_environment(Path(args.cwd).resolve())
+    if not env.is_git_repo:
+        print(_err(f"error: {env.repo_root} is not a git repository"))
+        return errors_module.EXIT_NOT_A_REPO
+
+    result = worktree_mod.create(
+        env.repo_root, args.name, branch=args.branch, base_ref=args.base_ref
+    )
+    if result.status == "error":
+        print(_err(f"error: {result.message}"))
+        return result.exit_code
+
+    print(_ok(result.message))
+    if result.exclude_note:
+        print(_dim(f"  {result.exclude_note}"))
+    return 0
 
 
 def cmd_setup(args: argparse.Namespace) -> int:

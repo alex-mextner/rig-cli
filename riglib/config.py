@@ -1580,6 +1580,31 @@ OPENCODE_HOOK_BRIDGE_EXCLUDE_COMMENT = (
 OPENCODE_HOOK_BRIDGE_PLUGIN_NAME = "zz-agent-tools-hook-bridge.js"
 
 
+# ── agent worktree convention (`rig worktree create`) ───────────────────────────────
+# rig standardizes WHERE a new agent/harness worktree lands: ``<repo>/.worktrees/<name>`` — a
+# single, discoverable, IN-repo location, replacing the several ad hoc conventions that had grown
+# up around the ecosystem (Claude Code's own throwaway ``.claude/worktrees/`` — a separate, already
+# -solved problem, see ``GITIGNORE_DEFAULT_ENTRIES`` above — plus a bare, uncoded ``.worktrees/``
+# some repos and some sibling-of-repo layouts had adopted by hand). ``rig worktree create`` is the
+# one place that plants a NEW worktree, so every repo it touches converges on this one path.
+#
+# The directory is LOCAL scratch space (a machine's working copies of in-progress branches), never
+# meant to be shared or committed — so it belongs in the per-repo, never-committed
+# ``.git/info/exclude``, exactly like the ship delegator above, and specifically NOT in the
+# committed ``.gitignore`` (that file is shared with every clone/contributor; a worktree
+# convention is a local, per-machine choice, and .gitignore is intentionally left untouched).
+WORKTREES_DIR_NAME = ".worktrees"
+
+# The markers that fence rig's managed entry in the per-repo ``.git/info/exclude``. Distinct text
+# from the ship-delegator/opencode markers so the managed blocks in one exclude file never collide.
+WORKTREES_EXCLUDE_BEGIN_MARKER = "# >>> rig-managed worktrees (do not edit) >>>"
+WORKTREES_EXCLUDE_END_MARKER = "# <<< rig-managed worktrees (do not edit) <<<"
+WORKTREES_EXCLUDE_COMMENT = (
+    "# rig-created agent worktrees live under .worktrees/; ignored so they don't dirty the "
+    "primary checkout."
+)
+
+
 def _validate_ship_delegator(sd: dict[str, Any]) -> None:
     """Validate the ``ship_delegator`` block — rig's per-repo ``gh ship`` delegator.
 
