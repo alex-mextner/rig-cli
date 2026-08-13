@@ -39,6 +39,7 @@ path, so it follows the OTHER established result-object precedent for that class
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,26 @@ from .actions.runner import reconcile_worktrees_exclude
 from .config import WORKTREES_DIR_NAME
 
 _GIT_TIMEOUT_S = 60
+
+
+def _partial_state_cleanup_hint(target: Path, branch_name: str) -> str:
+    """Copy-pasteable recovery for a ``target``/branch git may have left behind after a failed
+    ``git worktree add -b <branch_name>``.
+
+    Both the timeout path and the hook-failure path below can leave this same partial state, so
+    they share this one hint (kept in sync in one place) rather than duplicating the wording.
+    Quoted with :func:`shlex.quote` — ``target``/``branch_name`` are user-controlled (a worktree
+    name may contain spaces; :func:`_invalid_name_reason` only rejects ``/``, ``\\``, empty, and
+    ``.``/``..``) and these are meant to be pasted straight into a shell.
+    """
+    quoted_target = shlex.quote(str(target))
+    quoted_branch = shlex.quote(branch_name)
+    return (
+        f"check `git worktree list` and `git branch`, then `git worktree remove --force "
+        f"{quoted_target}` and `git branch -D {quoted_branch}` before retrying — `worktree "
+        f"remove` alone leaves the branch behind, so a bare retry fails with 'a branch named "
+        f"{branch_name!r} already exists'"
+    )
 
 
 @dataclass(frozen=True)
@@ -157,8 +178,7 @@ def _run_git_worktree_add(
         return WorktreeResult(
             "error",
             f"git worktree add timed out after {_GIT_TIMEOUT_S}s (git may have left a partial "
-            f"worktree/branch behind — check `git worktree list` and `git branch`, then "
-            f"`git worktree remove --force {target}` before retrying)",
+            f"worktree/branch behind — {_partial_state_cleanup_hint(target, branch_name)})",
             exit_code=errors.EXIT_INTERNAL,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -167,6 +187,22 @@ def _run_git_worktree_add(
         )
     if res.returncode != 0:
         detail = res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
+        if target.exists():
+            # Git had already created and registered the worktree AND the branch by the time a
+            # later step — typically a post-checkout hook — exited non-zero (empirically
+            # verified: `create()` already refused if `target` pre-existed, so `target` only
+            # exists here because THIS `git worktree add` call created it). Say so explicitly
+            # instead of just reporting "failed": a bare failure with no cleanup guidance leads
+            # a retry straight into "already exists" — and `git worktree remove` alone leaves
+            # the branch behind (verified: a follow-up `git worktree add -b <branch>` then fails
+            # with "a branch named '<branch>' already exists"), so both must be named.
+            return WorktreeResult(
+                "error",
+                f"git worktree add failed: {detail} ({target} was created before the failure, "
+                f"likely by a post-checkout hook — "
+                f"{_partial_state_cleanup_hint(target, branch_name)})",
+                exit_code=errors.EXIT_CONFIG,
+            )
         return WorktreeResult(
             "error", f"git worktree add failed: {detail}", exit_code=errors.EXIT_CONFIG
         )

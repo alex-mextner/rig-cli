@@ -855,9 +855,19 @@ def cmd_worktree(args: argparse.Namespace) -> int:
 
 
 def _cmd_worktree_create(args: argparse.Namespace) -> int:
+    import shutil
+
     from . import errors as errors_module
     from . import worktree as worktree_mod
     from .detect import detect_environment
+
+    # Check the git binary FIRST: detect_environment() swallows a missing `git` as
+    # is_git_repo=False (see riglib/detect.py's _git() catching OSError), so without this
+    # check a missing-dependency machine gets the wrong diagnosis ("not a git repository",
+    # exit 6) instead of the documented missing-dependency exit (127).
+    if shutil.which("git") is None:
+        print(_err("error: git is not installed (or not on PATH)"))
+        return errors_module.EXIT_MISSING_DEP
 
     env = detect_environment(Path(args.cwd).resolve())
     if not env.is_git_repo:

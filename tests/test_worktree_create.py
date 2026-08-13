@@ -16,8 +16,12 @@ create`, including `--branch`/`--from`) end to end.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from riglib import errors, worktree
 from riglib.actions.runner import reconcile_worktrees_exclude, worktrees_exclude_block_text
@@ -233,6 +237,43 @@ def test_git_worktree_add_failure_is_surfaced(tmp_path):
     assert res.status == "error"
     assert res.exit_code == errors.EXIT_CONFIG
     assert not (repo / WORKTREES_DIR_NAME / "agent-1").exists()
+    # pins that an ORDINARY failure (git ran, rejected the request, created nothing) never
+    # picks up the "was created before the failure" wording meant for the hook-failure case.
+    assert "was created before the failure" not in res.message
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook shebang + exec bit")
+def test_hook_failure_reports_the_partially_created_worktree(tmp_path):
+    # `git worktree add` propagates a failing post-checkout hook's exit code as ITS OWN exit
+    # code — but by then git has already created the worktree dir, checked it out, and
+    # registered the branch. Set `core.hooksPath` locally (not the ambient global one, which
+    # some dev machines override) so this reproduces the same on every machine/CI.
+    repo = _git_repo(tmp_path / "repo")
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", ".git/hooks"], check=True)
+    hooks_dir = repo / ".git" / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    hook = hooks_dir / "post-checkout"
+    hook.write_text("#!/bin/sh\nexit 17\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    res = worktree.create(repo, "agent-1")
+
+    if res.status != "error":
+        # older/other git builds may not propagate a failing post-checkout hook's exit code
+        # through `git worktree add` — nothing to verify on THIS git build, so don't go red.
+        pytest.skip(
+            "this git build does not propagate a failing post-checkout hook's exit code "
+            "through `git worktree add`"
+        )
+    assert res.exit_code == errors.EXIT_CONFIG
+    target = repo / WORKTREES_DIR_NAME / "agent-1"
+    assert target.is_dir()  # git really did create it despite the reported failure
+    assert str(target) in res.message
+    assert "worktree remove --force" in res.message
+    # `git worktree remove` alone leaves the branch behind (verified empirically: a bare retry
+    # then fails with "a branch named 'agent-1' already exists") — the guidance must also cover
+    # deleting it.
+    assert "git branch -D agent-1" in res.message
 
 
 def test_base_ref_starting_with_dash_is_rejected_not_passed_to_git(tmp_path):
@@ -377,6 +418,22 @@ def test_cli_worktree_create_outside_git_repo_exits_not_a_repo(tmp_path, capsys)
     rc = main(["worktree", "create", "agent-1", "-C", str(not_git)])
     assert rc == errors.EXIT_NOT_A_REPO
     assert "not a git repository" in capsys.readouterr().out
+
+
+def test_cli_worktree_create_missing_git_binary_is_missing_dep_not_not_a_repo(
+    tmp_path, capsys, monkeypatch
+):
+    # detect_environment() swallows a missing `git` executable as is_git_repo=False (its `_git()`
+    # helper catches OSError), so without an explicit check up front, "git isn't installed" gets
+    # misreported as "not a git repository" (exit 6) instead of the documented missing-dependency
+    # exit (127) — the CLI must distinguish the two.
+    repo = _git_repo(tmp_path / "repo")
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "git" else f"/usr/bin/{name}")
+
+    rc = main(["worktree", "create", "agent-1", "-C", str(repo)])
+
+    assert rc == errors.EXIT_MISSING_DEP
+    assert "git is not installed" in capsys.readouterr().out
 
 
 def test_cli_worktree_create_branch_and_from_flags_are_wired(tmp_path, capsys):
