@@ -29,11 +29,15 @@ import shlex
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import __version__
 from .layers import GLOBAL as _GLOBAL
 from .layers import REPO as _REPO
 from .layers import layer_for_category as _layer_for_category
+
+if TYPE_CHECKING:
+    from .detect import Environment
 
 # ── tiny output helpers (no color dep; honor NO_COLOR) ───────────────────────────
 import os as _os
@@ -461,10 +465,10 @@ def _add_codex_parser(sub: "argparse._SubParsersAction") -> None:
 
 
 def _add_worktree_parser(sub: "argparse._SubParsersAction") -> None:
-    """`rig worktree create` — the standardized ``.worktrees/<name>`` agent-worktree convention."""
-    wp = sub.add_parser("worktree", help="create a standardized agent worktree under .worktrees/")
+    """`rig worktree create`/`remove` — the standardized ``.worktrees/<name>`` agent-worktree lifecycle."""
+    wp = sub.add_parser("worktree", help="create/remove a standardized agent worktree under .worktrees/")
     wp.set_defaults(_worktree_parser=wp)
-    wsub = wp.add_subparsers(dest="worktree_command", metavar="<create>")
+    wsub = wp.add_subparsers(dest="worktree_command", metavar="<create|remove>")
 
     wc = wsub.add_parser(
         "create",
@@ -489,6 +493,31 @@ def _add_worktree_parser(sub: "argparse._SubParsersAction") -> None:
         "--from", dest="base_ref", metavar="REF",
         help="base ref/commit to branch from (default: git's own default, the current HEAD)",
     )
+
+    wr = wsub.add_parser(
+        "remove",
+        help="remove a linked worktree at .worktrees/<name> and delete its branch",
+        description="The inverse of `rig worktree create`: run `git worktree remove --force` on "
+        "the standardized <repo>/.worktrees/<name> path, then `git branch -D` the branch it had "
+        "checked out — `git worktree remove` alone leaves the branch behind, so a bare retry of "
+        "`create` with the same name fails with 'a branch already exists'. Also recovers a STALE "
+        "registration (the worktree directory was deleted by hand instead of via git): if git "
+        "still has <name> registered with a live branch, that branch is still found and deleted "
+        "even though the directory itself is already gone. Requires git >= 2.36 (uses `worktree "
+        "list --porcelain -z`).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="exit codes:\n"
+        "  0    success\n"
+        "  1    git worktree list/remove/branch -D timed out, or an unexpected runtime error\n"
+        "       ran into rig itself (not a missing git — that's 127)\n"
+        "  2    invalid name, .worktrees/ is a symlink escaping the repo, <name> was never a\n"
+        "       registered worktree, or git rejected the request (locked worktree, branch\n"
+        "       checked out elsewhere, git < 2.36, …)\n"
+        "  6    not a git repository\n"
+        "  127  git is not installed",
+    )
+    wr.add_argument("name", help="worktree directory name under .worktrees/ to remove")
+    wr.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -875,31 +904,45 @@ def cmd_worktree(args: argparse.Namespace) -> int:
     if not getattr(args, "worktree_command", None):
         args._worktree_parser.print_help()
         return 0
-    if args.worktree_command != "create":
-        args._worktree_parser.print_help()
-        return 2
-    return _cmd_worktree_create(args)
+    if args.worktree_command == "create":
+        return _cmd_worktree_create(args)
+    if args.worktree_command == "remove":
+        return _cmd_worktree_remove(args)
+    args._worktree_parser.print_help()
+    return 2
 
 
-def _cmd_worktree_create(args: argparse.Namespace) -> int:
+def _resolve_worktree_repo_env(cwd: str) -> tuple["Environment | None", int]:
+    """Shared preflight for both `worktree create` and `worktree remove`.
+
+    Returns ``(env, 0)`` on success, or ``(None, exit_code)`` after already printing the error.
+    Checks the git binary FIRST: `detect_environment()` swallows a missing `git` as
+    `is_git_repo=False` (see riglib/detect.py's `_git()` catching OSError), so without this check
+    a missing-dependency machine gets the wrong diagnosis ("not a git repository", exit 6) instead
+    of the documented missing-dependency exit (127).
+    """
     import shutil
 
     from . import errors as errors_module
-    from . import worktree as worktree_mod
     from .detect import detect_environment
 
-    # Check the git binary FIRST: detect_environment() swallows a missing `git` as
-    # is_git_repo=False (see riglib/detect.py's _git() catching OSError), so without this
-    # check a missing-dependency machine gets the wrong diagnosis ("not a git repository",
-    # exit 6) instead of the documented missing-dependency exit (127).
     if shutil.which("git") is None:
         print(_err("error: git is not installed (or not on PATH)"))
-        return errors_module.EXIT_MISSING_DEP
+        return None, errors_module.EXIT_MISSING_DEP
 
-    env = detect_environment(Path(args.cwd).resolve())
+    env = detect_environment(Path(cwd).resolve())
     if not env.is_git_repo:
         print(_err(f"error: {env.repo_root} is not a git repository"))
-        return errors_module.EXIT_NOT_A_REPO
+        return None, errors_module.EXIT_NOT_A_REPO
+    return env, 0
+
+
+def _cmd_worktree_create(args: argparse.Namespace) -> int:
+    from . import worktree as worktree_mod
+
+    env, exit_code = _resolve_worktree_repo_env(args.cwd)
+    if env is None:
+        return exit_code
 
     result = worktree_mod.create(
         env.repo_root, args.name, branch=args.branch, base_ref=args.base_ref
@@ -911,6 +954,22 @@ def _cmd_worktree_create(args: argparse.Namespace) -> int:
     print(_ok(result.message))
     if result.exclude_note:
         print(_dim(f"  {result.exclude_note}"))
+    return 0
+
+
+def _cmd_worktree_remove(args: argparse.Namespace) -> int:
+    from . import worktree as worktree_mod
+
+    env, exit_code = _resolve_worktree_repo_env(args.cwd)
+    if env is None:
+        return exit_code
+
+    result = worktree_mod.remove(env.repo_root, args.name)
+    if result.status == "error":
+        print(_err(f"error: {result.message}"))
+        return result.exit_code
+
+    print(_ok(result.message))
     return 0
 
 
