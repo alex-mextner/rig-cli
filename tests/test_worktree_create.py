@@ -311,6 +311,24 @@ def test_symlinked_worktrees_dir_is_refused(tmp_path):
     assert not (outside / "agent-1").exists()
 
 
+def test_dangling_symlinked_worktrees_dir_is_refused(tmp_path):
+    """A DANGLING symlink (its target doesn't exist) makes `Path.exists()` return False too —
+    `_target_escapes_repo` (shared with `remove()`) checks `is_symlink()` independently of
+    `exists()` specifically so this doesn't read as "no .worktrees dir yet, nothing to escape
+    through" and let a dangling escape straight past the guard."""
+    repo = _git_repo(tmp_path / "repo")
+    (repo / WORKTREES_DIR_NAME).symlink_to(
+        Path("/nonexistent-outside-target"), target_is_directory=True
+    )
+    assert not (repo / WORKTREES_DIR_NAME).exists()  # dangling: exists() is False
+    assert (repo / WORKTREES_DIR_NAME).is_symlink()  # but it IS a symlink
+
+    res = worktree.create(repo, "agent-1")
+    assert res.status == "error"
+    assert res.exit_code == errors.EXIT_CONFIG
+    assert "symlink" in res.message
+
+
 def test_failed_exclude_reconcile_refuses_to_create_the_worktree(tmp_path):
     repo = _git_repo(tmp_path / "repo")
     # an unbalanced marker pair is a refused conflict (see test_reconcile_unbalanced_markers_
