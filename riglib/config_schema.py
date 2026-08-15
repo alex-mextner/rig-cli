@@ -1004,6 +1004,66 @@ _TOOLS_BLOCK = Block(
     open_map_item=_TOOLS_ITEM_BLOCK,
 )
 
+_TASK_BLOCK = Block(
+    doc=(
+        "task-cli ticket-tracker routing for THIS repo (CTO decision #4136.4: hyperide -> "
+        "Linear/HYP, every other repo -> GitHub Issues by default). task-cli reads this block "
+        "directly (tasklib/config.py's rig_task_overlay) with LOWER precedence than a repo's own "
+        "native task.yaml, so a repo that already keeps one is unaffected. Flat shorthands "
+        "(team/project/repo/attachment_mode) and the nested github:/linear: sections may be used "
+        "together in the same block; task-cli itself rejects a genuine collision between the two "
+        "forms (e.g. both `team: X` and `linear: {team: Y}` set to different values) — this "
+        "schema only checks the KEY SET, not that kind of cross-field conflict."
+    ),
+    leaves={
+        "backend": Leaf("string", "the tracker backend", enum=("github-issues", "linear")),
+        "team": Leaf("string", "flat shorthand for linear.team (e.g. HYP)"),
+        "project": Leaf("string", "flat shorthand for linear.project"),
+        "repo": Leaf("string", "flat shorthand for github.repo (owner/name)"),
+        "attachment_mode": Leaf(
+            "string",
+            "how a screenshot/file gets attached to a Linear ticket: 'native' uploads it through "
+            "Linear's own API as a real attachment (the default); 'link' never uploads a local "
+            "file, only registers an already-hosted URL as-is (hyperide's default, HYP-1248 — "
+            "raw uploads.linear.app image links 401 for a non-browser viewer)",
+            enum=("link", "native"),
+        ),
+        # task-cli's own deep shape for these four is intentionally NOT modeled here — this
+        # schema only gates the KEY SET reaching task-cli's config cascade; task-cli's own
+        # `tasklib.config.validate` is the runtime authority on their contents (enforce/classify/
+        # session all have their own nested defaults task-cli already applies underneath).
+        # review finding: `projects` is a LIST of project entries in task-cli's own shape
+        # (tasklib/projects.py:projects_from_config), NOT a mapping — modeling it as `object`
+        # would make `rig status`/`apply` reject every valid `task.projects` value. Deliberately
+        # no `items_type` (review finding, 2nd round): task-cli's own `projects_from_config`
+        # SKIPS a malformed (non-mapping) entry rather than erroring — the published JSON
+        # schema shouldn't be STRICTER than the Python validator it's meant to mirror, so this
+        # stays "a list of anything", matching `_validate_task`'s equally shallow list-only check.
+        "projects": Leaf("array", "the cross-project registry (task-cli's own shape, not deeply modeled here)"),
+        "enforce": Leaf("object", "ticket-discipline gate overrides (task-cli's own shape)"),
+        "classify": Leaf("object", "inbound-message classifier config (task-cli's own shape)"),
+        "session": Leaf("object", "session-detection config (task-cli's own shape)"),
+    },
+    nested={
+        "github": Block(
+            doc="GitHub Issues coordinates (used when backend: github-issues).",
+            leaves={"repo": Leaf("string", "owner/name, or 'auto' to detect from the git remote")},
+        ),
+        "linear": Block(
+            doc="Linear coordinates + write behavior (used when backend: linear).",
+            leaves={
+                "team": Leaf("string", "the Linear team key (e.g. HYP)"),
+                "project": Leaf("string", "an optional Linear project id to scope create/list/search to"),
+                "attachment_mode": Leaf(
+                    "string",
+                    "same as the flat `attachment_mode` shorthand above, nested form",
+                    enum=("link", "native"),
+                ),
+            },
+        ),
+    },
+)
+
 _TG_CTL_BLOCK = Block(
     doc="the tg-ctl inbound daemon auto-started as a per-machine boot LaunchAgent (macOS).",
     leaves={
@@ -1061,6 +1121,7 @@ BLOCKS: dict[str, Block] = {
     "ship_delegator": _SHIP_DELEGATOR_BLOCK,
     "linters": _LINTERS_BLOCK,
     "project_tools": _PROJECT_TOOLS_BLOCK,
+    "task": _TASK_BLOCK,
 }
 
 # Every valid TOP-LEVEL key (scalars + blocks). Mirrors config._VALID_TOP_KEYS; the sync test
