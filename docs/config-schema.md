@@ -2016,6 +2016,69 @@ tests/smoke never touch the real launchd domain or delete the predecessor file.
 
 ---
 
+## `task`
+
+**task-cli's per-repo ticket-tracker routing** (CTO decision #4136.4: hyperide → Linear/HYP,
+every other repo → GitHub Issues by default). Unlike every other block above, rig itself
+**writes nothing to disk** for `task:` — task-cli reads this block **directly** at runtime
+(`tasklib.config.rig_task_overlay`, in the [task-cli
+repo](https://github.com/alex-mextner/task-cli)), with LOWER precedence than a repo's own
+native `task.yaml`. A repo that already keeps a `task.yaml` is unaffected by anything set here.
+rig only validates the key set + enum values so a typo fails fast at `rig status`/`rig apply`
+time, with rig's own error format, instead of only surfacing later as a task-cli error.
+
+```yaml
+task:
+  backend: linear          # github-issues (default) | linear
+  team: HYP                # flat shorthand for linear.team
+  attachment_mode: link    # link (never re-host a local file) | native (default; real upload)
+  # equivalently, nested form (both may be combined; task-cli rejects a genuine collision):
+  # linear:
+  #   team: HYP
+  #   project: ""           # optional Linear project id to scope create/list/search to
+  #   attachment_mode: link
+  # github:
+  #   repo: owner/name       # or 'auto' to detect from the git remote
+```
+
+All keys below (flat and nested, scalar and container) tolerate an explicit `null` the same as
+absent — rig's `_validate_task` guards every one of them with `is not None`, an early `None`
+return (the three enum leaves: `backend`, `attachment_mode`, `linear.attachment_mode`), or a
+null-specific `{} if x is None else x` normalization (the two nested sections; not a plain
+`or {}`, which would also swallow other falsy-but-invalid values), matching task-cli's own
+tolerant reads. The one exception is the top-level `task:` header itself, which stays rejected
+(matches every other
+block's convention).
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `backend` | str or null | `github-issues` | the tracker backend: `github-issues` or `linear` |
+| `team` | str or null | — | flat shorthand for `linear.team` (e.g. `HYP`) |
+| `project` | str or null | — | flat shorthand for `linear.project` |
+| `repo` | str or null | — | flat shorthand for `github.repo` (`owner/name`, or `auto`) |
+| `attachment_mode` | str or null | `native` (task-cli's own default) | how a screenshot/file gets attached to a Linear ticket — see below |
+| `github.repo` | str or null | — | nested form of the `repo` shorthand |
+| `linear.team` | str or null | — | nested form of the `team` shorthand |
+| `linear.project` | str or null | — | nested form of the `project` shorthand |
+| `linear.attachment_mode` | str or null | — | nested form of the `attachment_mode` shorthand |
+| `github`, `linear` | object or null | — | nested sections; an explicit `null` (a bare `github:`/`linear:` header) is tolerated the same as absent |
+| `projects` | array or null | — | task-cli's cross-project registry (a LIST of entries, not a mapping — see task-cli's `tasklib/projects.py`); rig only checks it's a list; an explicit `null` is tolerated the same as absent |
+| `enforce`, `classify`, `session` | object or null | — | task-cli's own nested shapes (each with their own defaults); rig only checks they're mappings — task-cli's own `tasklib.config.validate` is the runtime authority on their contents; an explicit `null` is tolerated the same as absent |
+
+**`attachment_mode` — `link` vs `native` (tg#11652).** How task-cli attaches a screenshot/file
+to a Linear ticket:
+- **`native`** (task-cli's own default): uploads the bytes through Linear's authenticated
+  `fileUpload` + signed-URL PUT + `attachmentCreate` API sequence, so the ticket carries a real
+  Linear attachment object with an inline preview.
+- **`link`**: never uploads a local file — only registers an already-hosted URL (e.g. a GitHub
+  PR asset, or a PR's `#screenshots` anchor) as an external-link attachment. hyperide pins this
+  mode (HYP-1248): a raw pasted-image `uploads.linear.app` URL is session-scoped and 401s for a
+  non-browser viewer, so hyperide's mitigation is to link out to the PR instead of embedding an
+  image. A bare local path in this mode has nothing to link to and the attach fails cleanly
+  (best-effort — the local ref stays visible in the ticket body regardless).
+
+---
+
 ## Editing this config — `rig setup` (wizard) and `rig config get|set`
 
 `rig setup` is the **interactive configuration wizard**. In a terminal it (1) SHOWS what is

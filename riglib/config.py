@@ -73,11 +73,14 @@ _VALID_TOP_KEYS = {
     "project_tools",
     "scripts",
     "dev",
+    "task",
 }
 _VALID_CATEGORIES = {"skills", "agent_hooks", "git_hooks", "ci", "mcp"}
 _VALID_ON_CONFLICT = {"skip", "overwrite", "backup"}
 _VALID_TIERS = {"block", "warn"}
 _VALID_ON_ERROR = {"open", "closed"}
+_VALID_TASK_BACKENDS = {"github-issues", "linear"}
+_VALID_TASK_ATTACHMENT_MODES = {"link", "native"}
 _VALID_LEGACY_AGENT_HOOK_TARGET_KINDS = {"claude-code", "generic"}
 _MCP_ITEM_KEYS = {"enabled", "server", "command", "args", "env"}
 _VALID_TMUX_APPLY = {"import", "block"}
@@ -612,6 +615,7 @@ def validate(data: dict[str, Any]) -> None:
     _validate_ship_delegator(data.get("ship_delegator", {}))
     _validate_linters(data.get("linters", {}))
     _validate_project_tools(data.get("project_tools", {}))
+    _validate_task(data.get("task", {}))
 
 
 def _validate_stack(data: dict[str, Any]) -> None:
@@ -2567,3 +2571,96 @@ def _validate_tg_ctl(t: dict[str, Any]) -> None:
                 f"tg_ctl.{strkey} must be a string, got {value!r}",
                 schema_path=f"tg_ctl.{strkey}",
             )
+
+
+def _validate_task(t: dict[str, Any]) -> None:
+    """Validate the ``task`` block — task-cli's per-repo ticket-tracker routing.
+
+    task-cli reads this block DIRECTLY (``tasklib.config.rig_task_overlay``) at runtime — rig
+    itself never materializes anything from it (no file gets written; unlike most other blocks,
+    there is no `rig apply` step for `task`). This validator exists so a typo fails FAST, at `rig
+    status`/`rig apply` time, with rig's own schema-pointer error format, rather than only
+    surfacing later as task-cli's own (differently-formatted) `ConfigError` the next time
+    someone happens to run a `task` command in the repo.
+
+    Deliberately shallow on ``projects``/``enforce``/``classify``/``session``: those are
+    task-cli's own nested shapes (with their own defaults/validation task-cli already applies)
+    — this only checks their outer TYPE (``projects`` a list per
+    ``tasklib/projects.py:projects_from_config``; the other three mappings), not their contents.
+    Fail-closed, consistent with every other block, on: a non-mapping block, an unknown key
+    (typo guard), a bad ``backend``/``attachment_mode`` enum, non-string flat coordinates
+    (``team``/``project``/``repo``), non-mapping ``github``/``linear`` sections, and unknown keys
+    or a bad ``attachment_mode`` enum WITHIN ``linear``.
+
+    Every enum check below does an ``isinstance(value, str)`` check BEFORE the ``in
+    _VALID_TASK_...`` membership test (review finding): ``_VALID_TASK_BACKENDS`` and
+    ``_VALID_TASK_ATTACHMENT_MODES`` are sets, and ``in`` on a set requires the left operand to
+    be HASHABLE — a malformed YAML value that's a list/dict (e.g. ``backend: []``) would raise a
+    raw, unhandled ``TypeError`` instead of the promised fail-closed ``ConfigError`` without the
+    guard.
+    """
+    if not isinstance(t, dict):
+        raise ConfigError("task must be a mapping", schema_path="task")
+    if not t:
+        return
+    _reject_unknown_keys(t, "task")
+
+    _validate_task_enum(t.get("backend"), _VALID_TASK_BACKENDS, "task.backend")
+    for strkey in ("team", "project", "repo"):
+        value = t.get(strkey)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"task.{strkey} must be a string, got {value!r}", schema_path=f"task.{strkey}")
+    _validate_task_enum(t.get("attachment_mode"), _VALID_TASK_ATTACHMENT_MODES, "task.attachment_mode")
+
+    # review finding (2 rounds): `t.get("github", {})` only falls back to `{}` when the KEY is
+    # ABSENT — an explicit `github:` header with nothing under it (a common YAML placeholder, or
+    # `github: null` to clear a section) parses to `None`, which the isinstance check below would
+    # then reject as "must be a mapping". That's inconsistent with `enforce`/`classify`/`session`/
+    # `projects` right below (all tolerate null via an `is not None` guard) — so nested
+    # SECTIONS now tolerate null the same way nested/flat SCALARS already do: a null-specific
+    # `{} if x is None else x` normalizes null to empty, same as absent (deliberately NOT a plain
+    # `or {}`, which would also swallow `github: false` — see the inline comment below). (The one
+    # deliberate exception, kept AS IS: the top-level
+    # `task: null` case itself still rejects — matches every other block's convention, e.g.
+    # `_validate_tg_ctl`, and is explicitly pinned by its own test.)
+    github = t.get("github")
+    github = {} if github is None else github  # only null->{}, NOT every falsy value (e.g. `github: false` must still fail below, not be silently swallowed)
+    if not isinstance(github, dict):
+        raise ConfigError("task.github must be a mapping", schema_path="task.github")
+    _reject_unknown_keys(github, "task.github")
+    github_repo = github.get("repo")
+    if github_repo is not None and not isinstance(github_repo, str):
+        raise ConfigError(f"task.github.repo must be a string, got {github_repo!r}", schema_path="task.github.repo")
+
+    linear = t.get("linear")
+    linear = {} if linear is None else linear  # same null->{} normalization as github above
+    if not isinstance(linear, dict):
+        raise ConfigError("task.linear must be a mapping", schema_path="task.linear")
+    _reject_unknown_keys(linear, "task.linear")
+    for strkey in ("team", "project"):
+        value = linear.get(strkey)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"task.linear.{strkey} must be a string, got {value!r}", schema_path=f"task.linear.{strkey}")
+    _validate_task_enum(linear.get("attachment_mode"), _VALID_TASK_ATTACHMENT_MODES, "task.linear.attachment_mode")
+
+    projects = t.get("projects")
+    if projects is not None and not isinstance(projects, list):
+        raise ConfigError(f"task.projects must be a list, got {projects!r}", schema_path="task.projects")
+    for objkey in ("enforce", "classify", "session"):
+        value = t.get(objkey)
+        if value is not None and not isinstance(value, dict):
+            raise ConfigError(f"task.{objkey} must be a mapping, got {value!r}", schema_path=f"task.{objkey}")
+
+
+def _validate_task_enum(value: Any, valid: set[str], schema_path: str) -> None:
+    """Shared enum check for the ``task`` block's three link/native + backend enums (review
+    finding: isinstance-before-membership, so a non-hashable value fails closed with a clean
+    ConfigError rather than a raw TypeError from the ``in`` check against ``valid``)."""
+    if value is None:
+        return
+    if not isinstance(value, str) or value not in valid:
+        raise ConfigError(
+            f"{schema_path} must be one of {sorted(valid)}, got {value!r}",
+            fix=f"use one of: {', '.join(sorted(valid))}",
+            schema_path=schema_path,
+        )
