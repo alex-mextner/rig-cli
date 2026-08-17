@@ -8,6 +8,8 @@ for the runtime overlay logic (``tasklib.config.rig_task_overlay``).
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from riglib import config_schema
@@ -242,3 +244,110 @@ def test_task_block_child_keys_include_flat_and_nested_forms():
         "github",
         "linear",
     }
+
+
+# ── schema/validator parity for the accepted null values (tg#11652, P2) ────────────────
+#
+# `_validate_task` accepts an explicit `null` for every leaf under `task:` except the top-level
+# `task:` header itself (that one stays rejected — pinned by
+# `test_task_block_null_value_is_rejected_not_treated_as_empty`, matching every other block's
+# convention). The generated schema must accept the same nulls, or an editor/schema-based CI
+# rejects a config `rig status`/`rig apply` happily accepts. `ALL_TASK_NULLABLE_LEAVES` pairs
+# each dotted leaf path with its non-null primary JSON type, so the type-parity test can assert
+# the FULL expected set (`{primary, "null"}`), not merely "null is somewhere in there" — the
+# latter would stay green even if a future edit dropped the primary type entirely.
+ALL_TASK_NULLABLE_LEAVES: list[tuple[tuple[str, ...], str]] = [
+    (("backend",), "string"),
+    (("team",), "string"),
+    (("project",), "string"),
+    (("repo",), "string"),
+    (("attachment_mode",), "string"),
+    (("projects",), "array"),
+    (("enforce",), "object"),
+    (("classify",), "object"),
+    (("session",), "object"),
+    (("github",), "object"),
+    (("linear",), "object"),
+    (("github", "repo"), "string"),
+    (("linear", "team"), "string"),
+    (("linear", "project"), "string"),
+    (("linear", "attachment_mode"), "string"),
+]
+ALL_TASK_NULLABLE_PATHS: list[tuple[str, ...]] = [path for path, _ in ALL_TASK_NULLABLE_LEAVES]
+
+
+def _task_config_with_null_at(path: tuple[str, ...]) -> dict:
+    """Build ``{"version": 1, "task": {...}}`` with ``null`` set at the dotted path under task."""
+    node: dict = {}
+    cursor = node
+    for part in path[:-1]:
+        cursor[part] = {}
+        cursor = cursor[part]
+    cursor[path[-1]] = None
+    return {"version": 1, "task": node}
+
+
+def _schema_node_for_task_path(schema: dict, path: tuple[str, ...]) -> dict:
+    """Walk ``properties.task.properties.<a>[.properties.<b>]`` for a dotted task path."""
+    node = schema["properties"]["task"]
+    for part in path:
+        node = node["properties"][part]
+    return node
+
+
+@pytest.mark.parametrize("path,primary_type", ALL_TASK_NULLABLE_LEAVES, ids=[".".join(p) for p, _ in ALL_TASK_NULLABLE_LEAVES])
+def test_task_schema_leaf_type_is_exactly_primary_and_null(path, primary_type):
+    node = _schema_node_for_task_path(config_schema.json_schema(), path)
+    assert set(node["type"]) == {primary_type, "null"}, (
+        f"task.{'.'.join(path)} schema type must be exactly [{primary_type!r}, 'null'], got {node['type']!r}"
+    )
+
+
+# the three enum leaves need null in BOTH the type union (checked above) AND the `enum` list —
+# a Draft-07 validator enforces `enum` independently of `type`, so dropping `None` from just the
+# enum would still reject `null` even with the type union in place. Non-skippable (review
+# finding): the jsonschema-gated file test below also exercises this, but only when jsonschema is
+# installed — this assertion must hold regardless.
+@pytest.mark.parametrize("path", [("backend",), ("attachment_mode",), ("linear", "attachment_mode")], ids=".".join)
+def test_task_schema_enum_leaf_includes_null_in_enum_list(path):
+    node = _schema_node_for_task_path(config_schema.json_schema(), path)
+    assert None in node["enum"], f"task.{'.'.join(path)} schema enum must include null, got {node['enum']!r}"
+
+
+@pytest.mark.parametrize("path", ALL_TASK_NULLABLE_PATHS, ids=".".join)
+def test_task_runtime_validator_accepts_null_for_every_nullable_leaf(path):
+    # kept in its own non-skippable test — the jsonschema-gated test below only runs when
+    # jsonschema is installed, but the runtime half of this contract must always be asserted.
+    validate(_task_config_with_null_at(path))
+
+
+@pytest.mark.parametrize("path", ALL_TASK_NULLABLE_PATHS, ids=".".join)
+def test_task_published_schema_file_accepts_null_for_every_nullable_leaf(path):
+    # validates the checked-in schema/rig.schema.json FILE directly (the artifact editors and
+    # schema-based CI actually consume), not just the in-memory generator output.
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads(config_schema.schema_file_path().read_text(encoding="utf-8"))
+    v = jsonschema.Draft7Validator(schema)
+    errors = list(v.iter_errors(_task_config_with_null_at(path)))
+    assert errors == [], f"published schema must accept task.{'.'.join(path)}: null, got {errors}"
+
+
+def test_task_schema_top_level_header_stays_non_nullable():
+    # the generator-side half of the ONE deliberate exception: a top-level `task: null` must
+    # stay REJECTED (matches every other block's convention, pinned on the runtime side by
+    # `test_task_block_null_value_is_rejected_not_treated_as_empty` above). Without this test,
+    # flipping `_TASK_BLOCK`'s new `nullable` flag to `True` would silently make the schema
+    # LAXER than the runtime validator — the same drift class this whole fix closes, just in the
+    # opposite direction. Kept in its OWN non-skippable test (review finding: an earlier version
+    # mixed this assertion into the jsonschema-gated test below, so on an environment without
+    # jsonschema the WHOLE test — including this always-checkable half — reported skipped).
+    node = config_schema.json_schema()["properties"]["task"]
+    assert node["type"] == "object", f"task's own schema type must stay plain 'object', got {node['type']!r}"
+
+
+def test_task_published_schema_file_still_rejects_top_level_null():
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads(config_schema.schema_file_path().read_text(encoding="utf-8"))
+    v = jsonschema.Draft7Validator(schema)
+    errors = list(v.iter_errors({"version": 1, "task": None}))
+    assert errors, "published schema must still reject task: null"

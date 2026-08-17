@@ -2617,8 +2617,10 @@ def _validate_task(t: dict[str, Any]) -> None:
     # `github: null` to clear a section) parses to `None`, which the isinstance check below would
     # then reject as "must be a mapping". That's inconsistent with `enforce`/`classify`/`session`/
     # `projects` right below (all tolerate null via an `is not None` guard) — so nested
-    # SECTIONS now tolerate null the same way nested/flat SCALARS already do: `or {}` normalizes
-    # null to empty, same as absent. (The one deliberate exception, kept AS IS: the top-level
+    # SECTIONS now tolerate null the same way nested/flat SCALARS already do: a null-specific
+    # `{} if x is None else x` normalizes null to empty, same as absent (deliberately NOT a plain
+    # `or {}`, which would also swallow `github: false` — see the inline comment below). (The one
+    # deliberate exception, kept AS IS: the top-level
     # `task: null` case itself still rejects — matches every other block's convention, e.g.
     # `_validate_tg_ctl`, and is explicitly pinned by its own test.)
     github = t.get("github")

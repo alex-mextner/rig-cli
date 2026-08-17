@@ -158,6 +158,14 @@ class Block:
     additional_properties: Any | None = None
     schema_extra: dict[str, Any] = field(default_factory=dict)
     closed: bool = True
+    # nested blocks only (review finding, tg#11652): when the Python validator treats an
+    # explicit `null` for this nested section the same as absent (an `is not None` guard, or the
+    # null-specific `{} if x is None else x` normalization — deliberately NOT a plain `or {}`,
+    # which would also swallow other falsy-but-invalid values like `False`; see
+    # `task.github`/`task.linear`), the schema must accept it too — otherwise editors and
+    # schema-based CI reject a config the runtime validator happily accepts. Emits
+    # `"type": ["object", "null"]` instead of the plain `"object"`.
+    nullable: bool = False
 
     def child_keys(self) -> set[str]:
         keys = set(self.leaves) | set(self.nested)
@@ -171,7 +179,8 @@ class Block:
             props[name] = leaf.to_node()
         for name, blk in self.nested.items():
             props[name] = blk.to_node()
-        node: dict[str, Any] = {"type": "object", "description": self.doc, "properties": props}
+        node_type: Any = ["object", "null"] if self.nullable else "object"
+        node: dict[str, Any] = {"type": node_type, "description": self.doc, "properties": props}
         if self.open_map:
             # the open child map: an object whose keys are arbitrary names. By default we don't
             # model each item's inner shape (catalog-defined, open by design) → a permissive object-
@@ -1015,18 +1024,26 @@ _TASK_BLOCK = Block(
         "forms (e.g. both `team: X` and `linear: {team: Y}` set to different values) — this "
         "schema only checks the KEY SET, not that kind of cross-field conflict."
     ),
+    # review finding (tg#11652, P2): `_validate_task_enum` returns early on `None` (so
+    # `backend`/`attachment_mode`/`linear.attachment_mode` tolerate null) and the flat/nested
+    # string guards below are all `is not None` (so `team`/`project`/`repo`/`github.repo`/
+    # `linear.team`/`linear.project` tolerate it too). All nine get the same `("string", "null")`
+    # treatment as `permissions.kind` above; the three enum leaves (`backend`, `attachment_mode`,
+    # `linear.attachment_mode`) also add `None` to their `enum` tuple (same house pattern).
     leaves={
-        "backend": Leaf("string", "the tracker backend", enum=("github-issues", "linear")),
-        "team": Leaf("string", "flat shorthand for linear.team (e.g. HYP)"),
-        "project": Leaf("string", "flat shorthand for linear.project"),
-        "repo": Leaf("string", "flat shorthand for github.repo (owner/name)"),
+        "backend": Leaf(
+            ("string", "null"), "the tracker backend", enum=("github-issues", "linear", None)
+        ),
+        "team": Leaf(("string", "null"), "flat shorthand for linear.team (e.g. HYP)"),
+        "project": Leaf(("string", "null"), "flat shorthand for linear.project"),
+        "repo": Leaf(("string", "null"), "flat shorthand for github.repo (owner/name)"),
         "attachment_mode": Leaf(
-            "string",
+            ("string", "null"),
             "how a screenshot/file gets attached to a Linear ticket: 'native' uploads it through "
             "Linear's own API as a real attachment (the default); 'link' never uploads a local "
             "file, only registers an already-hosted URL as-is (hyperide's default, HYP-1248 — "
             "raw uploads.linear.app image links 401 for a non-browser viewer)",
-            enum=("link", "native"),
+            enum=("link", "native", None),
         ),
         # task-cli's own deep shape for these four is intentionally NOT modeled here — this
         # schema only gates the KEY SET reaching task-cli's config cascade; task-cli's own
@@ -1039,27 +1056,46 @@ _TASK_BLOCK = Block(
         # SKIPS a malformed (non-mapping) entry rather than erroring — the published JSON
         # schema shouldn't be STRICTER than the Python validator it's meant to mirror, so this
         # stays "a list of anything", matching `_validate_task`'s equally shallow list-only check.
-        "projects": Leaf("array", "the cross-project registry (task-cli's own shape, not deeply modeled here)"),
-        "enforce": Leaf("object", "ticket-discipline gate overrides (task-cli's own shape)"),
-        "classify": Leaf("object", "inbound-message classifier config (task-cli's own shape)"),
-        "session": Leaf("object", "session-detection config (task-cli's own shape)"),
+        # review finding (tg#11652, P2): `_validate_task` accepts an explicit `null` for all four
+        # of these via `is not None` guards (a user clearing `task.projects: null` or
+        # `task.enforce: null`) — the schema must model that same union, or editors/schema-based
+        # CI reject a config `rig status`/`rig apply` happily accept. `("array", "null")` /
+        # `("object", "null")` emit `"type": [..., "null"]` (see `Leaf.type`'s tuple form, already
+        # used by `permissions.kind` above).
+        "projects": Leaf(
+            ("array", "null"), "the cross-project registry (task-cli's own shape, not deeply modeled here)"
+        ),
+        "enforce": Leaf(("object", "null"), "ticket-discipline gate overrides (task-cli's own shape)"),
+        "classify": Leaf(("object", "null"), "inbound-message classifier config (task-cli's own shape)"),
+        "session": Leaf(("object", "null"), "session-detection config (task-cli's own shape)"),
     },
     nested={
+        # `nullable=True` on both (same tg#11652 finding): `_validate_task` normalizes an
+        # explicit `github: null` / `linear: null` to `{}` (a common YAML placeholder shape),
+        # tolerating it exactly like the passthrough leaves above — the schema must too.
         "github": Block(
             doc="GitHub Issues coordinates (used when backend: github-issues).",
-            leaves={"repo": Leaf("string", "owner/name, or 'auto' to detect from the git remote")},
+            leaves={
+                "repo": Leaf(
+                    ("string", "null"), "owner/name, or 'auto' to detect from the git remote"
+                )
+            },
+            nullable=True,
         ),
         "linear": Block(
             doc="Linear coordinates + write behavior (used when backend: linear).",
             leaves={
-                "team": Leaf("string", "the Linear team key (e.g. HYP)"),
-                "project": Leaf("string", "an optional Linear project id to scope create/list/search to"),
+                "team": Leaf(("string", "null"), "the Linear team key (e.g. HYP)"),
+                "project": Leaf(
+                    ("string", "null"), "an optional Linear project id to scope create/list/search to"
+                ),
                 "attachment_mode": Leaf(
-                    "string",
+                    ("string", "null"),
                     "same as the flat `attachment_mode` shorthand above, nested form",
-                    enum=("link", "native"),
+                    enum=("link", "native", None),
                 ),
             },
+            nullable=True,
         ),
     },
 )

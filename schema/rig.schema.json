@@ -1740,78 +1740,126 @@
       "description": "task-cli ticket-tracker routing for THIS repo (CTO decision #4136.4: hyperide -> Linear/HYP, every other repo -> GitHub Issues by default). task-cli reads this block directly (tasklib/config.py's rig_task_overlay) with LOWER precedence than a repo's own native task.yaml, so a repo that already keeps one is unaffected. Flat shorthands (team/project/repo/attachment_mode) and the nested github:/linear: sections may be used together in the same block; task-cli itself rejects a genuine collision between the two forms (e.g. both `team: X` and `linear: {team: Y}` set to different values) — this schema only checks the KEY SET, not that kind of cross-field conflict.",
       "properties": {
         "backend": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "the tracker backend",
           "enum": [
             "github-issues",
-            "linear"
+            "linear",
+            null
           ]
         },
         "team": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "flat shorthand for linear.team (e.g. HYP)"
         },
         "project": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "flat shorthand for linear.project"
         },
         "repo": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "flat shorthand for github.repo (owner/name)"
         },
         "attachment_mode": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "how a screenshot/file gets attached to a Linear ticket: 'native' uploads it through Linear's own API as a real attachment (the default); 'link' never uploads a local file, only registers an already-hosted URL as-is (hyperide's default, HYP-1248 — raw uploads.linear.app image links 401 for a non-browser viewer)",
           "enum": [
             "link",
-            "native"
+            "native",
+            null
           ]
         },
         "projects": {
-          "type": "array",
+          "type": [
+            "array",
+            "null"
+          ],
           "description": "the cross-project registry (task-cli's own shape, not deeply modeled here)"
         },
         "enforce": {
-          "type": "object",
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "ticket-discipline gate overrides (task-cli's own shape)"
         },
         "classify": {
-          "type": "object",
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "inbound-message classifier config (task-cli's own shape)"
         },
         "session": {
-          "type": "object",
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "session-detection config (task-cli's own shape)"
         },
         "github": {
-          "type": "object",
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "GitHub Issues coordinates (used when backend: github-issues).",
           "properties": {
             "repo": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "owner/name, or 'auto' to detect from the git remote"
             }
           },
           "additionalProperties": false
         },
         "linear": {
-          "type": "object",
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "Linear coordinates + write behavior (used when backend: linear).",
           "properties": {
             "team": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "the Linear team key (e.g. HYP)"
             },
             "project": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "an optional Linear project id to scope create/list/search to"
             },
             "attachment_mode": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "same as the flat `attachment_mode` shorthand above, nested form",
               "enum": [
                 "link",
-                "native"
+                "native",
+                null
               ]
             }
           },

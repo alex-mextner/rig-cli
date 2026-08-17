@@ -2041,19 +2041,29 @@ task:
   #   repo: owner/name       # or 'auto' to detect from the git remote
 ```
 
+All keys below (flat and nested, scalar and container) tolerate an explicit `null` the same as
+absent — rig's `_validate_task` guards every one of them with `is not None`, an early `None`
+return (the three enum leaves: `backend`, `attachment_mode`, `linear.attachment_mode`), or a
+null-specific `{} if x is None else x` normalization (the two nested sections; not a plain
+`or {}`, which would also swallow other falsy-but-invalid values), matching task-cli's own
+tolerant reads. The one exception is the top-level `task:` header itself, which stays rejected
+(matches every other
+block's convention).
+
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `backend` | str | `github-issues` | the tracker backend: `github-issues` or `linear` |
-| `team` | str | — | flat shorthand for `linear.team` (e.g. `HYP`) |
-| `project` | str | — | flat shorthand for `linear.project` |
-| `repo` | str | — | flat shorthand for `github.repo` (`owner/name`, or `auto`) |
-| `attachment_mode` | str | `native` (task-cli's own default) | how a screenshot/file gets attached to a Linear ticket — see below |
-| `github.repo` | str | — | nested form of the `repo` shorthand |
-| `linear.team` | str | — | nested form of the `team` shorthand |
-| `linear.project` | str | — | nested form of the `project` shorthand |
-| `linear.attachment_mode` | str | — | nested form of the `attachment_mode` shorthand |
-| `projects` | array | — | task-cli's cross-project registry (a LIST of entries, not a mapping — see task-cli's `tasklib/projects.py`); rig only checks it's a list |
-| `enforce`, `classify`, `session` | object | — | task-cli's own nested shapes (each with their own defaults); rig only checks they're mappings — task-cli's own `tasklib.config.validate` is the runtime authority on their contents |
+| `backend` | str or null | `github-issues` | the tracker backend: `github-issues` or `linear` |
+| `team` | str or null | — | flat shorthand for `linear.team` (e.g. `HYP`) |
+| `project` | str or null | — | flat shorthand for `linear.project` |
+| `repo` | str or null | — | flat shorthand for `github.repo` (`owner/name`, or `auto`) |
+| `attachment_mode` | str or null | `native` (task-cli's own default) | how a screenshot/file gets attached to a Linear ticket — see below |
+| `github.repo` | str or null | — | nested form of the `repo` shorthand |
+| `linear.team` | str or null | — | nested form of the `team` shorthand |
+| `linear.project` | str or null | — | nested form of the `project` shorthand |
+| `linear.attachment_mode` | str or null | — | nested form of the `attachment_mode` shorthand |
+| `github`, `linear` | object or null | — | nested sections; an explicit `null` (a bare `github:`/`linear:` header) is tolerated the same as absent |
+| `projects` | array or null | — | task-cli's cross-project registry (a LIST of entries, not a mapping — see task-cli's `tasklib/projects.py`); rig only checks it's a list; an explicit `null` is tolerated the same as absent |
+| `enforce`, `classify`, `session` | object or null | — | task-cli's own nested shapes (each with their own defaults); rig only checks they're mappings — task-cli's own `tasklib.config.validate` is the runtime authority on their contents; an explicit `null` is tolerated the same as absent |
 
 **`attachment_mode` — `link` vs `native` (tg#11652).** How task-cli attaches a screenshot/file
 to a Linear ticket:
