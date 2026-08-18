@@ -1214,7 +1214,7 @@ def test_opencode_rg_pre_deny_matches_pre_but_not_pretty():
 
 
 def test_rg_pre_deny_rules_scoped_not_over_broad():
-    # rg-cli#187 fix must not touch the base `Bash(rg:*)` allow entry or over-deny plain search.
+    # rig-cli#187 fix must not touch the base `Bash(rg:*)` allow entry or over-deny plain search.
     from riglib.permissions import CLAUDE_CODE_DENY_RULES, DEFAULT_EXTERNAL_TOOLS
 
     assert "rg" in DEFAULT_EXTERNAL_TOOLS  # rg stays in the default allow set — only --pre denied
