@@ -6913,6 +6913,50 @@ def _do_provision_linter_bundle(action: Action, on_conflict: str) -> ActionResul
     out = apply_bundle(action.source, action.target, str(action.options.get("source_rel") or ""), str(action.options.get("target_rel") or ""), on_conflict)
     return ActionResult(action, out.status, out.detail, out.backup)
 
+
+def _do_install_dev_reload_hook(action: Action, on_conflict: str) -> ActionResult:
+    """Install the per-repo post-commit daemon auto-reload hook (+ global composer trampoline).
+
+    Writes the repo-local ``<git-dir>/hooks/post-commit`` at the resolved (worktree-correct) path
+    unconditionally — it is the managed, reviewable artifact. Honors ``dev_reload.DRY_RUN_ENV``:
+    when set, the machine-global composer trampoline (the one live/global mutation, needed only
+    when a ``core.hooksPath`` composer shadows the repo-local hook) is skipped, mirroring
+    ``RIG_TG_CTL_DRY_RUN`` / ``RIG_TMUX_DRY_RUN``.
+    """
+    from .. import dev_reload
+
+    repo_root = action.source
+    dplan = dev_reload.build_dev_reload(
+        repo_root=repo_root,
+        daemon_source_paths=action.options.get("daemon_source_paths", []),
+        reload_command=action.options.get("reload_command", dev_reload.DEFAULT_RELOAD_COMMAND),
+    )
+    hook_target = dev_reload.post_commit_hook_path(repo_root)
+    out = fsutil.write_file(hook_target, dplan.render_hook(), on_conflict)
+    _chmod_x_if_changed(hook_target, out)
+    notes = [f"post-commit hook {out.detail}"]
+    status, backup = out.status, out.backup
+
+    if os.environ.get(dev_reload.DRY_RUN_ENV):
+        return ActionResult(action, status, "; ".join(notes), backup)
+
+    composer_target = dev_reload.composer_post_commit_path(repo_root)
+    if composer_target is not None:
+        c_out = fsutil.write_file(composer_target, dev_reload.render_post_commit_composer(), on_conflict)
+        _chmod_x_if_changed(composer_target, c_out)
+        notes.append(f"composer {c_out.detail}")
+        # Surface the composer's own outcome — it is the one machine-global mutation this
+        # action makes. A backup there must not be silently dropped (per the backup-on-conflict
+        # rule), and a composer-only change (hook unchanged, composer newly written/backed up)
+        # must not report "skipped" and hide that a real live/global write happened.
+        if c_out.backup is not None:
+            backup = c_out.backup
+        if c_out.status in _CHANGED_STATUSES and status == "skipped":
+            status = c_out.status
+
+    return ActionResult(action, status, "; ".join(notes), backup)
+
+
 _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "record_mode": _do_record_mode,
     "copy_skill": _do_copy_skill,
@@ -6948,4 +6992,5 @@ _HANDLERS: dict[str, Callable[[Action, str], ActionResult]] = {
     "provision_spotlight": _do_provision_spotlight,
     "provision_tools": _do_provision_tools,
     "provision_tg_ctl": _do_provision_tg_ctl,
+    "install_dev_reload_hook": _do_install_dev_reload_hook,
 }

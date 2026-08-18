@@ -203,6 +203,18 @@ def _isolate_tmux_activation(monkeypatch):
     monkeypatch.setenv("RIG_TMUX_DRY_RUN", "1")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_dev_reload_activation(monkeypatch):
+    """Never let a test write the LIVE machine-global dev-reload composer or fire a real reload.
+
+    Mirrors ``_isolate_tmux_activation``: ``RIG_DEV_RELOAD_DRY_RUN=1`` suite-wide so a future
+    full-apply test against a composer-layout fixture can't accidentally write into the real
+    global hooks dir. The dedicated ``tests/test_internal_dev.py`` tests clear/override this
+    (``monkeypatch.delenv`` / explicit ``setenv``) to exercise the real composer-write logic.
+    """
+    monkeypatch.setenv("RIG_DEV_RELOAD_DRY_RUN", "1")
+
+
 @pytest.fixture
 def fake_agent_tools(tmp_path: Path) -> Path:
     """A minimal but structurally-valid agent-tools checkout."""
