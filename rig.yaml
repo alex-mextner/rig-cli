@@ -76,9 +76,10 @@ mcp:
 # tool set, so rig pre-allows tg/review/draw/3d/rig/task/dev/pm/research + read-only rg/jq/gitleaks in the
 # harness's permission allowlist (claude-code: permissions.allow in ~/.claude/settings.json;
 # opencode: permission.bash) — AND, for claude-code, asserts the conservative deny/ask rule
-# baselines (raw `gh pr merge`, force pushes, sudo rm, screencapture denied; pkill/killall/
-# `git reset --hard` prompt) — the OUTER belt the harness evaluates before hooks. The merge is
-# ADDITIVE — every existing entry is preserved, the desired ones are merged in, deduped; a
+# baselines (raw `gh pr merge`, force pushes, sudo rm, screencapture, `rg --pre` denied
+# (`--pre-glob` is never denied anywhere — no effect without `--pre`, which is caught on its
+# own); pkill/killall/`git reset --hard` prompt) — the OUTER belt the harness evaluates before hooks.
+# The merge is ADDITIVE — every existing entry is preserved, the desired ones are merged in, deduped; a
 # re-apply is a no-op; extras are reported as drift, never deleted. The allow grant is at the
 # command-PREFIX level (Bash(<tool>:*) covers a tool's subcommands/flags), so the restraint is in
 # WHICH tools are listed — read-only helpers only; raw process-control/package-manager/git-hosting

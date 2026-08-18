@@ -278,7 +278,7 @@ AREAS: tuple[Area, ...] = (
                  "Provision the per-harness permissions layer: the command allowlist (tg/review/draw/"
                  "3d/rig/task/dev + read-only rg/jq/gitleaks pre-allowed, no per-call prompts) plus "
                  "the deny/ask rule baselines (claude-code AND opencode; raw PR-merge, force-push, sudo "
-                 "rm, screencapture denied; pkill/killall/git reset --hard prompt). codex gets a "
+                 "rm, screencapture, rg --pre denied; pkill/killall/git reset --hard prompt). codex gets a "
                  "safe-command allow + coarse deny via its execpolicy .rules block. Additive — merges "
                  "into the existing lists, never clobbers or removes the user's own entries. Off = "
                  "leave it alone. The target settings file is per-machine; repo-local config is "

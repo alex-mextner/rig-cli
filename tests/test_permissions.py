@@ -904,6 +904,17 @@ def test_default_rules_are_scoped_and_conservative():
     assert "Bash(git commit --no-verify:*)" in deny
     assert "Bash(sudo rm:*)" in deny
     assert "Bash(screencapture:*)" in deny
+    # rig-cli#187: `rg --pre` is arbitrary subprocess execution behind a read-only search grant.
+    # rg's arg parser allows flags anywhere, so both flag-first AND later-position forms are
+    # required, for BOTH the space value (`--pre CMD`) and `=` value (`--pre=CMD`) shapes — `=`
+    # is a literal boundary character, not a space, so it needs its own pattern.
+    assert "Bash(rg --pre:*)" in deny and "Bash(rg * --pre *)" in deny
+    assert "Bash(rg --pre=*)" in deny and "Bash(rg * --pre=*)" in deny
+    assert "Bash(rg * --pre)" in deny  # end-anchored: `rg pattern --pre` (flag last, no value)
+    # `--pre-glob` is deliberately NOT globbed here — or anywhere, including the omp ARGV guard
+    # (no effect without `--pre`, which is caught on its own; denying it would be pattern bloat
+    # / a false positive for zero security value).
+    assert not any("--pre-glob" in r for r in deny)
     # the safe force (`--force-with-lease`) must never be denied — the word boundary in the
     # rules above already excludes it; assert no rule names it explicitly either
     assert not any("--force-with-lease" in r for r in deny)
@@ -1176,3 +1187,76 @@ def test_opencode_force_push_deny_over_blocks_force_with_lease_documented():
     from riglib.permissions import OPENCODE_DENY_RULES
 
     assert "git push*--force*" in OPENCODE_DENY_RULES
+
+
+def test_opencode_rg_pre_deny_matches_pre_but_not_pretty():
+    # rig-cli#187: BEHAVIORAL check (not just membership) via opencode's documented glob
+    # dialect (`*` = zero-or-more chars, verified equivalent to shell fnmatch). The single
+    # substring-only `rg*--pre*` entry was rejected in review for over-denying `--pretty` (a
+    # different, legitimate, read-only flag that merely contains "--pre" as a substring) — this
+    # proves the replacement value-shaped forms deny the real flag without that regression.
+    import fnmatch
+
+    from riglib.permissions import OPENCODE_DENY_RULES
+
+    def denied(command: str) -> bool:
+        return any(fnmatch.fnmatch(command, pattern) for pattern in OPENCODE_DENY_RULES)
+
+    assert denied("rg --pre cat pattern")
+    assert denied("rg pattern --pre cat")
+    assert denied("rg --pre=cat pattern")
+    assert denied("rg pattern --pre")  # trailing/end-anchored form, mirrors claude-code's coverage
+    assert not denied("rg --pretty pattern src")  # the regression this fix must not reintroduce
+    assert not denied("rg pattern src")
+    # `--pre-glob` ALONE (no `--pre`) is a documented no-op EVERYWHERE, not just this belt — it
+    # has no effect without `--pre`, which is caught on its own by every belt including this one.
+    assert not denied("rg --pre-glob '*.md' pattern")
+
+
+def test_rg_pre_deny_rules_scoped_not_over_broad():
+    # rig-cli#187 fix must not touch the base `Bash(rg:*)` allow entry or over-deny plain search.
+    from riglib.permissions import CLAUDE_CODE_DENY_RULES, DEFAULT_EXTERNAL_TOOLS
+
+    assert "rg" in DEFAULT_EXTERNAL_TOOLS  # rg stays in the default allow set — only --pre denied
+    assert "Bash(rg:*)" not in CLAUDE_CODE_DENY_RULES  # must never blanket-deny the whole tool
+    pre_rules = [r for r in CLAUDE_CODE_DENY_RULES if r.startswith("Bash(rg ")]
+    assert pre_rules, "expected at least one rg --pre deny rule"
+    for rule in pre_rules:
+        assert "--pre" in rule
+
+
+def test_guard_rule_subcommand_flags_arity_relaxed_to_1_or_2():
+    # rig-cli#187 relaxed subcommand_flags from "exactly 2 tokens" to "1 or 2" (a flat command
+    # like `rg` needs only 1). Pin the boundary: 1 and 2 are valid, 0 and 3 are still rejected.
+    import pytest
+
+    from riglib.permissions import GuardRule
+
+    GuardRule("ok-1token", "hint", "subcommand_flags", ("rg",), ("--pre",))
+    GuardRule("ok-2token", "hint", "subcommand_flags", ("git", "push"), ("--force",))
+    with pytest.raises(ValueError, match="1 or 2 tokens"):
+        GuardRule("bad-0token", "hint", "subcommand_flags", (), ("--pre",))
+    with pytest.raises(ValueError, match="1 or 2 tokens"):
+        GuardRule("bad-3token", "hint", "subcommand_flags", ("a", "b", "c"), ("--pre",))
+
+
+def test_guard_rule_flags_with_value_must_be_subset_of_flags():
+    # rig-cli#187 (round 2): flags_with_value is a PER-FLAG opt-in for the joined `flag=value`
+    # match, not a family-wide behavior — it must name only flags already in `flags`, and
+    # only `subcommand_flags` rules may use it at all (a construction error is far cheaper
+    # than a silent mismatch in a security guard).
+    import pytest
+
+    from riglib.permissions import GuardRule
+
+    GuardRule("ok-subset", "hint", "subcommand_flags", ("rg",), ("--pre", "--pre-glob"),
+              flags_with_value=("--pre",))
+    with pytest.raises(ValueError, match="flags_with_value must be a subset of flags"):
+        GuardRule("bad-not-subset", "hint", "subcommand_flags", ("rg",), ("--pre",),
+                   flags_with_value=("--not-in-flags",))
+    with pytest.raises(ValueError, match="argv_prefix needs tokens only"):
+        GuardRule("bad-argv-prefix-with-value", "hint", "argv_prefix", ("sudo", "rm"),
+                   flags_with_value=("--force",))
+    with pytest.raises(ValueError, match="flag_value_prefix needs"):
+        GuardRule("bad-flag-value-prefix-with-value", "hint", "flag_value_prefix", ("git",),
+                   ("-c",), ("core.hooksPath=",), flags_with_value=("-c",))
