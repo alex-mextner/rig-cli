@@ -245,6 +245,14 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--jobs", type=int, default=DEFAULT_JOBS)
     status.add_argument("--timeout", type=float, default=None)
     status.add_argument("--json", action="store_true")
+
+    # "config" is routed by fleet_entrypoint.py to fleet_config.py's own
+    # parser before this one ever sees it (see _fleet_subcommand_index) — this
+    # entry exists only so `rig fleet --help` lists it. It is never actually
+    # invoked in normal operation (the unmatched-command fallback below
+    # returns exit 2 rather than crashing if it somehow were); a real
+    # subparser here would duplicate fleet_config.py's argument surface.
+    sub.add_parser("config", help="bulk config mutation for registered repositories — see: rig fleet config --help")
     return parser
 
 
