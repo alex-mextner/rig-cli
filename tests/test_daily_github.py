@@ -119,6 +119,23 @@ def test_malformed_record_is_skipped_not_a_crash_and_marks_incomplete(monkeypatc
     assert "warning" in capsys.readouterr().err
 
 
+def test_missing_merged_at_is_skipped_not_silently_dropped_and_marks_incomplete(monkeypatch, capsys):
+    """A record with no/null `mergedAt` despite `--state merged` used to be silently
+    dropped (`_parse_one` returned `None` without flagging `any_skipped`), so the fetch
+    was wrongly considered complete and the watermark could advance past a real PR
+    forever. It must be treated exactly like any other malformed record: skipped with a
+    warning, and the result marked incomplete. Regression for the codex review P2
+    finding (round 5)."""
+    _stub_gh(monkeypatch, [
+        {"number": 1, "title": "bad", "body": "", "mergedAt": None, "url": "", "labels": []},
+        {"number": 2, "title": "good", "body": "", "mergedAt": "2026-08-19T11:00:00Z", "url": "", "labels": []},
+    ])
+    result = daily_github.fetch_merged_prs("owner/repo", parse_utc("2026-08-19T00:00:00Z"))
+    assert [p.number for p in result.prs] == [2]
+    assert result.complete is False
+    assert "warning" in capsys.readouterr().err
+
+
 def test_non_dict_record_is_skipped_not_a_crash_and_marks_incomplete(monkeypatch, capsys):
     _stub_gh(monkeypatch, [
         "not-even-a-dict",

@@ -114,6 +114,38 @@ def test_invalid_since_raises_structured_config_error_not_a_raw_crash():
     assert "not-a-timestamp-or-window" in exc_info.value.what
 
 
+def test_empty_string_config_flag_still_fails_closed(monkeypatch, tmp_path):
+    """`--config ""` is truthiness-falsy but IS an explicit `--config` from argparse's
+    point of view (`args.config == ""`, not `None`) — it must still fail closed like any
+    other unusable explicit --config, not silently fall through to the default-location
+    behavior and report/advance watermarks for the wrong (default) repos. Regression for
+    a `bool(args.config)` truthiness bug caught in review (round 6, this PR)."""
+    from riglib.errors import ConfigError
+
+    monkeypatch.chdir(tmp_path)  # Path("").expanduser() resolves to the cwd (a dir, not a file)
+    with pytest.raises(ConfigError, match="is not a regular file"):
+        daily_command.run(_args(repo=None, config=""))
+
+
+def test_valid_explicit_config_file_repos_are_actually_fetched(monkeypatch, state_path, tmp_path, capsys):
+    """Pins the success wiring end to end: an explicit `--config <file>` with a valid
+    `repos:` list must actually be the repo list `run()` fetches, not just avoid raising.
+    Regression for a review gap (round 6) — the raise-path tests didn't exercise
+    `config_path=Path(args.config).expanduser()` actually reaching `fetch_merged_prs`."""
+    config = tmp_path / "daily.yaml"
+    config.write_text("repos:\n  - explicit/one\n  - explicit/two\n", encoding="utf-8")
+    seen_repos: list[str] = []
+
+    def _fake(repo, since):
+        seen_repos.append(repo)
+        return FetchResult(prs=[], complete=True)
+
+    monkeypatch.setattr(daily_command, "fetch_merged_prs", _fake)
+    rc = daily_command.run(_args(repo=None, config=str(config), state=str(state_path)))
+    assert rc == 0
+    assert seen_repos == ["explicit/one", "explicit/two"]
+
+
 def test_gh_error_on_one_repo_does_not_abort_others(monkeypatch, capsys):
     def _fake(repo, since):
         if repo == "owner/broken":

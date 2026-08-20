@@ -102,6 +102,14 @@ def fetch_merged_prs(repo: str, since_utc) -> FetchResult:
     # the same as truncation: mark the fetch incomplete so the caller withholds the
     # watermark advance, or the omission becomes permanent (codex review P1 finding,
     # round 4: skipping-but-still-`complete=True` silently lost the skipped PR forever).
+    # Known tradeoff (accepted, not a regression of this rule): if a record stays
+    # malformed on EVERY future fetch (a persistent `gh`/API quirk on one specific PR,
+    # not just a transient blip), the watermark never advances past it and every other
+    # already-reported PR in that same page re-appears on every subsequent run too. The
+    # alternative — silently drop the bad record and advance anyway — was already tried
+    # (the pre-fix behavior for a null `mergedAt`) and is strictly worse: a permanently
+    # missing PR with zero signal, vs. re-reported good PRs with a loud stderr warning
+    # every run pointing at exactly which record is stuck.
     return FetchResult(prs=prs, complete=not (truncated or any_skipped))
 
 
@@ -141,7 +149,7 @@ def _parse_and_filter(repo: str, raw: list, since_utc) -> tuple[list[MergedPR], 
     for item in raw:
         try:
             pr = _parse_one(repo, item)
-            if pr is not None and parse_utc(pr.merged_at) > since_utc:
+            if parse_utc(pr.merged_at) > since_utc:
                 prs.append(pr)
         except (TypeError, ValueError, KeyError, AttributeError) as exc:
             any_skipped = True
@@ -149,10 +157,15 @@ def _parse_and_filter(repo: str, raw: list, since_utc) -> tuple[list[MergedPR], 
     return prs, any_skipped
 
 
-def _parse_one(repo: str, item: dict) -> MergedPR | None:
+def _parse_one(repo: str, item: dict) -> MergedPR:
     merged_at = item.get("mergedAt")
     if not merged_at:
-        return None  # defensive: --state merged should guarantee this, never trust blindly
+        # defensive: --state merged should guarantee this, never trust blindly. Raise
+        # (never silently return a sentinel) so the caller's except-and-skip path marks
+        # the fetch incomplete, same as any other malformed record — a silently-dropped
+        # record here let the watermark advance past this PR forever (codex review P2
+        # finding, round 5).
+        raise ValueError(f"PR #{item.get('number', '?')} in {repo} has no mergedAt despite --state merged")
     labels = [lbl.get("name", "") for lbl in (item.get("labels") or []) if isinstance(lbl, dict)]
     return MergedPR(
         repo=repo,

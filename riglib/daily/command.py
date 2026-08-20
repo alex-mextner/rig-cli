@@ -80,9 +80,14 @@ def run(args: argparse.Namespace) -> int:
     state_path = _state_path(args)
     saved_watermarks = {} if explicit_since_dt is not None else load_watermarks(state_path)
 
+    # `args.config is not None` — NOT truthiness — decides "explicit": `--config ""` is a
+    # real (if odd) CLI invocation and must still fail closed, not silently fall through
+    # to the default-location behavior because an empty string is falsy (review finding).
+    config_given = args.config is not None
     repos = load_repos(
-        config_path=Path(args.config).expanduser() if args.config else None,
+        config_path=Path(args.config).expanduser() if config_given else None,
         cli_repos=args.repo,
+        explicit=config_given,
     )
 
     # Snapshot "now" ONCE for the whole run: a repo whose fetch comes back complete but
