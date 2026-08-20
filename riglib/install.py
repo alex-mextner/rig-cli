@@ -67,28 +67,38 @@ rig export -o rig.yaml          # write a starter rig.yaml from detected default
 
 
 def install_skill() -> int:
-    skills_dir = Path(os.path.expanduser("~/.agents/skills")) / SKILL_NAME
+    return install_named_skill(SKILL_NAME, SKILL_MD)
+
+
+def install_named_skill(name: str, skill_md: str) -> int:
+    """The generic worker behind ``install_skill()``: write ``<name>``'s SKILL.md into
+    ``~/.agents/skills/<name>/`` and link it into every registered skills-dir harness.
+    Parameterized by ``name``/``skill_md`` so any rig subcommand that registers its OWN
+    agent skill (e.g. ``rig daily``) reuses this exact mechanism instead of re-implementing
+    it — see ``riglib/daily/skill.py``.
+    """
+    skills_dir = Path(os.path.expanduser("~/.agents/skills")) / name
     skills_dir.mkdir(parents=True, exist_ok=True)
     target = skills_dir / "SKILL.md"
-    if target.is_file() and target.read_text(encoding="utf-8") == SKILL_MD:
-        print(f"rig: skill already current at {target}")
+    if target.is_file() and target.read_text(encoding="utf-8") == skill_md:
+        print(f"{name}: skill already current at {target}")
     else:
-        target.write_text(SKILL_MD, encoding="utf-8")
-        print(f"rig: wrote skill → {target}")
-    _link_into_harnesses(skills_dir)
+        target.write_text(skill_md, encoding="utf-8")
+        print(f"{name}: wrote skill → {target}")
+    _link_into_harnesses(name, skills_dir)
     return 0
 
 
-def _link_into_harnesses(installed_skill_dir: Path) -> None:
-    """Symlink the installed rig skill into every registered skills-dir harness."""
+def _link_into_harnesses(name: str, installed_skill_dir: Path) -> None:
+    """Symlink the installed skill into every registered skills-dir harness."""
     for kind in HARNESS_SKILL_DIR_KINDS:
         harness_dir = skill_dir_for(kind)
         if harness_dir:
-            _link_into_harness(installed_skill_dir, harness_dir)
+            _link_into_harness(name, installed_skill_dir, harness_dir)
 
 
-def _link_into_harness(installed_skill_dir: Path, harness_dir_raw: str) -> None:
-    """Symlink the installed rig skill into one harness discovery dir (idempotent).
+def _link_into_harness(name: str, installed_skill_dir: Path, harness_dir_raw: str) -> None:
+    """Symlink the installed skill into one harness discovery dir (idempotent).
 
     Mirrors the ``link_skill_harness`` apply action: a correct symlink is a no-op, a wrong one
     is re-pointed, and a REAL (non-symlink) dir/file already there is left untouched (never
@@ -100,21 +110,21 @@ def _link_into_harness(installed_skill_dir: Path, harness_dir_raw: str) -> None:
     # no self-link when the agents skill dir IS the harness dir (~/.agents/skills == harness)
     if harness_dir.resolve() == installed_skill_dir.parent.resolve():
         return
-    link = harness_dir / SKILL_NAME
+    link = harness_dir / name
     try:
         link.parent.mkdir(parents=True, exist_ok=True)
         if link.is_symlink():
             if link.resolve() == dest:
-                print(f"rig: harness link already current → {link}")
+                print(f"{name}: harness link already current → {link}")
                 return
             link.unlink()
             link.symlink_to(dest)
-            print(f"rig: re-pointed harness link → {link}")
+            print(f"{name}: re-pointed harness link → {link}")
             return
         if link.exists():
-            print(f"rig: a real dir/file exists at {link} — left untouched (not a rig symlink)")
+            print(f"{name}: a real dir/file exists at {link} — left untouched (not a {name} symlink)")
             return
         link.symlink_to(dest)
-        print(f"rig: linked into harness dir → {link}")
+        print(f"{name}: linked into harness dir → {link}")
     except OSError as exc:
-        print(f"rig: warning — could not create harness skill link {link}: {exc}")
+        print(f"{name}: warning — could not create harness skill link {link}: {exc}")

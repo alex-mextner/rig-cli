@@ -333,6 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_lint_parser(sub)
     _add_stats_parser(sub)
+    _add_daily_parser(sub)
     _add_codex_parser(sub)
     _add_worktree_parser(sub)
 
@@ -431,6 +432,28 @@ def _add_stats_parser(sub: "argparse._SubParsersAction") -> None:
     )
     # hidden seam: tests/scripts can point the whole pipeline at a sandbox HOME.
     show.add_argument("--home", help=argparse.SUPPRESS)
+
+
+def _add_daily_parser(sub: "argparse._SubParsersAction") -> None:
+    """`rig daily` — a categorized "what shipped" report over merged PRs, ready to paste
+    into a Slack Daily channel. `rig daily install-skill` registers the `daily` agent
+    skill (same mechanism as `rig install-skill`, see `riglib/daily/skill.py`)."""
+    from .daily.command import add_arguments as _add_daily_report_args
+
+    dp = sub.add_parser(
+        "daily",
+        help="categorized 'what shipped' report over merged PRs (paste into Slack)",
+        description="Report merged PRs since the last run (source of truth: `gh pr "
+        "list --state merged`, never a ticket status). Grouped into Security / "
+        "Infra-CI / Performance / Product-UX / Other; one plain-language fact per "
+        "line, ticket/PR reference last in parentheses.",
+    )
+    dp.add_argument(
+        "action", nargs="?", choices=("install-skill",), default=None,
+        help="install-skill: register the `daily` agent skill with harnesses "
+        "(default with no action: generate the report)",
+    )
+    _add_daily_report_args(dp)
 
 
 def _add_codex_parser(sub: "argparse._SubParsersAction") -> None:
@@ -542,6 +565,7 @@ def main(argv: list[str] | None = None) -> int:
         "evolve": cmd_evolve,  # project evolution portal; lifecycle via agenttools-service
         "lint": cmd_lint,
         "stats": cmd_stats,
+        "daily": cmd_daily,
         "codex": cmd_codex,
         "worktree": cmd_worktree,
     }
@@ -2612,6 +2636,16 @@ def cmd_stats(args: argparse.Namespace) -> int:
     from .stats import run as stats_run
 
     return stats_run(args)
+
+
+def cmd_daily(args: argparse.Namespace) -> int:
+    if args.action == "install-skill":
+        from .daily.skill import install_skill as daily_install_skill
+
+        return daily_install_skill()
+    from .daily.command import run as daily_run
+
+    return daily_run(args)
 
 
 if __name__ == "__main__":
