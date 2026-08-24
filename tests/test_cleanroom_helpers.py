@@ -50,6 +50,7 @@ def _full_hook_bridge_settings() -> dict:
                 {"matcher": "Bash", "hooks": [command("PreToolUse")]},
                 {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [command("PreToolUse")]},
                 {"matcher": "Agent|Task", "hooks": [command("PreToolUse")]},
+                {"matcher": "Skill", "hooks": [command("PreToolUse")]},
             ],
             "PostToolUse": [
                 {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [command("PostToolUse")]},
