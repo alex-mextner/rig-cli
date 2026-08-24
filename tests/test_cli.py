@@ -487,7 +487,11 @@ def test_textual_fallback_previews_and_writes_nothing(tmp_path, capsys, fake_age
     """textual is a CORE dependency now (it ships WITH rig), so it is missing only on a genuinely
     broken environment. When it IS missing, `rig init` must NOT silently scaffold+apply — it shows
     a non-destructive PREVIEW (writes nothing, applies nothing) plus a SINGLE-LINE broken-env
-    message (no multi-step install hint) and how-to-proceed."""
+    message (no multi-step install hint) and how-to-proceed.
+
+    This is the non-PEP-668 shape (a managed interpreter where textual is missing for some other
+    reason) — see test_textual_fallback_pep668_offers_break_system_packages for the PEP-668 case,
+    which uses different wording since "broken install" is the wrong diagnosis there."""
     monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -497,6 +501,10 @@ def test_textual_fallback_previews_and_writes_nothing(tmp_path, capsys, fake_age
     # fallback branch, distinct from the no-TTY branch covered by test_init_no_tty_previews_*.
     monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
     monkeypatch.setattr("riglib.cli._tui_importable", lambda: False)
+    # pin BOTH the PEP-668 branch and which dep is reported missing deterministically — real
+    # host state (this box may genuinely be missing textual/rich, or not) must not leak in.
+    monkeypatch.setattr("riglib.doctor.externally_managed", lambda: False)
+    monkeypatch.setattr("riglib.cli._missing_tui_deps", lambda: ["textual"])
     repo = tmp_path / "repo"
     repo.mkdir()
     rc = main(["init", "-C", str(repo)])
@@ -516,10 +524,81 @@ def test_textual_fallback_previews_and_writes_nothing(tmp_path, capsys, fake_age
     assert "Nothing was written and nothing was applied" in out
     # principle 3 — concrete ways to proceed (reinstall rig + the headless paths)
     assert "rig init --yes" in out
-    assert "reinstall rig" in out
+    assert "reinstall rig" not in out  # this branch's own hint below replaces the old bare phrase
+    assert "pipx install rig-cli" in out
     # principle 2 — no-args mutates nothing
     assert not (repo / "rig.yaml").exists()
     assert not (tmp_path / "home" / ".agents" / "skills").exists()
+
+
+def test_textual_fallback_pep668_offers_break_system_packages(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """On a PEP-668 externally-managed interpreter (common on modern Homebrew/distro Python —
+    this is the exact shape a local `install.sh` dev checkout hits, not a "broken install"), the
+    no-textual preview must say so plainly and offer the --break-system-packages fallback that
+    actually works for a dev checkout, alongside the recommended pipx path."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: False)
+    monkeypatch.setattr("riglib.doctor.externally_managed", lambda: True)
+    monkeypatch.setattr("riglib.doctor._python_present", lambda name: False)
+    # both core TUI deps missing here (not just textual) — exercises the multi-dep naming +
+    # fallback-command path, deterministically (real host state must not leak in).
+    monkeypatch.setattr("riglib.cli._missing_tui_deps", lambda: ["textual", "rich"])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "textual + rich are missing" in out
+    assert "this Python refuses direct installs (PEP 668)" in out
+    assert "broken install" not in out  # wrong diagnosis for this case — must not appear
+    assert "pipx install rig-cli" in out
+    assert "--break-system-packages" in out
+    assert "pip install 'rig-cli[tui]'" not in out
+    assert "Plan:" in out
+    assert "PREVIEW" in out
+    assert "Nothing was written and nothing was applied" in out
+    assert "rig init --yes" in out
+    assert not (repo / "rig.yaml").exists()
+    assert not (tmp_path / "home" / ".agents" / "skills").exists()
+
+
+def test_textual_fallback_names_the_dep_actually_missing(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """`_tui_importable()` fails when EITHER textual OR rich is absent — with textual present
+    and only rich missing, the message must say "rich", never hardcode "textual" (review
+    finding: contradictory guidance when the wrong name is reported)."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: False)
+    monkeypatch.setattr("riglib.doctor.externally_managed", lambda: False)
+    monkeypatch.setattr("riglib.cli._missing_tui_deps", lambda: ["rich"])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "rich is missing from rig's environment" in out
+    assert "textual is missing" not in out
+
+
+def test_missing_tui_deps_real_check_against_this_interpreter():
+    """Unmocked: `_missing_tui_deps()`'s real `find_spec` path returns exactly the subset of
+    {"textual", "rich"} genuinely importable in THIS process — every other test monkeypatches
+    this function away, so exercise the real implementation at least once."""
+    import importlib.util
+
+    from riglib.cli import _missing_tui_deps
+
+    expected = [m for m in ("textual", "rich") if importlib.util.find_spec(m) is None]
+    assert _missing_tui_deps() == expected
 
 
 def test_textual_and_rich_are_core_dependencies():

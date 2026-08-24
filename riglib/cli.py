@@ -86,6 +86,27 @@ def _err_block(exc: Exception) -> str:
     return _err(f"error: {exc}")
 
 
+def _missing_tui_deps() -> list[str]:
+    """Which of the wizard's two CORE deps (textual, rich) are actually absent, by name.
+
+    ``_tui_importable()`` fails when EITHER is missing — naming the wrong one in a user-facing
+    message (e.g. always saying "textual" when only `rich` is absent) gives contradictory
+    guidance, since the install command built alongside it correctly targets whatever is
+    actually missing. Order matches ``DEPENDENCIES`` in doctor.py for a stable message.
+    """
+    import importlib.util
+
+    names = []
+    for mod in ("textual", "rich"):
+        try:
+            present = importlib.util.find_spec(mod) is not None
+        except (ImportError, ValueError):
+            present = False
+        if not present:
+            names.append(mod)
+    return names
+
+
 def _tui_importable() -> bool:
     """True when the wizard's deps (textual + rich) are importable.
 
@@ -1141,10 +1162,12 @@ def _persist_rig_yaml(pending_write, repo_yaml: Path) -> None:
 def _print_init_next_steps(*, config_exists: bool, reason: str) -> None:
     """The 'nothing was done — here is how to proceed' block for the no-TUI PREVIEW path.
 
-    The last line is ``reason``-aware: under ``no-textual`` rig's environment is broken (textual
-    ships WITH rig, so its absence means a corrupt install) and we point at reinstalling rig; under
-    ``no-tui`` the user opted out (``--no-tui`` / ``RIG_NO_TUI``) so we point at dropping the flag;
-    under ``no-tty`` (piped / CI / agent) the wizard can't run at all, so we point at a real terminal.
+    The last line is ``reason``-aware: under ``no-textual`` rig's environment is missing its
+    own core dep (textual ships WITH rig) and we point at the real fix — which, on a modern
+    PEP-668 externally-managed Python, is NOT the same one-liner as on a managed install (see
+    the fallback branch below); under ``no-tui`` the user opted out (``--no-tui`` /
+    ``RIG_NO_TUI``) so we point at dropping the flag; under ``no-tty`` (piped / CI / agent) the
+    wizard can't run at all, so we point at a real terminal.
     """
     print(_bold("\nNothing was written and nothing was applied — this is a PREVIEW."))
     print("To proceed, pick one:")
@@ -1154,7 +1177,22 @@ def _print_init_next_steps(*, config_exists: bool, reason: str) -> None:
         print(f"  {_dim('•')} rig init --yes           write rig.yaml (config only; then `rig apply commit`)")
         print(f"  {_dim('•')} rig init --yes --apply   write rig.yaml AND apply the plan in one step")
     if reason == "no-textual":
-        print(f"  {_dim('•')} reinstall rig (`pipx install rig-cli` / `uv tool install rig-cli`), then re-run `rig init`")
+        from .doctor import break_system_packages_command_for, externally_managed
+
+        if externally_managed():
+            # `pipx install rig-cli` is NOT a clean fix here without a caveat: `install.sh`'s
+            # symlink shape already occupies `~/.local/bin/rig`, and pipx typically leaves an
+            # EXISTING app link alone rather than replacing it — so recommending pipx FIRST as
+            # "the fix" (review finding) can leave the user still invoking the same broken
+            # checkout afterward. Lead with the command that actually fixes THIS checkout.
+            missing = _missing_tui_deps() or ["textual"]
+            fallback = break_system_packages_command_for(missing)
+            print(f"  {_dim('•')} developing on a local rig checkout? this Python refuses direct installs (PEP 668) —")
+            print(f"    {_dim('    run: ' + ' '.join(fallback))}")
+            print(f"  {_dim('•')} or switch to a managed install: remove ~/.local/bin/rig, then pipx install rig-cli")
+        else:
+            print(f"  {_dim('•')} pipx install rig-cli   (recommended — reinstalls rig into an isolated, managed env)")
+            print(f"  {_dim('•')} or: uv tool install rig-cli   (then re-run `rig init`)")
     elif reason == "no-tui":
         print(f"  {_dim('•')} drop --no-tui (and unset RIG_NO_TUI), then re-run `rig init` to choose interactively")
     else:  # no-tty: the wizard needs a real terminal; installing textual would not help here
@@ -1176,9 +1214,19 @@ def _setup_preview_no_tui(args: argparse.Namespace, *, reason: str) -> int:
     from .plan import PlanError
 
     if reason == "no-textual":
-        # textual is a CORE dependency (ships with rig); its absence means a broken environment.
-        # One line, NOT a multi-step install hint — the fix is to reinstall rig properly.
-        print(_warn("textual is missing from rig's environment (a broken install) — showing a preview only."))
+        # textual + rich are CORE dependencies (ship with rig) but their absence does not
+        # always mean a broken install — a local dev/symlink checkout (install.sh) on a
+        # PEP-668 externally-managed Python legitimately never gets them installed at all.
+        # Name whichever is actually missing (could be one or both) instead of always saying
+        # "textual" — `_print_init_next_steps` below gives the reason-appropriate fix either way.
+        from .doctor import externally_managed
+
+        names = _missing_tui_deps() or ["textual"]
+        missing = f"{' + '.join(names)} {'are' if len(names) > 1 else 'is'} missing"
+        if externally_managed():
+            print(_warn(f"{missing} — this Python refuses direct installs (PEP 668) — showing a preview only."))
+        else:
+            print(_warn(f"{missing} from rig's environment (a broken install) — showing a preview only."))
     elif reason == "no-tui":
         print(_warn("interactive TUI disabled (--no-tui / RIG_NO_TUI) — showing a preview only."))
     else:  # no-tty
@@ -2164,6 +2212,15 @@ def _print_dep_statuses(report) -> None:
             print(f"      install: {_dim(' '.join(st.install_cmd))}")
         else:
             print(f"      {_dim('install: (no package mapping for this OS — install manually)')}")
+        if st.pep668_fallback:
+            # the plain install_cmd above WILL fail here: this interpreter's stdlib carries
+            # PEP 668's EXTERNALLY-MANAGED marker (common on modern Homebrew/distro Python), so
+            # a bare uv/pip refuses. Offer the explicit bypass as a human-chosen fallback for
+            # someone intentionally installing into THIS interpreter (e.g. rig's own dev
+            # checkout) rather than switching to a pipx/uv-tool managed install.
+            print(f"      {_warn('this interpreter is PEP-668 externally-managed — the command above will refuse.')}")
+            print(f"      {_dim('either: pipx install rig-cli   (recommended — isolates rig cleanly)')}")
+            print(f"      {_dim('    or: ' + ' '.join(st.pep668_fallback))}")
 
 
 def _handle_core_bare(do_fix: bool) -> bool:
@@ -2276,8 +2333,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(_bold("\n  installing missing dependencies..."))
     results = bootstrap(report, assume_yes=True, include_optional=args.optional)
     failed = [name for name, rc in results if rc not in (0,)]
+    fallback_by_name = {st.dep.name: st.pep668_fallback for st in report.statuses if st.pep668_fallback}
     for name, rc in results:
         print(f"    {_ok('✔') if rc == 0 else _err('✗')} {name} (rc={rc})")
+        # rc != 0 here on a PEP-668 interpreter is that install_cmd refusing, not a real
+        # error worth a bare traceback-style "rc=1" — give the same actionable fallback
+        # `_print_dep_statuses` would have shown before this bootstrap attempt ran.
+        if rc != 0 and name in fallback_by_name:
+            # this interpreter IS externally-managed, so a PEP-668 refusal is the LIKELY cause
+            # of the failure above — but rc != 0 can also come from an unrelated network/
+            # resolver/permission failure the marker check can't distinguish. Hedge the wording
+            # accordingly rather than asserting a cause that isn't always true.
+            print(f"        {_warn('install failed — if this interpreter refused it (PEP-668), try:')}")
+            print(f"        {_dim('either: pipx install rig-cli   (recommended)')}")
+            print(f"        {_dim('    or: ' + ' '.join(fallback_by_name[name]))}")
     if failed:
         # an install that left a REQUIRED dep absent is still the missing-dependency class;
         # a failed optional install is advisory (generic non-zero).

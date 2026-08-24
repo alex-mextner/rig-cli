@@ -77,7 +77,12 @@ if [[ "${#_missing_core[@]}" -gt 0 ]]; then
     echo ""
     echo "  WARNING: could not install core deps ($pkgs)."
     echo "  rig init TUI wizard and config parsing will fail until they are present."
-    echo "  Install manually: uv pip install $pkgs   (or run: rig doctor --yes)"
+    echo "  A common cause: this Python is PEP-668 externally-managed (modern Homebrew/distro"
+    echo "  Python refuses a plain install on purpose) — but the failure above could also be a"
+    echo "  network/permission/resolver issue unrelated to that. Run \`rig doctor\` (or \`rig"
+    echo "  doctor --yes\`, which tries the plain command first and then PRINTS — never"
+    echo "  auto-runs — a --break-system-packages fallback for a local dev checkout like this"
+    echo "  one, IF that's actually why it failed) and follow what it reports for THIS machine."
     echo ""
   fi
 fi
