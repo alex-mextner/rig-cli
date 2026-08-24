@@ -516,6 +516,7 @@ _CHECK_SETTINGS = textwrap.dedent(
                 ("PreToolUse", "Bash"),
                 ("PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"),
                 ("PreToolUse", "Agent|Task"),
+                ("PreToolUse", "Skill"),
                 ("PostToolUse", "Edit|Write|MultiEdit|NotebookEdit"),
                 ("Stop", None),
             ]

@@ -70,7 +70,8 @@ def test_strictness_preserved_a_typo_is_still_rejected():
 
 
 def test_pretooluse_matchers_cover_the_full_managed_set():
-    """The bridge keeps every managed PreToolUse matcher, including subagent dispatch."""
+    """The bridge keeps every managed PreToolUse matcher, including subagent dispatch and
+    skill invocation."""
     action = Action(
         kind="register_hook_bridge",
         category="agent_hooks",
@@ -84,6 +85,7 @@ def test_pretooluse_matchers_cover_the_full_managed_set():
         "Bash",
         "Edit|Write|MultiEdit|NotebookEdit",
         "Agent|Task",
+        "Skill",
     }
 
 

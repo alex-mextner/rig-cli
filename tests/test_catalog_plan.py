@@ -1256,6 +1256,10 @@ def test_plan_codex_bridge_does_not_wire_pre_agent_yet(fake_agent_tools, tmp_pat
     assert set(entries) == {"PreToolUse", "PostToolUse", "Stop"}
     assert "SubagentStart" not in str(entries)
     assert "Agent" not in str(entries)
+    # pre-skill (the Skill matcher) is CC-only too — same undocumented-Codex-payload gap
+    # pre-agent has; a future accidental addition here would silently contradict
+    # docs/config-schema.md's stated gap.
+    assert "Skill" not in str(entries)
 
 
 def test_plan_codex_agent_hooks_preserve_custom_target(fake_agent_tools, tmp_path):

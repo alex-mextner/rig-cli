@@ -2355,7 +2355,7 @@ def _read_toml(path: Path) -> dict:
 
 
 def test_hook_bridge_registers_dispatcher_in_settings(fake_agent_tools, tmp_path):
-    """Apply wires PreToolUse (Bash + writes + Agent|Task), PostToolUse and Stop hooks."""
+    """Apply wires PreToolUse (Bash + writes + Agent|Task + Skill), PostToolUse and Stop hooks."""
     repo = tmp_path / "repo"
     repo.mkdir()
     settings = repo / ".claude" / "settings.json"
@@ -2367,12 +2367,13 @@ def test_hook_bridge_registers_dispatcher_in_settings(fake_agent_tools, tmp_path
 
     data = json.loads(settings.read_text())
     hooks = data["hooks"]
-    # PreToolUse: Bash + file-write tools + subagent dispatch all → cc_hook_bridge
+    # PreToolUse: Bash + file-write tools + subagent dispatch + skill invocation all → cc_hook_bridge
     pre = hooks["PreToolUse"]
     matchers = {b["matcher"] for b in pre}
     assert "Bash" in matchers
     assert "Edit|Write|MultiEdit|NotebookEdit" in matchers
     assert "Agent|Task" in matchers
+    assert "Skill" in matchers
     for b in pre:
         cmd = b["hooks"][0]["command"]
         assert "cc_hook_bridge PreToolUse" in cmd
@@ -3852,9 +3853,11 @@ def test_hook_bridge_idempotent_reapply(fake_agent_tools, tmp_path):
         if b.get("matcher") == "Edit|Write|MultiEdit|NotebookEdit"
     ]
     subagent_blocks = [b for b in data["hooks"]["PreToolUse"] if b.get("matcher") == "Agent|Task"]
+    skill_blocks = [b for b in data["hooks"]["PreToolUse"] if b.get("matcher") == "Skill"]
     assert len(bash_blocks) == 1
     assert len(write_blocks) == 1
     assert len(subagent_blocks) == 1
+    assert len(skill_blocks) == 1
     assert len(data["hooks"]["PostToolUse"]) == 1
 
 
@@ -4026,6 +4029,30 @@ def test_hook_bridge_drift_missing_agent_task_only(fake_agent_tools, tmp_path):
     assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
 
 
+def test_hook_bridge_drift_missing_skill_only(fake_agent_tools, tmp_path):
+    """The pre-skill upgrade state has Bash/write/Agent|Task/Stop wired but no Skill matcher —
+    same shape as the pre-agent upgrade case (test_hook_bridge_drift_missing_agent_task_only)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
+    run_plan(plan)
+    data = json.loads(settings.read_text())
+    data["hooks"]["PreToolUse"] = [
+        block for block in data["hooks"]["PreToolUse"]
+        if block.get("matcher") != "Skill"
+    ]
+    settings.write_text(json.dumps(data, indent=2))
+    before = detect(plan)
+    missing = [i for i in before.items if i.item == "hook-bridge" and i.direction == "missing"]
+    assert missing, [i.detail for i in before.items]
+    assert any("Skill" in i.detail for i in missing), [i.detail for i in missing]
+    run_plan(plan)
+    after = detect(plan)
+    assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
+
+
 def test_hook_bridge_drift_detects_stale_command(fake_agent_tools, tmp_path):
     """A managed hook whose command drifted (old lib path) is reported MODIFIED, not in-sync."""
     repo = tmp_path / "repo"
@@ -4039,6 +4066,8 @@ def test_hook_bridge_drift_detects_stale_command(fake_agent_tools, tmp_path):
             {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command",
              "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"}]},
             {"matcher": "Agent|Task", "hooks": [{"type": "command",
+             "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"}]},
+            {"matcher": "Skill", "hooks": [{"type": "command",
              "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"}]},
         ],
         "PostToolUse": [
@@ -4102,6 +4131,7 @@ def test_hook_bridge_skip_leaves_stale_command_untouched(fake_agent_tools, tmp_p
         {"matcher": "Bash", "hooks": [{"type": "command", "command": stale}]},
         {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": stale}]},
         {"matcher": "Agent|Task", "hooks": [{"type": "command", "command": stale}]},
+        {"matcher": "Skill", "hooks": [{"type": "command", "command": stale}]},
     ], "PostToolUse": [
         {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command",
          "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PostToolUse"}]},
@@ -4116,8 +4146,10 @@ def test_hook_bridge_skip_leaves_stale_command_untouched(fake_agent_tools, tmp_p
     data = json.loads(settings.read_text())
     bash_cmd = next(b["hooks"][0]["command"] for b in data["hooks"]["PreToolUse"] if b["matcher"] == "Bash")
     subagent_cmd = next(b["hooks"][0]["command"] for b in data["hooks"]["PreToolUse"] if b["matcher"] == "Agent|Task")
+    skill_cmd = next(b["hooks"][0]["command"] for b in data["hooks"]["PreToolUse"] if b["matcher"] == "Skill")
     assert bash_cmd == stale  # left untouched under skip
     assert subagent_cmd == stale
+    assert skill_cmd == stale
 
 
 def test_hook_bridge_skip_leaves_wrong_hook_type_untouched(fake_agent_tools, tmp_path):
