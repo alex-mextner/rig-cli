@@ -2355,7 +2355,8 @@ def _read_toml(path: Path) -> dict:
 
 
 def test_hook_bridge_registers_dispatcher_in_settings(fake_agent_tools, tmp_path):
-    """Apply wires PreToolUse (Bash + writes + Agent|Task + Skill), PostToolUse and Stop hooks."""
+    """Apply wires PreToolUse (Bash + writes + Agent|Task + Skill + Monitor), PostToolUse and
+    Stop hooks."""
     repo = tmp_path / "repo"
     repo.mkdir()
     settings = repo / ".claude" / "settings.json"
@@ -2367,13 +2368,15 @@ def test_hook_bridge_registers_dispatcher_in_settings(fake_agent_tools, tmp_path
 
     data = json.loads(settings.read_text())
     hooks = data["hooks"]
-    # PreToolUse: Bash + file-write tools + subagent dispatch + skill invocation all → cc_hook_bridge
+    # PreToolUse: Bash + file-write tools + subagent dispatch + skill invocation + Monitor
+    # calls all → cc_hook_bridge
     pre = hooks["PreToolUse"]
     matchers = {b["matcher"] for b in pre}
     assert "Bash" in matchers
     assert "Edit|Write|MultiEdit|NotebookEdit" in matchers
     assert "Agent|Task" in matchers
     assert "Skill" in matchers
+    assert "Monitor" in matchers
     for b in pre:
         cmd = b["hooks"][0]["command"]
         assert "cc_hook_bridge PreToolUse" in cmd
@@ -4053,6 +4056,41 @@ def test_hook_bridge_drift_missing_skill_only(fake_agent_tools, tmp_path):
     assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
 
 
+def test_hook_bridge_drift_missing_monitor_only(fake_agent_tools, tmp_path):
+    """The pre-monitor upgrade state has Bash/write/Agent|Task/Skill/Stop wired but no Monitor
+    matcher — same shape as the pre-agent/pre-skill upgrade cases above. This is the state
+    every existing install is actually in the moment this matcher ships (HYP-1350): drift must
+    report the gap, and apply must add Monitor while leaving the other four matchers alone."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = repo / ".claude" / "settings.json"
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(_bridge_cfg(repo, fake_agent_tools, settings_path=settings), cat, project_type="unknown")
+    run_plan(plan)
+    data = json.loads(settings.read_text())
+    other_matchers_before = {
+        block.get("matcher") for block in data["hooks"]["PreToolUse"]
+        if block.get("matcher") != "Monitor"
+    }
+    data["hooks"]["PreToolUse"] = [
+        block for block in data["hooks"]["PreToolUse"]
+        if block.get("matcher") != "Monitor"
+    ]
+    settings.write_text(json.dumps(data, indent=2))
+    before = detect(plan)
+    missing = [i for i in before.items if i.item == "hook-bridge" and i.direction == "missing"]
+    assert missing, [i.detail for i in before.items]
+    assert any("Monitor" in i.detail for i in missing), [i.detail for i in missing]
+    run_plan(plan)
+    after = detect(plan)
+    assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
+    # the pre-existing matchers were left alone, not rewritten/duplicated
+    data = json.loads(settings.read_text())
+    matchers_after = [block.get("matcher") for block in data["hooks"]["PreToolUse"]]
+    assert set(matchers_after) == other_matchers_before | {"Monitor"}
+    assert len(matchers_after) == len(set(matchers_after)), matchers_after
+
+
 def test_hook_bridge_drift_detects_stale_command(fake_agent_tools, tmp_path):
     """A managed hook whose command drifted (old lib path) is reported MODIFIED, not in-sync."""
     repo = tmp_path / "repo"
@@ -4068,6 +4106,8 @@ def test_hook_bridge_drift_detects_stale_command(fake_agent_tools, tmp_path):
             {"matcher": "Agent|Task", "hooks": [{"type": "command",
              "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"}]},
             {"matcher": "Skill", "hooks": [{"type": "command",
+             "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"}]},
+            {"matcher": "Monitor", "hooks": [{"type": "command",
              "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PreToolUse"}]},
         ],
         "PostToolUse": [
@@ -4132,6 +4172,7 @@ def test_hook_bridge_skip_leaves_stale_command_untouched(fake_agent_tools, tmp_p
         {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": stale}]},
         {"matcher": "Agent|Task", "hooks": [{"type": "command", "command": stale}]},
         {"matcher": "Skill", "hooks": [{"type": "command", "command": stale}]},
+        {"matcher": "Monitor", "hooks": [{"type": "command", "command": stale}]},
     ], "PostToolUse": [
         {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command",
          "command": "PYTHONPATH=/old/lib python3 -m cc_hook_bridge PostToolUse"}]},
