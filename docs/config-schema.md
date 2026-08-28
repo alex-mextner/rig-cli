@@ -559,8 +559,8 @@ agent-hooks are inert. So when a supported harness block is present (and `agent_
 enabled), `rig apply` registers the matching dispatcher from `agent-tools/lib`:
 
 - `kind: claude-code` writes `cc_hook_bridge` into `settings.json`: `PreToolUse` matchers
-  `Bash`, `Edit|Write|MultiEdit|NotebookEdit`, `Agent|Task`, and `Skill`; `PostToolUse`
-  matcher `Edit|Write|MultiEdit|NotebookEdit`; and `Stop`.
+  `Bash`, `Edit|Write|MultiEdit|NotebookEdit`, `Agent|Task`, `Skill`, and `EnterWorktree`;
+  `PostToolUse` matcher `Edit|Write|MultiEdit|NotebookEdit`; and `Stop`.
 - `kind: codex` writes `codex_hook_bridge` into `~/.codex/config.toml` (or
   `$RIG_CODEX_HOME/config.toml`, or `settings_path`) as a managed `[hooks]` TOML block:
   `PreToolUse` matchers `Bash` and `apply_patch`, `PostToolUse` matcher `apply_patch`, and
@@ -594,14 +594,16 @@ block inert: `[features] hooks = false`, top-level `features.hooks = false`, and
 top-level `codex_hooks = false` are reported as drift and rewritten to `true` when `hook_bridge`
 is enabled.
 
-Codex `pre-agent` and `pre-skill` are not wired yet: rig may install `pre-agent`/`pre-skill`
-descriptors into `~/.codex/hooks` (or `$RIG_CODEX_HOME/hooks`) alongside the rest of the selected
-catalog, but the Codex bridge currently dispatches only `pre-bash`, `pre-write`, `post-write`, and
-`stop` via the confirmed Codex hook events above — Codex has no `Skill`-equivalent tool dispatch
-mapped either. opencode has `task` tool dispatch for `pre-agent` but no `Skill`-equivalent
-dispatch for `pre-skill`, and no stop-equivalent blocking hook is documented, so the opencode
-bridge does not dispatch `stop`; use Claude Code for workflows that require `pre-skill` or
-stop-time enforcement until opencode/Codex expose the matching contracts.
+Codex `pre-agent`, `pre-skill`, and `pre-worktree-enter` are not wired yet: rig may install
+`pre-agent`/`pre-skill`/`pre-worktree-enter` descriptors into `~/.codex/hooks` (or
+`$RIG_CODEX_HOME/hooks`) alongside the rest of the selected catalog, but the Codex bridge
+currently dispatches only `pre-bash`, `pre-write`, `post-write`, and `stop` via the confirmed
+Codex hook events above — Codex has no `Skill`- or `EnterWorktree`-equivalent tool dispatch
+mapped either. opencode has `task` tool dispatch for `pre-agent` but no `Skill`- or
+`EnterWorktree`-equivalent dispatch (`pre-skill`, `pre-worktree-enter`), and no stop-equivalent
+blocking hook is documented, so the opencode bridge does not dispatch `stop`; use Claude Code
+for workflows that require `pre-skill`, `pre-worktree-enter`, or stop-time enforcement until
+opencode/Codex expose the matching contracts.
 The managed TOML block has this shape, with full commands including the resolved
 `PYTHONPATH=<agent-tools>/lib`:
 

@@ -1260,6 +1260,9 @@ def test_plan_codex_bridge_does_not_wire_pre_agent_yet(fake_agent_tools, tmp_pat
     # pre-agent has; a future accidental addition here would silently contradict
     # docs/config-schema.md's stated gap.
     assert "Skill" not in str(entries)
+    # pre-worktree-enter (the EnterWorktree matcher) is CC-only too — Codex has no
+    # worktree-switching tool of its own, same undocumented-payload gap.
+    assert "EnterWorktree" not in str(entries)
 
 
 def test_plan_codex_agent_hooks_preserve_custom_target(fake_agent_tools, tmp_path):
