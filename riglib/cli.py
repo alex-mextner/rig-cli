@@ -65,6 +65,18 @@ def _dim(s: str) -> str:
     return _c("2", s)
 
 
+def _dim_cmd(cmd: list[str]) -> str:
+    """Dim-render a shell command for copy-paste display.
+
+    ``shlex.join`` (never a bare ``' '.join``): a too-old-textual install spec can carry
+    ``textual>=0.66`` — an unquoted ``>`` in copy-pasted shell text is a redirection
+    operator, not a version comparator, and would silently strip the very constraint the
+    command exists to enforce (plus create a stray file named ``=0.66``). One helper for
+    every command-display site so this policy can't drift out of sync at any one of them.
+    """
+    return _dim(shlex.join(cmd))
+
+
 def _bold(s: str) -> str:
     return _c("1", s)
 
@@ -87,14 +99,21 @@ def _err_block(exc: Exception) -> str:
 
 
 def _missing_tui_deps() -> list[str]:
-    """Which of the wizard's two CORE deps (textual, rich) are actually absent, by name.
+    """Which of the wizard's two CORE deps (textual, rich) need (re)installing, by name.
 
-    ``_tui_importable()`` fails when EITHER is missing — naming the wrong one in a user-facing
-    message (e.g. always saying "textual" when only `rich` is absent) gives contradictory
-    guidance, since the install command built alongside it correctly targets whatever is
-    actually missing. Order matches ``DEPENDENCIES`` in doctor.py for a stable message.
+    ``_tui_importable()`` fails when EITHER is missing OR ``textual`` is too old — naming the
+    wrong one in a user-facing message (e.g. always saying "textual" when only `rich` is
+    absent) gives contradictory guidance, since the install command built alongside it
+    correctly targets whatever actually needs fixing. A too-old ``textual`` is reported here
+    as "textual" too (not a separate case): the fix is the same reinstall either way, and
+    every caller's messaging already treats this list as "run the install command below" —
+    see ``doctor.textual_too_old()`` for the version check itself (single source of truth,
+    shared with `rig doctor`'s own report). Order matches ``DEPENDENCIES`` in doctor.py for a
+    stable message.
     """
     import importlib.util
+
+    from .doctor import textual_too_old
 
     names = []
     for mod in ("textual", "rich"):
@@ -102,29 +121,35 @@ def _missing_tui_deps() -> list[str]:
             present = importlib.util.find_spec(mod) is not None
         except (ImportError, ValueError):
             present = False
-        if not present:
+        if not present or (mod == "textual" and textual_too_old()):
             names.append(mod)
     return names
 
 
 def _tui_importable() -> bool:
-    """True when the wizard's deps (textual + rich) are importable.
+    """True when the wizard's deps are importable AND new enough to actually run the wizard.
 
     ``textual`` + ``rich`` are CORE runtime dependencies (pyproject ``[project].dependencies``),
     so every canonical install (`pipx install rig-cli`, `uv tool install rig-cli`, `pip install
-    rig-cli`) brings them and this is normally True. It can be False only on a genuinely broken
-    environment (a partial / corrupt install); when it is, `rig init` degrades to a one-line
-    message + a non-destructive preview instead of crashing. Pure spec lookup (no import side
-    effects) so the check never drags textual into the process when it is absent. ``find_spec``
-    itself can raise (``ModuleNotFoundError`` on a missing parent package, ``ValueError`` on a
-    half-written ``__spec__``), so it is caught: this predicate must never throw.
+    rig-cli`) brings them and this is normally True. It can be False on a genuinely broken
+    environment (a partial / corrupt install) OR on a present-but-too-old ``textual`` (a distro
+    package, a stale pre-floor-bump venv, see ``doctor.textual_too_old()``); either way `rig
+    init` degrades to a one-line message + a non-destructive preview instead of launching a
+    wizard that crashes mid-Apply. Pure spec lookup (no import side effects) so the check
+    never drags textual into the process when it is absent. ``find_spec`` itself can raise
+    (``ModuleNotFoundError`` on a missing parent package, ``ValueError`` on a half-written
+    ``__spec__``), so it is caught: this predicate must never throw.
     """
     import importlib.util
 
+    from .doctor import textual_too_old
+
     try:
-        return all(importlib.util.find_spec(m) is not None for m in ("textual", "rich"))
+        if any(importlib.util.find_spec(m) is None for m in ("textual", "rich")):
+            return False
     except (ImportError, ValueError):
         return False
+    return not textual_too_old()
 
 
 def _tui_opted_out() -> bool:
@@ -1159,15 +1184,27 @@ def _persist_rig_yaml(pending_write, repo_yaml: Path) -> None:
     print(_ok(f"wrote {repo_yaml}  (from {payload})"))
 
 
-def _print_init_next_steps(*, config_exists: bool, reason: str) -> None:
+def _print_init_next_steps(
+    *,
+    config_exists: bool,
+    reason: str,
+    textual_is_too_old: bool = False,
+    missing_names: list[str] | None = None,
+) -> None:
     """The 'nothing was done — here is how to proceed' block for the no-TUI PREVIEW path.
 
     The last line is ``reason``-aware: under ``no-textual`` rig's environment is missing its
-    own core dep (textual ships WITH rig) and we point at the real fix — which, on a modern
-    PEP-668 externally-managed Python, is NOT the same one-liner as on a managed install (see
-    the fallback branch below); under ``no-tui`` the user opted out (``--no-tui`` /
-    ``RIG_NO_TUI``) so we point at dropping the flag; under ``no-tty`` (piped / CI / agent) the
-    wizard can't run at all, so we point at a real terminal.
+    own core dep (textual ships WITH rig), OR has a present-but-too-old one
+    (``textual_is_too_old`` — computed once by the caller, ``_setup_preview_no_tui``, which
+    already needs the same fact for its diagnosis line; not re-derived here, a review
+    finding on the scattered-classification bug class this codebase kept re-hitting), and we
+    point at the real fix — which, on a modern PEP-668 externally-managed Python, is NOT the
+    same one-liner as on a managed install (see the fallback branch below); under ``no-tui``
+    the user opted out (``--no-tui`` / ``RIG_NO_TUI``) so we point at dropping the flag;
+    under ``no-tty`` (piped / CI / agent) the wizard can't run at all, so we point at a real
+    terminal. ``missing_names`` is likewise threaded through from the caller's ALREADY-computed
+    ``_missing_tui_deps()`` call rather than re-probing the environment a second time here for
+    the identical fact (another instance of the same review finding).
     """
     print(_bold("\nNothing was written and nothing was applied — this is a PREVIEW."))
     print("To proceed, pick one:")
@@ -1177,22 +1214,61 @@ def _print_init_next_steps(*, config_exists: bool, reason: str) -> None:
         print(f"  {_dim('•')} rig init --yes           write rig.yaml (config only; then `rig apply commit`)")
         print(f"  {_dim('•')} rig init --yes --apply   write rig.yaml AND apply the plan in one step")
     if reason == "no-textual":
-        from .doctor import break_system_packages_command_for, externally_managed
+        from .doctor import break_system_packages_command_for, externally_managed, textual_upgrade_command
 
+        # In practice `missing_names` is always non-empty here — the sole caller
+        # (`_setup_preview_no_tui`'s own body, above) already applies
+        # `_missing_tui_deps() or ["textual"]` before reaching this branch, and ALSO relies
+        # on that same non-empty list itself (the `set(missing_names) == {"textual"}` check
+        # and the diagnosis line's word-join both need it) — so it can't be removed from the
+        # caller side either. The `or ["textual"]` fallback HERE is this function's OWN
+        # defensive default, not a duplicate of the caller's: a review finding (Opus, round
+        # 19) caught that a bare `missing = missing_names` (an earlier "de-duplication" fix,
+        # round 16-18) left a latent `TypeError: 'NoneType' is not iterable` trap for any
+        # FUTURE second caller that passes the documented `None` default — this function
+        # must defend its own contract regardless of what today's one caller happens to
+        # already guarantee. (A prior comment here also named a nonexistent `cmd_init`
+        # function — round 18 — the real dispatcher is `cmd_setup`.)
+        missing = missing_names or ["textual"]
+        # `pipx install rig-cli` is NOT a clean fix without this caveat, in EITHER branch
+        # below that offers it as the "switch to a managed install" alternative:
+        # `install.sh`'s symlink shape already occupies `~/.local/bin/rig`, and pipx
+        # typically leaves an EXISTING app link alone rather than replacing it — so a bare
+        # "pipx install rig-cli" can leave the user still invoking the same broken/too-old
+        # checkout afterward (a review finding, found twice: the caveat was present in only
+        # one of the two branches that needed it). One string so the two copies can't drift
+        # apart again.
+        managed_install_line = f"  {_dim('•')} or switch to a managed install: remove ~/.local/bin/rig, then pipx install rig-cli"
         if externally_managed():
-            # `pipx install rig-cli` is NOT a clean fix here without a caveat: `install.sh`'s
-            # symlink shape already occupies `~/.local/bin/rig`, and pipx typically leaves an
-            # EXISTING app link alone rather than replacing it — so recommending pipx FIRST as
-            # "the fix" (review finding) can leave the user still invoking the same broken
-            # checkout afterward. Lead with the command that actually fixes THIS checkout.
-            missing = _missing_tui_deps() or ["textual"]
+            # Lead with the command that actually fixes THIS checkout.
             fallback = break_system_packages_command_for(missing)
             print(f"  {_dim('•')} developing on a local rig checkout? this Python refuses direct installs (PEP 668) —")
-            print(f"    {_dim('    run: ' + ' '.join(fallback))}")
-            print(f"  {_dim('•')} or switch to a managed install: remove ~/.local/bin/rig, then pipx install rig-cli")
+            print(f"        run: {_dim_cmd(fallback)}")
+            print(managed_install_line)
+        elif textual_is_too_old:
+            # A review finding: this branch used to ONLY ever suggest `pipx install rig-cli` /
+            # `uv tool install rig-cli` — fine for a genuinely ABSENT textual (a fresh managed
+            # install brings a current one), but a REINSTALL of rig into a NEW managed venv
+            # never touches an existing dev-checkout install's CURRENT interpreter, so a
+            # too-old textual there survived every re-run with the identical "too old"
+            # message — the exact remediation-loop class this whole mechanism exists to
+            # close, just reopened on this one branch.
+            print(f"  {_dim('•')} upgrade textual in THIS interpreter —")
+            print(f"        run: {_dim_cmd(textual_upgrade_command())}")
+            print(managed_install_line)
         else:
             print(f"  {_dim('•')} pipx install rig-cli   (recommended — reinstalls rig into an isolated, managed env)")
             print(f"  {_dim('•')} or: uv tool install rig-cli   (then re-run `rig init`)")
+            # A review finding: this branch's suggestions hit the SAME stale-symlink problem
+            # `managed_install_line` above exists for — a dev-checkout install
+            # (install.sh's `~/.local/bin/rig` symlink) with textual genuinely absent, on a
+            # non-managed interpreter, isn't actually fixed by either suggestion above
+            # (pipx/uv-tool create a SEPARATE managed environment and leave the existing
+            # symlink pointed at the same checkout). A direct interpreter-targeted command
+            # for this specific combination is tracked separately (rig-cli#302, not yet
+            # built) — until then, say so explicitly rather than silently implying the
+            # suggestions above always work.
+            print(f"  {_dim('•')} still broken after that? remove ~/.local/bin/rig first, then retry")
     elif reason == "no-tui":
         print(f"  {_dim('•')} drop --no-tui (and unset RIG_NO_TUI), then re-run `rig init` to choose interactively")
     else:  # no-tty: the wizard needs a real terminal; installing textual would not help here
@@ -1203,28 +1279,64 @@ def _setup_preview_no_tui(args: argparse.Namespace, *, reason: str) -> int:
     """`rig init` with no instructions and no way to run the wizard: a non-destructive PREVIEW.
 
     A bare `rig init` carries no user signal, so it must not "do a bunch of things". When the
-    wizard can't run — ``reason="no-tty"`` (piped / CI / agent), ``reason="no-textual"`` (textual
-    is missing from rig's environment — a broken install, since it ships WITH rig), or
-    ``reason="no-tui"`` (the user opted out via ``--no-tui`` / ``RIG_NO_TUI``) — we WRITE NOTHING
-    and APPLY NOTHING: we print what `rig apply` WOULD do and exactly how to proceed.
+    wizard can't run — ``reason="no-tty"`` (piped / CI / agent), ``reason="no-textual"``
+    (textual is missing from rig's environment, OR present but too old to run the wizard
+    safely — both degrade the same way, but the printed diagnosis line distinguishes them),
+    or ``reason="no-tui"`` (the user opted out via ``--no-tui`` / ``RIG_NO_TUI``) — we WRITE
+    NOTHING and APPLY NOTHING: we print what `rig apply` WOULD do and exactly how to proceed.
     """
     from .catalog import CatalogError
     from .config import ConfigError
     from .detect import detect_environment
     from .plan import PlanError
 
+    # Computed once here (when `reason == "no-textual"`) and threaded through to
+    # `_print_init_next_steps` below rather than re-derived there — a review finding on the
+    # scattered "absent vs too old" classification this codebase kept re-hitting bugs in.
+    textual_is_too_old = False
+    missing_names: list[str] = []
     if reason == "no-textual":
         # textual + rich are CORE dependencies (ship with rig) but their absence does not
         # always mean a broken install — a local dev/symlink checkout (install.sh) on a
         # PEP-668 externally-managed Python legitimately never gets them installed at all.
         # Name whichever is actually missing (could be one or both) instead of always saying
         # "textual" — `_print_init_next_steps` below gives the reason-appropriate fix either way.
-        from .doctor import externally_managed
+        import importlib.util
 
-        names = _missing_tui_deps() or ["textual"]
-        missing = f"{' + '.join(names)} {'are' if len(names) > 1 else 'is'} missing"
+        from .doctor import externally_managed, textual_too_old
+
+        missing_names = _missing_tui_deps() or ["textual"]
+        # `_missing_tui_deps()` folds "present but too old" and "genuinely absent" into the
+        # SAME list (the remediation command is the same reinstall either way — see its own
+        # docstring) — but the DIAGNOSIS line here must say which one it actually is, or a
+        # user with an old-but-installed textual goes hunting for a "missing" package that
+        # isn't missing at all (a review finding). Only textual can be "too old" (rich has no
+        # version gate), and only when it's the SOLE reported name — if rich is ALSO
+        # affected, the generic wording still applies to that combination. `textual_too_old()`
+        # ALONE isn't enough to tell "too old" from "absent" — it fails closed (True) for a
+        # genuinely absent textual too (its own documented contract) — so `find_spec` must
+        # confirm it's actually IMPORTABLE first, or a genuinely absent textual gets the
+        # "too old" wording instead (the mirror image of the bug this branch fixes; a
+        # second, independent review finding on the fix itself).
+        try:
+            textual_importable = importlib.util.find_spec("textual") is not None
+        except (ImportError, ValueError):
+            textual_importable = False
+        # `set(...)`, not a list-equality check — robust to a future reorder of
+        # `_missing_tui_deps()`'s iteration (a review finding: the order-coupled form
+        # silently depends on it always returning ["textual"] specifically, never
+        # ["rich", "textual"] for the identical single-name case).
+        textual_is_too_old = set(missing_names) == {"textual"} and textual_importable and textual_too_old()
+        if textual_is_too_old:
+            missing = "textual is too old (needs upgrading)"
+        else:
+            missing = f"{' + '.join(missing_names)} {'are' if len(missing_names) > 1 else 'is'} missing"
         if externally_managed():
             print(_warn(f"{missing} — this Python refuses direct installs (PEP 668) — showing a preview only."))
+        elif textual_is_too_old:
+            # "a broken install" is the wrong diagnosis here (a review finding) — a pacman
+            # package or a deliberately-pinned venv isn't broken, it's just below the floor.
+            print(_warn(f"{missing} — showing a preview only."))
         else:
             print(_warn(f"{missing} from rig's environment (a broken install) — showing a preview only."))
     elif reason == "no-tui":
@@ -1244,7 +1356,12 @@ def _setup_preview_no_tui(args: argparse.Namespace, *, reason: str) -> int:
         print(_err_block(exc))
         return 2
     _print_plan(plan, full=getattr(args, "plan", False), preview=True, expand_notes=getattr(args, "notes", False))
-    _print_init_next_steps(config_exists=config_exists, reason=reason)
+    _print_init_next_steps(
+        config_exists=config_exists,
+        reason=reason,
+        textual_is_too_old=textual_is_too_old,
+        missing_names=missing_names,
+    )
     return 0
 
 
@@ -2209,7 +2326,7 @@ def _print_dep_statuses(report) -> None:
         mark = _err("✗") if st.dep.required else _warn("○")
         print(f"  {mark} {st.dep.name:<12} {_dim('(' + tag + ')')}  {st.dep.why}")
         if st.install_cmd:
-            print(f"      install: {_dim(' '.join(st.install_cmd))}")
+            print(f"      install: {_dim_cmd(st.install_cmd)}")
         else:
             print(f"      {_dim('install: (no package mapping for this OS — install manually)')}")
         if st.pep668_fallback:
@@ -2220,7 +2337,7 @@ def _print_dep_statuses(report) -> None:
             # checkout) rather than switching to a pipx/uv-tool managed install.
             print(f"      {_warn('this interpreter is PEP-668 externally-managed — the command above will refuse.')}")
             print(f"      {_dim('either: pipx install rig-cli   (recommended — isolates rig cleanly)')}")
-            print(f"      {_dim('    or: ' + ' '.join(st.pep668_fallback))}")
+            print(f"          or: {_dim_cmd(st.pep668_fallback)}")
 
 
 def _handle_core_bare(do_fix: bool) -> bool:
@@ -2346,7 +2463,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             # accordingly rather than asserting a cause that isn't always true.
             print(f"        {_warn('install failed — if this interpreter refused it (PEP-668), try:')}")
             print(f"        {_dim('either: pipx install rig-cli   (recommended)')}")
-            print(f"        {_dim('    or: ' + ' '.join(fallback_by_name[name]))}")
+            print(f"            or: {_dim_cmd(fallback_by_name[name])}")
     if failed:
         # an install that left a REQUIRED dep absent is still the missing-dependency class;
         # a failed optional install is advisory (generic non-zero).
