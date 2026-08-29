@@ -59,13 +59,29 @@ fi
 # absent. NOTE: this is best-effort and non-fatal — on an externally-managed system Python
 # (PEP-668) BOTH uv and pip refuse a system-wide install, so the warning below fires and
 # `rig doctor` / a managed (uv-tool) install is the real fix.
+# textual floor is 0.66, matching pyproject.toml and riglib/doctor.py's
+# `_TEXTUAL_MIN_VERSION` (see their comments for the full rig-cli#292 story — the effective
+# floor is the max of every new Textual API surface introduced: `refresh_bindings()` needs
+# 0.63, `Button(tooltip=...)` needs 0.66). This check is presence-only (`import textual`
+# succeeds on ANY installed version), so it only fires — and only THEN installs the correct
+# >=0.66 floor — when textual is genuinely absent; a present-but-older textual is caught
+# instead by `riglib.cli._tui_importable()`'s version-aware gate at `rig init` time, which
+# degrades to a non-destructive preview + an upgrade command rather than launching a wizard
+# that crashes.
 _missing_core=()
 python3 -c 'import yaml' 2>/dev/null     || _missing_core+=("pyyaml")
-python3 -c 'import textual' 2>/dev/null  || _missing_core+=("textual>=0.50")
+python3 -c 'import textual' 2>/dev/null  || _missing_core+=("textual>=0.66")
 python3 -c 'import rich' 2>/dev/null     || _missing_core+=("rich>=13")
 if [[ "${#_missing_core[@]}" -gt 0 ]]; then
   py3="$(command -v python3)"
-  pkgs="${_missing_core[*]}"
+  # Shell-quote each package name for DISPLAY (printf %q), not a bare space-joined "${arr[*]}"
+  # — "textual>=0.66" echoed unquoted has a bare `>`, which is a redirection operator when
+  # copy-pasted into a shell (silently truncates the package list AND creates a stray file
+  # named "=0.66"). The EXECUTED commands below already use safe array expansion
+  # ("${_missing_core[@]}"); this only fixes what a human reads and might copy-paste — the
+  # same hazard `_dim_cmd` in riglib/cli.py exists to close on the Python side of this diff.
+  pkgs=$(printf '%q ' "${_missing_core[@]}")
+  pkgs="${pkgs% }"  # strip the trailing separator printf's loop leaves behind
   if command -v uv >/dev/null 2>&1; then
     echo "rig: core deps missing, attempting: uv pip install --python $py3 $pkgs"
     uv pip install --python "$py3" "${_missing_core[@]}" 2>/dev/null && _core_ok=1

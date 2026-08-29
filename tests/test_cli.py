@@ -505,6 +505,16 @@ def test_textual_fallback_previews_and_writes_nothing(tmp_path, capsys, fake_age
     # host state (this box may genuinely be missing textual/rich, or not) must not leak in.
     monkeypatch.setattr("riglib.doctor.externally_managed", lambda: False)
     monkeypatch.setattr("riglib.cli._missing_tui_deps", lambda: ["textual"])
+    # Pin the absent-vs-too-old classification too (a review finding, k3, round 20):
+    # `_setup_preview_no_tui` does its OWN `find_spec`/`textual_too_old()` re-derivation on
+    # top of the mocked `_missing_tui_deps` above (to tell "genuinely absent" from
+    # "present but too old" for the diagnosis wording) — on a host where textual happens to
+    # be genuinely INSTALLED but BELOW the 0.66 floor (a realistic "stale pre-floor-bump
+    # venv" state, exactly the population rig-cli#292 targets), the real `textual_too_old()`
+    # would return True and flip this test to the wrong branch/wording for an environment
+    # reason, not a code bug — the same "fails for the wrong reason" class this diff already
+    # fixes in several sibling tests.
+    monkeypatch.setattr("riglib.doctor.textual_too_old", lambda: False)
     repo = tmp_path / "repo"
     repo.mkdir()
     rc = main(["init", "-C", str(repo)])
@@ -567,6 +577,116 @@ def test_textual_fallback_pep668_offers_break_system_packages(tmp_path, capsys, 
     assert not (tmp_path / "home" / ".agents" / "skills").exists()
 
 
+def test_textual_fallback_pep668_upgrades_a_too_old_textual(tmp_path, capsys, fake_agent_tools, monkeypatch):
+    """Regression for the "remediation loop" review finding: a present-but-too-old textual
+    routes through the same "missing" messaging as a genuinely absent one, but the printed
+    fallback command must actually carry a version floor (`textual>=0.66`) -- a bare
+    `pip install textual` against an already-installed 0.55 reports "already satisfied" and
+    fixes nothing, leaving the user stuck seeing the identical message on every re-run. Also
+    asserts the printed command is SHELL-QUOTED (`'textual>=0.66'`, not a bare `>`) -- an
+    unquoted `>` in copy-pasted shell text is a redirection operator that would silently strip
+    the version constraint on paste. And asserts the DIAGNOSIS line itself says "too old", not
+    "missing" -- a review finding: a user with an old-but-installed textual would otherwise go
+    hunting for a "missing" package that isn't missing at all.
+
+    `importlib.util.find_spec` is explicitly mocked (not left to the real interpreter) --
+    a review finding: an earlier version of this test relied on textual actually being
+    importable in the TEST process to reach the "too old" wording branch at all, so it
+    would fail for the WRONG reason (environment mismatch, not a real bug) in a hermetic
+    venv without textual installed -- exactly the posture `test_tui_wizard.py` defends
+    with its own `pytest.importorskip("textual")`."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: False)
+    monkeypatch.setattr("riglib.doctor.externally_managed", lambda: True)
+    monkeypatch.setattr("riglib.doctor.textual_too_old", lambda: True)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr("riglib.cli._missing_tui_deps", lambda: ["textual"])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "'textual>=0.66'" in out  # shell-quoted (shlex.join), not a bare unquoted `>`
+    assert "textual is too old" in out
+    assert "textual is missing" not in out
+
+
+def test_textual_fallback_says_missing_not_too_old_when_genuinely_absent(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    """Regression for a review finding on the "too old" wording fix itself: `textual_too_old()`
+    fails closed (True) for a genuinely absent textual too (its own documented contract, since
+    `PackageNotFoundError` can't be told apart from "importable but unparseable" without also
+    checking `find_spec`) -- so gating the "too old" wording on `textual_too_old()` alone
+    mislabels a genuinely absent textual as "too old" instead of "missing", the mirror image
+    of the bug this wording distinction exists to fix. Must check `find_spec` first."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: False)
+    monkeypatch.setattr("riglib.doctor.externally_managed", lambda: False)
+    # the REAL-WORLD state for genuine absence: find_spec fails, and textual_too_old() fails
+    # closed (True) as its own contract documents -- do NOT mock textual_too_old itself, or
+    # this test can't distinguish the bug from the fix.
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    monkeypatch.setattr("riglib.cli._missing_tui_deps", lambda: ["textual"])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "textual is missing" in out
+    assert "textual is too old" not in out
+
+
+def test_textual_too_old_non_pep668_gets_a_direct_upgrade_command(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    """Regression for a review finding: on a NON-externally-managed interpreter (pyenv, the
+    python.org macOS installer, asdf -- none carry PEP 668's marker), a present-but-too-old
+    textual used to get ONLY the generic "pipx install rig-cli" / "uv tool install rig-cli"
+    reinstall suggestions -- neither of which upgrades textual in a dev-checkout's CURRENT
+    interpreter (a fresh pipx/uv-tool install creates a SEPARATE managed environment that
+    never touches the running symlinked checkout at all, the diff's own PEP-668-branch
+    comment already explains this for that branch). The user was stuck reproducing the
+    identical "too old" diagnosis on every re-run -- the exact remediation-loop class this
+    whole mechanism exists to close, just reopened on the one branch that lacked the fix."""
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("RIG_NO_TUI", raising=False)
+
+    monkeypatch.setattr("riglib.setup_wizard.is_interactive", lambda: True)
+    monkeypatch.setattr("riglib.cli._tui_importable", lambda: False)
+    monkeypatch.setattr("riglib.doctor.externally_managed", lambda: False)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr("riglib.doctor.textual_too_old", lambda: True)
+    monkeypatch.setattr("riglib.cli._missing_tui_deps", lambda: ["textual"])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rc = main(["init", "-C", str(repo)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "textual is too old" in out
+    assert "'textual>=0.66'" in out  # a real, executable upgrade command for THIS interpreter
+    assert "pipx install rig-cli" in out  # still offered as the alternative
+    # a review finding: the alternative needs the SAME "remove ~/.local/bin/rig first"
+    # caveat the PEP-668 branch already has -- a bare "pipx install rig-cli" leaves an
+    # existing dev-checkout symlink pointed at the same too-old install.
+    assert "remove ~/.local/bin/rig" in out
+    # a review finding: "a broken install" is the wrong diagnosis for "too old" -- a pacman
+    # package or a deliberately-pinned venv isn't broken.
+    assert "a broken install" not in out
+
+
 def test_textual_fallback_names_the_dep_actually_missing(tmp_path, capsys, fake_agent_tools, monkeypatch):
     """`_tui_importable()` fails when EITHER textual OR rich is absent — with textual present
     and only rich missing, the message must say "rich", never hardcode "textual" (review
@@ -590,15 +710,82 @@ def test_textual_fallback_names_the_dep_actually_missing(tmp_path, capsys, fake_
 
 
 def test_missing_tui_deps_real_check_against_this_interpreter():
-    """Unmocked: `_missing_tui_deps()`'s real `find_spec` path returns exactly the subset of
-    {"textual", "rich"} genuinely importable in THIS process — every other test monkeypatches
-    this function away, so exercise the real implementation at least once."""
+    """Unmocked: `_missing_tui_deps()`'s real `find_spec` + version-gate path returns exactly
+    the subset of {"textual", "rich"} that genuinely can't run the wizard in THIS process —
+    every other test monkeypatches this function away, so exercise the real implementation at
+    least once. Regression for a review finding: the ORIGINAL version of this test computed
+    its expectation from `find_spec` alone, which encoded the pre-rig-cli#292 contract — on
+    any interpreter with a genuinely-installed-but-too-old textual (a CI image pinned below
+    the 0.66 floor), that would fail while the implementation was behaving correctly; folding
+    `doctor.textual_too_old()` into the expectation matches the real contract everywhere."""
     import importlib.util
 
+    from riglib import doctor
     from riglib.cli import _missing_tui_deps
 
-    expected = [m for m in ("textual", "rich") if importlib.util.find_spec(m) is None]
+    expected = [
+        m
+        for m in ("textual", "rich")
+        if importlib.util.find_spec(m) is None or (m == "textual" and doctor.textual_too_old())
+    ]
     assert _missing_tui_deps() == expected
+
+
+def test_missing_tui_deps_reports_textual_when_present_but_too_old(monkeypatch):
+    """Regression for rig-cli#292: `refresh_bindings()` (called by the wizard's
+    `_set_controls_enabled`) was added to Textual between 0.60 and 0.63 -- a present-but-older
+    textual (a distro package, a stale pre-floor-bump venv) must be reported as needing
+    (re)install, not silently treated as satisfied just because it imports.
+
+    Mock `find_spec` explicitly too (a review finding, round 18: an earlier version of this
+    test mocked only `textual_too_old`, so on a hermetic venv without textual installed at
+    all, `find_spec` returns None and textual lands in the list via the ABSENT path instead
+    -- the test passes green without the mocked `textual_too_old` ever actually deciding
+    anything, the same "passes for the wrong reason" class the sibling test right below
+    documents and fixes)."""
+    from riglib.cli import _missing_tui_deps
+
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr("riglib.doctor.textual_too_old", lambda: True)
+    assert "textual" in _missing_tui_deps()
+
+
+def test_missing_tui_deps_omits_textual_when_new_enough(monkeypatch):
+    """`textual_too_old` alone doesn't gate whether textual is reported missing --
+    `_missing_tui_deps` ALSO does a real `find_spec("textual")` first (a review finding:
+    an earlier version of this test relied on textual actually being importable in the
+    TEST process to reach the "not missing" branch, so it would fail for the WRONG reason
+    -- environment mismatch, not a real bug -- in a hermetic venv without textual
+    installed). Mock `find_spec` explicitly rather than relying on the real interpreter."""
+    from riglib.cli import _missing_tui_deps
+
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr("riglib.doctor.textual_too_old", lambda: False)
+    assert "textual" not in _missing_tui_deps()
+
+
+def test_tui_importable_false_when_textual_present_but_too_old(monkeypatch):
+    """The other half of the same regression: `_tui_importable()` -- the gate `cmd_setup`
+    actually checks before launching the wizard -- must refuse a too-old textual too, not just
+    report it in the diagnostic list. Without this, `rig init` launches a wizard that crashes
+    mid-Apply the moment `_set_controls_enabled` calls `refresh_bindings()`."""
+    import importlib.util
+
+    from riglib.cli import _tui_importable
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr("riglib.doctor.textual_too_old", lambda: True)
+    assert _tui_importable() is False
+
+
+def test_tui_importable_true_when_present_and_new_enough(monkeypatch):
+    import importlib.util
+
+    from riglib.cli import _tui_importable
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr("riglib.doctor.textual_too_old", lambda: False)
+    assert _tui_importable() is True
 
 
 def test_textual_and_rich_are_core_dependencies():
@@ -620,6 +807,69 @@ def test_textual_and_rich_are_core_dependencies():
     assert "rich" in names, f"rich must be a core dep, got {deps}"
     # the old optional `[tui]` extra is gone — it is no longer an opt-in step.
     assert "tui" not in data["project"].get("optional-dependencies", {})
+
+
+def test_textual_floor_matches_across_pyproject_install_sh_and_doctor():
+    """The `textual>=X.Y` floor is spelled out in THREE places that must never drift apart
+    (each carries its own comment saying so, but nothing enforced it): `pyproject.toml`'s
+    `dependencies`, `install.sh`'s first-bootstrap probe, and `riglib.doctor._TEXTUAL_MIN_VERSION`
+    (the actual runtime gate `_tui_importable`/`textual_too_old` compare against). A future
+    edit to only one or two of the three would silently reopen the rig-cli#292 crash for
+    whichever site fell behind."""
+    import re
+    from pathlib import Path
+
+    from riglib import doctor
+
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    repo_root = Path(__file__).resolve().parent.parent
+    floor_str = ".".join(str(n) for n in doctor._TEXTUAL_MIN_VERSION)
+
+    pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    deps = pyproject["project"]["dependencies"]
+    textual_dep = next(d for d in deps if d.split(">")[0].split("=")[0].strip().lower() == "textual")
+    assert textual_dep == f"textual>={floor_str}", (
+        f"pyproject.toml's textual floor ({textual_dep!r}) is out of sync with "
+        f"doctor._TEXTUAL_MIN_VERSION ({floor_str!r})"
+    )
+
+    install_sh = (repo_root / "install.sh").read_text(encoding="utf-8")
+    match = re.search(r'_missing_core\+=\("textual>=([0-9.]+)"\)', install_sh)
+    assert match is not None, "install.sh's textual floor entry not found in the expected form"
+    assert match.group(1) == floor_str, (
+        f"install.sh's textual floor ({match.group(1)!r}) is out of sync with "
+        f"doctor._TEXTUAL_MIN_VERSION ({floor_str!r})"
+    )
+
+
+def test_install_sh_echoes_missing_deps_shell_quoted_not_raw_star_join():
+    """Regression for a review finding (GLM-cc-last, round 21): `install.sh`'s copy-paste
+    safety fix (`pkgs=$(printf '%q ' "${_missing_core[@]}")` instead of the bare
+    `"${_missing_core[*]}"` join) had zero test coverage -- the floor-sync test above only
+    regexes the EXECUTED probe line, never the DISPLAYED one. A future "simplification"
+    reverting to the bare join would pass the whole suite green while reopening the exact
+    bug the fix exists to close: an unquoted `>` in an echoed `textual>=0.66` is a shell
+    redirection operator when copy-pasted, silently truncating the package list and
+    creating a stray file named `=0.66`. Pin the SOURCE shape directly (a real shell
+    invocation would need `import textual` etc. to actually be absent, which isn't
+    reliable/hermetic in a unit test -- the source-shape check is what's actionable here)."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    install_sh = (repo_root / "install.sh").read_text(encoding="utf-8")
+
+    assert "printf '%q '" in install_sh, (
+        "install.sh no longer shell-quotes the displayed missing-deps list via printf %q"
+    )
+    # the raw `[*]`-join form must not reappear anywhere in an echoed line (it's fine, and
+    # still present, in the EXECUTED `"${_missing_core[@]}"` array-expansion form).
+    assert '"${_missing_core[*]}"' not in install_sh, (
+        "install.sh reverted to the unquoted bare space-joined display form"
+    )
 
 
 def test_init_tty_launches_tui_directly_no_install_step(tmp_path, capsys, fake_agent_tools, monkeypatch):

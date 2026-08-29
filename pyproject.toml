@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rig-cli"
-version = "0.30.0"
+version = "0.31.0"
 description = "rig — the dev-environment umbrella driver: set up a repo from a committed rig.yaml by applying agent-tools content (skills, hooks, CI gates, MCP)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,7 +18,17 @@ authors = [{ name = "Alex Mextner" }]
 #     rig-cli`, `pip install rig-cli` — brings the wizard. `rig init` from a terminal launches
 #     it with NO extra install step and NO "go install textual yourself" hint.
 #   • rich     — the `rig stats show --format tui` report (degrades to plain text when absent).
-dependencies = ["pyyaml", "textual>=0.50", "rich>=13"]
+# textual floor is 0.66 (not 0.50): `_set_controls_enabled()` in riglib/tui/app.py calls
+# `self.refresh_bindings()`, an App/Screen method Textual added between 0.60 and 0.63 — on an
+# older-but->=0.50-satisfying install, clicking Apply writes rig.yaml/the backup and THEN raises
+# AttributeError before the worker starts (review finding, rig-cli#292). `compose()` ALSO
+# passes `tooltip=` to `Button(...)`, a constructor kwarg added later still (confirmed absent
+# in 0.65.2, present starting 0.66.0 — a second review finding: 0.63 alone still let the
+# wizard launch and crash at `compose()` on textual 0.63–0.65, the same bug class relocated
+# to an earlier point). Keep this floor in sync with riglib/doctor.py's
+# `_TEXTUAL_MIN_VERSION` and install.sh's probe (see their comments) — the effective floor is
+# the max of every new Textual API surface this PR introduces, not just the first one found.
+dependencies = ["pyyaml", "textual>=0.66", "rich>=13"]
 
 [project.optional-dependencies]
 test = ["pytest", "tomli; python_version < '3.11'"]
