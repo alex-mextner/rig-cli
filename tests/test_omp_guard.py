@@ -934,7 +934,9 @@ def test_cmd_doctor_probe_exit_codes(tmp_path, monkeypatch, capsys):
 
     args = argparse.Namespace(yes=False, optional=False, fix=False)
     monkeypatch.setattr(cli, "_handle_core_bare", lambda do_fix: False)
-    monkeypatch.setattr(cli, "_scan_missing_targets", lambda settings_paths=None: [])
+    from riglib import drift as _drift
+
+    monkeypatch.setattr(_drift, "scan_missing_targets", lambda settings_paths=None: [])
 
     # cmd_doctor lazy-imports from the modules, so patch there, not on cli's namespace
     import riglib.doctor
@@ -1182,7 +1184,9 @@ def test_cmd_doctor_failed_probe_yields_to_missing_required_dep(tmp_path, monkey
 
     args = argparse.Namespace(yes=False, optional=False, fix=False)
     monkeypatch.setattr(cli, "_handle_core_bare", lambda do_fix: False)
-    monkeypatch.setattr(cli, "_scan_missing_targets", lambda settings_paths=None: [])
+    from riglib import drift as _drift
+
+    monkeypatch.setattr(_drift, "scan_missing_targets", lambda settings_paths=None: [])
     real = diagnose()
     report = DoctorReport(os=real.os, statuses=real.statuses)
     # force a required dep missing

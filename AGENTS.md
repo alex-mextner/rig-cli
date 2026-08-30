@@ -50,18 +50,35 @@ the write or the catalog-backed plan build fails. `--global` targets the global 
 `--no-apply` writes the key and prints the plan only; a repo-local `set` refuses when `./rig.yaml`
 is absent (run `rig init` first). The dot-path engine lives in `riglib/config.py`.
 
-**`rig config-web` is the WEB front-end onto the same config engine** — a third surface beside
-the wizard and `config get|set`, never a parallel implementation. It serves a local `http.server`
-page (`riglib/config_web.py`) that renders every area from the SAME registry (`riglib/schema.py`,
-via `effective_value`) over the cascaded config, and an edit POSTs to `/edit` → `apply_edit`,
-which coerces + validates fail-closed and writes through the SAME `SetupState` serializer
-`config set` uses, routed to the OWNING layer (REPO → `./rig.yaml`, GLOBAL-only → the global
-config). It does NOT run `rig apply` (you reconcile explicitly). Its lifecycle
-(`run`/`start`/`stop`/`status`/`enable`/`disable` + launchd/systemd autostart) is delegated to the
-SHARED `agenttools-service` lib — NOT hand-rolled here; the seam is `riglib/config_web_service.py`
-(lazy-imports the lib so `rig --help` works without it, failing closed with a `MissingDepError`
-when a lifecycle verb actually needs it). The server binds `127.0.0.1` only and refuses cross-site
-(CSRF) writes. A bare `rig config-web` prints help, never launches.
+**`rig config-web` is the WEB front-end onto the same config + apply engine** — a fourth surface
+beside the wizard, `config get|set`, and `rig apply` itself, never a parallel implementation. It
+serves a local `http.server` MACHINE-WIDE console (`riglib/config_web.py`): one browser tab per
+rig-managed repo (discovered read-only from the repository registry via
+`riglib/config_web_scopes.py`) plus a dedicated Global tab (`~/.config/rig/config.yaml` alone, no
+repo overlay). Each tab renders every area from the SAME registry (`riglib/schema.py`, via
+`effective_value`) over the cascaded config, plus a DRIFT panel next to the settings
+(`riglib/config_web_plan.py`'s `compute_scope_drift`, which delegates to the SAME
+`compute_drift_report` helper `rig status` uses). An edit POSTs to `/edit` → `apply_edit`, which
+coerces + validates fail-closed and writes through the SAME `SetupState` serializer `config set`
+uses, routed to the OWNING layer (REPO → that scope's `./rig.yaml`, GLOBAL-only → the global
+config); `apply_edit` itself still does NOT run `rig apply`. Reconciling is now INTERACTIVE
+instead of a silent no-op: the browser offers a plan preview (`POST /api/plan`, mirroring `rig
+apply info` via the exact same `plan.build()` call, each action tagged by
+`riglib/action_tags.py`'s taxonomy — keyed off the real handler kinds in
+`riglib/actions/runner.py`'s `_HANDLERS`, with a completeness test pinning it), lets you confirm
+the whole plan or skip individual actions, then applies the SELECTED actions
+(`POST /api/apply` → `riglib/config_web_plan.py`'s `ApplyJobStore`, which calls the SAME
+`riglib.actions.runner.run_plan` — never a forked executor) with live per-phase progress polled
+via `GET /api/apply/status` (reusing `run_plan`'s existing `on_start`/`progress` callbacks, the
+same mechanism the `rig init` TUI's live Apply screen uses). A stale plan (config changed since
+preview) is refused by fingerprint mismatch; only one apply job runs process-wide at a time; every
+multi-repo endpoint validates its `scope` against the server's discovered-repo allowlist. Its
+lifecycle (`run`/`start`/`stop`/`status`/`enable`/`disable` + launchd/systemd autostart) is
+delegated to the SHARED `agenttools-service` lib — NOT hand-rolled here; the seam is
+`riglib/config_web_service.py` (lazy-imports the lib so `rig --help` works without it, failing
+closed with a `MissingDepError` when a lifecycle verb actually needs it). The server binds
+`127.0.0.1` only and refuses cross-site (CSRF) writes on every mutating/compute-triggering POST. A
+bare `rig config-web` prints help, never launches.
 
 ## Hard rules
 

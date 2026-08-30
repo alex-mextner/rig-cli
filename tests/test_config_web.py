@@ -1017,3 +1017,49 @@ def test_install_hint_targets_rig_interpreter_via_uv():
     assert "-e <agent-tools>/lib/agenttools_daemon" in hint
     assert "-e <agent-tools>/lib/agenttools_service" in hint
     assert "uv pip install -e" not in hint
+
+
+# -- global-only scope (rig-cli#310) ------------------------------------------------------------
+def test_build_model_global_only_omits_repo_layer_areas(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # a repo-layer field (harness.auto_mode) is written in the repo file -- must NOT leak into
+    # the global-only model, and must not affect it even though it's present on disk.
+    _write_repo_config(repo, "version: 1\nharness:\n  auto_mode: false\n")
+
+    model = cw.build_model(repo, global_only=True)
+    cats = {a.category for a in model.areas}
+    # only the writable-GLOBAL categories (schema._GLOBAL_ONLY_CATEGORIES)
+    assert cats <= {"gitignore", "spotlight", "tg_ctl", "tmux", "mode"}
+    assert "harness" not in cats
+    assert "skills" not in cats
+    assert model.global_only is True
+
+
+def test_build_model_global_only_shows_mode_option(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    model = cw.build_model(repo, global_only=True)
+    mode_area = next((a for a in model.areas if a.category == "mode"), None)
+    assert mode_area is not None, "the mode area (standard/autonomous) must render on the Global tab"
+
+
+def test_build_model_global_only_never_reads_repo_rigyaml(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # a MALFORMED repo rig.yaml would blow up cfg.load() if the global-only path touched it
+    (repo / "rig.yaml").write_text("not: [valid: yaml: at all", encoding="utf-8")
+    model = cw.build_model(repo, global_only=True)  # must not raise
+    assert model.global_only is True
