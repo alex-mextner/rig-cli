@@ -1042,3 +1042,92 @@ def test_usage_substring_pregate_skips_non_usage_lines_without_crashing(tmp_path
     records = list(iter_usage_records(home=tmp_path))
     assert len(records) == 1
     assert records[0].input_tokens == 100
+
+
+# ── delegated-agent (subagent/fork/workflow) transcripts ────────────────────────────
+def test_iter_session_files_finds_subagent_transcripts_nested_under_a_session(tmp_path):
+    """Regression (GitHub PR review bot, then confirmed against real logs on this
+    machine): Claude Code stores delegated-agent transcripts under
+    <project>/<session-uuid>/subagents/*.jsonl — a real, sometimes dominant, fraction of
+    total usage that a flat *.jsonl glob at the project directory level silently missed
+    entirely. Confirmed on this machine: fixing this raised one week's reported total
+    token count by roughly 8.5x."""
+    proj = tmp_path / ".claude" / "projects" / "-Users-ultra-xp-rig-cli"
+    proj.mkdir(parents=True)
+    # top-level session file
+    (proj / "session-uuid.jsonl").write_text(
+        _usage_event("2026-08-25T10:00:00Z", "claude-sonnet-5", "m1", "r1", input_tokens=100, output_tokens=50)
+        + "\n",
+        encoding="utf-8",
+    )
+    # a subagent transcript nested under <session-uuid>/subagents/
+    subagents_dir = proj / "session-uuid" / "subagents"
+    subagents_dir.mkdir(parents=True)
+    (subagents_dir / "agent-abc123.jsonl").write_text(
+        _usage_event("2026-08-25T10:05:00Z", "claude-sonnet-5", "m2", "r2", input_tokens=200, output_tokens=75)
+        + "\n",
+        encoding="utf-8",
+    )
+    records = list(iter_usage_records(home=tmp_path))
+    total_input = sum(r.input_tokens for r in records)
+    assert len(records) == 2
+    assert total_input == 300  # both the main session AND the subagent transcript counted
+
+
+def test_iter_session_files_finds_workflow_transcripts_nested_two_levels_deep(tmp_path):
+    """A workflow-tool run nests one level deeper still:
+    <session-uuid>/subagents/workflows/<run-id>/*.jsonl — also confirmed on real logs."""
+    proj = tmp_path / ".claude" / "projects" / "-Users-ultra-xp-rig-cli"
+    proj.mkdir(parents=True)
+    workflow_dir = proj / "session-uuid" / "subagents" / "workflows" / "wf-123"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "journal.jsonl").write_text(
+        _usage_event("2026-08-25T10:00:00Z", "claude-sonnet-5", "m1", "r1", input_tokens=50, output_tokens=25)
+        + "\n",
+        encoding="utf-8",
+    )
+    records = list(iter_usage_records(home=tmp_path))
+    assert len(records) == 1
+    assert records[0].input_tokens == 50
+
+
+def test_iter_session_files_ignores_non_transcript_jsonl_shape_safely(tmp_path):
+    """A workflow directory can hold non-transcript `.jsonl` files (e.g. a bare progress
+    journal with a different shape) — the recursive walk picks the FILE up, but the
+    per-line shape checks in `_iter_session_records` filter it out safely, never
+    mistaking unrelated JSON for usage."""
+    proj = tmp_path / ".claude" / "projects" / "-Users-ultra-xp-rig-cli"
+    proj.mkdir(parents=True)
+    workflow_dir = proj / "session-uuid" / "subagents" / "workflows" / "wf-123"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "not-a-transcript.jsonl").write_text(
+        json.dumps({"step": "started", "at": "2026-08-25T10:00:00Z"}) + "\n",
+        encoding="utf-8",
+    )
+    records = list(iter_usage_records(home=tmp_path))
+    assert records == []
+
+
+def test_parent_session_and_subagent_transcript_share_a_message_id_deduped_once(tmp_path):
+    """Regression (Opus + GLM review, round 6): recursing into subagents/ raised the risk
+    that the SAME message appears in both the parent session file and its own subagent
+    transcript (confirmed on real logs on this machine: 42 message ids shared between a
+    session's parent file and its subagents/ files, always with byte-identical usage
+    figures). The pre-existing GLOBAL (cross-file) dedup in `iter_usage_records` must
+    collapse this to one record, not two — proving the recursive walk fixed an undercount
+    rather than trading it for an overcount."""
+    proj = tmp_path / ".claude" / "projects" / "-Users-ultra-xp-rig-cli"
+    proj.mkdir(parents=True)
+    shared_event = _usage_event(
+        "2026-08-25T10:00:00Z", "claude-sonnet-5", "msg_shared", "req_shared", input_tokens=500, output_tokens=200
+    )
+    # parent session file
+    (proj / "session-uuid.jsonl").write_text(shared_event + "\n", encoding="utf-8")
+    # the SAME message, same id/requestId, byte-identical figures, in a subagent transcript
+    subagents_dir = proj / "session-uuid" / "subagents"
+    subagents_dir.mkdir(parents=True)
+    (subagents_dir / "agent-x.jsonl").write_text(shared_event + "\n", encoding="utf-8")
+
+    records = list(iter_usage_records(home=tmp_path))
+    assert len(records) == 1  # deduped across files, not double-counted
+    assert records[0].input_tokens == 500  # not 1000

@@ -1,13 +1,15 @@
 """``rig usage`` — real Claude token/cost usage across the accounts on this machine.
 
 Data source: per-message ``usage`` records written by Claude Code itself, one JSON object
-per line, under a fixed two-level layout (the same layout
-``riglib/stats/sources/claude_code.py`` assumes for the same on-disk format — verified
-directly against real logs on this machine, not `**`-glob-recursive):
+per line, under (genuinely recursive — see :func:`_iter_session_files`'s docstring for why
+a fixed-depth assumption was tried and found wrong on real logs):
 
-  * ``~/.claude/projects/<encoded-project-dir>/<session-uuid>.jsonl`` (the "default" account)
-  * ``~/.claude-accounts/account-*/projects/<encoded-project-dir>/<session-uuid>.jsonl``
-    (each claude-rotate account)
+  * ``~/.claude/projects/**/*.jsonl`` (the "default" account) — a top-level session file
+    (``<encoded-project-dir>/<session-uuid>.jsonl``) plus, per session, however many
+    delegated-agent transcripts it spawned (``<session-uuid>/subagents/*.jsonl``,
+    ``<session-uuid>/subagents/workflows/<run>/*.jsonl``)
+  * ``~/.claude-accounts/account-*/projects/**/*.jsonl`` (each claude-rotate account, same
+    nested layout)
 
 Each line that carries token usage has ``message.usage.{input_tokens,output_tokens,
 cache_creation_input_tokens,cache_read_input_tokens}``, ``message.model``, a top-level
@@ -379,10 +381,41 @@ def _iter_session_records(session_file: Path, account: str) -> Iterator[tuple[by
 
 
 def _iter_session_files(root: Path) -> Iterator[Path]:
-    """Every ``*.jsonl`` under ``root``'s project subdirectories, guarded end to end
-    against ``OSError`` (permission changes, or the directory vanishing mid-scan) so one
-    unreadable account never aborts the whole command — the remaining accounts still
-    report."""
+    """Every ``*.jsonl`` under ``root``'s project subdirectories, at ANY depth — guarded
+    end to end against ``OSError`` (permission changes, or a directory vanishing
+    mid-scan) so one unreadable account never aborts the whole command — the remaining
+    accounts still report.
+
+    Genuinely recursive (``rglob``, not a fixed-depth ``glob``): a top-level session file
+    is not the only place usage lives. Confirmed on a real, live machine — a single
+    active session directory held over 100 delegated-agent (subagent/fork) transcripts
+    under ``<session>/subagents/*.jsonl``, and workflow-tool runs go one level deeper
+    still, ``<session>/subagents/workflows/<run>/*.jsonl`` — both with the exact same
+    ``message.usage`` shape as a top-level session file. A fixed two-level assumption
+    (this module briefly carried one, matching ``stats/sources/claude_code.py``'s
+    parser, which shares the same gap — tracked as rig-cli#316) silently missed all of
+    it — a real, large undercount for anyone whose usage is dominated by delegated work,
+    caught by an automated PR review after the manual verification pass happened not to
+    sample a session with subagent activity.
+
+    Two SEPARATE safety nets make recursing further than strictly necessary safe rather
+    than a source of overcounting, and review correctly asked which one was doing the
+    work here (it's both, for different failure classes):
+
+    1. A non-transcript ``.jsonl`` this walk also picks up (a workflow ``journal.jsonl``,
+       for instance) is filtered out per-line by ``_iter_session_records``'s own shape
+       checks — costs extra I/O, never corrupts a total.
+    2. The SAME message can legitimately appear in more than one file this walk now
+       visits — confirmed on this machine's real logs: the parent session file and its
+       own ``subagents/`` transcripts share exact ``(message.id, requestId)`` keys for
+       some records, always with byte-identical usage figures. This is caught by
+       :func:`iter_usage_records`'s existing GLOBAL (cross-file) dedup — the ``seen`` set
+       is declared once per scan, not reset per file, so a key first seen in one file is
+       recognized in another. This was true before this recursive walk existed (it's why
+       the dedup was documented as global in the first place); recursing into more files
+       just means it now has more files to actually prove that claim against — pinned by
+       ``test_parent_session_and_subagent_transcript_share_a_message_id_deduped_once``.
+    """
     try:
         proj_dirs = sorted(root.iterdir())
     except OSError:
@@ -391,7 +424,7 @@ def _iter_session_files(root: Path) -> Iterator[Path]:
         if not proj_dir.is_dir():
             continue
         try:
-            session_files = sorted(proj_dir.glob("*.jsonl"))
+            session_files = sorted(proj_dir.rglob("*.jsonl"))
         except OSError:
             continue
         yield from session_files
