@@ -634,6 +634,12 @@ def build_html(
     active_id = active_scope.id if active_scope is not None else ""
     tab_bar = _tab_bar(scopes, active_id) if scopes else ""
     body = areas_fragment(model)
+    # Precomputed OUTSIDE the f-string: Python <3.12 forbids a backslash inside an f-string
+    # ``{expression}`` part (PEP 701 only lifts this in 3.12+), and this repo supports 3.10+
+    # (pyproject.toml requires-python) — the escaped-JSON expression below needs a literal
+    # ``\\u003c`` (see the CURRENT_SCOPE comment further down for WHY), which broke CI on
+    # 3.10/3.11 while passing locally on a newer interpreter (found by CI, not local pytest).
+    current_scope_json = json.dumps(active_id).replace("<", "\\u003c")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -765,7 +771,7 @@ def build_html(
 // XSS (every "</" is still escaped), but it silently kills ALL page JS on that scope's render
 // (found in review, a second pass). Escaping EVERY "<" closes both the plain and the
 // double-escape path in one rule.
-var CURRENT_SCOPE = {json.dumps(active_id).replace("<", "\\u003c")};
+var CURRENT_SCOPE = {current_scope_json};
 var PENDING_PLAN = null;  // {{fingerprint, actions}} from the last /api/plan fetch
 var APPLY_POLL = null;
 
