@@ -15,6 +15,8 @@ Subcommands:
     rig doctor   detect + (offer to) install required/optional dependencies
     rig export   serialize default/current config to rig.yaml without a TUI
     rig stats    tool-adoption analytics over agent-harness session logs (sub: `show`)
+    rig daily    "what shipped" report over merged PRs (paste into Slack)
+    rig usage    Claude token/cost usage across accounts (hypothetical cost at list price)
     rig evolve   local project evolution portal (git histogram + code treemap)
     rig codex    safe Codex maintenance helpers
 """
@@ -380,6 +382,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_lint_parser(sub)
     _add_stats_parser(sub)
     _add_daily_parser(sub)
+    _add_usage_parser(sub)
     _add_codex_parser(sub)
     _add_worktree_parser(sub)
 
@@ -502,6 +505,24 @@ def _add_daily_parser(sub: "argparse._SubParsersAction") -> None:
     _add_daily_report_args(dp)
 
 
+def _add_usage_parser(sub: "argparse._SubParsersAction") -> None:
+    """`rig usage` — real Claude token/cost usage across the default account plus every
+    claude-rotate account on this machine (`riglib/usage.py`). Bare = current week + current
+    month. `--json` is the stable, versioned contract a scheduled Telegram push (built
+    separately, in tg-cli) invokes unattended."""
+    from .usage import add_arguments as _add_usage_report_args
+
+    up = sub.add_parser(
+        "usage",
+        help="Claude token/cost usage across accounts (hypothetical cost at list price)",
+        description="Aggregate real per-message token usage across ~/.claude/projects "
+        "and every ~/.claude-accounts/account-*/projects, by model/account/token-type. "
+        "Cost is a HYPOTHETICAL estimate at published API list prices — this is a "
+        "Claude.ai subscription, not pay-per-token billing.",
+    )
+    _add_usage_report_args(up)
+
+
 def _add_codex_parser(sub: "argparse._SubParsersAction") -> None:
     """`rig codex update` — wrap Codex updates with rollback-on-hang probes."""
     cp = sub.add_parser("codex", help="safe Codex maintenance helpers")
@@ -612,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
         "lint": cmd_lint,
         "stats": cmd_stats,
         "daily": cmd_daily,
+        "usage": cmd_usage,
         "codex": cmd_codex,
         "worktree": cmd_worktree,
     }
@@ -2832,6 +2854,12 @@ def cmd_daily(args: argparse.Namespace) -> int:
     from .daily.command import run as daily_run
 
     return daily_run(args)
+
+
+def cmd_usage(args: argparse.Namespace) -> int:
+    from .usage import run as usage_run
+
+    return usage_run(args)
 
 
 if __name__ == "__main__":
