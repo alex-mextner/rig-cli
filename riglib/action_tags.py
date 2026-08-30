@@ -204,13 +204,14 @@ ACTION_TAGS: dict[str, ActionTag] = {
     ),
     "provision_github_browser": _tag(
         "provision_github_browser", "remote_github_change", AUDIENCE_HUMAN,
-        "Updates a GitHub repo setting only reachable through the web UI (no API) — this action "
-        "records what to change by hand and where.",
+        "A GitHub setting handled via browser automation, not the API. Skipped by default; "
+        "with RIG_GH_BROWSER=1 it drives a real browser to change it live on github.com.",
     ),
     "provision_tmux": _tag(
         "provision_tmux", "starts_reloads_service", AUDIENCE_HUMAN,
-        "Writes rig's tmux config + may reload a LIVE tmux server / launchd boot agent on this "
-        "machine — this is the human's terminal session, never the agent's.",
+        "Writes rig's tmux config + performs live activation (plugin clones, launchd boot/"
+        "autosave agents, first resurrect save, stale-boot cleanup); never reloads a live "
+        "tmux server.",
     ),
     "provision_env": _tag(
         "provision_env", "edits_file", AUDIENCE_HUMAN,
