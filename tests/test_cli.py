@@ -135,7 +135,7 @@ def test_codex_update_cli_rejects_nonpositive_probe_timeout(capsys):
 def test_doctor_runs(tmp_path, capsys, monkeypatch):
     from riglib import errors
 
-    # isolate HOME so `_scan_missing_targets()` can't read the dev machine's real
+    # isolate HOME so `drift.scan_missing_targets()` can't read the dev machine's real
     # ~/.claude/settings.json (a dead hook there would flip the exit code to MISSING_TARGET).
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     rc = main(["doctor"])

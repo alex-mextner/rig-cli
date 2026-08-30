@@ -292,8 +292,10 @@ def test_cmd_doctor_yes_shows_pep668_fallback_on_failed_install(monkeypatch, cap
     from riglib import cli
     from riglib.doctor import DoctorReport
 
+    from riglib import drift as _drift
+
     monkeypatch.setattr(cli, "_handle_core_bare", lambda do_fix: False)
-    monkeypatch.setattr(cli, "_scan_missing_targets", lambda settings_paths=None: [])
+    monkeypatch.setattr(_drift, "scan_missing_targets", lambda settings_paths=None: [])
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
     monkeypatch.setattr(doctor, "_python_present", lambda name: False)
     monkeypatch.setattr(doctor, "externally_managed", lambda: True)

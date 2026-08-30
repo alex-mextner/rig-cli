@@ -68,6 +68,17 @@ def writable_layer_for_category(category: str) -> str:
     return GLOBAL if category in _GLOBAL_ONLY_CATEGORIES else REPO
 
 
+def global_only_categories() -> frozenset[str]:
+    """The category names in :data:`_GLOBAL_ONLY_CATEGORIES`, as a public, read-only set.
+
+    config-web's Global scope (rig-cli#310) needs this SAME set to restrict its drift scan to
+    categories it can actually render/apply (:func:`riglib.config_web_plan.build_scope_plan`'s
+    docstring) — this getter is the one place that set is exposed outside this module, so the
+    two stay in lockstep by construction rather than by a second hardcoded category list.
+    """
+    return frozenset(_GLOBAL_ONLY_CATEGORIES)
+
+
 @dataclass(frozen=True)
 class Option:
     """One wizard-exposable rig.yaml option.

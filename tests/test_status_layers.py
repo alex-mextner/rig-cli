@@ -31,7 +31,7 @@ from riglib.layers import GLOBAL, REPO, layer_for_category
 def _isolate_home(tmp_path, monkeypatch):
     """Isolate HOME for every test in this module.
 
-    `rig status`/`rig doctor` unconditionally call `_scan_missing_targets()`, which reads the
+    `rig status`/`rig doctor` unconditionally call `drift.scan_missing_targets()`, which reads the
     real `~/.claude/settings.json` via `expanduser`. Without an isolated HOME, a dev machine
     whose real settings.json has a hook pointing at a now-gone script would make `dead_targets`
     non-empty — flipping a "clean repo → exit 0" test into EXIT_MISSING_TARGET and a "non-git →

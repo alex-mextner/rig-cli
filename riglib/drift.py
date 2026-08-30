@@ -82,9 +82,16 @@ from .actions.runner import (
 )
 from .config import GITIGNORE_BEGIN_MARKER, linter_path_escapes_repo
 from .github_ruleset import DEFAULT_RULESET_NAME
+from .layers import GLOBAL, layer_for_category
+from .missing_target import scan_settings_hooks
 from .plan import Action, InstallPlan
 from . import project_tools
 from .tg_ctl import STALE_PREDECESSOR_LABEL
+
+
+def is_global_action(action: Action) -> bool:
+    """Whether an install action belongs to the GLOBAL status layer (see :mod:`riglib.layers`)."""
+    return layer_for_category(action.category) == GLOBAL
 
 
 @dataclass
@@ -106,6 +113,262 @@ class DriftReport:
 
     def by_direction(self, direction: str) -> list[DriftItem]:
         return [i for i in self.items if i.direction == direction]
+
+
+def harness_settings_paths(plan: InstallPlan) -> list[Path]:
+    """The claude-code settings.json file(s) THIS config provisions hooks/permissions into.
+
+    The actions that write the harness settings file (auto-mode, the command allowlist, the
+    hook-bridge) all carry the RESOLVED settings path as ``action.target`` — honoring a
+    ``harness.settings_path`` / ``permissions.settings_path`` override and the harness kind
+    (e.g. a non-``auto`` mode writes the repo-local ``.claude/settings.json``, not the one
+    under HOME). Resolve from THOSE so the missing-target scan inspects the file rig actually
+    manages, not a hardcoded ``~/.claude/settings.json``. Deduped, order-preserving.
+
+    Scoped to **claude-code** actions: the scanner (:func:`scan_settings_hooks`) understands
+    only the claude-code ``settings.json`` ``hooks`` shape. The allowlist write CAN target
+    opencode (its ``~/.config/opencode/opencode.json`` has a different schema with no such
+    ``hooks`` blocks), so an opencode ``provision_permissions`` action's target must NOT be
+    scanned here — feeding it to the claude-hook scanner would misread an opencode file as a
+    claude hooks file. We key off the harness kind every action carries in ``options['kind']``.
+    """
+    kinds = {"apply_harness", "provision_permissions", "register_hook_bridge"}
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for action in plan.actions:
+        if action.kind not in kinds:
+            continue
+        if action.options.get("kind") != "claude-code":
+            continue  # only the claude-code settings.json carries the hook shape we scan
+        resolved = harness_settings_file(action)
+        if resolved not in seen:
+            seen.add(resolved)
+            paths.append(resolved)
+    return paths
+
+
+def scan_missing_targets(settings_paths: list[Path] | None = None) -> list:
+    """Scan the harness settings.json(s) for hook commands pointing at files that are gone.
+
+    ``settings_paths`` are the resolved harness settings files THIS config manages (from
+    :func:`harness_settings_paths`). ``None`` — the ``rig doctor`` case, which loads no config —
+    falls back to the claude-code default under HOME (``~/.claude/settings.json``). An EMPTY
+    list is NOT the same as ``None``: it means this config provisions no harness settings file
+    (e.g. harness + permissions both disabled), so there is nothing to scan — scanning the HOME
+    default there would cry wolf on a file the config doesn't manage (the very false positive
+    this scan exists to avoid). Findings are deduped across files by the per-finding ``what``
+    line (``missing <kind>: <path>``) so the same dead target isn't reported twice.
+    """
+    if settings_paths is None:
+        settings_paths = [Path(os.path.expanduser("~/.claude/settings.json"))]
+    findings: list = []
+    seen: set[str] = set()
+    for settings in settings_paths:
+        for finding in scan_settings_hooks(settings):
+            if finding.what in seen:
+                continue
+            seen.add(finding.what)
+            findings.append(finding)
+    return findings
+
+
+@dataclass
+class DriftScan:
+    """The result of :func:`compute_drift_report`: a two-way drift report plus its context."""
+
+    report: DriftReport
+    dead_targets: list
+    dropped_ship_delegator: list  # list[Action] dropped from the effective plan (non-git only)
+    repo_actions_dropped: int  # count of repo-scoped actions dropped (non-git only)
+    plan: InstallPlan  # the EFFECTIVE plan drift was computed against (see docstring below)
+
+
+def compute_drift_report(
+    plan: InstallPlan, loaded, env, *, restrict_scan_categories: frozenset[str] | None = None
+) -> DriftScan:
+    """Scan configured target dirs + compute config<->disk drift for a resolved plan.
+
+    Shared by ``rig status`` (:func:`riglib.cli.cmd_status`) and config-web's drift panel
+    (:func:`riglib.config_web_plan.compute_scope_drift`) — the ONE place that (a) computes the
+    EFFECTIVE plan (GLOBAL-layer actions only, when ``env.is_git_repo`` is False — repo-scoped
+    actions have no layer to report under outside a git repo, mirroring what ``rig apply`` itself
+    skips there), (b) wires :func:`detect`'s scan-dir arguments (which target dirs to scan for
+    disk→config extras), (c) runs the disabled-category augmentation checks (a category the
+    config turned OFF but whose prior artifacts are still on disk: dispatcher / global-excludes /
+    env), and (d) runs the missing-target scan (a harness hook command pointing at a file that's
+    gone). PURE — no printing, and it does NOT mutate the caller's ``plan`` — a caller does NOT
+    need to (and must NOT separately) filter ``plan.actions`` first, and calling this twice on
+    the SAME input ``plan`` returns identical results both times (unlike an earlier version of
+    this function, which reassigned ``plan.actions`` in place: a second call on that same object
+    then saw an already-filtered list and silently reported 0 dropped actions — caught in review).
+
+    Returns a :class:`DriftScan`. ``dropped_ship_delegator`` is the repo-scoped ``ship_delegator``
+    actions dropped from the EFFECTIVE plan in the non-git case (their GLOBAL ``ship_env``
+    machine-env-file check still runs here even though the repo-local action was dropped) — a
+    caller needing to render them (e.g. `cmd_status`'s area summary) gets them back;
+    ``repo_actions_dropped`` is the total count of repo-scoped actions dropped, for a caller's own
+    "N action(s) not evaluated" note. ``scan.plan`` is the plan actually scanned — a caller doing
+    further rendering (area summaries, a plan preview) after this call MUST use ``scan.plan``,
+    not the original ``plan`` it passed in, to see the same GLOBAL-only view drift was computed
+    against. Both ``dropped_ship_delegator``/``repo_actions_dropped`` are empty/0, and
+    ``scan.plan is plan``, when ``env.is_git_repo`` is True.
+
+    ``restrict_scan_categories`` (config-web's Global tab; ``None`` for ``rig status``, which
+    scans everything the cascade enables) additionally requires a category to be IN this set
+    before its extras-scan dir is added — on top of the existing enabled-check. Needed because
+    the Global tab's PLAN is deliberately narrowed to only the WRITABLE-global categories
+    (:func:`riglib.config_web_plan.build_scope_plan`'s docstring explains why), but this
+    function's scan-dir wiring is independent of the plan's own action list — without this
+    restriction, the Global tab would scan ``~/.agents/skills``/hooks/MCP dirs for "extras" it
+    can NEVER resolve from that tab (its plan declares zero skills/agent_hooks/mcp actions by
+    design), flagging every skill a REPO tab legitimately installed as false-positive drift on a
+    tab that never renders those settings (caught in review — a regression the Global-plan
+    narrowing itself introduced, since before that narrowing the plan and the scan agreed).
+    """
+    from .plan import resolve_category_target, resolve_category_targets
+
+    # The REPO layer only exists inside a git repository. plan.build still emits default-on repo
+    # actions from built-in defaults even when no repo config file was loaded; outside git those
+    # actions have no layer to report under, so drift detection must drop them (as must the
+    # summary a caller renders from the returned dropped list). Build a NEW plan for internal use
+    # rather than mutating the caller's — see the docstring's "PURE" note.
+    dropped_ship_delegator: list = []
+    repo_actions_dropped = 0
+    effective_plan = plan
+    if not env.is_git_repo:
+        global_actions = []
+        repo_actions = []
+        for action in plan.actions:
+            (global_actions if is_global_action(action) else repo_actions).append(action)
+        effective_plan = InstallPlan(
+            actions=global_actions, on_conflict=plan.on_conflict, notes=plan.notes
+        )
+        # ship_delegator carries the GLOBAL ship_env (machine env file) check, and apply does
+        # NOT drop repo actions outside git — it still reconciles that file. Remember the dropped
+        # actions so the env-file check below still runs (status/apply parity for the
+        # machine-wide artifact; the repo-local delegator part stays dropped).
+        dropped_ship_delegator = [a for a in repo_actions if a.category == "ship_delegator"]
+        repo_actions_dropped = len(repo_actions)
+
+    # scan the configured target dirs for extras even if no action targets them.
+    # CI + MCP targets are REPO-LOCAL with clear ownership → scan even when the category is
+    # disabled, so a previously-applied gate/server left on disk surfaces as disk→config
+    # drift. Skills/agent-hooks live in SHARED global dirs (~/.agents/skills, ~/.claude/
+    # hooks) where other tools' entries legitimately coexist, so only scan them when the
+    # category is enabled (flagging every global skill as "extra" would be noise).
+    scan_skill_dirs = []
+    scan_ci_dirs = []
+    scan_mcp_files = []
+    scan_hook_dirs = []
+
+    def _restricted_out(category: str) -> bool:
+        return restrict_scan_categories is not None and category not in restrict_scan_categories
+
+    if loaded.category("skills").get("enabled") is not False and not _restricted_out("skills"):
+        d = resolve_category_target(loaded, "skills")
+        if d:
+            scan_skill_dirs.append(d)
+    if loaded.category("agent_hooks").get("enabled") is not False and not _restricted_out("agent_hooks"):
+        scan_hook_dirs.extend(resolve_category_targets(loaded, "agent_hooks"))
+    # CI + MCP are REPO-LOCAL — only scan them when this IS a repo (a non-git dir has no repo
+    # layer; scanning a cwd-relative .github there would be meaningless). Gated on the SAME
+    # env.is_git_repo the effective-plan partition above uses, so a scope that forces a non-git
+    # env (config-web's Global tab, which has no repo context even when $HOME happens to be a
+    # git checkout) never scans a repo-local CI dir either.
+    if env.is_git_repo and not _restricted_out("ci"):
+        d = resolve_category_target(loaded, "ci")  # CI: scan unconditionally (repo-local)
+        if d:
+            scan_ci_dirs.append(d)
+    if not _restricted_out("mcp"):
+        d = resolve_category_target(loaded, "mcp")  # MCP: scan unconditionally (global)
+        if d:
+            scan_mcp_files.append(d if d.suffix == ".json" else d / "mcp.json")
+    report = detect(
+        effective_plan,
+        scan_skill_dirs=scan_skill_dirs,
+        scan_ci_dirs=scan_ci_dirs,
+        scan_mcp_files=scan_mcp_files,
+        scan_hook_dirs=scan_hook_dirs,
+    )
+    if dropped_ship_delegator:
+        # non-git cwd: the repo-scoped delegator actions were dropped above (in this function's
+        # own non-git partition), but their GLOBAL ship_env (machine env file) check must still
+        # run — apply reconciles that file here too.
+        for action in dropped_ship_delegator:
+            check_ship_env_for_dropped_repo_action(action, report)
+    # disabled-but-installed dispatcher: config turned the dispatcher off, but a prior apply
+    # may have left core.hooksPath pointing at the installed composer dir. apply won't delete
+    # it, so surface it as disk→config drift. Gated on the SAME restriction as the scan-dirs
+    # above — the Global tab's plan can't declare a "git_hooks" action either, so it must not
+    # report drift for a category it never renders/applies (caught in review, same class of bug
+    # as the skills-false-positive the scan-dir restriction above fixes).
+    disp_cfg = loaded.category("git_hooks").get("dispatcher", {}) if isinstance(loaded.category("git_hooks"), dict) else {}
+    if isinstance(disp_cfg, dict) and not disp_cfg.get("enabled") and not _restricted_out("git_hooks"):
+        check_disabled_dispatcher(loaded.repo_root, report)
+    # disabled-but-installed global-excludes block: config opted the gitignore category out, but a
+    # prior apply may have left the rig-managed block in the global excludes file. apply won't
+    # remove it, so surface it as disk→config drift (mirrors the disabled-dispatcher scan; this is
+    # a GLOBAL, machine-wide artifact, not repo-local). "gitignore" IS writable-global, so this
+    # one is NOT restricted out for the Global scope — it belongs there.
+    gi_cfg = loaded.data.get("gitignore")
+    if isinstance(gi_cfg, dict) and gi_cfg.get("enabled") is False and not _restricted_out("gitignore"):
+        from .config import GITIGNORE_DEFAULT_EXCLUDESFILE
+
+        gi_opts: dict[str, object] = {"xdg_default": GITIGNORE_DEFAULT_EXCLUDESFILE}
+        override = gi_cfg.get("excludesfile")
+        if isinstance(override, str) and override:
+            gi_opts["excludesfile"] = override
+        check_disabled_global_excludes(
+            Action(
+                kind="provision_global_excludes",
+                category="gitignore",
+                item="block",
+                source=loaded.repo_root,
+                target=loaded.repo_root,
+                options=gi_opts,
+            ),
+            report,
+        )
+    # disabled-but-installed shell env vars: config opted the env category out, but a prior
+    # apply may have left rig.env.sh + its live source line in rc_path. apply won't remove
+    # them, so surface as disk→config drift (mirrors the disabled-global-excludes scan above;
+    # also a GLOBAL, machine-wide artifact). A higher-consequence orphan than a stale tmux conf
+    # — the vars keep applying to every shell, not just tmux sessions — so worth the extra scan
+    # even though tmux itself has no equivalent check. "env" is status-global but NOT
+    # writable-global (like skills/agent_hooks) — restricted out for the Global scope for the
+    # same reason as the dispatcher check above.
+    env_cfg = loaded.data.get("env")
+    if isinstance(env_cfg, dict) and env_cfg.get("enabled") is False and not _restricted_out("env"):
+        from .plan import env_options_from_config
+
+        env_disabled_options = env_options_from_config(env_cfg, loaded.repo_root)
+        check_disabled_env(
+            Action(
+                kind="provision_env",
+                category="env",
+                item="vars",
+                source=loaded.repo_root,
+                # matches `_build_env`'s own target (rc_path) — the scan derives everything
+                # from `options` regardless, but keeping the two constructions of this action
+                # kind identical avoids a needless divergence (review).
+                target=Path(env_disabled_options["rc_path"]),
+                options=env_disabled_options,
+            ),
+            report,
+        )
+    # missing-target: a hook command in the harness settings.json that points at a file gone
+    # from disk (the dead-rtk-hook case) surfaces PROACTIVELY here, before it bites at runtime
+    # as a generic "PreToolUse error". This is independent of config↔disk drift. Scan the
+    # settings file(s) THIS config actually provisions (honoring a settings_path / harness-kind
+    # override), not a hardcoded ~/.claude/settings.json.
+    dead_targets = scan_missing_targets(harness_settings_paths(effective_plan))
+    return DriftScan(
+        report=report,
+        dead_targets=dead_targets,
+        dropped_ship_delegator=dropped_ship_delegator,
+        repo_actions_dropped=repo_actions_dropped,
+        plan=effective_plan,
+    )
 
 
 def detect(

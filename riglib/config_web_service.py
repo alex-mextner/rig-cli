@@ -243,15 +243,21 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> argparse.Argument
     """
     cw = subparsers.add_parser(
         "config-web",
-        help="local web UI to view/edit the reconciled rig config "
+        help="machine-wide web console to view/edit/apply the reconciled rig config "
         "(run|start|stop|status|enable|disable)",
         description=(
-            "Serve a local web UI to view and edit the reconciled rig config (the cascade of the "
-            "global ~/.config/rig/config.yaml + the repo ./rig.yaml). Edits route to the owning "
-            "layer, exactly like `rig config set` / the wizard; reconcile with `rig apply commit`. "
-            "Lifecycle is the shared agenttools-service manager (identical run/start/stop/status/"
-            "enable/disable to every ecosystem service); OS autostart is launchd (macOS) / systemd "
-            "--user (Linux). A bare `rig config-web` with no verb prints this help, never launches."
+            "Serve a local, machine-wide web console: one browser tab per rig-managed repo "
+            "(discovered from the repository registry) plus a Global tab for "
+            "~/.config/rig/config.yaml alone. Each tab shows a drift panel (the same two-way "
+            "engine `rig status` uses) next to the settings. Edits route to the owning layer, "
+            "exactly like `rig config set` / the wizard, and now offer an interactive apply: a "
+            "plan preview (mirrors `rig apply info`, each action tagged with what kind of change "
+            "it is), confirm-or-skip individual actions, then live per-phase progress as the "
+            "SAME shared engine (`plan.build` + `run_plan`) rig apply/init use actually applies "
+            "them. Lifecycle is the shared agenttools-service manager (identical "
+            "run/start/stop/status/enable/disable to every ecosystem service); OS autostart is "
+            "launchd (macOS) / systemd --user (Linux). A bare `rig config-web` with no verb "
+            "prints this help, never launches."
         ),
     )
     _add_target_args(cw)

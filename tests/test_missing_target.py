@@ -245,12 +245,12 @@ def _hooks_settings(path: Path, command: str) -> None:
 
 
 def test_harness_settings_paths_resolves_action_targets(tmp_path):
-    """`_harness_settings_paths` reads the settings file from the harness-writing actions.
+    """`harness_settings_paths` reads the settings file from the harness-writing actions.
 
     The scan must follow where rig ACTUALLY provisions hooks — the apply_harness /
     provision_permissions / register_hook_bridge action targets — not a hardcoded path.
     """
-    from riglib.cli import _harness_settings_paths
+    from riglib.drift import harness_settings_paths
     from riglib.plan import Action, InstallPlan
 
     repo_settings = tmp_path / "repo" / ".claude" / "settings.json"  # a NON-default location
@@ -266,7 +266,7 @@ def test_harness_settings_paths_resolves_action_targets(tmp_path):
         # the hook-bridge action also targets settings.json — must be covered
         Action(kind="register_hook_bridge", category="harness", item="hook-bridge", source=tmp_path, target=bridge_settings, options=cc),
     ]
-    paths = _harness_settings_paths(plan)
+    paths = harness_settings_paths(plan)
     assert repo_settings in paths
     assert user_settings in paths  # dir target → <dir>/settings.json
     assert bridge_settings in paths  # register_hook_bridge is covered
@@ -279,9 +279,9 @@ def test_harness_settings_paths_excludes_non_claude_harness(tmp_path):
 
     The allowlist write can target opencode's ``opencode.json`` (a different schema with no
     claude ``hooks`` blocks). Feeding it to the claude-hook scanner would misread it — so
-    ``_harness_settings_paths`` must scope to claude-code actions only.
+    ``harness_settings_paths`` must scope to claude-code actions only.
     """
-    from riglib.cli import _harness_settings_paths
+    from riglib.drift import harness_settings_paths
     from riglib.plan import Action, InstallPlan
 
     oc_settings = tmp_path / "oc" / "opencode.json"
@@ -291,14 +291,14 @@ def test_harness_settings_paths_excludes_non_claude_harness(tmp_path):
         Action(kind="provision_permissions", category="permissions", item="opencode", source=tmp_path, target=oc_settings, options={"kind": "opencode"}),
         Action(kind="apply_harness", category="harness", item="claude-code", source=tmp_path, target=cc_settings, options={"kind": "claude-code"}),
     ]
-    paths = _harness_settings_paths(plan)
+    paths = harness_settings_paths(plan)
     assert cc_settings in paths
     assert oc_settings not in paths  # opencode config is NOT a claude hooks file
     assert len(paths) == 1
 
 
 def test_harness_settings_paths_from_real_plan_builders(fake_agent_tools, tmp_path):
-    """`_harness_settings_paths` works against a REAL plan (not hand-built actions).
+    """`harness_settings_paths` works against a REAL plan (not hand-built actions).
 
     The scan's claude-code filter keys off ``options['kind']`` — so the REAL plan builders for
     apply_harness / provision_permissions / register_hook_bridge MUST set it, or a managed
@@ -308,7 +308,7 @@ def test_harness_settings_paths_from_real_plan_builders(fake_agent_tools, tmp_pa
     """
     from riglib.actions.runner import harness_settings_file
     from riglib.catalog import Catalog
-    from riglib.cli import _harness_settings_paths
+    from riglib.drift import harness_settings_paths
     from riglib.config import LoadedConfig
     from riglib.plan import build
 
@@ -339,7 +339,7 @@ def test_harness_settings_paths_from_real_plan_builders(fake_agent_tools, tmp_pa
         assert a.options.get("kind") == "claude-code", f"{a.kind} did not tag options['kind']"
         assert harness_settings_file(a) == settings, f"{a.kind} resolved an unexpected settings path"
     # and the scan picks up that one real settings path
-    assert _harness_settings_paths(plan) == [settings]
+    assert harness_settings_paths(plan) == [settings]
 
 
 def test_scan_finds_dead_hook_in_nondefault_settings_path(tmp_path):
@@ -348,16 +348,16 @@ def test_scan_finds_dead_hook_in_nondefault_settings_path(tmp_path):
     Regression for the hardcoded-``~/.claude/settings.json`` bug: a repo whose harness settings
     live elsewhere had its dead hooks silently missed.
     """
-    from riglib.cli import _scan_missing_targets
+    from riglib.drift import scan_missing_targets
 
     gone = tmp_path / "gone" / "rtk-hook.py"  # never created
     nondefault = tmp_path / "elsewhere" / "settings.json"
     _hooks_settings(nondefault, f"python3 {gone}")
 
     # the OLD hardcoded scan (default path only) sees nothing — the file isn't even there
-    assert _scan_missing_targets([tmp_path / "no-such" / "settings.json"]) == []
+    assert scan_missing_targets([tmp_path / "no-such" / "settings.json"]) == []
     # scanning the ACTUAL provisioned path surfaces the dead hook
-    findings = _scan_missing_targets([nondefault])
+    findings = scan_missing_targets([nondefault])
     assert len(findings) == 1
     assert str(gone) in findings[0].what
 
@@ -369,7 +369,7 @@ def test_scan_empty_list_scans_nothing_not_home_default(tmp_path, monkeypatch):
     an empty path list. Falling back to the HOME default there would flag a dead hook in a file
     the config doesn't manage — a false positive. Empty must give []; only None falls back.
     """
-    from riglib.cli import _scan_missing_targets
+    from riglib.drift import scan_missing_targets
 
     # plant a dead hook in the HOME default — the fallback target the OLD `if not` check hit
     home = tmp_path / "home"
@@ -378,23 +378,23 @@ def test_scan_empty_list_scans_nothing_not_home_default(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
 
     # empty list → scan nothing → no findings (must NOT pick up the HOME default's dead hook)
-    assert _scan_missing_targets([]) == []
+    assert scan_missing_targets([]) == []
     # None → the doctor fallback → DOES scan the HOME default and finds it
-    findings = _scan_missing_targets(None)
+    findings = scan_missing_targets(None)
     assert len(findings) == 1
     assert str(gone) in findings[0].what
 
 
 def test_scan_dedupes_same_dead_hook_across_files(tmp_path):
     """The same dead path referenced from two settings files is reported ONCE."""
-    from riglib.cli import _scan_missing_targets
+    from riglib.drift import scan_missing_targets
 
     gone = tmp_path / "gone" / "hook.py"
     a = tmp_path / "a" / "settings.json"
     b = tmp_path / "b" / "settings.json"
     _hooks_settings(a, f"python3 {gone}")
     _hooks_settings(b, f"python3 {gone}")
-    findings = _scan_missing_targets([a, b])
+    findings = scan_missing_targets([a, b])
     assert len(findings) == 1
 
 
