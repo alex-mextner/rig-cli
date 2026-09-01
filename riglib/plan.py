@@ -875,6 +875,9 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     # ── tg_ctl (rig-managed tg-ctl inbound daemon LaunchAgent) ─────────────────────
     _build_tg_ctl(config, plan)
 
+    # ── internal_dev (per-repo daemon auto-reload post-commit hook) ────────────────
+    _build_internal_dev(config, plan)
+
     return plan
 
 
@@ -2513,6 +2516,39 @@ def _build_tg_ctl(config: LoadedConfig, plan: InstallPlan) -> None:
                 "bun_path": t.get("bun_path"),
                 "tg_ctl_path": t.get("tg_ctl_path"),
                 "config_dir": t.get("config_dir"),
+            },
+        )
+    )
+
+
+def _build_internal_dev(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Plan the per-repo daemon auto-reload post-commit hook, when ``auto_reload_on_commit`` is on.
+
+    Default **OFF** (opt-in): an ABSENT/empty/``false`` block emits NOTHING. When enabled, one
+    ``install_dev_reload_hook`` action carries the resolved daemon-source patterns + reload command;
+    the runner writes the repo-local ``<git-dir>/hooks/post-commit`` (and, under a global
+    ``core.hooksPath`` composer, a generic post-commit trampoline). REPO-owned: the enablement +
+    paths live in the committed ``rig.yaml``, exactly like ``agent_hooks.worktree_only``.
+    """
+    from .dev_reload import DEFAULT_RELOAD_COMMAND
+
+    d = config.data.get("internal_dev") or {}
+    if not d.get("auto_reload_on_commit"):
+        return
+
+    paths = list(d.get("daemon_source_paths") or [])
+    reload_command = d.get("reload_command") or DEFAULT_RELOAD_COMMAND
+    plan.actions.append(
+        Action(
+            kind="install_dev_reload_hook",
+            category="internal_dev",
+            item="post-commit",
+            source=config.repo_root,  # the repo whose commits trigger the reload
+            # display target — the runner re-resolves the real git dir (worktree-correct) at apply.
+            target=config.repo_root / ".git" / "hooks" / "post-commit",
+            options={
+                "daemon_source_paths": paths,
+                "reload_command": reload_command,
             },
         )
     )

@@ -413,6 +413,18 @@ AREAS: tuple[Area, ...] = (
         ),
     ),
     Area(
+        "internal_dev", "internal-dev daemon auto-reload",
+        "A per-repo committed post-commit hook that gracefully reloads the daemon when a commit touches its source.",
+        (
+            _opt("internal_dev.auto_reload_on_commit", KIND_BOOL, False,
+                 "Opt-IN: install a post-commit git hook (in THIS repo) that runs the reload "
+                 "command when a commit touches a daemon-source path, so a change to the "
+                 "rig-ecosystem tool's own daemon auto-reloads with no manual restart. Off by "
+                 "default. REPO-owned (committed rig.yaml), like agent_hooks — the enablement + "
+                 "paths travel with the repo. Reload / composer live-write gate: RIG_DEV_RELOAD_DRY_RUN."),
+        ),
+    ),
+    Area(
         "linters", "linter / formatter config files", "Per-repo linter + formatter config files rig writes/reconciles (tool + content per repo).",
         (
             _opt("linters.enabled", KIND_BOOL, True,

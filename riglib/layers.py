@@ -53,6 +53,7 @@ _CATEGORY_LAYER = {
     # REPO — this repo, from ./rig.yaml
     "ci": REPO,
     "ship_delegator": REPO,
+    "internal_dev": REPO,
     "linters": REPO,
     "project_tools": REPO,
     "agents_md": REPO,

@@ -1112,6 +1112,33 @@ _TG_CTL_BLOCK = Block(
     },
 )
 
+_INTERNAL_DEV_BLOCK = Block(
+    doc=(
+        "internal development of the rig-ecosystem tools themselves (rig, tg-cli, review-cli, …): "
+        "a per-repo COMMITTED opt-in that installs a post-commit git hook so a commit touching the "
+        "daemon's source gracefully reloads the running daemon (tg-ctl restart) — zero manual restart."
+    ),
+    leaves={
+        "auto_reload_on_commit": Leaf(
+            "boolean",
+            "install a post-commit hook that reloads the daemon when a commit touches a "
+            "daemon-source path (opt-in)",
+            default=False,
+        ),
+        "daemon_source_paths": Leaf(
+            "array",
+            "repo-relative shell-glob patterns (POSIX `case`, `*` spans `/`) whose change in a "
+            "commit triggers the reload",
+            items_type="string",
+        ),
+        "reload_command": Leaf(
+            "string",
+            "the graceful reload command the hook runs on a match",
+            default="tg-ctl restart",
+        ),
+    },
+)
+
 
 # The top-level shape: the scalar top keys + every block, in the order config.py validates them.
 _TOP_LEAVES: dict[str, Leaf] = {
@@ -1154,6 +1181,7 @@ BLOCKS: dict[str, Block] = {
     "spotlight": _SPOTLIGHT_BLOCK,
     "tools": _TOOLS_BLOCK,
     "tg_ctl": _TG_CTL_BLOCK,
+    "internal_dev": _INTERNAL_DEV_BLOCK,
     "ship_delegator": _SHIP_DELEGATOR_BLOCK,
     "linters": _LINTERS_BLOCK,
     "project_tools": _PROJECT_TOOLS_BLOCK,

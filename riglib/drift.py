@@ -482,6 +482,8 @@ def detect(
             _check_tg_ctl(action, report)
         elif action.kind == "provision_spotlight":
             _check_spotlight(action, report)
+        elif action.kind == "install_dev_reload_hook":
+            _check_internal_dev(action, report)
 
     _extras_skills(declared_skill_dirs, report)
     _extras_ci(declared_ci_dirs, report)
@@ -2566,6 +2568,37 @@ def _check_tg_ctl(action: Action, report: DriftReport) -> None:
         report.items.append(
             DriftItem("missing", "tg_ctl", action.item, plan.plist_path,
                       f"tg-ctl LaunchAgent '{plan.boot_label}' installed but not loaded")
+        )
+
+
+def _check_internal_dev(action: Action, report: DriftReport) -> None:
+    """Flag drift on the per-repo daemon auto-reload post-commit hook.
+
+    Compares the rendered hook against the file at the resolved (worktree-correct) git-hooks
+    path — the SAME rendering the runner writes, so status and apply can never disagree. The
+    machine-global composer trampoline is a live/global apply-time concern (mirrors tg_ctl's
+    boot plist) and is not checked here; a missing repo-local hook already surfaces the drift
+    that matters to the repo.
+    """
+    from . import dev_reload
+
+    repo_root = action.source
+    dplan = dev_reload.build_dev_reload(
+        repo_root=repo_root,
+        daemon_source_paths=action.options.get("daemon_source_paths", []),
+        reload_command=action.options.get("reload_command", dev_reload.DEFAULT_RELOAD_COMMAND),
+    )
+    target = dev_reload.post_commit_hook_path(repo_root)
+    if not target.is_file():
+        report.items.append(
+            DriftItem("missing", "internal_dev", action.item, target,
+                      "dev-reload post-commit hook not installed")
+        )
+        return
+    if target.read_text(encoding="utf-8") != dplan.render_hook():
+        report.items.append(
+            DriftItem("modified", "internal_dev", action.item, target,
+                      "post-commit hook differs from the rig-generated dev-reload hook")
         )
 
 
