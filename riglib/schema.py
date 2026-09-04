@@ -386,11 +386,12 @@ AREAS: tuple[Area, ...] = (
         ),
     ),
     Area(
-        "gitignore", "global git-excludes block", "A rig-managed block in git's global core.excludesfile (ignores harness worktrees machine-wide).",
+        "gitignore", "global git-excludes block", "A rig-managed block in git's global core.excludesfile (ignores harness worktrees + the Spotlight sentinel machine-wide).",
         (
             _opt("gitignore.enabled", KIND_BOOL, True,
-                 "Maintain the managed block in the GLOBAL excludes file so **/.claude/worktrees/ is "
-                 "ignored in every repo, with zero per-repo commits. GLOBAL-only — never written to a repo rig.yaml."),
+                 "Maintain the managed block in the GLOBAL excludes file so **/.claude/worktrees/ and the "
+                 "spotlight sweep's .metadata_never_index sentinel are ignored in every repo, with zero "
+                 "per-repo commits. GLOBAL-only — never written to a repo rig.yaml."),
         ),
     ),
     Area(

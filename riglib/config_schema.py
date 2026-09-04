@@ -850,7 +850,7 @@ _ENV_BLOCK = Block(
 )
 
 _GITIGNORE_BLOCK = Block(
-    doc="a rig-managed block in git's global core.excludesfile (ignores harness worktrees machine-wide).",
+    doc="a rig-managed block in git's global core.excludesfile (ignores harness worktrees + the Spotlight sentinel machine-wide).",
     leaves={
         "enabled": Leaf("boolean", "provision the managed block", default=True),
         "entries": Leaf("array", "the ignored paths inside the managed block", items_type="string"),

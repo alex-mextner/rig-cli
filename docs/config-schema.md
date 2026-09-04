@@ -85,7 +85,7 @@ models: { ... }               # daily model-freshness checker schedule (launchd/
 agents_md: { ... }            # AGENTS.md (canonical) + CLAUDE.md (symlink), default ON
 github: { ... }               # repo settings: ruleset/merge/ghas/actions via gh api + browser via agent-browser, default ON
 tmux: { ... }                 # rig-managed tmux config (generate + migrate ~/.tmux.conf), opt-in
-gitignore: { ... }            # rig-managed block in the GLOBAL git excludesfile (ignores **/.claude/worktrees/ in EVERY repo), default ON
+gitignore: { ... }            # rig-managed block in the GLOBAL git excludesfile (ignores **/.claude/worktrees/ + the Spotlight sentinel in EVERY repo), default ON
 tg_ctl: { ... }               # tg-ctl inbound daemon as a macOS boot LaunchAgent, default ON (macOS-only)
 ```
 
@@ -1816,13 +1816,14 @@ gitignore:
   enabled: true                 # provision the managed block (default ON; false opts out)
   entries:                      # the ignored paths inside the managed block
     - "**/.claude/worktrees/"   # default: Claude Code's throwaway worktrees (every repo)
+    - ".metadata_never_index"   # default: the macOS Spotlight sentinel the `spotlight:` sweep drops
   # excludesfile: ~/.gitignore  # rare: force a specific file instead of honoring core.excludesfile
 ```
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the managed block (set `false` to leave the global excludes file untouched) |
-| `entries` | list[str] | `["**/.claude/worktrees/"]` | the paths ignored inside the managed block; an empty/absent list uses the default |
+| `entries` | list[str] | `["**/.claude/worktrees/", ".metadata_never_index"]` | the paths ignored inside the managed block; an empty/absent list uses the default |
 | `excludesfile` | str | *(unset)* | force a specific file; by default rig honors `core.excludesfile` (or sets it — see below) |
 
 **Target resolution (the headline behavior).** rig decides WHICH file holds the block at apply
@@ -1846,10 +1847,17 @@ another tool's) is preserved verbatim (CRLF, trailing blanks, no-final-newline a
 
 ```
 # >>> rig-managed (do not edit) >>>
-# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/; rig ignores them globally.
+# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/ and rig's spotlight sweep drops .metadata_never_index into dependency dirs; rig ignores both globally.
 **/.claude/worktrees/
+.metadata_never_index
 # <<< rig-managed (do not edit) <<<
 ```
+
+**Caveat of the bare-basename sentinel ignore.** `.metadata_never_index` is ignored at ANY depth,
+machine-wide. A repo that deliberately TRACKS a file by that name (dotfiles-style repos commit the
+Apple sentinel to keep Spotlight off a directory) still has its already-tracked copies untouched
+(ignores never affect tracked files), but a NEW one needs `git add -f` or a repo-local
+`!.metadata_never_index` negation in that repo's `.gitignore`.
 
 **Strict idempotency.** A re-apply is a **byte-identical no-op** when the block is already correct.
 If a prior non-idempotent tool appended the block **more than once**, rig **collapses the entire

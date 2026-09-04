@@ -1306,7 +1306,7 @@
     },
     "gitignore": {
       "type": "object",
-      "description": "a rig-managed block in git's global core.excludesfile (ignores harness worktrees machine-wide).",
+      "description": "a rig-managed block in git's global core.excludesfile (ignores harness worktrees + the Spotlight sentinel machine-wide).",
       "properties": {
         "enabled": {
           "type": "boolean",

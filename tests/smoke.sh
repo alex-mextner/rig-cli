@@ -302,6 +302,7 @@ PY
   [[ -f "$excludes_file" ]] || fail "global excludes file not written at $excludes_file"
   grep -q "rig-managed" "$excludes_file" || fail "rig-managed marker missing from global excludes file"
   grep -q "\.claude/worktrees/" "$excludes_file" || fail "worktrees entry missing from global excludes file"
+  grep -q "^\.metadata_never_index$" "$excludes_file" || fail "spotlight sentinel entry missing from global excludes file (rig-cli#331)"
   pass "rig init --yes set core.excludesfile + wrote the rig-managed global-excludes block"
 
   # idempotency: a second apply changes nothing (no created/updated/backed_up in summary).

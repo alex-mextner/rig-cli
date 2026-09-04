@@ -1523,7 +1523,11 @@ def _validate_agents_md(am: dict[str, Any]) -> None:
 # — not by a per-repo committed ``.gitignore`` and not by a hand-edited global ignore. Listed once
 # so the validator (default-fill), the plan builder, and the runner reference the SAME default —
 # NB: ``.serena/`` is deliberately NOT here (Serena state is COMMITTED shared project memory).
-GITIGNORE_DEFAULT_ENTRIES = ("**/.claude/worktrees/",)
+# ``.metadata_never_index`` (rig-cli#331): the ``spotlight:`` sweep drops this macOS Spotlight
+# sentinel into dependency/build dirs — including a COMMITTED ``vendor/`` inside a git working
+# tree — so without a machine-wide ignore every worktree shows an untracked file and ``gh ship``
+# refuses it as dirty. A bare basename pattern matches at any depth.
+GITIGNORE_DEFAULT_ENTRIES = ("**/.claude/worktrees/", ".metadata_never_index")
 
 # The XDG default rig points ``core.excludesfile`` at when the user has NOT already set it. Git's
 # documented global-ignore location is ``$XDG_CONFIG_HOME/git/ignore`` (``~/.config/git/ignore``).
@@ -1543,9 +1547,10 @@ GITIGNORE_END_MARKER = "# <<< rig-managed (do not edit) <<<"
 # there. It is part of the canonical block text (rendered byte-for-byte), so it must match what is
 # ALREADY on a provisioned machine for a re-apply to be a true zero-churn no-op. Do not reword
 # casually — a change here makes the next apply rewrite every provisioned machine's block.
+# (Reworded once with rig-cli#331, which added the sentinel entry and rewrote every block anyway.)
 GITIGNORE_BLOCK_COMMENT = (
-    "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/; "
-    "rig ignores them globally."
+    "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/ and rig's "
+    "spotlight sweep drops .metadata_never_index into dependency dirs; rig ignores both globally."
 )
 
 
