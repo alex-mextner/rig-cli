@@ -40,9 +40,45 @@ def test_default_tools_cover_ecosystem_and_external():
         assert t in DEFAULT_TOOLS
     for t in ("rg", "jq", "gitleaks"):  # read-only helper tools
         assert t in DEFAULT_TOOLS
+    assert "gh" in DEFAULT_TOOLS  # the one raw git-hosting tool that IS pre-allowed by default
     # Development lifecycle and process/git/external-write access routes through `dev`, not raw tools.
-    for t in _DESTRUCTIVE_RAW_COMMANDS + ("lsof", "ps", "pgrep", "docker", "bun", "npm", "uv", "gh", "git"):
+    for t in _DESTRUCTIVE_RAW_COMMANDS + ("lsof", "ps", "pgrep", "docker", "bun", "npm", "uv", "git"):
         assert t not in DEFAULT_TOOLS
+
+
+def test_gh_pr_merge_stays_denied_on_every_belt_despite_gh_being_default():
+    # `gh` joining the default allow set must never widen the merge ban — the gh-pr-merge deny
+    # rule stays intact on all four belts (rig-cli task: "keeping the existing gh-pr-merge deny
+    # rule intact").
+    from riglib.permissions import (
+        CLAUDE_CODE_DENY_RULES,
+        CODEX_DENY_RULES,
+        DEFAULT_GIT_HOSTING_TOOLS,
+        OMP_GUARD_DENY_RULES,
+        OPENCODE_DENY_RULES,
+    )
+
+    assert "Bash(gh pr merge:*)" in CLAUDE_CODE_DENY_RULES
+    assert "gh pr merge*" in OPENCODE_DENY_RULES
+    assert ("gh", "pr", "merge") in CODEX_DENY_RULES
+    assert any(rule.id == "gh-pr-merge" for rule in OMP_GUARD_DENY_RULES)
+    # `plan._resolved_permission_tools` folds `allow_gh: false` into `disable` by iterating
+    # DEFAULT_GIT_HOSTING_TOOLS, not a hardcoded "gh" literal — pin the coupling loudly: a second
+    # member here means `allow_gh` silently covers it too, and the flag likely needs renaming or
+    # splitting into a per-tool opt-out.
+    assert DEFAULT_GIT_HOSTING_TOOLS == ("gh",)
+
+
+def test_allow_gh_false_opts_out_via_disable():
+    # `allow_gh: false` is documented sugar over `disable: [gh]` — assert the underlying
+    # `disable`-based opt-out (which plan._resolved_permission_tools folds allow_gh into) still
+    # drops `gh` from the resolved/rendered allowlist while every other default tool stays.
+    tools = resolve_tools(None, None, ["gh"])
+    assert "gh" not in tools
+    for t in ("tg", "rg", "dev"):
+        assert t in tools
+    entries = desired_entries("claude-code", tools)
+    assert "Bash(gh:*)" not in entries
 
 
 def test_default_claude_code_allowlist_includes_pm_and_research():
@@ -119,8 +155,11 @@ def test_validate_rejects_unknown_key_and_bad_types():
         validate({"version": 1, "permissions": {"tools": "git"}})  # not a list
     with pytest.raises(ConfigError):
         validate({"version": 1, "permissions": {"enabled": "yes"}})  # not a bool
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "permissions": {"allow_gh": "no"}})  # not a bool
     # the good shape passes
     validate({"version": 1, "permissions": {"enabled": True, "tools": ["git"], "extra": ["gh"], "disable": []}})
+    validate({"version": 1, "permissions": {"allow_gh": False}})
 
 
 # ── plan + apply (claude-code array form) ───────────────────────────────────────────
@@ -171,6 +210,52 @@ def test_plan_disabled_emits_no_action(fake_agent_tools, tmp_path):
     plan = build(_cfg(repo, fake_agent_tools, settings, enabled=False),
                  Catalog.scan(str(fake_agent_tools)), project_type="unknown")
     assert not [a for a in plan.actions if a.kind == "provision_permissions"]
+
+
+def test_plan_allow_gh_false_drops_gh_from_default_set(fake_agent_tools, tmp_path):
+    # `allow_gh: false` opts out of the `gh` default without touching the rest of the default set.
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    plan = build(_cfg(repo, fake_agent_tools, settings, allow_gh=False),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    perm_actions = [a for a in plan.actions if a.kind == "provision_permissions"]
+    assert len(perm_actions) == 1
+    tools = perm_actions[0].options["tools"]
+    assert "gh" not in tools
+    assert [t for t in DEFAULT_TOOLS if t != "gh"] == list(tools)
+
+
+def test_plan_allow_gh_absent_or_true_keeps_gh(fake_agent_tools, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    for perm in ({}, {"allow_gh": True}):
+        plan = build(_cfg(repo, fake_agent_tools, settings, **perm),
+                     Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+        perm_actions = [a for a in plan.actions if a.kind == "provision_permissions"]
+        assert "gh" in perm_actions[0].options["tools"]
+
+
+def test_plan_allow_gh_false_wins_over_extra_gh(fake_agent_tools, tmp_path):
+    # `extra: [gh]` re-adding `gh` must not undo `allow_gh: false` — disable applies AFTER extra
+    # in resolve_tools, and _resolved_permission_tools folds allow_gh into disable, so `gh` is
+    # dropped regardless of how it entered the desired set.
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    plan = build(_cfg(repo, fake_agent_tools, settings, extra=["gh"], allow_gh=False),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    tools = [a for a in plan.actions if a.kind == "provision_permissions"][0].options["tools"]
+    assert "gh" not in tools
+
+
+def test_plan_allow_gh_false_wins_over_explicit_tools_gh(fake_agent_tools, tmp_path):
+    # same interplay against an explicit `tools` list (which REPLACES the default set) rather
+    # than `extra`.
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "settings.json"
+    plan = build(_cfg(repo, fake_agent_tools, settings, tools=["gh", "tg"], allow_gh=False),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    tools = [a for a in plan.actions if a.kind == "provision_permissions"][0].options["tools"]
+    assert tools == ["tg"]
 
 
 def test_apply_creates_allowlist_and_is_idempotent(fake_agent_tools, tmp_path):
@@ -1160,6 +1245,93 @@ def test_opencode_deny_ask_written_after_user_catch_all(fake_agent_tools, tmp_pa
         assert keys.index(d) > keys.index("gh *")   # …and after rig's allow keys
     for a in OPENCODE_ASK_RULES:
         assert bash[a] == "ask"
+
+
+def test_opencode_upgrade_reanchors_deny_after_a_newly_merged_allow_key(fake_agent_tools, tmp_path):
+    """Regression: on a machine that already applied rig BEFORE `gh` joined the default tool
+    set, `gh pr merge*: deny` was written first; `gh` joining the defaults later means `gh *:
+    allow` is a NEW key merged into an object that already has that deny key. Plain
+    append-missing would land `gh *` AFTER the pre-existing `gh pr merge*`, and opencode is
+    last-match-wins — the later allow key would silently un-deny the merge. Assert the runner
+    re-anchors rig's deny/ask keys after every apply, and that a second apply changes nothing
+    (idempotent — the fix must not turn every apply into a rewrite)."""
+    from riglib.permissions import OPENCODE_ASK_RULES, OPENCODE_DENY_RULES
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "opencode.json"
+    pre_gh_tools = [t for t in DEFAULT_TOOLS if t != "gh"]
+    seed_bash: dict[str, str] = {f"{t} *": "allow" for t in pre_gh_tools}
+    for key in OPENCODE_DENY_RULES:
+        seed_bash[key] = "deny"
+    for key in OPENCODE_ASK_RULES:
+        seed_bash[key] = "ask"
+    settings.write_text(json.dumps({"permission": {"bash": seed_bash}}), encoding="utf-8")
+
+    plan = build(_opencode_cfg(repo, fake_agent_tools, settings),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+
+    bash = json.loads(settings.read_text(encoding="utf-8"))["permission"]["bash"]
+    assert bash["gh *"] == "allow"
+    assert bash["gh pr merge*"] == "deny"
+    keys = list(bash)
+    # the load-bearing assertion: the newly-merged `gh *` allow key must NOT outrank the
+    # pre-existing `gh pr merge*` deny key (last-match-wins → later position wins)
+    assert keys.index("gh *") < keys.index("gh pr merge*")
+    for d in OPENCODE_DENY_RULES:
+        assert keys.index(d) > keys.index("gh *")
+    for a in OPENCODE_ASK_RULES:
+        assert keys.index(a) > keys.index("gh *")
+
+    after_first = settings.read_text(encoding="utf-8")
+    second = run_plan(plan)
+    assert not second.errors, [r.detail for r in second.errors]
+    assert settings.read_text(encoding="utf-8") == after_first  # idempotent: no-op re-apply
+
+
+def test_opencode_apply_heals_an_already_misordered_machine(fake_agent_tools, tmp_path):
+    """The SHARPER regression: a machine that opted into `gh` the documented pre-diff way
+    (`permissions.extra: [gh]`, back when `gh` was not yet a default tool) already has `gh *:
+    allow` sitting AFTER `gh pr merge*: deny` in `permission.bash` — last-match-wins means the
+    merge deny was ALREADY silently defeated on that machine, before this PR even lands. Every
+    desired entry (allow AND deny/ask) is already PRESENT there — `added` would be 0 for every
+    container — so a naive `total_added == 0` skip would leave it broken forever, on every future
+    apply, because "everything already present" never stops being true. The fix must compare the
+    container's serialized bytes, not `added`, to catch pure reordering as a write-worthy change."""
+    from riglib.permissions import OPENCODE_ASK_RULES, OPENCODE_DENY_RULES
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    settings = repo / "opencode.json"
+    pre_gh_tools = [t for t in DEFAULT_TOOLS if t != "gh"]
+    seed_bash: dict[str, str] = {f"{t} *": "allow" for t in pre_gh_tools}
+    for key in OPENCODE_DENY_RULES:
+        seed_bash[key] = "deny"
+    for key in OPENCODE_ASK_RULES:
+        seed_bash[key] = "ask"
+    seed_bash["gh *"] = "allow"  # the already-broken shape: gh allow AFTER the deny keys
+    settings.write_text(json.dumps({"permission": {"bash": seed_bash}}), encoding="utf-8")
+
+    plan = build(_opencode_cfg(repo, fake_agent_tools, settings),
+                 Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert not any(r.status == "skipped" for r in report.results if r.action.category == "permissions"), (
+        "the reorder-only repair must not be silently discarded as a no-op"
+    )
+
+    bash = json.loads(settings.read_text(encoding="utf-8"))["permission"]["bash"]
+    keys = list(bash)
+    assert keys.index("gh *") < keys.index("gh pr merge*")  # healed
+    for d in OPENCODE_DENY_RULES:
+        assert keys.index(d) > keys.index("gh *")
+    for a in OPENCODE_ASK_RULES:
+        assert keys.index(a) > keys.index("gh *")
+
+    after_first = settings.read_text(encoding="utf-8")
+    second = run_plan(plan)
+    assert not second.errors, [r.detail for r in second.errors]
+    assert settings.read_text(encoding="utf-8") == after_first  # idempotent once healed
 
 
 def test_opencode_deny_ask_drift_missing_then_converged_and_extras_once(fake_agent_tools, tmp_path):

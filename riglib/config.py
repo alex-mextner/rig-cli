@@ -1127,7 +1127,7 @@ def _validate_mode(m: dict[str, Any]) -> None:
 
 # The keys the permissions block accepts. Listed once so the validator rejects a typo (fail-closed,
 # consistent with every other block).
-_PERMISSIONS_KEYS = {"enabled", "kind", "tools", "extra", "disable", "settings_path",
+_PERMISSIONS_KEYS = {"enabled", "kind", "tools", "extra", "disable", "allow_gh", "settings_path",
                      "allow", "deny", "ask"}
 # Harness kinds the permissions capability provisions when PINNED — any kind with a real
 # permissions SURFACE: the allowlist kinds, the execpolicy kind (codex), the guard kind (omp),
@@ -1158,13 +1158,15 @@ _PERMISSION_RULE_RE = re.compile(r"^(?!.*[\r\n])[A-Za-z0-9_*.-]+(\(.+\))?\Z")
 def _validate_permissions(p: dict[str, Any]) -> None:
     """Validate the ``permissions`` block — the per-harness command allowlist rig provisions.
 
-    rig pre-allows our ecosystem CLIs (tg/review/draw/3d/rig/task/dev) plus read-only helper
-    tools (rg/jq/gitleaks) in the harness's permission allowlist so the agent
-    never stops to ask for a known-safe command. Default **ON**: an EMPTY/absent block still
-    provisions the DEFAULT tool set (a present block with ``enabled`` not false opts in). The list
-    is config-driven — ``tools`` (a list of command names) REPLACES the default set, ``extra``
-    adds, ``disable`` removes. Fail-closed, consistent with every other block, on: a non-mapping
-    block, an unknown key (typo guard), a non-bool ``enabled``, a non-string-list
+    rig pre-allows our ecosystem CLIs (tg/review/draw/3d/rig/task/dev/pm/research) plus read-only
+    helper tools (rg/jq/gitleaks) plus gh (the GitHub CLI — not read-only, see
+    ``riglib.permissions``'s module docstring for the residual write-surface it trades in) in the
+    harness's permission allowlist so the agent never stops to ask for a known-safe command.
+    Default **ON**: an EMPTY/absent block still provisions the DEFAULT tool set (a present block
+    with ``enabled`` not false opts in). The list is config-driven — ``tools`` (a list of command
+    names) REPLACES the default set, ``extra`` adds, ``disable`` removes, ``allow_gh: false`` is
+    sugar for ``disable: [gh]``. Fail-closed, consistent with every other block, on: a non-mapping
+    block, an unknown key (typo guard), a non-bool ``enabled``/``allow_gh``, a non-string-list
     ``tools``/``extra``/``disable``, and a non-string ``settings_path``.
     """
     if not isinstance(p, dict):
@@ -1173,6 +1175,7 @@ def _validate_permissions(p: dict[str, Any]) -> None:
         return
     _reject_unknown_keys(p, "permissions")
     _check_bool(p, "enabled", "permissions.enabled")
+    _check_bool(p, "allow_gh", "permissions.allow_gh")
     kind = p.get("kind")
     if kind is not None:
         if not isinstance(kind, str):

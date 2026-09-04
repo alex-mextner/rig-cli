@@ -51,12 +51,13 @@ from typing import Callable
 
 from .harness_skills import HARNESS_INSTRUCTION_FILES, omp_agent_root
 
-# ── the default tool list — our ecosystem CLIs + read-only helper tools ─────────────────────
+# ── the default tool list — our ecosystem CLIs + read-only helper tools + gh ────────────────
 # CONFIG-DRIVEN: this is the DEFAULT set rig pre-allows; a config ``permissions.tools`` replaces
 # it wholesale, and ``permissions.extra`` / ``permissions.disable`` apply deltas on top. The grant
 # is at the command-PREFIX level (``Bash(<tool>:*)`` covers a tool's subcommands/flags), so raw
-# process-control / package-manager / git-hosting tools stay OUT of the default set. Development
-# lifecycle work routes through ``dev``, whose implementation validates process/project ownership.
+# process-control / package-manager tools stay OUT of the default set. Development lifecycle work
+# routes through ``dev``, whose implementation validates process/project ownership. ``gh`` is the
+# one git-hosting tool that IS in the default set — see the note above :data:`DEFAULT_GIT_HOSTING_TOOLS`.
 #
 # Our ecosystem CLIs (tg/review/draw/3d/rig/task/dev/pm/research) and the external tools we lean
 # on. ``task`` is alex-mextner/task-cli (the binary is ``task``). ``dev`` is the agent-tools
@@ -64,14 +65,50 @@ from .harness_skills import HARNESS_INSTRUCTION_FILES, omp_agent_root
 # helper's own implementation/provenance stays in agent-tools. ``pm`` (pm-cli) and ``research``
 # (research-cli) are read-only ecosystem coordinators — a project-manager observer/reconciler and
 # a multi-provider research/panel CLI; both observe and never edit code, matching the safe
-# read-only profile of ``review``/``task``. ``rg`` is ripgrep's binary name. Raw ``gh``, ``git``,
-# ``uv``, ``bun``, ``npm``, ``docker``, ``kill``, ``lsof``, ``ps`` and ``pgrep`` are deliberately
-# absent by default.
+# read-only profile of ``review``/``task``. ``rg`` is ripgrep's binary name. Raw ``git``, ``uv``,
+# ``bun``, ``npm``, ``docker``, ``kill``, ``lsof``, ``ps`` and ``pgrep`` are deliberately absent
+# by default — those safety checks belong inside ``dev``.
+#
+# ``gh`` (the GitHub CLI) IS pre-allowed by default, unlike the other raw git-hosting/process
+# tools above — everyday agent use of it is read-heavy (``gh pr view``, ``gh issue list``). Be
+# honest about the residual risk this trades in, though: ``gh`` is a BROAD write transport, not
+# just a merge tool — ``gh api -X PUT/POST ...`` reaches the same REST surface a browser session
+# would (including the PR-merge endpoint), ``gh api graphql`` can run a ``mergePullRequest``/
+# ``enablePullRequestAutoMerge`` mutation, and unrelated commands like ``gh auth token`` (prints
+# the OAuth token) or ``gh repo delete``/``gh secret set`` are just as reachable under a blanket
+# ``gh:*`` grant. The baked ``gh-pr-merge`` deny/forbidden rule on every belt below
+# (:data:`CLAUDE_CODE_DENY_RULES`, :data:`OPENCODE_DENY_RULES`, :data:`OMP_GUARD_DENY_RULES`,
+# :data:`CODEX_DENY_RULES`) covers ONLY the direct, argv-prefix ``gh pr merge`` form — a global
+# flag ahead of the subcommand (``gh --repo o/r pr merge 5``) or the ``gh api``/``gh api graphql``
+# merge routes above are NOT caught by any of these prefix/glob rules, on ANY harness; that gap is
+# real, not hypothetical (verified in review). What DOES close it, on claude-code and codex (where
+# rig's separate ``agent_hooks``/hook-bridge feature is enabled — see ``riglib.plan``'s
+# ``codex_hook_bridge`` wiring), is agent-tools' own argv-level ``block-raw-pr-merge`` hook: it
+# tokenizes the full command (not just a prefix), skips ``gh``'s global flags, and recognizes both
+# the REST and GraphQL merge routes — the same "coarse belt here, argv-parsing deep layer in the
+# hook bridge" split already documented for force-push/``--no-verify`` above. That hook does NOT
+# exist for opencode or omp today, and even where it runs it targets MERGES specifically, not the
+# wider ``gh auth token``/``gh repo delete``/``gh secret set`` write surface — those stay open
+# under the default ``gh`` grant on every harness. Where the deny rule DOES apply (the direct
+# ``gh pr merge`` form), it still wins over the broader ``gh`` allow: claude-code evaluates
+# deny → ask → allow (first match wins, deny checked first); opencode is last-match-wins and rig
+# both emits deny/ask entries after the allow keys AND re-anchors them there on every subsequent
+# apply (see ``riglib.actions.runner._merge_permission_container``, added because a machine that
+# had already applied the OLD opencode baseline — deny key present, no ``gh`` allow key yet — would
+# otherwise get the new ``gh *`` allow key appended AFTER it, silently un-denying the merge);
+# codex execpolicy is most-restrictive-wins (already proven for the analogous ``rg``/``rg --pre``
+# overlap, see ``tests/test_execpolicy.py``). A project or machine that wants ``gh`` off entirely —
+# closing all of the above at once — can set ``permissions.allow_gh: false`` (sugar over
+# ``permissions.disable: [gh]``, which already worked) or list it in ``permissions.disable``
+# directly.
 DEFAULT_ECOSYSTEM_TOOLS: tuple[str, ...] = (
     "tg", "review", "draw", "3d", "rig", "task", "dev", "pm", "research",
 )
-DEFAULT_EXTERNAL_TOOLS: tuple[str, ...] = ("rg", "jq", "gitleaks")
-DEFAULT_TOOLS: tuple[str, ...] = DEFAULT_ECOSYSTEM_TOOLS + DEFAULT_EXTERNAL_TOOLS
+DEFAULT_EXTERNAL_TOOLS: tuple[str, ...] = ("rg", "jq", "gitleaks")  # read-only helper tools
+DEFAULT_GIT_HOSTING_TOOLS: tuple[str, ...] = ("gh",)  # NOT read-only — see the deny-belt note above
+DEFAULT_TOOLS: tuple[str, ...] = (
+    DEFAULT_ECOSYSTEM_TOOLS + DEFAULT_EXTERNAL_TOOLS + DEFAULT_GIT_HOSTING_TOOLS
+)
 
 
 def _render_claude_code(tool: str) -> str:
