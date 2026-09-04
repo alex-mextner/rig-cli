@@ -444,6 +444,12 @@ _PERMISSIONS_BLOCK = Block(
         "tools": Leaf("array", "command names to pre-allow (replaces the default set)", items_type="string"),
         "extra": Leaf("array", "command names to ADD on top of the set", items_type="string"),
         "disable": Leaf("array", "command names to drop from rig's desired set", items_type="string"),
+        "allow_gh": Leaf(
+            "boolean",
+            "pre-allow the GitHub CLI (gh); false opts out (sugar over disable: [gh]) — "
+            "see the gh note in docs/config-schema.md for the residual risk this trades in",
+            default=True,
+        ),
         "allow": Leaf(
             "array",
             "raw permission-rule entries asserted present in the allow list, on TOP of the tool-derived ones",

@@ -1151,7 +1151,10 @@ def _merge_permission_container(data: dict, ps: PermissionSpec) -> int:
     - array form: append each missing entry, order-stable — the user's entries stay first.
     - object form: set each missing entry KEY → ``ps.value`` only when the key is absent (never
       downgrade a user's ``"deny"``/``"ask"`` override on an allow entry — that is the user's
-      call, not rig's; drift surfaces it as ``modified`` instead).
+      call, not rig's; drift surfaces it as ``modified`` instead). For deny/ask roles, rig's OWN
+      desired entries are then re-anchored to the end of the object on every call (not just when
+      newly added) — opencode is last-match-wins, so a deny/ask key merged in an EARLIER apply
+      must never end up before an allow key merged in a LATER one.
 
     Raises ``ValueError`` on a shape mismatch (non-dict parent, non-array/non-object container);
     the caller turns that into an action error — never a blind overwrite of the user's data.
@@ -1183,6 +1186,30 @@ def _merge_permission_container(data: dict, ps: PermissionSpec) -> int:
             if entry not in existing:
                 existing[entry] = ps.value
                 added += 1
+        if ps.role in ("deny", "ask"):
+            # opencode is last-match-wins, and dict insertion order only grows at the tail — a
+            # deny/ask key MERGED IN A PRIOR APPLY can already sit BEFORE an allow key that is
+            # only newly merged in THIS apply (the exact shape rig-cli's gh default hit: `gh
+            # pr merge*: deny` provisioned before `gh` joined the default tool set, `gh *:
+            # allow` merged afterward → landed AFTER the existing deny key → later-key-wins
+            # silently un-denied the merge — same shape for any machine that opted into `gh`
+            # earlier via `permissions.extra: [gh]`, before it joined the default set). Re-anchor
+            # every one of rig's OWN desired deny/ask entries (``ps.entries`` — never a user's
+            # unrelated key) to the END of the container on EVERY apply, not just when freshly
+            # added, so this invariant holds on a fresh write, on an upgrade, AND on a machine
+            # that is ALREADY in the broken state (every desired key present, just misordered —
+            # ``added`` alone would be 0 there too). This is pure reordering with no value
+            # change, so the CALLER (``_do_provision_permissions``) is what decides whether it is
+            # write-worthy — it compares the container's serialized bytes before/after the merge
+            # loop rather than gating on ``added``, specifically so this repair is never silently
+            # discarded by an "already added everything" skip. NB: this also means a user's own
+            # key that sits AFTER one of rig's deny/ask entries — the only way to positionally
+            # override a baked deny in opencode's last-match-wins dialect — gets re-anchored past
+            # on the next apply too, defeating that override; the sanctioned way to relax a baked
+            # rule is `permissions.deny: [...]` (replaces the baseline), not key position.
+            for entry in ps.entries:
+                if entry in existing:
+                    existing[entry] = existing.pop(entry)
     parent[leaf] = existing
     return added
 
@@ -1197,6 +1224,10 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
     re-apply with the same config is a true no-op. The accumulated ``permissions.allow`` in the
     user's live settings (auto-mode, docker, psql, …) and the user's own deny/ask rules are
     never clobbered — rig only ever ADDS what is missing (see :func:`_merge_permission_container`).
+    The write decision compares the container's serialized bytes before/after the merge, not a
+    plain "were any entries added" count — opencode's deny/ask re-anchor (same function) can
+    change key ORDER with zero new entries, and that must still count as a write or the repair
+    never reaches disk.
 
     Backup-noted under ``on_conflict=backup`` when the file changes; ``skip`` leaves a malformed
     file untouched; a non-dict settings root or a non-array/object container is a hard error
@@ -1229,25 +1260,49 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
     if not isinstance(data, dict):
         return ActionResult(action, "error", f"permissions/{action.item}: {config_file} is not a JSON object")
 
-    added_per_container: list[str] = []
-    total_added = 0
-    for ps in specs:
-        try:
-            n = _merge_permission_container(data, ps)
-        except ValueError as exc:
-            return ActionResult(action, "error", f"permissions/{action.item}: {exc} in {config_file}")
-        if n:
-            added_per_container.append(f"{n} to {'.'.join(ps.key_path)}")
-            total_added += n
+    # Snapshot BEFORE the merge so the write decision below is driven by whether `data` actually
+    # CHANGED — not by whether any entry was newly ADDED. The deny/ask re-anchor in
+    # ``_merge_permission_container`` can reorder existing keys with zero new entries (the exact
+    # shape of a machine that opted into `gh` via `permissions.extra` before `gh` joined the
+    # default set: every desired key is already present, just in the wrong order) — a
+    # ``total_added == 0`` check would silently discard that repair and leave the file broken
+    # forever, since a subsequent apply would see the same "everything already present" state.
+    before = json.dumps(data, indent=2) + "\n"
 
     total_desired = sum(len(ps.entries) for ps in specs)
-    if total_added == 0:
+    added_per_container: list[str] = []
+    total_added = 0
+    if total_desired > 0:
+        # Only walk the merge AT ALL when some spec actually wants an entry. `_merge_permission_
+        # container` unconditionally scaffolds its container (`_container_at` creates intermediate
+        # dicts even for a zero-entries spec) — harmless when a SIBLING spec in this same action
+        # has real entries (their container gets created either way; `test_disable_drops_tool_
+        # from_desired_set_end_to_end` pins that an empty `allow` list still lands in the file
+        # alongside a non-empty deny/ask baseline), but with EVERY spec's entries empty there is
+        # nothing to scaffold FOR — skipping the loop entirely keeps a fully-empty action a true
+        # no-op (`test_empty_tools_list_is_noop`) rather than writing a `{"permissions": {"allow":
+        # [], "deny": [], "ask": []}}` shell for zero desired content.
+        for ps in specs:
+            try:
+                n = _merge_permission_container(data, ps)
+            except ValueError as exc:
+                return ActionResult(action, "error", f"permissions/{action.item}: {exc} in {config_file}")
+            if n:
+                added_per_container.append(f"{n} to {'.'.join(ps.key_path)}")
+                total_added += n
+
+    after = json.dumps(data, indent=2) + "\n"
+    if after == before:
         detail = (
             f"permissions/{action.item}: no desired entries to provision (empty tool + rule sets)"
             if total_desired == 0
             else f"permissions/{action.item}: all {total_desired} entries already in {config_file}"
         )
         return ActionResult(action, "skipped", detail)
+    if total_added == 0:
+        # Nothing NEW, but the container changed shape anyway — the deny/ask re-anchor above
+        # moved an already-present key. Still a write: `after != before` is what proves it.
+        added_per_container.append("re-anchored deny/ask key order")
 
     if _should_backup(on_conflict) and backup_note == "" and config_file.is_file():
         bak = fsutil.backup_path(config_file)
@@ -1258,8 +1313,9 @@ def _do_provision_permissions(action: Action, on_conflict: str) -> ActionResult:
     # rebuilding the object) would silently reorder deny before allow and turn every deny into a
     # no-op — with no test failure unless the order assertion in test_opencode_deny_ask_written_
     # after_user_catch_all stays. Insertion order (the additive merge appends missing keys) is the
-    # invariant; json.dumps preserves dict order, so leave it be.
-    config_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    # invariant; json.dumps preserves dict order, so leave it be. Reuse `after` (already the exact
+    # bytes this same serialization would produce) rather than dumping a third time.
+    config_file.write_text(after, encoding="utf-8")
     # "backed_up" when we preserved a prior copy; else "updated" if the file pre-existed (we merged
     # entries into it), or "created" if we wrote it fresh. Don't report "created" for a file we
     # actually modified under a non-backup policy (the review's misleading-status finding).

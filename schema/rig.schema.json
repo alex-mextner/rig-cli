@@ -760,6 +760,11 @@
             "type": "string"
           }
         },
+        "allow_gh": {
+          "type": "boolean",
+          "description": "pre-allow the GitHub CLI (gh); false opts out (sugar over disable: [gh]) — see the gh note in docs/config-schema.md for the residual risk this trades in",
+          "default": true
+        },
         "allow": {
           "type": "array",
           "description": "raw permission-rule entries asserted present in the allow list, on TOP of the tool-derived ones",

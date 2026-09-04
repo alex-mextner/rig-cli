@@ -287,12 +287,14 @@ AREAS: tuple[Area, ...] = (
         (
             _opt("permissions.enabled", KIND_BOOL, True,
                  "Provision the per-harness permissions layer: the command allowlist (tg/review/draw/"
-                 "3d/rig/task/dev + read-only rg/jq/gitleaks pre-allowed, no per-call prompts) plus "
-                 "the deny/ask rule baselines (claude-code AND opencode; raw PR-merge, force-push, sudo "
-                 "rm, screencapture, rg --pre denied; pkill/killall/git reset --hard prompt). codex gets a "
-                 "safe-command allow + coarse deny via its execpolicy .rules block. Additive — merges "
-                 "into the existing lists, never clobbers or removes the user's own entries. Off = "
-                 "leave it alone. The target settings file is per-machine; repo-local config is "
+                 "3d/rig/task/dev/pm/research + read-only rg/jq/gitleaks + gh pre-allowed, no per-call "
+                 "prompts) plus the deny/ask rule baselines (claude-code AND opencode; raw PR-merge via "
+                 "gh pr merge, force-push, sudo rm, screencapture, rg --pre denied; pkill/killall/git "
+                 "reset --hard prompt) — see the gh note in docs/config-schema.md for the residual risk "
+                 "gh's default grant trades in and permissions.allow_gh to opt it out. codex gets a "
+                 "safe-command allow + coarse deny via its execpolicy .rules block. Additive — "
+                 "merges into the existing lists, never clobbers or removes the user's own entries. "
+                 "Off = leave it alone. The target settings file is per-machine; repo-local config is "
                  "still accepted for compatibility."),
             _opt("permissions.kind", KIND_ENUM, None,
                  "Which harness's permissions to provision. opencode is supported for the ALLOWLIST "
@@ -301,8 +303,8 @@ AREAS: tuple[Area, ...] = (
                  "declarative approval posture. "
                  "Absent permissions.kind, rig provisions supported harness.kind plus harness.kinds "
                  "allowlists; codex has no config allowlist (its allow/coarse-deny go via the "
-                 "execpolicy .rules block). The lists (tools/extra/disable, allow/deny/ask) are "
-                 "edited directly in the config file.",
+                 "execpolicy .rules block). The lists (tools/extra/disable, allow_gh, allow/deny/ask) "
+                 "are edited directly in the config file.",
                  choices=("claude-code", "opencode", "codex", "omp", "pi", "commandcode"),
                  null_tokens=("", "null", "none", "~", "unset", "fan-out")),
         ),

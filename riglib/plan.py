@@ -958,6 +958,34 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
     )
 
 
+def _resolved_permission_tools(p: dict) -> list[str]:
+    """The effective ``permissions`` tool list, folding ``allow_gh: false`` into ``disable``.
+
+    ``allow_gh`` is sugar over ``permissions.disable: [gh]`` (which already worked before ``gh``
+    joined the default set) — a single, discoverable opt-out for the one default addition that is
+    a raw git-hosting tool, without inventing a second delta mechanism alongside
+    ``tools``/``extra``/``disable``. Folds in :data:`riglib.permissions.DEFAULT_GIT_HOSTING_TOOLS`
+    (today just ``("gh",)``) rather than a hardcoded literal, so the two never drift; if that tuple
+    ever grows, ``allow_gh`` covers every member of it, not just ``gh`` — rename the flag if a
+    second member ever needs its OWN independent opt-out. Shared by both permissions call sites
+    (the allowlist builder and the codex execpolicy builder) so the two surfaces can never resolve
+    ``gh`` differently.
+    """
+    from .permissions import DEFAULT_GIT_HOSTING_TOOLS, resolve_tools
+
+    tools_cfg = p.get("tools")
+    disable = list(p.get("disable", []) or []) if isinstance(p.get("disable"), list) else []
+    if p.get("allow_gh") is False:
+        for tool in DEFAULT_GIT_HOSTING_TOOLS:
+            if tool not in disable:
+                disable.append(tool)
+    return resolve_tools(
+        list(tools_cfg) if isinstance(tools_cfg, list) else None,
+        list(p.get("extra", []) or []) if isinstance(p.get("extra"), list) else [],
+        disable,
+    )
+
+
 def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
     """Plan the per-harness permissions provisioning (allow + deny/ask), unless ``enabled: false``.
 
@@ -967,9 +995,11 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
     with no config at all.
 
     Everything is CONFIG-DRIVEN — ``permissions.tools`` (a list) REPLACES the default set;
-    ``permissions.extra`` adds; ``permissions.disable`` removes; ``permissions.allow`` adds RAW
-    rule entries on top of the tool-derived allowlist; ``permissions.deny``/``ask`` REPLACE the
-    baked rule baselines. The action carries the RESOLVED lists (so the runner stays config-pure)
+    ``permissions.extra`` adds; ``permissions.disable`` removes; ``permissions.allow_gh: false``
+    is sugar that folds ``gh`` into ``disable`` (see :func:`_resolved_permission_tools`);
+    ``permissions.allow`` adds RAW rule entries on top of the tool-derived allowlist;
+    ``permissions.deny``/``ask`` REPLACE the baked rule baselines. The action carries the RESOLVED
+    lists (so the runner stays config-pure)
     and is keyed off ``harness.kind`` (exactly like the auto-mode write), targeting the SAME
     per-harness user-scope settings file. A harness whose kind has no additively-mergeable
     allowlist (codex, pi — see :mod:`riglib.permissions`) emits NO action and is recorded
@@ -979,7 +1009,6 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
         HARNESS_ALLOWLISTS,
         HARNESS_ALLOWLIST_NA,
         harness_supported,
-        resolve_tools,
     )
 
     p = config.data.get("permissions")
@@ -990,12 +1019,7 @@ def _build_permissions(config: LoadedConfig, plan: InstallPlan) -> None:
     if p.get("enabled") is False:
         return
 
-    tools_cfg = p.get("tools")
-    tools = resolve_tools(
-        list(tools_cfg) if isinstance(tools_cfg, list) else None,
-        list(p.get("extra", []) or []) if isinstance(p.get("extra"), list) else [],
-        list(p.get("disable", []) or []) if isinstance(p.get("disable"), list) else [],
-    )
+    tools = _resolved_permission_tools(p)
     kinds = _permissions_kinds(config, p)
     if p.get("settings_path") and len(kinds) > 1:
         original = list(kinds)
@@ -1087,7 +1111,7 @@ def _build_execpolicy(config: LoadedConfig, plan: InstallPlan) -> None:
     flag-position denies stay in the PreToolUse hook bridge. A kind with no execpolicy surface emits
     nothing here (the allowlist builder already noted it).
     """
-    from .permissions import HARNESS_EXECPOLICY, execpolicy_supported, resolve_tools
+    from .permissions import HARNESS_EXECPOLICY, execpolicy_supported
 
     p = config.data.get("permissions")
     if p is None:
@@ -1097,12 +1121,7 @@ def _build_execpolicy(config: LoadedConfig, plan: InstallPlan) -> None:
     if p.get("enabled") is False:
         return
 
-    tools_cfg = p.get("tools")
-    tools = resolve_tools(
-        list(tools_cfg) if isinstance(tools_cfg, list) else None,
-        list(p.get("extra", []) or []) if isinstance(p.get("extra"), list) else [],
-        list(p.get("disable", []) or []) if isinstance(p.get("disable"), list) else [],
-    )
+    tools = _resolved_permission_tools(p)
     for kind in _permissions_kinds(config, p):
         if not execpolicy_supported(kind):
             continue
