@@ -1285,9 +1285,13 @@ def _check_global_excludes(action: Action, report: DriftReport) -> None:
                       "rig-managed global-excludes block not present (apply adds it)")
         )
     elif r.state == "update":
+        # Name the entries the file lacks (e.g. `.metadata_never_index` on a machine provisioned
+        # before rig-cli#331) so the operator sees WHY the block is stale, not just that it is.
+        missing = f" — missing: {', '.join(r.missing_entries)}" if r.missing_entries else ""
         report.items.append(
             DriftItem("modified", "gitignore", "block", target,
-                      "rig-managed global-excludes block differs from config (apply reconciles it)")
+                      f"rig-managed global-excludes block differs from config{missing} "
+                      "(apply reconciles it)")
         )
     elif r.state in ("conflict", "io_error"):
         report.items.append(

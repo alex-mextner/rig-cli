@@ -55,6 +55,11 @@ SCHEMA_ID = "https://github.com/alex-mextner/rig-cli/blob/main/schema/rig.schema
 # the CLI, the docs, and the sync test name the same file.
 SCHEMA_REL_PATH = "schema/rig.schema.json"
 PERMISSION_RULE_JSON_PATTERN = r"^(?!.*[\r\n])[A-Za-z0-9_*.-]+(\(.+\))?$"
+# Mirrors ``riglib.config``'s ``_validate_gitignore`` entry check EXACTLY: non-empty after
+# stripping, and no line separator ``str.splitlines()`` recognizes (LF/CR plus VT/FF/FS/GS/RS/
+# NEL/LINE SEPARATOR/PARAGRAPH SEPARATOR) — so a config that validates offline against the
+# published schema never surprises `rig apply` with a rejection the schema didn't warn about.
+GITIGNORE_ENTRY_JSON_PATTERN = r"^(?!\s*$)(?!.*[\r\n\x0b\x0c\x1c-\x1e\x85\u2028\u2029]).+$"
 # Mirrors riglib.tmux's `_pane_titles_format_is_safe` char/substring blocklist EXACTLY (a test —
 # `test_pane_titles_format_python_check_matches_json_schema_pattern` — runs a shared corpus
 # through both and asserts identical verdicts, so the two can't independently drift): `"`, `\`,
@@ -850,10 +855,13 @@ _ENV_BLOCK = Block(
 )
 
 _GITIGNORE_BLOCK = Block(
-    doc="a rig-managed block in git's global core.excludesfile (ignores harness worktrees machine-wide).",
+    doc="a rig-managed block in git's global core.excludesfile (ignores harness worktrees + the Spotlight sentinel machine-wide).",
     leaves={
         "enabled": Leaf("boolean", "provision the managed block", default=True),
-        "entries": Leaf("array", "the ignored paths inside the managed block", items_type="string"),
+        "entries": Leaf(
+            "array", "the ignored paths inside the managed block",
+            items_type="string", items_pattern=GITIGNORE_ENTRY_JSON_PATTERN,
+        ),
         "excludesfile": Leaf("string", "force a specific file instead of honoring core.excludesfile"),
     },
 )

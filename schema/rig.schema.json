@@ -1306,7 +1306,7 @@
     },
     "gitignore": {
       "type": "object",
-      "description": "a rig-managed block in git's global core.excludesfile (ignores harness worktrees machine-wide).",
+      "description": "a rig-managed block in git's global core.excludesfile (ignores harness worktrees + the Spotlight sentinel machine-wide).",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -1317,7 +1317,8 @@
           "type": "array",
           "description": "the ignored paths inside the managed block",
           "items": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^(?!\\s*$)(?!.*[\\r\\n\\x0b\\x0c\\x1c-\\x1e\\x85\\u2028\\u2029]).+$"
           }
         },
         "excludesfile": {

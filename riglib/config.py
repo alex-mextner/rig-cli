@@ -1523,7 +1523,11 @@ def _validate_agents_md(am: dict[str, Any]) -> None:
 # — not by a per-repo committed ``.gitignore`` and not by a hand-edited global ignore. Listed once
 # so the validator (default-fill), the plan builder, and the runner reference the SAME default —
 # NB: ``.serena/`` is deliberately NOT here (Serena state is COMMITTED shared project memory).
-GITIGNORE_DEFAULT_ENTRIES = ("**/.claude/worktrees/",)
+# ``.metadata_never_index`` (rig-cli#331): the ``spotlight:`` sweep drops this macOS Spotlight
+# sentinel into dependency/build dirs — including a COMMITTED ``vendor/`` inside a git working
+# tree — so without a machine-wide ignore every worktree shows an untracked file and ``gh ship``
+# refuses it as dirty. A bare basename pattern matches at any depth.
+GITIGNORE_DEFAULT_ENTRIES = ("**/.claude/worktrees/", ".metadata_never_index")
 
 # The XDG default rig points ``core.excludesfile`` at when the user has NOT already set it. Git's
 # documented global-ignore location is ``$XDG_CONFIG_HOME/git/ignore`` (``~/.config/git/ignore``).
@@ -1543,9 +1547,10 @@ GITIGNORE_END_MARKER = "# <<< rig-managed (do not edit) <<<"
 # there. It is part of the canonical block text (rendered byte-for-byte), so it must match what is
 # ALREADY on a provisioned machine for a re-apply to be a true zero-churn no-op. Do not reword
 # casually — a change here makes the next apply rewrite every provisioned machine's block.
+# (Reworded once with rig-cli#331, which added the sentinel entry and rewrote every block anyway.)
 GITIGNORE_BLOCK_COMMENT = (
-    "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/; "
-    "rig ignores them globally."
+    "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/ and rig's "
+    "spotlight sweep drops .metadata_never_index into dependency dirs; rig ignores both globally."
 )
 
 
@@ -2041,7 +2046,9 @@ def _validate_gitignore(gi: dict[str, Any]) -> None:
     ``.gitignore`` and not by a hand-edited global ignore. Default **ON**: an absent/empty block
     means "provision the default entries (and set core.excludesfile if it is unset)". Fail-closed,
     consistent with every other block, on: a non-mapping block, a non-bool ``enabled``, an unknown
-    key (typo guard), a non-string ``excludesfile`` override, and a non-string-list ``entries``.
+    key (typo guard), a non-string ``excludesfile`` override, a non-string-list ``entries``, an
+    entry containing a rig-managed marker line, and an entry that is empty or spans more than one
+    line (``str.splitlines()`` semantics — see the check below).
     """
     if not isinstance(gi, dict):
         raise ConfigError("gitignore must be a mapping", schema_path="gitignore")
@@ -2072,6 +2079,19 @@ def _validate_gitignore(gi: dict[str, Any]) -> None:
                 raise ConfigError(
                     f"gitignore.entries may not contain a rig-managed marker line, got {e!r}",
                     schema_path="gitignore.entries",
+                )
+            # A multi-line entry (any separator ``str.splitlines`` knows, not just LF/CR) renders
+            # as several block lines and can never line-match itself in a stale block, and the
+            # drift note (rig-cli#331) interpolates raw entry text into a ONE-line detail; an
+            # empty entry is a blank block line. Fail closed on both. Mirror in the published JSON
+            # schema: ``GITIGNORE_ENTRY_JSON_PATTERN`` (config_schema.py) — keep the two aligned.
+            if not e.strip() or e.splitlines() != [e]:
+                raise ConfigError(
+                    f"gitignore.entries must be single non-empty lines, got {e!r}",
+                    schema_path="gitignore.entries",
+                    why="a blank or multi-line entry can never match itself back as a single "
+                        "ignored line, and would render broken across the drift/status detail",
+                    fix="use one non-empty line per entry (leading/trailing spaces are fine)",
                 )
 
 

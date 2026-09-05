@@ -159,9 +159,10 @@ def test_canonical_block_text_is_byte_stable():
     """
     expected = (
         "# >>> rig-managed (do not edit) >>>\n"
-        "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/; "
-        "rig ignores them globally.\n"
+        "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/ and rig's "
+        "spotlight sweep drops .metadata_never_index into dependency dirs; rig ignores both globally.\n"
         "**/.claude/worktrees/\n"
+        ".metadata_never_index\n"
         "# <<< rig-managed (do not edit) <<<"
     )
     assert global_excludes_block_text(DEFAULT_ENTRIES) == expected
@@ -183,9 +184,13 @@ def test_reapply_is_noop_against_already_provisioned_block(git_config, tmp_path)
     assert gi.read_bytes() == before  # zero churn
 
 
-# ── default entry is the harness worktrees dir, never .serena/ ────────────────────
+# ── default entries: the harness worktrees dir + the Spotlight sentinel, never .serena/ ──
 def test_default_entries_ignore_worktrees_not_serena():
     assert "**/.claude/worktrees/" in DEFAULT_ENTRIES
+    # rig-cli#331: the spotlight sweep drops `.metadata_never_index` into dependency/build dirs
+    # (incl. a committed `vendor/`), so it must be ignored machine-wide or every worktree looks
+    # dirty and `gh ship` refuses it.
+    assert ".metadata_never_index" in DEFAULT_ENTRIES
     assert ".serena/" not in DEFAULT_ENTRIES  # Serena state is committed, never ignored
     block = global_excludes_block_text(DEFAULT_ENTRIES)
     assert block.startswith(GITIGNORE_BEGIN_MARKER)
@@ -671,3 +676,132 @@ def test_end_to_end_build_apply_detect_in_sync(git_config, fake_agent_tools, mon
     second = run_plan(plan)
     assert all(r.status == "skipped" for r in second.results if r.action.category == "gitignore")
     assert not any(i.category == "gitignore" for i in detect(plan).items)
+
+
+# ── rig-cli#331: the Spotlight sentinel is ignored machine-wide ──────────────────────
+LEGACY_ENTRIES = ["**/.claude/worktrees/"]  # the block every machine carried before #331
+# The BYTE content every machine carried before #331 (old comment + one entry) — the migration
+# this change exists to perform, pinned literally so a comment reword can't fake the coverage.
+LEGACY_BLOCK = (
+    "# >>> rig-managed (do not edit) >>>\n"
+    "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/; "
+    "rig ignores them globally.\n"
+    "**/.claude/worktrees/\n"
+    "# <<< rig-managed (do not edit) <<<"
+)
+
+
+def test_literal_pre_331_block_is_upgraded_and_names_the_missing_sentinel(git_config, tmp_path):
+    gi = tmp_path / "ignore"
+    git_config["core.excludesfile"] = str(gi)
+    gi.write_text(f"*.pyc\n\n{LEGACY_BLOCK}\n", encoding="utf-8")
+    r = resolve_global_excludes(gi, list(DEFAULT_ENTRIES))
+    assert r.state == "update" and r.missing_entries == (".metadata_never_index",)
+    items = [i for i in detect(_plan_with_action(gi)).items if i.item == "block"]
+    assert len(items) == 1 and "missing: .metadata_never_index" in items[0].detail
+    assert _apply(gi).status == "updated"
+    assert gi.read_text(encoding="utf-8") == f"*.pyc\n\n{_block(DEFAULT_ENTRIES)}\n"
+    assert _apply(gi).status == "skipped"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "foo\nbar", "foo\rbar", "foo\n", "foo\u2028bar"])
+def test_validator_rejects_empty_or_multiline_entries(bad):
+    cfg = {"version": 1, "gitignore": {"entries": ["**/.claude/worktrees/", bad]}}
+    with pytest.raises(ConfigError, match="single non-empty lines"):
+        validate(cfg)
+
+
+def test_validator_keeps_padded_single_line_entries():
+    validate({"version": 1, "gitignore": {"entries": ["  build/", *DEFAULT_ENTRIES]}})
+
+
+def test_drift_names_the_missing_sentinel_entry_in_a_legacy_block(git_config, tmp_path):
+    """A machine provisioned BEFORE #331 carries the worktrees-only block: drift must not just say
+    "differs" — it names the missing line so the operator knows WHY the next apply rewrites it.
+    """
+    gi = tmp_path / "ignore"
+    git_config["core.excludesfile"] = str(gi)
+    gi.write_text(f"*.pyc\n\n{_block(LEGACY_ENTRIES)}\n", encoding="utf-8")
+    report = detect(_plan_with_action(gi))
+    items = [i for i in report.items if i.category == "gitignore" and i.item == "block"]
+    assert len(items) == 1 and items[0].direction == "modified"
+    assert ".metadata_never_index" in items[0].detail
+
+
+def test_drift_names_the_missing_entry_even_when_the_user_has_it_outside_the_block(git_config, tmp_path):
+    """Only the MANAGED block counts: a hand-added `.metadata_never_index` line elsewhere in the
+    file does not make a legacy block current (apply still rewrites it), so the note must still
+    name the entry the block lacks — not fall back to a bare "differs"."""
+    gi = tmp_path / "ignore"
+    git_config["core.excludesfile"] = str(gi)
+    gi.write_text(f".metadata_never_index\n\n{_block(LEGACY_ENTRIES)}\n", encoding="utf-8")
+    items = [i for i in detect(_plan_with_action(gi)).items if i.item == "block"]
+    assert len(items) == 1 and items[0].direction == "modified"
+    assert "missing: .metadata_never_index" in items[0].detail
+
+
+def test_padded_entry_written_verbatim_is_not_reported_missing(git_config, tmp_path):
+    """Entries and block lines are compared stripped, so a padded entry the block carries verbatim
+    is never claimed missing when the block is stale for an unrelated reason."""
+    padded = [*DEFAULT_ENTRIES, "  build/"]
+    gi = tmp_path / "ignore"
+    git_config["core.excludesfile"] = str(gi)
+    gi.write_text(f"{_block(padded)}\n{_block(padded)}\n", encoding="utf-8")  # duplicated → update
+    r = resolve_global_excludes(gi, padded)
+    assert r.state == "update" and r.missing_entries == ()
+
+
+def test_apply_upgrades_a_legacy_block_then_is_idempotent(git_config, tmp_path):
+    gi = tmp_path / "ignore"
+    git_config["core.excludesfile"] = str(gi)
+    gi.write_text(f"*.pyc\n\n{_block(LEGACY_ENTRIES)}\n", encoding="utf-8")
+    assert _apply(gi).status == "updated"
+    assert gi.read_text(encoding="utf-8") == f"*.pyc\n\n{_block(DEFAULT_ENTRIES)}\n"
+    assert _apply(gi).status == "skipped"
+    assert not any(i.category == "gitignore" for i in detect(_plan_with_action(gi)).items)
+
+
+def test_drift_modified_detail_without_missing_entries_has_no_missing_list(git_config, tmp_path):
+    """A block that carries every desired entry but ALSO an extra line is still `modified`, yet
+    nothing is missing — the detail must not claim a missing entry."""
+    gi = tmp_path / "ignore"
+    git_config["core.excludesfile"] = str(gi)
+    gi.write_text(f"{_block([*DEFAULT_ENTRIES, 'extra/'])}\n", encoding="utf-8")
+    items = [i for i in detect(_plan_with_action(gi)).items if i.item == "block"]
+    assert len(items) == 1 and items[0].direction == "modified"
+    assert "missing" not in items[0].detail
+
+
+def test_real_git_ignores_the_sentinel_via_the_managed_block(git_config, tmp_path, monkeypatch):
+    """The acceptance proof for #331: with the managed block in the global excludes file, a repo
+    whose `vendor/` carries the untracked Spotlight sentinel has a CLEAN `git status` — so
+    `gh ship`'s clean-worktree gate passes. Runs a real `git` against an isolated global config
+    (GIT_CONFIG_GLOBAL + GIT_CONFIG_NOSYSTEM), never the user's own."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    gi = tmp_path / "ignore"
+    git_config["core.excludesfile"] = str(gi)
+    assert _apply(gi).status == "created"
+
+    gconf = tmp_path / "gitconfig"
+    gconf.write_text(f"[core]\n\texcludesfile = {gi}\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gconf))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("HOME", str(tmp_path))  # a git < 2.32 ignores GIT_CONFIG_GLOBAL; never the real ~/.gitconfig
+    repo = tmp_path / "repo"
+    (repo / "vendor" / "pkg").mkdir(parents=True)
+    (repo / "vendor" / "pkg" / "lib.go").write_text("package pkg\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    (repo / "vendor" / ".metadata_never_index").touch()  # the sweep's untracked sentinel
+    (repo / ".claude" / "worktrees" / "x").mkdir(parents=True)
+    (repo / ".claude" / "worktrees" / "x" / "f").write_text("", encoding="utf-8")
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert ".metadata_never_index" not in status
+    assert ".claude/worktrees" not in status

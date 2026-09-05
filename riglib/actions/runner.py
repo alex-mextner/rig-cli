@@ -6486,7 +6486,11 @@ class GlobalExcludesResolution:
                        skip. ``detail`` carries the OS error.
 
     ``desired_block`` is the canonical block text; ``new_content`` is the full desired file content
-    for ``create``/``update`` (``None`` for ``ok``/``conflict``/``io_error``).
+    for ``create``/``update`` (``None`` for ``ok``/``conflict``/``io_error``). ``missing_entries``
+    lists the desired entries the MANAGED block(s) do not carry (``update`` only) — so drift can
+    name WHY a provisioned block is stale (e.g. a machine provisioned before an entry was added).
+    Only the marker-delimited region counts: a user-authored copy of the line elsewhere in the
+    file does not make the block current (apply still rewrites it), so it must not hide the note.
     """
 
     path: Path
@@ -6494,6 +6498,7 @@ class GlobalExcludesResolution:
     desired_block: str
     new_content: str | None = None
     detail: str = ""
+    missing_entries: tuple[str, ...] = ()
 
 
 def resolve_global_excludes(path: Path, entries: list[str]) -> GlobalExcludesResolution:
@@ -6587,7 +6592,21 @@ def resolve_global_excludes(path: Path, entries: list[str]) -> GlobalExcludesRes
         cursor = r_end
     out_parts.append(content[cursor:])  # trailing user content, verbatim
     new_content = "".join(out_parts)
-    return GlobalExcludesResolution(path, "update", desired, new_content=new_content)
+    # `pairs` holds the ORIGINAL (start, end) spans; genexp targets are their own scope, so this
+    # reads them regardless of the loop's `r_end += 1` seam adjustment above.
+    managed = "".join(content[start:end] for start, end in pairs)
+    return GlobalExcludesResolution(
+        path, "update", desired, new_content=new_content,
+        missing_entries=_missing_exclude_entries(managed, entries),
+    )
+
+
+def _missing_exclude_entries(managed: str, entries: list[str]) -> tuple[str, ...]:
+    """The desired ``entries`` that the managed block text carries on NO line — the lines an
+    ``update`` is going to ADD, so drift can name them (rig-cli#331). Both sides are compared
+    stripped, so a padded entry written verbatim still counts as present."""
+    present = {line.strip() for line in managed.splitlines()}
+    return tuple(e for e in entries if e.strip() not in present)
 
 
 def _find_marker_lines(content: str, marker: str) -> list[tuple[int, int]]:
