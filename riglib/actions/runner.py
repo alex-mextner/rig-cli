@@ -1844,6 +1844,12 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
     registered yet — is likewise inert rather than broken: the descriptor simply never fires
     until this function is updated, exactly the state ``pre-skill`` was in before this matcher
     was added.
+
+    ``action.options["extra_stop_hooks"]`` (codex only) is a list of already-rendered,
+    already-quoted command strings appended as additional ``Stop`` entries after the bridge's
+    own — a generic seam other tools' Codex Stop hooks fold into (see
+    :func:`riglib.tg_ctl.codex_usage_hook_command` for the tg-cli#308 rationale and the one
+    current caller). This function does not know or care what those commands do.
     """
     lib_dir = str(action.options["lib_dir"])
     py = str(action.options.get("python", "python3"))
@@ -1866,6 +1872,8 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
         return f"{' '.join(env)} {shlex.quote(py)} -m {module} {event}"
 
     if kind == "codex":
+        extra_stop_hooks = action.options.get("extra_stop_hooks") or []
+        stop_entries = [("", cmd("Stop"))] + [("", extra) for extra in extra_stop_hooks]
         return {
             "PreToolUse": [
                 ("Bash", cmd("PreToolUse")),
@@ -1874,7 +1882,7 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
             "PostToolUse": [
                 ("apply_patch", cmd("PostToolUse")),
             ],
-            "Stop": [("", cmd("Stop"))],
+            "Stop": stop_entries,
         }
 
     return {

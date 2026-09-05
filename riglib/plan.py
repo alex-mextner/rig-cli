@@ -1583,6 +1583,10 @@ def _build_hook_bridge_for_kind(
             "hook_bridge: skipped — repo-local opencode plugin path requires a repo config layer"
         )
         return
+    if kind == "codex":
+        extra_stop_hooks = _codex_extra_stop_hooks(config)
+        if extra_stop_hooks:
+            options["extra_stop_hooks"] = extra_stop_hooks
     plan.actions.append(
         Action(
             kind="register_hook_bridge",
@@ -1593,6 +1597,24 @@ def _build_hook_bridge_for_kind(
             options=options,
         )
     )
+
+
+def _codex_extra_stop_hooks(config: LoadedConfig) -> list[str]:
+    """tg-ctl's Codex Stop usage-telemetry hook, folded into rig's own bridge (tg-cli#308).
+
+    Delegates entirely to :func:`riglib.tg_ctl.codex_usage_hook_command` — the single place
+    that decides whether to fold in and resolves the command — so this planner never
+    independently re-derives tg-ctl's bun/tg_ctl_path resolution (that would risk disagreeing
+    with the actual provisioned daemon, and with tg-ctl's own grep-based detection of this
+    command in the rendered config.toml). tg-ctl's paths are HOME-anchored per-machine (not
+    repo-relative), same reasoning as ``_build_tg_ctl``, so this resolves against ``Path.home()``
+    rather than the repo-relative ``_expand`` helper.
+    """
+    from .tg_ctl import codex_usage_hook_command
+
+    t = config.data.get("tg_ctl") or {}
+    cmd = codex_usage_hook_command(t, home=Path.home())
+    return [cmd] if cmd else []
 
 
 def _build_agents_symlink(config: LoadedConfig, plan: InstallPlan) -> None:

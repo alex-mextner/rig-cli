@@ -2011,6 +2011,7 @@ off darwin it is a no-op.
 tg_ctl:
   enabled: true                       # provision the tg-ctl LaunchAgent (default true; false = off)
   boot: true                          # write + load the boot agent (default true)
+  codex_usage_hook: true              # fold tg-ctl's Codex Stop hook into rig's codex hook bridge (default true)
   # everything below is auto-discovered per-machine — override only if non-standard:
   label: ai.hyperide.tg-ctl           # launchd Label / plist filename stem (advanced)
   bun_path: ~/.bun/bin/bun            # the bun binary (default: `which bun` → ~/.bun fallback)
@@ -2022,9 +2023,10 @@ tg_ctl:
 |-----|------|---------|---------|
 | `enabled` | bool | `true` | `false` = **don't touch tg-ctl at all** — rig emits no action, so it neither provisions NOR cleans up NOR reports drift (a hands-off opt-out). Use `boot: false` instead to keep rig tracking a leftover plist. |
 | `boot` | bool | `true` | `false` = provisioned-but-no-boot: rig writes/loads nothing, but a leftover plist (or the stale predecessor) IS still surfaced as drift so you see the orphan |
+| `codex_usage_hook` | bool | `true` | whenever a codex hook bridge is being provisioned (`harness.kind: codex`, OR `codex` listed in `harness.kinds` alongside a different primary kind) and `harness.hook_bridge` is enabled, fold tg-ctl's Codex `Stop` usage-telemetry hook (`tg-ctl codex-usage-hook`) into rig's own codex hook bridge `Stop` array in `~/.codex/config.toml`, instead of tg-ctl writing its own `~/.codex/hooks.json` — avoids Codex's "loading hooks from both ..." dual-source warning (tg-cli#308). `false` = leave tg-ctl to manage its own `hooks.json` independently. No effect on a claude-code/opencode bridge (each harness kind's bridge is independent), and independent of `boot` — the fold-in runs whether or not the tg-ctl daemon itself is set to auto-start (it only needs the `tg-ctl` script + bun to be present and runnable on disk, not the daemon running). Folds in nothing (fail-closed, no error) if the resolved `tg_ctl_path` or `bun_path` does not exist/isn't executable yet. |
 | `label` | str | `ai.hyperide.tg-ctl` | launchd Label / plist filename stem (one identity for install/drift/remove) |
 | `bun_path` | str | discovered | the bun binary; default `which bun`, else `~/.bun/bin/bun` |
-| `tg_ctl_path` | str | `~/.files/bin/tg-ctl` | the tg-ctl Bun script launchd runs (`bun <path> run`) |
+| `tg_ctl_path` | str | `~/.files/bin/tg-ctl` | the tg-ctl Bun script launchd runs (`bun <path> run`); also the binary invoked for the folded-in `codex_usage_hook` command |
 | `config_dir` | str | `~/.config/tg-cli` | tg-cli config dir; the launchd out/err logs land here (honors `$TG_CTL_CONFIG_DIR`) |
 
 > **`enabled: false` vs `boot: false`.** `enabled: false` is a complete opt-out — rig stops
@@ -2230,7 +2232,7 @@ that is not a list of strings, a bad `tmux.apply` enum, a `tmux.resurrect.proces
 list of strings, a `tmux.continuum.save_interval` that is not an int ≥ 1, a non-bool `tmux` bool
 knob, a non-string `gitignore.excludesfile` / a `gitignore.entries` that is not a list of strings,
 that contains a rig-managed marker line, or that has a blank or multi-line entry, a non-bool
-`tg_ctl.enabled`/`boot`, a non-string
+`tg_ctl.enabled`/`boot`/`codex_usage_hook`, a non-string
 `tg_ctl.label`/`bun_path`/`tg_ctl_path`/`config_dir`, a bad
 `project_tools.haft.workflow.mode`, a non-list/string item in `project_tools.serena.languages` or
 `project_tools.serena.ignored_paths`, and an `agent_tools_source` that is not an agent-tools

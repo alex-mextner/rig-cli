@@ -2554,6 +2554,7 @@ def _validate_tools_item(name: str, spec: Any) -> None:
 _TG_CTL_KEYS = {
     "enabled",
     "boot",
+    "codex_usage_hook",
     "label",
     "bun_path",
     "tg_ctl_path",
@@ -2569,15 +2570,15 @@ def _validate_tg_ctl(t: dict[str, Any]) -> None:
     ``git_hooks`` — NOT a committed repo ``rig.yaml``. Default **ON**: an EMPTY/absent block
     still provisions the daemon (a present block with ``enabled`` not false opts in). Fail-closed,
     consistent with every other block, on: a non-mapping block, an unknown key (typo guard), a
-    non-bool ``enabled``/``boot``, and a non-string ``label``/``bun_path``/``tg_ctl_path``/
-    ``config_dir``.
+    non-bool ``enabled``/``boot``/``codex_usage_hook``, and a non-string
+    ``label``/``bun_path``/``tg_ctl_path``/``config_dir``.
     """
     if not isinstance(t, dict):
         raise ConfigError("tg_ctl must be a mapping", schema_path="tg_ctl")
     if not t:
         return
     _reject_unknown_keys(t, "tg_ctl")
-    for boolkey in ("enabled", "boot"):
+    for boolkey in ("enabled", "boot", "codex_usage_hook"):
         value = t.get(boolkey)
         if value is not None and not isinstance(value, bool):
             raise ConfigError(
