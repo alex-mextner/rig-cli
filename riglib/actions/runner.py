@@ -1829,19 +1829,24 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
     PreToolUse is real prevention; Stop gates the turn end; PostToolUse (write tools only)
     is the feedback channel for the agent-tools ``post-write`` point. Claude Code uses its
     pipe-alternation tool matcher for writes, ``Agent|Task`` for subagent dispatch (the
-    agent-tools ``pre-agent`` point), and ``Skill`` for a skill invocation (the agent-tools
-    ``pre-skill`` point). Codex uses the hook matchers exposed by its TOML contract here:
-    ``Bash`` and ``apply_patch`` (no ``pre-agent``/``pre-skill`` mapping yet — same gap,
-    tracked upstream in agent-tools).
+    agent-tools ``pre-agent`` point), ``Skill`` for a skill invocation (the agent-tools
+    ``pre-skill`` point), and ``Monitor`` for a background event-stream watch (the agent-tools
+    ``pre-monitor`` point). Codex uses the hook matchers exposed by its TOML contract here:
+    ``Bash`` and ``apply_patch`` (no ``pre-agent``/``pre-skill``/``pre-monitor`` mapping yet —
+    same gap, tracked upstream in agent-tools; Codex has no Monitor-equivalent tool today either).
 
     Entries are unconditional by design, not capability-probed against the bridge package at
     plan time: the plan already verifies the runnable module files exist, and drift/apply share
     this function as the desired state. This is safe against version skew in EITHER direction:
     ``cc_hook_bridge``'s ``point_for_event`` returns ``None`` for any ``(event, tool)`` pair it
-    doesn't map (dispatch.py, confirmed) — a matcher registered here against an OLDER
-    agent-tools checkout that predates a given point is a silent no-op, not a block, and never
-    wedges the tool call. The mirror case — an agent-hook installed for a point with no matcher
-    registered yet — is likewise inert rather than broken: the descriptor simply never fires
+    doesn't map (dispatch.py, confirmed), and its dispatcher treats that ``None`` exactly like
+    "no descriptor blocked" — it emits NOTHING on stdout, so Claude Code sees no
+    ``permissionDecision`` and the tool call proceeds ALLOWED, indistinguishable from no hook
+    being registered at all. So a matcher registered here against an OLDER agent-tools checkout
+    that predates a given point is a silent no-op, not a block, and never wedges the tool call —
+    the safety property this unconditional-registration design relies on. The mirror case — an
+    agent-hook installed for a point with no matcher registered yet — is likewise inert rather
+    than broken: the descriptor simply never fires
     until this function is updated, exactly the state ``pre-skill`` was in before this matcher
     was added.
     """
@@ -1883,6 +1888,7 @@ def hook_bridge_entries(action: Action) -> dict[str, list[tuple[str, str]]]:
             ("Edit|Write|MultiEdit|NotebookEdit", cmd("PreToolUse")),
             ("Agent|Task", cmd("PreToolUse")),
             ("Skill", cmd("PreToolUse")),
+            ("Monitor", cmd("PreToolUse")),
         ],
         "PostToolUse": [
             ("Edit|Write|MultiEdit|NotebookEdit", cmd("PostToolUse")),
