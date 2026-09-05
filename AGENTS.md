@@ -185,6 +185,38 @@ a checkout (`agent_tools_source` → `$RIG_AGENT_TOOLS_SOURCE` → default candi
 flat `Item` registry. If agent-tools changes its layout, fix it *here* — nothing else
 should hard-code agent-tools paths.
 
+## Worktree lifecycle — one door, one location, one reconciler
+
+**`rig worktree create` is the ONLY way an agent (or a human) should create a worktree in a
+rig-managed repo, and `<repo>/.worktrees/<name>` is the ONLY location.** Before this, the
+ecosystem had grown at least five conventions for where a worktree lands — a bare in-repo
+`.worktrees/`, a sibling-of-repo `.worktrees/`, Claude Code's own `.claude/worktrees/`,
+`<repo>-worktrees/`, `<repo>-wt-*` — and none of them were tracked, so nothing ever cleaned them
+up (GH-329: ~70 leftover worktrees across the agent-ecosystem repos, tens of GB of duplicated
+`node_modules`/`.venv`). `rig worktree create` also idempotently registers `.worktrees/` in the
+repo's `.git/info/exclude` (never the committed `.gitignore`) BEFORE creating the worktree, so a
+freshly created tree never dirties `git status` in the primary checkout. See
+`riglib/worktree.py`'s module docstring for the full rationale, and the README's `rig worktree
+create`/`remove`/`gc` rows for the user-facing contract.
+
+- **`rig worktree create <name>`** — the single door. `--branch`/`--from` override the branch/base.
+- **`rig worktree remove <name>`** — the inverse: removes the worktree AND its branch (`git
+  worktree remove` alone leaves the branch behind).
+- **`rig worktree gc`** — the reconciler for everything ALREADY on disk (including worktrees that
+  predate this convention, wherever they physically live — `git worktree list` tracks every
+  linked worktree for a repo regardless of location). Classifies each as live/prunable/dirty/
+  merged/closed/no-pr-stale/active and removes only the safe classes; `rig status` reports a
+  stale-worktree count using the same classifier. See `riglib/worktree_gc.py`'s module docstring.
+
+**Known gap (GH-329, tracked, not yet fixed here):** the agent-tools skill
+`skills/by-type/monorepo/worktree-isolation` — the one an agent reaches for when told to isolate
+parallel work — still teaches a RAW `git worktree add ../.worktrees/agent-$run_id -b
+work/$run_id` pattern (a sibling-of-repo location, one of the very conventions this section
+replaces) and never mentions `rig worktree create`. That skill lives in the agent-tools repo,
+which this repo consumes read-only (see "The integration seam" above) — rig-cli cannot fix it
+here. Needs a follow-up PR against agent-tools pointing the skill at `rig worktree create`
+wherever the target repo has one (falling back to raw `git worktree add` only when it doesn't).
+
 ## Harness workflow guards (worktree-only + orchestrator-only)
 
 `rig apply` installs agent-hooks from THREE hook directories (from agent-tools, via
