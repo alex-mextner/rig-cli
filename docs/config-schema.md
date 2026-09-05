@@ -977,7 +977,16 @@ doctor` flags a missing scheduler binary (`launchctl`/`crontab`).
 
 Set `RIG_SCHEDULE_DRY_RUN=1` to write the artifact file but **skip the live daemon mutation**
 (no `launchctl load`, no `crontab` write) — for CI, containers, or smoke tests where touching
-the real per-user scheduler is unwanted.
+the real per-user scheduler is unwanted. The same skip happens **automatically when `$HOME` is
+overridden** (the resolved `Path.home()` differs from the uid's real login home): a HOME-only
+sandbox cannot redirect the per-user launchd/crontab, so rig writes the artifact and reports
+`HOME is overridden (<home> != <real home>) — skipped live launchctl load (sandboxed run)` instead
+of mutating the real scheduler (rig-cli#116; applies to `tmux`, `tg_ctl`, `spotlight` too). The
+post-apply verify skips its loaded-check and `rig status` suppresses the live loaded-probe (and, on
+Linux, the crontab-line-missing check) under the same condition, so a sandboxed apply exits 0 and
+stays converged on both the launchd and crontab platforms. Note `sudo rig apply` with a
+preserved user `$HOME` counts as sandboxed too (uid 0's login home is not yours) — run rig as the
+user whose launchd session it should manage.
 
 ---
 
@@ -1653,7 +1662,9 @@ snapshot → nothing to restore); **clones** `tpm` + `tmux-resurrect` + `tmux-co
 stale boot** (its `osx_iterm/terminal_start_tmux.sh` Login Items + an old `Tmux.Start` launchd
 agent) that would otherwise compete with rig's boot agent. Every step is idempotent and non-fatal
 (an offline machine just skips the clone and retries on the next apply). Set `RIG_TMUX_DRY_RUN=1`
-to write the on-disk artifacts but skip all live activation (CI / containers).
+to write the on-disk artifacts but skip all live activation (CI / containers). A HOME-overridden
+run skips the live activation automatically and surfaces it as a warning in the action detail
+(`HOME is overridden … (sandboxed run)`) — see the `models` dry-run note (rig-cli#116).
 
 **cc-restore — per-window Claude Code resume by exact session id.** rig installs two managed
 scripts and wires them via `@resurrect-hook-post-save-all` / `@resurrect-hook-post-restore-all`:
@@ -1918,7 +1929,8 @@ re-crawls (a forced reindex would be the opposite of the goal).
 **The re-sweep agent.** `rig apply` writes `~/Library/LaunchAgents/<label>.plist` and
 `launchctl load`s it. The plist runs `rig spotlight-sweep` (the same sweep, headless) at login and
 daily. `RIG_SPOTLIGHT_DRY_RUN=1` writes the plist but skips the live `launchctl load` (used by
-tests/CI). `rig spotlight-sweep` is also runnable by hand to re-cover new dirs immediately.
+tests/CI); a HOME-overridden run skips it automatically (rig-cli#116, see the `models` dry-run
+note). `rig spotlight-sweep` is also runnable by hand to re-cover new dirs immediately.
 
 **Verification.** After `rig apply`/`rig init`, the post-apply **verify** framework confirms a
 sample of matched dirs carry the sentinel AND the launchd agent is loaded (see the verify note at
@@ -2041,6 +2053,15 @@ disk→config **extra**. `rig apply` reconciles.
 path but skips every live/destructive mutation — the gui-domain `launchctl bootstrap`/`bootout` AND
 the stale-predecessor teardown (its bootout and the on-disk backup+remove of its plist) — so
 tests/smoke never touch the real launchd domain or delete the predecessor file.
+
+**HOME override is not enough — and rig knows it (rig-cli#116).** The plist path follows `$HOME`,
+but `launchctl bootstrap` loads the agent into the REAL `gui/<uid>` domain whatever `$HOME` says: a
+HOME-only-isolated `rig apply` once loaded the real `ai.hyperide.tg-ctl` from a scratch-HOME plist
+(pointing at a nonexistent binary) and crash-looped it until booted out by hand. So whenever the
+resolved `Path.home()` differs from the uid's real login home, `rig apply` behaves exactly like
+`RIG_TG_CTL_DRY_RUN` on its own — writes the plist, skips the bootstrap AND the predecessor
+teardown — and reports `tg_ctl/boot: … (HOME is overridden (<home> != <real home>) — skipped live
+launchctl bootstrap (sandboxed run))`. To exercise the live path on purpose, run with your real HOME.
 
 ---
 

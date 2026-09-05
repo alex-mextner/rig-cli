@@ -30,7 +30,9 @@ from .actions.runner import (
     _launchctl_gui_loaded,
     _launchctl_loaded,
     _read_crontab,
+    _schedule_dry_run,
     _spotlight_dry_run,
+    _tg_ctl_dry_run,
     _tmux_dry_run,
     _resolve_excludes_target,
     build_hook_descriptor,
@@ -2057,14 +2059,20 @@ def _check_schedule(action: Action, report: DriftReport) -> None:
                 DriftItem("modified", "models", action.item, plist, "launchd plist differs from configured schedule")
             )
             return
-        if not _launchctl_loaded(sched.label):
+        # Apply skips the live load under dry-run / a sandboxed HOME (rig-cli#116), so status
+        # suppresses the matching live probe to stay consistent (as spotlight / tmux already do).
+        if not _schedule_dry_run() and not _launchctl_loaded(sched.label):
             report.items.append(
                 DriftItem("missing", "models", action.item, plist, f"launchd job '{sched.label}' not loaded")
             )
         return
     # crontab branch — position-preserving (a user's lines after rig's block are NOT drift).
     # `crontab_with_managed` returns None iff our managed pair is already present unchanged at
-    # its position; a non-None result means an apply WOULD change something → drift.
+    # its position; a non-None result means an apply WOULD change something → drift. Apply skips
+    # the crontab WRITE under dry-run / a sandboxed HOME (rig-cli#116) too, so status must not
+    # report the resulting absence as drift — that would make a sandboxed run un-convergeable.
+    if _schedule_dry_run():
+        return
     _has, current = _read_crontab()
     desired_pair = sched.crontab_lines()
     if not any(sched.label in ln for ln in current.splitlines()):
@@ -2566,7 +2574,9 @@ def _check_tg_ctl(action: Action, report: DriftReport) -> None:
                       "tg-ctl boot LaunchAgent differs from the configured plist")
         )
         return
-    if not _launchctl_gui_loaded(plan.boot_label):
+    # Apply skips the bootstrap under dry-run / a sandboxed HOME (rig-cli#116), so status
+    # suppresses the matching live probe to stay consistent (as spotlight / tmux already do).
+    if not _tg_ctl_dry_run() and not _launchctl_gui_loaded(plan.boot_label):
         report.items.append(
             DriftItem("missing", "tg_ctl", action.item, plan.plist_path,
                       f"tg-ctl LaunchAgent '{plan.boot_label}' installed but not loaded")

@@ -158,7 +158,24 @@ bare `rig config-web` prints help, never launches.
   (mirrors `RIG_SCHEDULE_DRY_RUN`) — which writes the managed plist but skips every
   live/destructive mutation (the `launchctl` bootstrap/bootout AND the stale-predecessor teardown:
   no bootout, no on-disk backup+remove). The unit suite + CI set these, so tests/smoke NEVER touch
-  the real launchd domain or delete the predecessor file. Migration backs up the original
+  the real launchd domain or delete the predecessor file. **A HOME override alone is NOT a
+  launchd sandbox — so rig guards it automatically (rig-cli#116).** Every fsutil-based action
+  follows `Path.home()`, but `launchctl` acts on the real per-user `gui/<uid>` domain regardless
+  of `$HOME`; a HOME-only-isolated `rig apply` once bootstrapped the REAL `ai.hyperide.tg-ctl`
+  agent from a scratch-HOME plist and crash-looped it 23,641 times. So before ANY live
+  launchctl/crontab mutation the runner compares the resolved `Path.home()` with the uid's real
+  login home (`riglib/actions/runner.py::_home_is_sandboxed`, one predicate feeding the four
+  `_*_dry_run` seams: schedule, tmux, tg_ctl, spotlight); when they differ it behaves exactly like
+  the DRY_RUN env (artifact written, live mutation skipped) and says so in the action detail
+  (`HOME is overridden (<home> != <real home>) — skipped live launchctl … (sandboxed run)`). The
+  post-apply **verify** and `rig status` **drift** follow the SAME predicate — verify skips the
+  loaded-check and drift suppresses the live loaded-probe (schedule/tg_ctl now, as spotlight/tmux
+  already did) — so a sandboxed apply exits 0 and converges instead of failing its own
+  verification; a current plist is a no-op WITHOUT probing the real domain. There is no opt-in to
+  force the live path from a foreign HOME (that is the incident); run with the real HOME. The env
+  flags remain the explicit seam (and take precedence in the wording); a test that fakes HOME but
+  asserts on the live (stubbed) path opts out with the `live_launchd_home` conftest fixture
+  (`tests/conftest.py`). Migration backs up the original
   (`~/.tmux.conf.rig-bak-<UTC>`, timestamped) and never overwrites an existing backup.
 
 ## The integration seam (agent-tools)

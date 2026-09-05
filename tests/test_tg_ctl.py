@@ -32,7 +32,7 @@ _REAL_CHECK = driftmod._check_tg_ctl
 
 
 @pytest.fixture(autouse=True)
-def _real_tg_ctl(monkeypatch):
+def _real_tg_ctl(monkeypatch, live_launchd_home):
     """Restore the REAL provision_tg_ctl handler + drift check for THIS module's tests.
 
     conftest's autouse ``_isolate_scheduler`` stubs ``_do_provision_tg_ctl`` (+ the ``_HANDLERS``
