@@ -6592,7 +6592,9 @@ def resolve_global_excludes(path: Path, entries: list[str]) -> GlobalExcludesRes
         cursor = r_end
     out_parts.append(content[cursor:])  # trailing user content, verbatim
     new_content = "".join(out_parts)
-    managed = "".join(content[r_start:r_end] for r_start, r_end in pairs)
+    # `pairs` holds the ORIGINAL (start, end) spans; genexp targets are their own scope, so this
+    # reads them regardless of the loop's `r_end += 1` seam adjustment above.
+    managed = "".join(content[start:end] for start, end in pairs)
     return GlobalExcludesResolution(
         path, "update", desired, new_content=new_content,
         missing_entries=_missing_exclude_entries(managed, entries),

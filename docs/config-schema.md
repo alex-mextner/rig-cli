@@ -1823,7 +1823,7 @@ gitignore:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the managed block (set `false` to leave the global excludes file untouched) |
-| `entries` | list[str] | `["**/.claude/worktrees/", ".metadata_never_index"]` | the paths ignored inside the managed block; an empty/absent list uses the default |
+| `entries` | list[str] | `["**/.claude/worktrees/", ".metadata_never_index"]` | the paths ignored inside the managed block; an empty/absent list uses the default. Each entry must be a single non-empty line (no `\n`/`\r`/other `str.splitlines()` separator) and may not contain a rig-managed marker line — enforced by `validate()` and mirrored in the published JSON schema (`GITIGNORE_ENTRY_JSON_PATTERN`) |
 | `excludesfile` | str | *(unset)* | force a specific file; by default rig honors `core.excludesfile` (or sets it — see below) |
 
 **Target resolution (the headline behavior).** rig decides WHICH file holds the block at apply
@@ -2207,8 +2207,9 @@ non-bool `agents_md.enabled`/`symlink`, a non-bool `github.ruleset` boolean knob
 `github.ruleset.required_reviews` that is not an int ≥ 0, a `github.ruleset.required_status_checks`
 that is not a list of strings, a bad `tmux.apply` enum, a `tmux.resurrect.processes` that is not a
 list of strings, a `tmux.continuum.save_interval` that is not an int ≥ 1, a non-bool `tmux` bool
-knob, a non-string `gitignore.excludesfile` / a `gitignore.entries` that is not a list of strings
-or that contains a rig-managed marker line, a non-bool `tg_ctl.enabled`/`boot`, a non-string
+knob, a non-string `gitignore.excludesfile` / a `gitignore.entries` that is not a list of strings,
+that contains a rig-managed marker line, or that has a blank or multi-line entry, a non-bool
+`tg_ctl.enabled`/`boot`, a non-string
 `tg_ctl.label`/`bun_path`/`tg_ctl_path`/`config_dir`, a bad
 `project_tools.haft.workflow.mode`, a non-list/string item in `project_tools.serena.languages` or
 `project_tools.serena.ignored_paths`, and an `agent_tools_source` that is not an agent-tools

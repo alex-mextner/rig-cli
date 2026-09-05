@@ -680,6 +680,39 @@ def test_end_to_end_build_apply_detect_in_sync(git_config, fake_agent_tools, mon
 
 # ── rig-cli#331: the Spotlight sentinel is ignored machine-wide ──────────────────────
 LEGACY_ENTRIES = ["**/.claude/worktrees/"]  # the block every machine carried before #331
+# The BYTE content every machine carried before #331 (old comment + one entry) — the migration
+# this change exists to perform, pinned literally so a comment reword can't fake the coverage.
+LEGACY_BLOCK = (
+    "# >>> rig-managed (do not edit) >>>\n"
+    "# Claude Code creates throwaway worktrees under each repo's .claude/worktrees/; "
+    "rig ignores them globally.\n"
+    "**/.claude/worktrees/\n"
+    "# <<< rig-managed (do not edit) <<<"
+)
+
+
+def test_literal_pre_331_block_is_upgraded_and_names_the_missing_sentinel(git_config, tmp_path):
+    gi = tmp_path / "ignore"
+    git_config["core.excludesfile"] = str(gi)
+    gi.write_text(f"*.pyc\n\n{LEGACY_BLOCK}\n", encoding="utf-8")
+    r = resolve_global_excludes(gi, list(DEFAULT_ENTRIES))
+    assert r.state == "update" and r.missing_entries == (".metadata_never_index",)
+    items = [i for i in detect(_plan_with_action(gi)).items if i.item == "block"]
+    assert len(items) == 1 and "missing: .metadata_never_index" in items[0].detail
+    assert _apply(gi).status == "updated"
+    assert gi.read_text(encoding="utf-8") == f"*.pyc\n\n{_block(DEFAULT_ENTRIES)}\n"
+    assert _apply(gi).status == "skipped"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "foo\nbar", "foo\rbar", "foo\n", "foo\u2028bar"])
+def test_validator_rejects_empty_or_multiline_entries(bad):
+    cfg = {"version": 1, "gitignore": {"entries": ["**/.claude/worktrees/", bad]}}
+    with pytest.raises(ConfigError, match="single non-empty lines"):
+        validate(cfg)
+
+
+def test_validator_keeps_padded_single_line_entries():
+    validate({"version": 1, "gitignore": {"entries": ["  build/", *DEFAULT_ENTRIES]}})
 
 
 def test_drift_names_the_missing_sentinel_entry_in_a_legacy_block(git_config, tmp_path):

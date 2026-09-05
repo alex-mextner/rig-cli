@@ -152,6 +152,23 @@ def test_scripts_schema_pattern_matches_the_runtime_non_empty_rule():
     assert not pattern.search("   ")
 
 
+def test_gitignore_entries_schema_pattern_matches_the_runtime_rule():
+    # `_validate_gitignore` (riglib/config.py) rejects a blank or multi-line `entries` value
+    # (rig-cli#331); the published schema must reject the SAME set via `items.pattern`, so an
+    # editor validating rig.yaml offline never accepts what `rig apply` will reject.
+    doc = config_schema.json_schema()
+    entries = doc["properties"]["gitignore"]["properties"]["entries"]
+    assert entries["type"] == "array"
+    assert entries["items"]["type"] == "string"
+    pattern = re.compile(entries["items"]["pattern"])
+    accepted = ["**/.claude/worktrees/", ".metadata_never_index", "  build/"]
+    rejected = ["", "   ", "foo\nbar", "foo\rbar", "foo\n", "foo\u2028bar"]
+    for value in accepted:
+        assert pattern.search(value), value
+    for value in rejected:
+        assert not pattern.fullmatch(value), value
+
+
 def test_dev_schema_models_server_and_e2e_metadata():
     doc = config_schema.json_schema()
     dev = doc["properties"]["dev"]
