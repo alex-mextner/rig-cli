@@ -1619,7 +1619,15 @@ def test_list_worktrees_handles_a_bare_primary_without_dropping_the_first_linked
     bare primary. Slicing the RAW records first (by position) fixes this regardless of whether
     record 0 happens to parse to a worktree or not."""
     bare = tmp_path / "repo.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    # `init.defaultBranch=trunk` (deliberately NOT "main") makes this regression hermetic — review-
+    # caught (Codex, CI-fix round): on a runner where the global default already happens to be
+    # "main", the old implicit-HEAD `worktree add -b feat1 <wt1>` call below would ALSO pass,
+    # silently making the fixed-vs-broken behavior indistinguishable. Pinning it away from "main"
+    # here means this test actually exercises the unborn-HEAD failure mode being guarded against,
+    # regardless of whatever this machine's/CI's own git config defaults to.
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=trunk", "init", "-q", "--bare", str(bare)], check=True
+    )
     wt_main = tmp_path / "wt-main"
     subprocess.run(["git", "-C", str(bare), "worktree", "add", "-q", "-b", "main", str(wt_main)], check=True)
     subprocess.run(
@@ -1627,7 +1635,16 @@ def test_list_worktrees_handles_a_bare_primary_without_dropping_the_first_linked
         check=True,
     )
     wt1 = tmp_path / "wt1"
-    subprocess.run(["git", "-C", str(bare), "worktree", "add", "-q", "-b", "feat1", str(wt1)], check=True)
+    # Explicit start-point ("main"), not implicit HEAD: a bare repo's OWN `HEAD` stays an unborn
+    # symbolic ref to whatever `init.defaultBranch` resolves to on THIS machine/CI runner (which
+    # may not be "main") until something actually commits on that specific ref — the `wt_main`
+    # commit above landed on the "main" branch a fresh linked worktree created, not necessarily on
+    # the bare repo's own default branch. Relying on implicit HEAD made this test pass locally
+    # (where `init.defaultBranch=main`) and fail in CI ("fatal: invalid reference: HEAD") wherever
+    # it isn't — a real, environment-dependent bug in the fixture itself, not the code under test.
+    subprocess.run(
+        ["git", "-C", str(bare), "worktree", "add", "-q", "-b", "feat1", str(wt1), "main"], check=True
+    )
 
     infos = worktree_gc.list_worktrees(bare)
 
