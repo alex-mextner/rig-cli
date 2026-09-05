@@ -8,6 +8,7 @@ decides how to surface them.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import shlex
@@ -2934,14 +2935,91 @@ def crontab_with_managed(contents: str, label: str, desired_pair: list[str]) -> 
     return out if changed else None
 
 
+# ── the sandboxed-HOME guard for every launchd-touching action (rig-cli#116) ─────────
+# Every fsutil-based action follows ``Path.home()``, so overriding ``$HOME`` LOOKS like a full
+# sandbox — but ``launchctl`` acts on the per-user ``gui/<uid>`` domain, which HOME cannot
+# redirect. A HOME-only-isolated ``rig apply`` (a test, an e2e leg, a manual catalog check) once
+# bootstrapped the REAL ``ai.hyperide.tg-ctl`` agent from a plist under a scratch HOME (pointing at
+# a nonexistent binary) and crash-looped it 23,641 times until booted out by hand. So: before ANY
+# live launchctl (or crontab) mutation, compare the resolved ``Path.home()`` with the uid's real
+# login home; when they differ, the action behaves exactly like its ``RIG_*_DRY_RUN`` env (artifact
+# written, live mutation skipped) and says so in its detail. Fail-closed: an unknown login home
+# counts as sandboxed. ONE predicate feeds all four launchd paths (schedule, tmux, tg_ctl,
+# spotlight) via their ``_*_dry_run`` predicates, and ``_live_skip_reason`` renders the note.
+@functools.lru_cache(maxsize=1)
+def _real_login_home() -> Path | None:
+    """The current uid's login home from the passwd database (resolved), or ``None`` if unknown.
+    Process-stable, so cached (tests monkeypatch the NAME, which bypasses the cache)."""
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except (ImportError, KeyError, OSError):
+        return None
+
+
+def _home_is_sandboxed() -> bool:
+    """True when ``Path.home()`` (the HOME rig writes under) is NOT the uid's real login home —
+    i.e. a HOME-override sandbox that a per-user launchd mutation would silently escape.
+
+    ``Path.home()`` itself can fail-closed-worthy here: with ``$HOME`` unset AND no passwd entry
+    for the uid (e.g. ``docker run --user <unmapped-uid>``), POSIX ``expanduser`` falls back to
+    ``pwd.getpwuid`` and raises ``KeyError`` (wrapped as ``RuntimeError`` on Python >= 3.12) —
+    the SAME "uid has no passwd entry" case :func:`_real_login_home` already turns into "sandboxed"
+    by returning ``None``. Catch it here too so THIS predicate degrades to "sandboxed" instead of
+    crashing. NOTE this does not make a bare `rig apply` crash-proof in that container shape on its
+    own: several call sites (e.g. ``tg_ctl_plan_from_action``) call ``Path.home()`` directly to
+    resolve artifact paths BEFORE this predicate ever runs, and would already raise there — a
+    genuinely unresolvable HOME is a pre-existing, tool-wide limitation outside rig-cli#116's
+    scope (mismatch detection, not HOME-resolution recovery). What this guards is narrower but
+    still real: every RENDERING call site that reads ``Path.home()`` again for a detail message
+    AFTER the predicate already answered (see :func:`_live_skip_reason`) must not crash even when
+    a fresh ``Path.home()`` call would.
+    """
+    real = _real_login_home()
+    if real is None:
+        return True
+    try:
+        return Path.home().resolve() != real
+    except (KeyError, OSError, RuntimeError):
+        return True
+
+
+def _env_flag(var: str) -> bool:
+    return os.environ.get(var, "").strip().lower() in ("1", "true", "yes")
+
+
+def _live_skip_reason(env_var: str, verb: str) -> str:
+    """Why a live launchd/crontab mutation was skipped, for an action's detail: the env flag when
+    it is set (``RIG_X_DRY_RUN — skipped <verb>``), else the sandboxed-HOME note.
+
+    ``Path.home()`` itself can raise here in the exact state ``_home_is_sandboxed`` degrades to
+    dry-run for (an unmapped-uid container: no ``$HOME``, no passwd entry) — this renderer must
+    not reintroduce that crash on the reporting path. Render the raw ``$HOME`` env var instead
+    when resolution fails; the detail is informational, never load-bearing.
+    """
+    if _env_flag(env_var):
+        return f"{env_var} — skipped {verb}"
+    real = _real_login_home()
+    try:
+        home = str(Path.home())
+    except (KeyError, OSError, RuntimeError):
+        home = os.environ.get("HOME", "<unset, no passwd entry>")
+    return (
+        f"HOME is overridden ({home} != {real if real is not None else 'unknown login home'})"
+        f" — skipped live {verb} (sandboxed run)"
+    )
+
+
 def _schedule_dry_run() -> bool:
     """Honor RIG_SCHEDULE_DRY_RUN — write the artifact file but DON'T touch the live daemon.
 
     For CI / containers / smoke where a real ``launchctl load`` (a per-user daemon mutation
     HOME can't redirect) or a real ``crontab`` write is unwanted. The plist file still lands
-    (in the configured/HOME path), but the daemon load / crontab write is skipped.
+    (in the configured/HOME path), but the daemon load / crontab write is skipped. ALSO true
+    automatically under a sandboxed HOME (:func:`_home_is_sandboxed`, rig-cli#116).
     """
-    return os.environ.get("RIG_SCHEDULE_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+    return _env_flag("RIG_SCHEDULE_DRY_RUN") or _home_is_sandboxed()
 
 
 def _tmux_dry_run() -> bool:
@@ -2951,9 +3029,10 @@ def _tmux_dry_run() -> bool:
     load -w`` the boot agent, take a first ``resurrect save``, clean continuum's stale macOS
     boot Login Items) is real network + daemon + ``tmux``-server access — unwanted in CI /
     containers / the unit suite. With the flag set, the on-disk artifacts still land; the live
-    effects are skipped. Mirrors :func:`_schedule_dry_run`.
+    effects are skipped. Mirrors :func:`_schedule_dry_run`, including the automatic sandboxed-HOME
+    skip (:func:`_home_is_sandboxed`, rig-cli#116).
     """
-    return os.environ.get("RIG_TMUX_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+    return _env_flag("RIG_TMUX_DRY_RUN") or _home_is_sandboxed()
 
 
 def _do_provision_schedule(action: Action, on_conflict: str) -> ActionResult:
@@ -2983,9 +3062,18 @@ def _provision_launchd(action: Action, sched, on_conflict: str) -> ActionResult:
 
     already = plist_path.is_file()
     current = plist_path.read_text(encoding="utf-8") if already else ""
-    if already and current == desired and _launchctl_loaded(sched.label):
-        # present AND current AND loaded → nothing to do (the install-if-missing no-op).
-        return ActionResult(action, "skipped", f"models/{action.item}: launchd job '{sched.label}' already installed at {sched.human_time}")
+    if already and current == desired:
+        # Under dry-run / a sandboxed HOME the loaded-probe would query the REAL launchd domain
+        # (rig-cli#116) — a current plist is the whole no-op then. Otherwise: present AND current
+        # AND loaded → nothing to do (the install-if-missing no-op).
+        if _schedule_dry_run():
+            return ActionResult(
+                action, "skipped",
+                f"models/{action.item}: launchd plist {plist_path} already current "
+                f"({_live_skip_reason('RIG_SCHEDULE_DRY_RUN', 'launchctl loaded-probe')})",
+            )
+        if _launchctl_loaded(sched.label):
+            return ActionResult(action, "skipped", f"models/{action.item}: launchd job '{sched.label}' already installed at {sched.human_time}")
 
     out = fsutil.write_file(plist_path, desired, on_conflict)
     if out.status == "error":
@@ -3005,7 +3093,8 @@ def _provision_launchd(action: Action, sched, on_conflict: str) -> ActionResult:
     if _schedule_dry_run():
         return ActionResult(
             action, out.status if out.status != "skipped" else "created",
-            f"models/{action.item}: wrote plist {plist_path} (RIG_SCHEDULE_DRY_RUN — skipped launchctl load)",
+            f"models/{action.item}: wrote plist {plist_path} "
+            f"({_live_skip_reason('RIG_SCHEDULE_DRY_RUN', 'launchctl load')})",
             out.backup,
         )
     # (re)load the agent so launchd picks up the (possibly new) calendar interval. unload
@@ -3043,7 +3132,8 @@ def _provision_crontab(action: Action, sched) -> ActionResult:
     if _schedule_dry_run():
         return ActionResult(
             action, "created",
-            f"models/{action.item}: RIG_SCHEDULE_DRY_RUN — would install crontab line '{sched.label}' at {sched.human_time} (not written)",
+            f"models/{action.item}: {_live_skip_reason('RIG_SCHEDULE_DRY_RUN', 'crontab write')} "
+            f"— would install crontab line '{sched.label}' at {sched.human_time} (not written)",
         )
     new_contents = "\n".join(new_lines).rstrip("\n") + "\n"
     rc = _write_crontab(new_contents)
@@ -3496,10 +3586,13 @@ def _tmux_activate(
       6b) take a FIRST ``resurrect save`` ONLY when no snapshot exists yet — so a re-apply never
          re-saves (idempotency) and never clobbers a good snapshot with an empty/partial one.
 
-    ``RIG_TMUX_DRY_RUN`` skips every live step (the file artifacts already landed in the caller).
+    ``RIG_TMUX_DRY_RUN`` skips every live step (the file artifacts already landed in the caller),
+    silently; a sandboxed HOME (rig-cli#116) skips them too but is SURFACED as a warning.
     """
     if _tmux_dry_run():
-        return [], []
+        if _env_flag("RIG_TMUX_DRY_RUN"):
+            return [], []
+        return [], [_live_skip_reason("RIG_TMUX_DRY_RUN", "tmux activation (plugins/launchctl)")]
 
     from .. import tmux as tmod
 
@@ -3794,8 +3887,10 @@ def _tg_ctl_dry_run() -> bool:
     stale-predecessor teardown (its ``bootout`` AND the on-disk backup+remove of its plist) are
     BOTH skipped — dry-run never mutates the live launchd domain nor deletes the predecessor file,
     it only reports what it would do. Mirrors ``RIG_SCHEDULE_DRY_RUN`` (the schedule's seam).
+    ALSO true automatically under a sandboxed HOME (:func:`_home_is_sandboxed`, rig-cli#116) — the
+    incident this guards against was exactly this action.
     """
-    return os.environ.get("RIG_TG_CTL_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+    return _env_flag("RIG_TG_CTL_DRY_RUN") or _home_is_sandboxed()
 
 
 def _tg_ctl_config_dir_default() -> str:
@@ -3841,7 +3936,8 @@ def _tg_ctl_teardown_stale(plan, dry: bool) -> tuple[Path | None, str | None]:
         return None, None
     if dry:
         return None, (
-            f"RIG_TG_CTL_DRY_RUN — would boot out + remove stale predecessor {stale.name}"
+            f"{_live_skip_reason('RIG_TG_CTL_DRY_RUN', 'launchctl bootout')} — would boot out "
+            f"+ remove stale predecessor {stale.name}"
         )
     _launchctl_bootout(str(stale))  # harmless rc!=0 if it wasn't loaded
     bak = _timestamped_backup_path(stale.with_name(stale.name + ".rig-bak"))
@@ -4097,13 +4193,22 @@ def _do_provision_tg_ctl(action: Action, on_conflict: str) -> ActionResult:
     already = plan.plist_path.is_file()
     current = plan.plist_path.read_text(encoding="utf-8") if already else ""
 
-    # The install-if-missing no-op: present AND byte-identical AND already loaded → nothing to do.
-    # (Skip the loaded check under dry-run — it would query the real launchd domain.)
-    if already and current == desired and not changed and (dry or _launchctl_gui_loaded(plan.boot_label)):
-        return ActionResult(
-            action, "skipped",
-            f"tg_ctl/boot: launchd agent '{plan.boot_label}' already installed and loaded",
-        )
+    # The install-if-missing no-op: present AND byte-identical → nothing left to do. Under
+    # dry-run / a sandboxed HOME (rig-cli#116) this is the WHOLE no-op — never probe the real
+    # launchd domain, and say so (mirrors the schedule/spotlight no-op paths), instead of the
+    # unqualified "already installed and loaded" this used to claim without checking.
+    if already and current == desired and not changed:
+        if dry:
+            return ActionResult(
+                action, "skipped",
+                f"tg_ctl/boot: plist {plan.plist_path} already current "
+                f"({_live_skip_reason('RIG_TG_CTL_DRY_RUN', 'launchctl loaded-probe')})",
+            )
+        if _launchctl_gui_loaded(plan.boot_label):
+            return ActionResult(
+                action, "skipped",
+                f"tg_ctl/boot: launchd agent '{plan.boot_label}' already installed and loaded",
+            )
 
     out = fsutil.write_file(plan.plist_path, desired, on_conflict)
     if out.status == "error":
@@ -4136,7 +4241,7 @@ def _do_provision_tg_ctl(action: Action, on_conflict: str) -> ActionResult:
             action,
             "backed_up" if headline_backup else ("created" if changed else "skipped"),
             f"tg_ctl/boot: {'; '.join(details) or 'plist already current'} "
-            f"(RIG_TG_CTL_DRY_RUN — skipped launchctl bootstrap)",
+            f"({_live_skip_reason('RIG_TG_CTL_DRY_RUN', 'launchctl bootstrap')})",
             headline_backup,
         )
 
@@ -6863,9 +6968,10 @@ def _spotlight_dry_run() -> bool:
     """Honor RIG_SPOTLIGHT_DRY_RUN — drop sentinels + write the plist but DON'T ``launchctl load``.
 
     For CI / containers / smoke where a real ``launchctl load`` (a per-user daemon mutation HOME
-    can't redirect) is unwanted. Mirrors ``RIG_SCHEDULE_DRY_RUN`` / ``RIG_TMUX_DRY_RUN``.
+    can't redirect) is unwanted. Mirrors ``RIG_SCHEDULE_DRY_RUN`` / ``RIG_TMUX_DRY_RUN``, including
+    the automatic sandboxed-HOME skip (:func:`_home_is_sandboxed`, rig-cli#116).
     """
-    return os.environ.get("RIG_SPOTLIGHT_DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+    return _env_flag("RIG_SPOTLIGHT_DRY_RUN") or _home_is_sandboxed()
 
 
 def _do_provision_spotlight(action: Action, on_conflict: str) -> ActionResult:
@@ -6899,15 +7005,26 @@ def _do_provision_spotlight(action: Action, on_conflict: str) -> ActionResult:
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     already = plist_path.is_file()
     current = plist_path.read_text(encoding="utf-8") if already else ""
-    if already and current == desired and _launchctl_loaded(label):
-        notes.append(f"launchd agent '{label}' already loaded ({plist_path})")
-        return ActionResult(action, "created" if result.created else "skipped", "; ".join(notes))
+    if already and current == desired:
+        # The loaded-probe queries the REAL launchd domain — never under dry-run / a sandboxed
+        # HOME (rig-cli#116); a current plist is the whole no-op then.
+        if _spotlight_dry_run():
+            notes.append(
+                f"launchd plist {plist_path} already current "
+                f"({_live_skip_reason('RIG_SPOTLIGHT_DRY_RUN', 'launchctl loaded-probe')})"
+            )
+            return ActionResult(action, "created" if result.created else "skipped", "; ".join(notes))
+        if _launchctl_loaded(label):
+            notes.append(f"launchd agent '{label}' already loaded ({plist_path})")
+            return ActionResult(action, "created" if result.created else "skipped", "; ".join(notes))
     out = fsutil.write_file(plist_path, desired, on_conflict)
     if out.status == "skipped" and already and current != desired:
         notes.append(f"launchd plist {plist_path} differs but on_conflict=skip — left unchanged")
         return ActionResult(action, "skipped", "; ".join(notes))
     if _spotlight_dry_run():
-        notes.append(f"wrote plist {plist_path} (RIG_SPOTLIGHT_DRY_RUN — skipped launchctl load)")
+        notes.append(
+            f"wrote plist {plist_path} ({_live_skip_reason('RIG_SPOTLIGHT_DRY_RUN', 'launchctl load')})"
+        )
         return ActionResult(action, "created", "; ".join(notes), out.backup)
     _launchctl("unload", str(plist_path))
     rc = _launchctl("load", str(plist_path))

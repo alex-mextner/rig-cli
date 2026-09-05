@@ -396,3 +396,14 @@ def fake_agent_tools(tmp_path: Path) -> Path:
     )
 
     return root
+
+
+@pytest.fixture
+def live_launchd_home(monkeypatch):
+    """rig-cli#116 opt-out: make the (fake, tmp) HOME count as the uid's login home, so a test
+    that fakes HOME on purpose and asserts on the LIVE (stubbed) launchctl path is not routed dry
+    by the sandboxed-HOME guard (``runner._home_is_sandboxed``). Request it wherever a
+    ``RIG_*_DRY_RUN`` flag is cleared to exercise the live seams."""
+    from riglib.actions import runner
+
+    monkeypatch.setattr(runner, "_home_is_sandboxed", lambda: False)

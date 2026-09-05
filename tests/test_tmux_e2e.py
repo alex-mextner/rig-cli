@@ -276,6 +276,9 @@ def _apply_with_real_plugins(home, monkeypatch):
     stubbed (a test can't load a real launch agent without polluting the host). Returns the
     ActionResult. The boot script + cc scripts + config are all real on-disk artifacts."""
     monkeypatch.delenv("RIG_TMUX_DRY_RUN", raising=False)
+    # rig-cli#116: these tests fake HOME on purpose and assert on the LIVE (stubbed) launchctl
+    # path — opt out of the sandboxed-HOME auto-skip, which would otherwise route them dry.
+    monkeypatch.setattr(runner, "_home_is_sandboxed", lambda: False)
     loads: list[str] = []
     monkeypatch.setattr(runner, "_launchctl", lambda verb, arg: 0)
     monkeypatch.setattr(runner, "_launchctl_loaded", lambda label: False)

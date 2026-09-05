@@ -170,7 +170,7 @@ def test_verify_plan_converts_verifier_exception_to_failure():
         verify._VERIFIERS.pop("provision_boom", None)
 
 
-def test_verify_tg_ctl_uses_gui_domain_check(tmp_path, monkeypatch):
+def test_verify_tg_ctl_uses_gui_domain_check(tmp_path, monkeypatch, live_launchd_home):
     # tg_ctl loads in gui/<uid>; the verifier must consult the GUI-domain predicate, not the
     # legacy `launchctl list`. Prove it: gui-check True but legacy-check False → result is LOADED.
     from riglib.actions import runner

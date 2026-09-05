@@ -29,7 +29,6 @@ that legitimately can't run the live activation.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -136,8 +135,18 @@ def _is_darwin() -> bool:
     return sys.platform == "darwin"
 
 
-def _dry_run(env_var: str) -> bool:
-    return os.environ.get(env_var, "").strip().lower() in ("1", "true", "yes")
+def _live_check_skip_reason(env_var: str) -> str | None:
+    """Why the live launchd loaded-check is suppressed (``None`` = run it): the dry-run env flag,
+    or a sandboxed HOME (rig-cli#116). These are the SAME predicates the runner's apply path uses
+    to skip the live activation, so verify never asserts a load the runner deliberately skipped
+    (which would fail `rig apply` on exactly the scratch-HOME run the guard exists for)."""
+    from .actions.runner import _env_flag, _home_is_sandboxed
+
+    if _env_flag(env_var):
+        return f"{env_var} set"
+    if _home_is_sandboxed():
+        return "HOME is overridden — sandboxed run, live activation was skipped"
+    return None
 
 
 def _launchctl_loaded(label: str) -> bool:
@@ -164,7 +173,7 @@ def _verify_launchd_agent(
     On a non-macOS host there is NO launchd (the provisioner writes no plist by design), so the
     WHOLE check is a single SKIPPED result — asserting a missing plist there would be a false
     failure. On macOS the plist presence IS a real assertion; the loaded check is skipped only
-    when the live activation was suppressed by ``dry_run_var``.
+    when the live activation was suppressed by ``dry_run_var`` or by a sandboxed HOME (rig-cli#116).
 
     ``loaded_check`` MUST match the launchd DOMAIN the provisioner loaded the agent into: the
     default legacy ``launchctl list <label>`` (used by tmux-boot / spotlight, loaded via
@@ -178,8 +187,9 @@ def _verify_launchd_agent(
     results.append(
         VerifyResult(category, item, exists, f"plist {'present' if exists else 'MISSING'}: {plist_path}")
     )
-    if _dry_run(dry_run_var):
-        results.append(VerifyResult(category, item, None, f"launchd load check skipped ({dry_run_var} set)"))
+    skip = _live_check_skip_reason(dry_run_var)
+    if skip is not None:
+        results.append(VerifyResult(category, item, None, f"launchd load check skipped ({skip})"))
         return results
     check = loaded_check or _launchctl_loaded
     loaded = check(label)

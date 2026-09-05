@@ -2921,7 +2921,7 @@ def test_drift_tmux_in_sync_after_apply(tmp_path, monkeypatch):
     assert not [d for d in report.items if d.category == "tmux"]
 
 
-def test_drift_tmux_live_state_missing(tmp_path, monkeypatch):
+def test_drift_tmux_live_state_missing(tmp_path, monkeypatch, live_launchd_home):
     """DEFECTS 4/6 drift: a missing resurrect dir / plugin checkout is surfaced by `rig status`
     so a clean machine doesn't read as in-sync while apply still has live work to do (codex
     finding). Here the live state is NOT staged → drift reports both."""
@@ -3185,6 +3185,9 @@ def _activation_seams(monkeypatch, *, plugins_present=False, launchctl_loaded=Fa
         rec["cleanups"] += 1
         return True
 
+    # rig-cli#116: these tests fake HOME on purpose and assert on the LIVE (stubbed) launchctl
+    # path — opt out of the sandboxed-HOME auto-skip, which would otherwise route them dry.
+    monkeypatch.setattr(runner, "_home_is_sandboxed", lambda: False)
     monkeypatch.setattr(runner, "_git_clone", _clone)
     monkeypatch.setattr(runner, "_launchctl", lambda verb, arg: rec["launchctl"].append((verb, arg)) or 0)
     monkeypatch.setattr(runner, "_launchctl_load_enable", _load_w)

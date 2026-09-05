@@ -131,7 +131,7 @@ def test_plan_emits_spotlight_action_only_when_enabled(tmp_path):
     assert "foo" in act.options["deny"]
 
 
-def test_do_provision_spotlight_launchctl_load_failure_is_error(tmp_path, monkeypatch):
+def test_do_provision_spotlight_launchctl_load_failure_is_error(tmp_path, monkeypatch, live_launchd_home):
     import sys
     if sys.platform != "darwin":
         import pytest
@@ -266,7 +266,7 @@ def test_drift_spotlight_modified_plist(tmp_path, monkeypatch):
     assert any(d.direction == "modified" for d in drift)
 
 
-def test_drift_spotlight_agent_not_loaded(tmp_path, monkeypatch):
+def test_drift_spotlight_agent_not_loaded(tmp_path, monkeypatch, live_launchd_home):
     """With a correct plist on disk but the launchd agent NOT loaded (real load path, not dry-run),
     status flags 'not loaded' — the branch every other drift test short-circuits via dry-run."""
     from riglib import drift as driftmod
@@ -282,7 +282,7 @@ def test_drift_spotlight_agent_not_loaded(tmp_path, monkeypatch):
     assert any(d.direction == "missing" and "not loaded" in d.detail for d in drift)
 
 
-def test_drift_spotlight_modified_and_not_loaded_both_surface(tmp_path, monkeypatch):
+def test_drift_spotlight_modified_and_not_loaded_both_surface(tmp_path, monkeypatch, live_launchd_home):
     """A content-drifted plist whose agent is ALSO not loaded surfaces BOTH facts — the modified
     check must not short-circuit the (independent) loaded probe."""
     from riglib import drift as driftmod

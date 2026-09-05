@@ -28,7 +28,7 @@ _REAL_PROVISION = runner._do_provision_schedule
 
 
 @pytest.fixture(autouse=True)
-def _real_scheduler(monkeypatch):
+def _real_scheduler(monkeypatch, live_launchd_home):
     """Restore the REAL provision_schedule handler for THIS module's tests.
 
     conftest's autouse `_isolate_scheduler` stubs `_do_provision_schedule` (+ the `_HANDLERS`
