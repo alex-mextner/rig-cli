@@ -1428,7 +1428,10 @@
           "default": true
         },
         "codex_usage_hook": {
-          "type": "boolean",
+          "type": [
+            "boolean",
+            "null"
+          ],
           "description": "fold tg-ctl's Codex Stop usage-telemetry hook into rig's own codex hook bridge in ~/.codex/config.toml instead of tg-ctl writing its own ~/.codex/hooks.json (tg-cli#308)",
           "default": true
         },
