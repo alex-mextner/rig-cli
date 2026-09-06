@@ -2011,6 +2011,31 @@ def _omp_wrapper_file_is_rig_managed(path: Path) -> bool:
     return _omp_wrapper_text_is_rig_managed(text)
 
 
+def _omp_symlink_is_rig_managed(link_path: Path, dest: Path) -> bool:
+    """True when ``link_path`` is a symlink that DEMONSTRABLY targets the omp bridge — either the
+    current ``dest`` (``extension.ts`` in this checkout) or a prior agent-tools checkout's
+    ``lib/omp_hook_bridge/extension.ts`` (the checkout moved; the link is stale but ours).
+
+    Only such a link may bypass ``on_conflict``: a symlink a USER created at the managed path
+    pointing at some other extension of their own is foreign configuration, and replacing it
+    without honoring ``skip``/``backup`` would silently destroy it with no restore path —
+    exactly what AGENTS.md's "anything replaced is backed up per on_conflict" rule forbids
+    (PR #352 review thread). Mirrors :func:`_looks_like_agent_tools_opencode_bridge`. A
+    dangling link is judged by its stored target text (no resolve needed), so a link into a
+    deleted old checkout still reads as ours. Read failures → not ours (fail safe).
+    """
+    if not link_path.is_symlink():
+        return False
+    try:
+        current = link_path.readlink()
+    except OSError:
+        return False
+    if _same_link_dest(link_path, current, dest):
+        return True
+    parts = _link_target_path(link_path, current).parts
+    return len(parts) >= 3 and parts[-3:] == ("lib", "omp_hook_bridge", "extension.ts")
+
+
 def opencode_hook_bridge_uses_wrapper(action: Action) -> bool:
     """True when rig must write a plugin wrapper to pass a custom descriptor dir."""
     return bool(action.options.get("hooks_dir"))
@@ -2510,7 +2535,10 @@ def _do_register_omp_hook_bridge(action: Action, on_conflict: str) -> ActionResu
         # ``current_text`` is already known not to equal ``desired`` here (the early-return
         # above catches the identical case), so a match on the header alone is enough — no need
         # to distinguish "content differs because config changed" from "some other rig version".
-        is_rig_owned = extension_path.is_symlink() or (
+        # ONLY a symlink that demonstrably targets the bridge counts as ours (a user's own
+        # symlink to some other extension at this path is foreign config and goes through the
+        # on_conflict path below — PR #352 review thread).
+        is_rig_owned = _omp_symlink_is_rig_managed(extension_path, dest) or (
             current_text is not None and _omp_wrapper_text_is_rig_managed(current_text)
         )
         if is_rig_owned:
@@ -2523,9 +2551,14 @@ def _do_register_omp_hook_bridge(action: Action, on_conflict: str) -> ActionResu
                     "(on_conflict=skip), left untouched",
                 )
             if _should_backup(on_conflict):
+                # shutil.move on a symlink moves the LINK itself (os.rename), never its target —
+                # so a foreign symlink is preserved as a restorable .rig-bak-* link.
                 bak = fsutil.backup_path(extension_path)
                 shutil.move(str(extension_path), str(bak))
                 backup_note = f" (backed up prior → {bak})"
+            elif extension_path.is_symlink():
+                # before is_dir(): rmtree refuses a symlink, and is_dir() follows one.
+                extension_path.unlink()
             elif extension_path.is_dir():
                 shutil.rmtree(extension_path)
             else:
@@ -2544,9 +2577,15 @@ def _do_register_omp_hook_bridge(action: Action, on_conflict: str) -> ActionResu
             return ActionResult(action, "error", f"hook_bridge/{action.item}: cannot read symlink {extension_path}: {exc}")
         if _same_link_dest(extension_path, current, dest):
             return ActionResult(action, "skipped", f"hook_bridge/{action.item}: omp extension already linked → {dest}")
-        extension_path.unlink()
-        extension_path.symlink_to(dest)
-        return ActionResult(action, "updated", f"hook_bridge/{action.item}: re-pointed omp extension → {dest}")
+        if _omp_symlink_is_rig_managed(extension_path, dest):
+            # ours (a prior checkout's bridge) — a stale rig symlink carries no user data, so
+            # re-point it regardless of on_conflict, like link_skill_harness does.
+            extension_path.unlink()
+            extension_path.symlink_to(dest)
+            return ActionResult(action, "updated", f"hook_bridge/{action.item}: re-pointed omp extension → {dest}")
+        # a FOREIGN symlink (a user's own extension linked at the managed path) is user
+        # configuration: fall through to the on_conflict handling below — skip leaves it,
+        # backup preserves the link as .rig-bak-* (PR #352 review thread).
 
     if _omp_wrapper_file_is_rig_managed(extension_path):
         # A rig-authored wrapper LOSING its hooks_dir/python config (hook_bridge.python removed,
@@ -2562,7 +2601,9 @@ def _do_register_omp_hook_bridge(action: Action, on_conflict: str) -> ActionResu
         )
 
     backup_note = ""
-    replaced_existing = extension_path.exists()
+    # `or is_symlink()`: a dangling FOREIGN symlink has exists()==False but still occupies the
+    # path and is still the user's — it must go through on_conflict too, never be clobbered.
+    replaced_existing = extension_path.exists() or extension_path.is_symlink()
     if replaced_existing:
         if on_conflict == "skip":
             return ActionResult(
@@ -2571,14 +2612,17 @@ def _do_register_omp_hook_bridge(action: Action, on_conflict: str) -> ActionResu
                 "(on_conflict=skip), left untouched",
             )
         if _should_backup(on_conflict):
+            # moves a symlink as the LINK itself (never its target) — restorable .rig-bak-*
             bak = fsutil.backup_path(extension_path)
             shutil.move(str(extension_path), str(bak))
             backup_note = f" (backed up prior → {bak})"
+        elif extension_path.is_symlink():
+            # before is_dir(): rmtree refuses a symlink, and is_dir() follows one.
+            extension_path.unlink()
+        elif extension_path.is_dir():
+            shutil.rmtree(extension_path)
         else:
-            if extension_path.is_dir():
-                shutil.rmtree(extension_path)
-            else:
-                extension_path.unlink()
+            extension_path.unlink()
 
     extension_path.symlink_to(dest)
     status = "backed_up" if backup_note else ("updated" if replaced_existing else "created")

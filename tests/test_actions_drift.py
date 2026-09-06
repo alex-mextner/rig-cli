@@ -3149,11 +3149,93 @@ def test_omp_hook_bridge_repoints_existing_symlink(fake_agent_tools, tmp_path):
     report = run_plan(plan)
     assert not report.errors, [r.detail for r in report.errors]
     result = _bridge_results(report)[0]
-    assert result.status == "updated"
+    # a symlink to an UNRELATED target is the user's own configuration, not a stale rig link:
+    # under the default on_conflict=backup it is preserved as a restorable .rig-bak-* LINK
+    # (the link itself is moved, never its target), then the managed symlink is created.
+    assert result.status == "backed_up", result.detail
     assert extension.is_symlink()
     assert extension.resolve() == (fake_agent_tools / "lib" / "omp_hook_bridge" / "extension.ts")
+    backups = list(extension.parent.glob("zz-agent-tools-hook-bridge.ts.rig-bak-*"))
+    assert len(backups) == 1 and backups[0].is_symlink(), backups
+    assert backups[0].resolve() == wrong_dest.resolve()
     assert wrong_dest.read_text(encoding="utf-8") == "// wrong bridge\n"
     assert detect(plan).in_sync
+
+
+def test_omp_hook_bridge_foreign_symlink_skip_left_untouched(fake_agent_tools, tmp_path):
+    """on_conflict=skip must leave a USER-created symlink (pointing at an unrelated
+    extension) alone — it is foreign configuration with no rig provenance, so replacing it
+    would destroy it with no restore path (PR #352 review thread / AGENTS.md backup rule)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    extension = repo / "omp-agent" / "extensions" / "zz-agent-tools-hook-bridge.ts"
+    extension.parent.mkdir(parents=True)
+    users_own = tmp_path / "my-extension.ts"
+    users_own.write_text("// the user's own extension\n", encoding="utf-8")
+    extension.symlink_to(users_own)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=extension, kind="omp",
+                    hook_bridge={"enabled": True}, on_conflict="skip"),
+        cat, project_type="unknown",
+    )
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert _bridge_results(report)[0].status == "skipped"
+    assert extension.is_symlink() and extension.resolve() == users_own.resolve()
+    assert not list(extension.parent.glob("*.rig-bak-*"))
+    drift = detect(plan)
+    assert any(i.item == "hook-bridge" and "points elsewhere" in i.detail for i in drift.items), \
+        [i.detail for i in drift.items]
+
+
+def test_omp_hook_bridge_prior_checkout_symlink_repointed_regardless_of_conflict(fake_agent_tools, tmp_path):
+    """A symlink into a PRIOR agent-tools checkout's lib/omp_hook_bridge/extension.ts is
+    demonstrably rig's own (the checkout moved) — re-pointed even under on_conflict=skip, and
+    without a backup (a stale rig link carries no user data), like link_skill_harness."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    extension = repo / "omp-agent" / "extensions" / "zz-agent-tools-hook-bridge.ts"
+    extension.parent.mkdir(parents=True)
+    old_checkout = tmp_path / "old-agent-tools" / "lib" / "omp_hook_bridge" / "extension.ts"
+    old_checkout.parent.mkdir(parents=True)
+    old_checkout.write_text("// old bridge\n", encoding="utf-8")
+    extension.symlink_to(old_checkout)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _bridge_cfg(repo, fake_agent_tools, settings_path=extension, kind="omp",
+                    hook_bridge={"enabled": True}, on_conflict="skip"),
+        cat, project_type="unknown",
+    )
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert _bridge_results(report)[0].status == "updated"
+    assert extension.resolve() == (fake_agent_tools / "lib" / "omp_hook_bridge" / "extension.ts")
+    assert not list(extension.parent.glob("*.rig-bak-*"))
+    assert detect(plan).in_sync
+
+
+def test_omp_hook_bridge_wrapper_mode_foreign_symlink_skip_left_untouched(fake_agent_tools, tmp_path):
+    """Same foreign-symlink rule in the WRAPPER branch (custom hook_bridge.python): a user's
+    symlink at the path is not ours to replace under on_conflict=skip."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init(repo)
+    extension = repo / ".omp-agent" / "extensions" / "zz-agent-tools-hook-bridge.ts"
+    extension.parent.mkdir(parents=True)
+    users_own = tmp_path / "my-extension.ts"
+    users_own.write_text("// the user's own extension\n", encoding="utf-8")
+    extension.symlink_to(users_own)
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(
+        _omp_wrapper_cfg(repo, fake_agent_tools, extension, python="/opt/py/bin/python3", on_conflict="skip"),
+        cat, project_type="unknown",
+    )
+    report = run_plan(plan)
+    assert not report.errors, [r.detail for r in report.errors]
+    assert _bridge_results(report)[0].status == "skipped"
+    assert extension.is_symlink() and extension.resolve() == users_own.resolve()
+    assert not list(extension.parent.glob("*.rig-bak-*"))
 
 
 def test_omp_hook_bridge_backs_up_existing_extension_file(fake_agent_tools, tmp_path):
