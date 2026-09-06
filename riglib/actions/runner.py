@@ -1804,14 +1804,31 @@ def receipt_installed_values(receipt: dict) -> dict[str, object]:
 
 
 def approval_posture_relaxes(action: Action) -> bool:
-    """True when any desired approval value is the kind's AUTO value (omp ``yolo``) — the only
-    direction the guard interlock exists for. Tightening back to ``always-ask`` must never be
-    blocked by a missing guard belt (that would leave the user stuck in yolo)."""
+    """True when any desired approval value is NOT the kind's interactive value — anything short of
+    ``always-ask`` (omp ``yolo``, but also the intermediate ``write``, which auto-approves edits)
+    is a relaxed posture the guard interlock exists for. Only the pure tightening write is exempt:
+    it must never be blocked by a missing guard belt (that would leave the user stuck in yolo).
+    Fails closed for a kind the registry does not describe."""
     kind = str(action.options.get("kind", ""))
     spec = HARNESS_MODES.get(kind)
     if spec is None:
-        return True  # unknown kind: keep the interlock (fail closed)
-    return any(scalar in spec.auto_values for _, scalar in approval_desired_keys(action))
+        return True
+    return any(scalar != spec.values[False] for _, scalar in approval_desired_keys(action))
+
+
+def _restore_point(prior_receipt: dict, backup_identity: str | None) -> str | None:
+    """The receipt's file-level restore point across writes: the ORIGINAL pre-rig backup once one
+    is recorded; a recorded ``null`` stays ``null`` when rig CREATED the file (there was nothing to
+    restore); but an ADOPTED config (rig never rewrote it, so no backup was taken then) takes the
+    first backup made now — that IS the user's original file. A receipt without managed entries
+    (absent, or malformed by hand) is no provenance at all: this run's backup is recorded."""
+    entries = receipt_managed_entries(prior_receipt)
+    if not entries:
+        return backup_identity
+    if prior_receipt.get("backup"):
+        return str(prior_receipt["backup"])
+    adopted = any(entry.get("adopted") for entry in entries.values())
+    return backup_identity if adopted else None
 
 
 def _receipt_entries(missing, keys, prior: dict[str, dict]) -> dict[str, dict]:
@@ -1960,9 +1977,9 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
         "template": 1,
         "kind": str(action.options.get("kind", "")),
         "managed": managed,
-        # the ORIGINAL pre-rig backup stays the restore point across a convergence (the new
-        # backup taken this run is named in the action detail)
-        "backup": prior_receipt.get("backup") or backup_identity,
+        # the ORIGINAL pre-rig backup stays the restore point across a convergence; a backup of
+        # rig's OWN prior write is named in the action detail only (see _restore_point)
+        "backup": _restore_point(prior_receipt, backup_identity),
     }
     receipt_file.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     receipt_file.chmod(0o600)

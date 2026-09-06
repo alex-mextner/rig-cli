@@ -571,17 +571,61 @@ def test_omp_tightening_is_not_blocked_by_a_missing_guard(fake_agent_tools, tmp_
     assert res.status in ("updated", "backed_up"), res.detail
     assert yaml.safe_load(_omp_yml().read_text(encoding="utf-8"))["tools"]["approvalMode"] == "always-ask"
     assert not [d for d in detect(plan).items if d.category == "permissions" and "relaxed" in d.detail]
-    # the relaxing direction keeps the interlock
-    relax = _omp_plan(fake_agent_tools, repo, auto_mode=True)
-    relax.actions = [a for a in relax.actions if a.kind != "install_harness_guard"]
-    res2 = [r for r in run_plan(relax).results if r.action.kind == "provision_harness_approval"][0]
-    assert res2.status == "error" and "guard" in res2.detail, res2.detail
+    # the relaxing direction keeps the interlock — yolo AND the intermediate `write` (a pinned
+    # primary mode that auto-approves edits is a relaxed posture too, not a tightening)
+    for relaxed in ({"auto_mode": True}, {"mode": "write"}):
+        relax = _omp_plan(fake_agent_tools, repo, **relaxed)
+        relax.actions = [a for a in relax.actions if a.kind != "install_harness_guard"]
+        res2 = [r for r in run_plan(relax).results if r.action.kind == "provision_harness_approval"][0]
+        assert res2.status == "error" and "guard" in res2.detail, (relaxed, res2.detail)
+        assert yaml.safe_load(_omp_yml().read_text(encoding="utf-8"))["tools"]["approvalMode"] == "always-ask"
+
+
+def test_omp_receipt_backup_stays_the_pre_rig_restore_point(fake_agent_tools, tmp_path):
+    """First write: no config.yml existed → receipt `backup: null`. A later convergence backs up
+    rig's OWN prior write, but the receipt must keep `null` — the pre-rig state was "absent", and a
+    file-level restore from the new backup would bring back rig's yolo, not the user's file."""
+    repo = tmp_path / "repo"; repo.mkdir()
+    assert not run_plan(_omp_plan(fake_agent_tools, repo, auto_mode=True)).errors
+    receipt_file = _omp_yml().parent / ".rig-permissions-receipt.json"
+    assert json.loads(receipt_file.read_text())["backup"] is None
+    res = [r for r in run_plan(_omp_plan(fake_agent_tools, repo, auto_mode=False)).results
+           if r.action.kind == "provision_harness_approval"][0]
+    assert res.status == "backed_up", res.detail
+    assert json.loads(receipt_file.read_text())["backup"] is None
 
 
 def test_primary_omp_pinned_write_mode_is_written_verbatim(fake_agent_tools, tmp_path):
-    """`kind: omp, mode: write` is omp's own value — the documented exact override, kept as is."""
+    """`kind: omp, mode: write` is omp's own value — the documented exact override, kept as is.
+    The FULL plan (guard action included, nothing filtered) applies cleanly: a relaxed pinned mode
+    is interlocked on the guard, and the planner emits that guard in the same plan."""
+    import yaml
+
     repo = tmp_path / "repo"; repo.mkdir()
-    assert _approval_value(_omp_plan(fake_agent_tools, repo, mode="write")) == "write"
+    plan = _omp_plan(fake_agent_tools, repo, mode="write")
+    assert _approval_value(plan) == "write"
+    assert any(a.kind == "install_harness_guard" for a in plan.actions)
+    outcome = run_plan(plan)
+    assert not outcome.errors, [r.detail for r in outcome.errors]
+    res = [r for r in outcome.results if r.action.kind == "provision_harness_approval"][0]
+    assert res.status == "created", res.detail
+    assert yaml.safe_load(_omp_yml().read_text(encoding="utf-8"))["tools"]["approvalMode"] == "write"
+
+
+def test_omp_malformed_receipt_does_not_hide_this_runs_backup(fake_agent_tools, tmp_path):
+    """A receipt file without managed entries (hand-damaged `{"template": 1}`) is no provenance:
+    the write backs the user's file up and the receipt records THAT backup, never a null that would
+    claim rig created the file."""
+    _omp_yml().parent.mkdir(parents=True)
+    _omp_yml().write_text("model: x\n", encoding="utf-8")
+    receipt_file = _omp_yml().parent / ".rig-permissions-receipt.json"
+    receipt_file.write_text('{"template": 1}\n', encoding="utf-8")
+    repo = tmp_path / "repo"; repo.mkdir()
+    res = [r for r in run_plan(_omp_plan(fake_agent_tools, repo, auto_mode=True)).results
+           if r.action.kind == "provision_harness_approval"][0]
+    assert res.status == "backed_up", res.detail
+    backup = json.loads(receipt_file.read_text())["backup"]
+    assert backup and Path(backup).read_text(encoding="utf-8") == "model: x\n"
 
 
 def test_omp_interactive_value_when_auto_mode_false(fake_agent_tools, tmp_path):
@@ -884,3 +928,24 @@ def test_opencode_object_under_the_mode_key_is_a_conflict_left_untouched(fake_ag
     res = [r for r in run_plan(plan).results if r.action.kind == "apply_harness"][0]
     assert res.status == "skipped" and "not a plain value" in res.detail, res.detail
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_omp_adopted_config_gets_its_first_backup_recorded_on_convergence(fake_agent_tools, tmp_path):
+    """A user config that already matched was ADOPTED (receipt `backup: null`, file untouched —
+    nothing to back up yet). The first convergence that rewrites it backs the ORIGINAL up, and the
+    receipt must record THAT backup (a recorded null means "rig created the file" only)."""
+    original = "# my omp config\ntools:\n  approvalMode: always-ask\n"
+    _omp_yml().parent.mkdir(parents=True)
+    _omp_yml().write_text(original, encoding="utf-8")
+    repo = tmp_path / "repo"; repo.mkdir()
+    adopt = [r for r in run_plan(_omp_plan(fake_agent_tools, repo, auto_mode=False)).results
+             if r.action.kind == "provision_harness_approval"][0]
+    assert adopt.status == "updated" and "adopted" in adopt.detail, adopt.detail
+    receipt_file = _omp_yml().parent / ".rig-permissions-receipt.json"
+    assert json.loads(receipt_file.read_text())["backup"] is None
+    assert _omp_yml().read_text(encoding="utf-8") == original
+    res = [r for r in run_plan(_omp_plan(fake_agent_tools, repo, auto_mode=True)).results
+           if r.action.kind == "provision_harness_approval"][0]
+    assert res.status == "backed_up", res.detail
+    backup = json.loads(receipt_file.read_text())["backup"]
+    assert backup and Path(backup).read_text(encoding="utf-8") == original

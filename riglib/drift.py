@@ -1789,7 +1789,7 @@ def _check_harness_approval(action: Action, report: DriftReport) -> None:
             report.items.append(
                 DriftItem("modified", "permissions", action.item, path,
                           f"{dotted} is {value!r} (rig-installed; config now declares {scalar!r} — "
-                          "apply converges it)")
+                          "apply converges it; on_conflict=skip leaves it)")
             )
         elif value != scalar:
             report.items.append(
