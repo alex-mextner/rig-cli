@@ -371,6 +371,45 @@ def test_opencode_scalar_permission_shorthand_is_migrated_not_rejected(fake_agen
     assert res2.status == "skipped", res2.detail
 
 
+def test_codex_toml_write_fails_closed_without_any_toml_parser(fake_agent_tools, tmp_path, monkeypatch):
+    """Python 3.10 without the tomli backport: rig cannot verify the file, so it must NOT edit it
+    (a malformed config.toml would otherwise be written back still malformed) — an explicit error
+    naming the remedy, and drift that says the same, never a silent fail-open."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tomllib", None)  # `import tomllib` → ImportError
+    monkeypatch.setitem(sys.modules, "tomli", None)
+    codex_home = tmp_path / "codex-home"; codex_home.mkdir()
+    monkeypatch.setenv("RIG_CODEX_HOME", str(codex_home))
+    before = 'model = "gpt-5"\n'
+    _codex_toml(codex_home).write_text(before, encoding="utf-8")
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = _plan(fake_agent_tools, repo, kind="codex", auto_mode=True)
+    drift = [d for d in detect(plan).items if d.category == "harness"]
+    assert drift and drift[0].direction == "modified" and "tomli" in drift[0].detail, drift
+    res = [r for r in run_plan(plan).results if r.action.kind == "apply_harness"][0]
+    assert res.status == "error" and "tomli" in res.detail, res.detail
+    assert _codex_toml(codex_home).read_text(encoding="utf-8") == before
+
+
+def test_toml_mode_keys_are_root_keys():
+    """The TOML probe/writer handle ROOT keys only (`read_toml_root_key(text, key_path[0])`); a
+    nested TOML key in the registry would be silently mis-probed — pin the invariant."""
+    for spec in HARNESS_MODES.values():
+        if spec.format == "toml":
+            assert len(spec.key_path) == 1, spec
+
+
+def test_unknown_mode_row_text_is_exact(fake_agent_tools, tmp_path, monkeypatch):
+    """The rig status row for an unknown-mode kind is cut out of the note's text — pin the exact
+    rendering so a rewording of unknown_mode_kind_note fails here instead of corrupting the row."""
+    monkeypatch.setenv("RIG_CODEX_HOME", str(tmp_path / "codex-home"))
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = _plan(fake_agent_tools, repo, kind="codex", mode="bypassPermissions")
+    row = {r.kind: r for r in harness_mode_rows(plan)}["codex"]
+    assert row.note == "not written — harness.mode 'bypassPermissions' is not a codex value — not managed"
+
+
 def test_codex_malformed_toml_is_an_error_and_visible_drift(fake_agent_tools, tmp_path, monkeypatch):
     """A config.toml that does not parse is never edited (rig must not hand codex a file it cannot
     load) and shows as drift to fix by hand."""
@@ -484,24 +523,65 @@ def test_omp_converges_back_to_always_ask_after_rig_wrote_yolo(fake_agent_tools,
     assert yaml.safe_load(_omp_yml().read_text(encoding="utf-8"))["tools"]["approvalMode"] == "yolo"
 
     plan = _omp_plan(fake_agent_tools, repo, auto_mode=False)
-    assert [d for d in detect(plan).items if d.category == "permissions"], "the changed intent is drift first"
+    drift = [d for d in detect(plan).items if d.category == "permissions"]
+    # status says what apply will DO — a rig-owned value converges, it is not a hand fix
+    assert drift and "apply converges" in drift[0].detail and "never clobbers" not in drift[0].detail, drift
     second = run_plan(plan)
     assert not second.errors, [r.detail for r in second.errors]
     res = [r for r in second.results if r.action.kind == "provision_harness_approval"][0]
     assert res.status in ("updated", "backed_up"), res.detail
     assert yaml.safe_load(_omp_yml().read_text(encoding="utf-8"))["tools"]["approvalMode"] == "always-ask"
     receipt = json.loads((_omp_yml().parent / ".rig-permissions-receipt.json").read_text())
-    assert receipt["managed"]["tools.approvalMode"] == {"previous": "yolo", "installed": "always-ask"}
+    # `previous` stays the ORIGINAL pre-rig state (the key was absent), never rig's own `yolo` —
+    # a deprovision must restore what the user had, not rig's intermediate write
+    assert receipt["managed"]["tools.approvalMode"] == {"previous": None, "installed": "always-ask"}
     assert not [d for d in detect(plan).items if d.category == "permissions"]
     third = run_plan(plan)
     assert [r for r in third.results if r.action.kind == "provision_harness_approval"][0].status == "skipped"
     # a value the USER changed afterwards (differs from what the receipt says rig installed) is a
     # conflict again — rig-ownership is exactly "still holds what rig wrote", nothing wider
     _omp_yml().write_text("tools:\n  approvalMode: write\n", encoding="utf-8")
+    drift4 = [d for d in detect(plan).items if d.category == "permissions"]
+    assert drift4 and "never clobbers" in drift4[0].detail, drift4
     fourth = run_plan(plan)
     res4 = [r for r in fourth.results if r.action.kind == "provision_harness_approval"][0]
     assert res4.status == "skipped" and "differs" in res4.detail, res4.detail
     assert yaml.safe_load(_omp_yml().read_text(encoding="utf-8"))["tools"]["approvalMode"] == "write"
+
+
+def test_omp_tightening_is_not_blocked_by_a_missing_guard(fake_agent_tools, tmp_path):
+    """The guard interlock exists to stop RELAXING to yolo without the belt; tightening back to
+    always-ask is the safe direction and must go through even when the guard file is gone —
+    otherwise a user who removed the guard is stuck in yolo. Drift must not call an always-ask
+    posture "relaxed" either."""
+    import yaml
+
+    from riglib.actions.runner import resolve_guard_target
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    first = run_plan(_omp_plan(fake_agent_tools, repo, auto_mode=True))
+    assert not first.errors, [r.detail for r in first.errors]
+    plan = _omp_plan(fake_agent_tools, repo, auto_mode=False)
+    approval = [a for a in plan.actions if a.kind == "provision_harness_approval"][0]
+    guard = resolve_guard_target(approval)
+    assert guard is not None and guard.is_file()
+    guard.unlink()
+    plan.actions = [a for a in plan.actions if a.kind != "install_harness_guard"]  # the belt stays gone
+    res = [r for r in run_plan(plan).results if r.action.kind == "provision_harness_approval"][0]
+    assert res.status in ("updated", "backed_up"), res.detail
+    assert yaml.safe_load(_omp_yml().read_text(encoding="utf-8"))["tools"]["approvalMode"] == "always-ask"
+    assert not [d for d in detect(plan).items if d.category == "permissions" and "relaxed" in d.detail]
+    # the relaxing direction keeps the interlock
+    relax = _omp_plan(fake_agent_tools, repo, auto_mode=True)
+    relax.actions = [a for a in relax.actions if a.kind != "install_harness_guard"]
+    res2 = [r for r in run_plan(relax).results if r.action.kind == "provision_harness_approval"][0]
+    assert res2.status == "error" and "guard" in res2.detail, res2.detail
+
+
+def test_primary_omp_pinned_write_mode_is_written_verbatim(fake_agent_tools, tmp_path):
+    """`kind: omp, mode: write` is omp's own value — the documented exact override, kept as is."""
+    repo = tmp_path / "repo"; repo.mkdir()
+    assert _approval_value(_omp_plan(fake_agent_tools, repo, mode="write")) == "write"
 
 
 def test_omp_interactive_value_when_auto_mode_false(fake_agent_tools, tmp_path):
@@ -730,3 +810,77 @@ def test_generic_mode_writer_refuses_an_unknown_format(tmp_path):
                     options={"kind": "omp", "auto_mode": True, "mode_value": "yolo", "format": "yaml"})
     with pytest.raises(ValueError, match="no mode writer for format 'yaml'"):
         _do_apply_harness_mode(action, "backup")
+
+
+# ── a pinned harness.mode is the PRIMARY kind's exact override ────────────────────────────
+def test_primary_opencode_pinned_deny_is_written_verbatim(fake_agent_tools, tmp_path):
+    """`kind: opencode, mode: deny` is opencode's own value: written as `deny` (the documented exact
+    override), never reduced to the interactive intent and relaxed to `ask`; `rig status` shows it."""
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = _plan(fake_agent_tools, repo, kind="opencode", mode="deny")
+    acts = _mode_actions(plan, "opencode")
+    assert len(acts) == 1 and acts[0].options["mode_value"] == "deny" and acts[0].options["auto_mode"] is False
+    assert {r.kind: r.value for r in harness_mode_rows(plan)}["opencode"] == "deny"
+    res = [r for r in run_plan(plan).results if r.action.kind == "apply_harness"][0]
+    assert res.status == "created", res.detail
+    assert json.loads(_opencode_json().read_text(encoding="utf-8"))["permission"]["*"] == "deny"
+
+
+def test_additive_kind_never_gets_the_primary_raw_mode(fake_agent_tools, tmp_path, monkeypatch):
+    """The primary's string is harness-specific: `kind: claude-code, mode: plan, kinds: [opencode,
+    codex]` gives the additive kinds the MAPPED interactive value, not `plan`; and a primary
+    opencode `deny` maps to `user` for an additive codex."""
+    monkeypatch.setenv("RIG_CODEX_HOME", str(tmp_path / "codex-home"))
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = _plan(fake_agent_tools, repo, kinds=["opencode", "codex"], mode="plan",
+                 settings_path=str(repo / ".claude/settings.json"))
+    assert _mode_actions(plan, "opencode")[0].options["mode_value"] == "ask"
+    assert _mode_actions(plan, "codex")[0].options["mode_value"] == "user"
+    plan2 = _plan(fake_agent_tools, repo, kind="opencode", kinds=["codex"], mode="deny")
+    assert _mode_actions(plan2, "opencode")[0].options["mode_value"] == "deny"
+    assert _mode_actions(plan2, "codex")[0].options["mode_value"] == "user"
+
+
+def test_codex_absent_toml_is_not_created_without_a_parser(fake_agent_tools, tmp_path, monkeypatch):
+    """No config.toml yet AND no TOML parser: rig cannot verify what it would create, so the file
+    is NOT created — the error (and drift) name the tomli remedy, never a misleading "would not
+    parse" about rig's own valid TOML."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tomllib", None)
+    monkeypatch.setitem(sys.modules, "tomli", None)
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("RIG_CODEX_HOME", str(codex_home))
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = _plan(fake_agent_tools, repo, kind="codex", auto_mode=True)
+    drift = [d for d in detect(plan).items if d.category == "harness"]
+    assert drift and drift[0].direction == "modified" and "tomli" in drift[0].detail, drift
+    res = [r for r in run_plan(plan).results if r.action.kind == "apply_harness"][0]
+    assert res.status == "error" and "tomli" in res.detail and "would not parse" not in res.detail, res.detail
+    assert not _codex_toml(codex_home).exists()
+
+
+def test_unknown_mode_row_survives_a_delimiter_in_the_mode(fake_agent_tools, tmp_path, monkeypatch):
+    """A user mode containing the note's own ` — ` delimiter must render intact in `rig status`
+    (the row is sliced on the note's known suffix, never split on the delimiter)."""
+    monkeypatch.setenv("RIG_CODEX_HOME", str(tmp_path / "codex-home"))
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = _plan(fake_agent_tools, repo, kind="codex", mode="bad — forged")
+    row = {r.kind: r for r in harness_mode_rows(plan)}["codex"]
+    assert row.note == "not written — harness.mode 'bad — forged' is not a codex value — not managed"
+
+
+def test_opencode_object_under_the_mode_key_is_a_conflict_left_untouched(fake_agent_tools, tmp_path):
+    """`permission."*"` holding an OBJECT is not a plain value rig may rewrite blind: skipped with
+    the file byte-identical, and drift says so — the same contract the TOML inline-table path keeps."""
+    path = _opencode_json()
+    path.parent.mkdir(parents=True)
+    before = json.dumps({"permission": {"*": {"read": "allow"}}})
+    path.write_text(before, encoding="utf-8")
+    repo = tmp_path / "repo"; repo.mkdir()
+    plan = _plan(fake_agent_tools, repo, kind="opencode", auto_mode=True)
+    drift = [d for d in detect(plan).items if d.category == "harness"]
+    assert drift and "not a plain value" in drift[0].detail, drift
+    res = [r for r in run_plan(plan).results if r.action.kind == "apply_harness"][0]
+    assert res.status == "skipped" and "not a plain value" in res.detail, res.detail
+    assert path.read_text(encoding="utf-8") == before

@@ -47,6 +47,7 @@ from .harness_mode import (
     harness_auto_intent,
     mode_is_known,
     mode_value_for,
+    resolved_mode_value,
     na_note,
     undeclared_note,
     unknown_mode_kind_note,
@@ -972,7 +973,7 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
             else:
                 _build_harness_claude_code(config, plan, block, kind)
         else:
-            _build_harness_mode_for_kind(config, plan, kind, intent)
+            _build_harness_mode_for_kind(config, plan, kind, intent, primary=primary, mode=mode)
 
 
 def _enabled_harness_block(config: LoadedConfig) -> dict[str, Any] | None:
@@ -1024,13 +1025,16 @@ def _claude_code_block(h: dict[str, Any], kind: str, primary: str, intent: bool 
     return reduced
 
 
-def _build_harness_mode_for_kind(config: LoadedConfig, plan: InstallPlan, kind: str, intent: bool | None) -> None:
+def _build_harness_mode_for_kind(
+    config: LoadedConfig, plan: InstallPlan, kind: str, intent: bool | None, *, primary: str, mode: object,
+) -> None:
     """One generic ``apply_harness`` write of ``kind``'s own mode key (codex/opencode).
 
     The value follows the harness auto ``intent`` resolved by :func:`_build_harness` (``auto_mode``,
-    else inferred from a pinned ``mode:`` via the primary kind's ``auto_values``) — never the raw
-    ``mode:`` string. No declared intent → no write (an informational note instead). The target is
-    always the kind's user-scope file from the registry.
+    else inferred from a pinned ``mode:`` via the primary kind's ``auto_values``) — except that the
+    PRIMARY kind's own known ``mode:`` is written verbatim (``kind: opencode, mode: deny`` must stay
+    ``deny``, not relax to ``ask``; see :func:`resolved_mode_value`). No declared intent → no write
+    (an informational note instead). The target is always the kind's user-scope file from the registry.
     """
     spec = HARNESS_MODES[kind]
     if intent is None:
@@ -1038,10 +1042,10 @@ def _build_harness_mode_for_kind(config: LoadedConfig, plan: InstallPlan, kind: 
         # have its posture tightened to the interactive value behind its back — write nothing, say so.
         plan.notes.append(undeclared_note(kind))
         return
-    # NEVER the raw ``mode:`` string: it is a harness-specific value (documented as claude-code's
-    # ``acceptEdits``/``bypassPermissions``), and a primary codex/opencode ``mode:`` only feeds the
-    # intent inference above — writing it verbatim would hand the harness an invalid setting.
-    mode_value = mode_value_for(kind, intent)
+    # An ADDITIVE kind never gets the raw ``mode:`` string: it is the primary harness's value
+    # (claude-code's ``acceptEdits``, opencode's ``deny``) and would be an invalid setting here — it
+    # only feeds the intent inference above. The primary's own known value is the documented override.
+    mode_value = resolved_mode_value(kind, primary, mode, intent)
     # ALWAYS the kind's user-scope file: auto-mode is a per-MACHINE posture (the same reason the
     # claude-code ``auto`` write is user-scope only). ``harness.settings_path`` is NOT consulted here —
     # it is the hook-bridge / claude settings override (for opencode it names a .js PLUGIN), never
@@ -1406,10 +1410,12 @@ def _approval_mode_value(config: LoadedConfig, kind: str) -> str:
     configured harness kinds) the legacy relaxed posture (yolo, rig-cli#202 owner decision) — a
     foreign harness's ``auto_mode: false`` must not flip a kind it never declared."""
     h = _enabled_harness_block(config)
-    intent = None
-    if h is not None and kind in _configured_harness_kinds(config):
-        intent = harness_auto_intent(h, str(h.get("kind") or _DEFAULT_HARNESS_KIND))
-    return mode_value_for(kind, intent, legacy_intent=True)
+    if h is None or kind not in _configured_harness_kinds(config):
+        return mode_value_for(kind, None, legacy_intent=True)
+    primary = str(h.get("kind") or _DEFAULT_HARNESS_KIND)
+    intent = harness_auto_intent(h, primary)
+    # a primary omp's own pinned mode (``write``) is honoured verbatim, like every primary kind
+    return resolved_mode_value(kind, primary, h.get("mode"), intent, legacy_intent=True)
 
 
 def _permissions_kinds(config: LoadedConfig, p: dict[str, Any]) -> list[str]:

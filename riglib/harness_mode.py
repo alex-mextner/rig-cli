@@ -179,6 +179,21 @@ def mode_value_for(kind: str, intent: bool | None, *, legacy_intent: bool = Fals
     return spec.values[legacy_intent if intent is None else intent]
 
 
+def resolved_mode_value(kind: str, primary: str, mode: object, intent: bool | None, *, legacy_intent: bool = False) -> str:
+    """The value ``kind``'s writer converges to, honouring a pinned ``harness.mode``.
+
+    The PRIMARY kind's own ``mode:`` is written VERBATIM when it is one the kind knows (opencode
+    ``deny``, omp ``write``, codex ``user``) — ``harness.mode`` is documented as the exact override,
+    and reducing it to the boolean intent would silently relax an explicit ``deny`` to ``ask``.
+    Every ADDITIVE kind follows the boolean intent only: the primary's string is harness-specific
+    and means nothing to another harness. An unknown ``mode:`` never reaches a writer (the plan
+    notes it and writes nothing), so the fallback here is the intent mapping.
+    """
+    if kind == primary and mode is not None and mode_is_known(kind, mode):
+        return str(mode)
+    return mode_value_for(kind, intent, legacy_intent=legacy_intent)
+
+
 def delegated_note(kind: str, *, written: bool) -> str:
     """The plan note for a kind whose mode key is owned by the permissions approval action.
 
@@ -217,6 +232,7 @@ def unknown_mode_note(primary_kind: str, mode: object) -> str:
 # The per-kind prefix of :func:`unknown_mode_kind_note` — ``rig status`` recovers the kind's row
 # from it (the block-level :func:`unknown_mode_note` names no kind, so it cannot stand for one).
 _UNKNOWN_MODE_KIND_PREFIX = "harness: {kind} auto-mode not written — harness.mode '"
+_UNKNOWN_MODE_KIND_SUFFIX = " — {key} left as is"
 
 
 def unknown_mode_kind_note(kind: str, primary: str, mode: object) -> str:
@@ -226,7 +242,8 @@ def unknown_mode_kind_note(kind: str, primary: str, mode: object) -> str:
     says so, instead of a contradictory "not declared (no harness.mode)" while ``mode:`` IS set."""
     return (
         _UNKNOWN_MODE_KIND_PREFIX.format(kind=kind)
-        + f"{mode}' is not a {primary} value — {HARNESS_MODES[kind].dotted()} left as is"
+        + f"{mode}' is not a {primary} value"
+        + _UNKNOWN_MODE_KIND_SUFFIX.format(key=HARNESS_MODES[kind].dotted())
     )
 
 
@@ -330,7 +347,12 @@ def _row_for_note(note: str, seen: set[str]) -> HarnessModeRow | None:
             return HarnessModeRow(kind, spec.dotted(), None, None,
                                   "not declared (no harness.auto_mode / harness.mode) — not managed")
         prefix = _UNKNOWN_MODE_KIND_PREFIX.format(kind=kind)
-        if note.startswith(prefix):
+        suffix = _UNKNOWN_MODE_KIND_SUFFIX.format(key=spec.dotted())
+        if note.startswith(prefix) and note.endswith(suffix):
+            # COUPLED to unknown_mode_kind_note's exact shape: "<prefix><mode>' is not a <primary>
+            # value<suffix>" — the row keeps the middle clause; slicing on the KNOWN suffix (never
+            # splitting on " — ") keeps a user mode that itself contains " — " intact;
+            # test_unknown_mode_row_text_is_exact pins the rendered row, so a rewording fails loud
             return HarnessModeRow(kind, spec.dotted(), None, None,
-                                  "not written — harness.mode '" + note[len(prefix):].split(" — ", 1)[0] + " — not managed")
+                                  "not written — harness.mode '" + note[len(prefix):-len(suffix)] + " — not managed")
     return None

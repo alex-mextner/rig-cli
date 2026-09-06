@@ -955,13 +955,20 @@ def harness_mode_probe(action: Action) -> tuple[str, object]:
     """READ-ONLY state of the managed mode key on disk (shared by the writer and drift).
 
     Returns ``(state, value)`` with state one of ``absent`` (no file), ``malformed`` (unparseable
-    file), ``shape`` (a parent is not an object — value names it), ``conflict`` (a value rig must
-    not rewrite blind, e.g. a TOML inline table), ``missing`` (key not set) or ``present``."""
+    file), ``unverifiable`` (a TOML file rig cannot validate on this Python — no ``tomllib`` /
+    ``tomli``; value names the remedy), ``shape`` (a parent is not an object — value names it),
+    ``conflict`` (a value rig must not rewrite blind, e.g. a TOML inline table), ``missing`` (key
+    not set) or ``present``."""
     key_path, _ = desired_harness_mode(action)
     config_file = action.target
+    fmt = str(action.options.get("format", "json"))
+    if fmt == "toml" and _toml_parser() is None:
+        # BEFORE the existence check: a fresh config.toml is not created either (rig cannot verify
+        # what it would write), and drift must say the same thing apply will — never "missing"
+        # while apply then errors
+        return "unverifiable", _TOML_UNVERIFIABLE_REMEDY
     if not config_file.is_file():
         return "absent", None
-    fmt = str(action.options.get("format", "json"))
     try:
         text = config_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -969,6 +976,7 @@ def harness_mode_probe(action: Action) -> tuple[str, object]:
     if fmt == "toml":
         if not _toml_parses(text):
             return "malformed", None
+        # the registry's TOML entries are ROOT keys only (pinned by test_toml_mode_keys_are_root_keys)
         return read_toml_root_key(text, key_path[0])
     try:
         data = json.loads(text) if text.strip() else {}  # a touched, empty file is merely missing
@@ -980,6 +988,10 @@ def harness_mode_probe(action: Action) -> tuple[str, object]:
     if scalar_parent is not None:
         return "present", scalar_parent
     state, value = approval_lookup(data, key_path)
+    if state == "present" and isinstance(value, (dict, list)):
+        # an object/array under the managed key is not a value rig may rewrite blind — the same
+        # contract the TOML path keeps for an inline table (reported, left for the user)
+        return "conflict", f"{'.'.join(key_path)} = <{type(value).__name__}>"
     return state, value
 
 
@@ -992,18 +1004,33 @@ def _scalar_wildcard_parent(data: dict, key_path: tuple[str, ...]) -> str | None
     return parent if isinstance(parent, str) else None
 
 
-def _toml_parses(text: str) -> bool:
-    """True when ``text`` is valid TOML — or when it cannot be checked (Python 3.10 has no
-    ``tomllib``; the ``tomli`` backport is tried next, else the root-key scanner runs unvalidated,
-    as the hook-bridge merge always has). Lazy import: ``tomllib`` is stdlib but absent on 3.10,
-    and never needed for ``rig --help``."""
+_TOML_UNVERIFIABLE_REMEDY = (
+    "no TOML parser on this Python (3.10 has no tomllib) — install the tomli backport "
+    "(`pip install tomli`) so rig can verify the file before and after the write"
+)
+
+
+def _toml_parser():
+    """The TOML parser module, or ``None`` when this Python has none (3.10 without the ``tomli``
+    backport). Lazy import: ``tomllib`` is stdlib but absent on 3.10, and never needed for
+    ``rig --help``."""
     try:
         import tomllib
-    except ImportError:  # pragma: no cover — 3.10 only
+    except ImportError:
         try:
             import tomli as tomllib  # type: ignore[no-redef]
         except ImportError:
-            return True
+            return None
+    return tomllib
+
+
+def _toml_parses(text: str) -> bool | None:
+    """True/False when ``text`` is valid/invalid TOML; ``None`` when it CANNOT be checked (no
+    parser, see :func:`_toml_parser`) — the mode writer then fails closed (never edits or creates
+    a file it cannot verify) instead of handing codex a config it may not load."""
+    tomllib = _toml_parser()
+    if tomllib is None:
+        return None
     try:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError:
@@ -1027,6 +1054,8 @@ def _do_apply_harness_mode(action: Action, on_conflict: str) -> ActionResult:
     label = f"harness/{action.item}: {dotted}"
     if state == "malformed":
         return ActionResult(action, "error", f"{label}: {config_file} is malformed — fix it by hand; rig never rewrites a config it cannot parse")
+    if state == "unverifiable":
+        return ActionResult(action, "error", f"{label}: {config_file} left untouched — {current}")
     if state == "shape":
         return ActionResult(action, "error", f"{label}: '{current}' is not an object in {config_file}")
     if state == "conflict":
@@ -1040,7 +1069,7 @@ def _do_apply_harness_mode(action: Action, on_conflict: str) -> ActionResult:
         merged, conflict = upsert_toml_root_key(config_file.read_text(encoding="utf-8") if state != "absent" else "", key_path[0], value)
         if conflict:
             return ActionResult(action, "skipped", f"{label}: {conflict} in {config_file} — left untouched (drift visible)")
-        if not _toml_parses(merged):  # never leave the harness a config it cannot load
+        if _toml_parses(merged) is not True:  # never leave the harness a config it cannot load
             return ActionResult(action, "error", f"{label}: merged {config_file} would not parse as TOML — left untouched")
     elif fmt == "json":
         text = config_file.read_text(encoding="utf-8") if state != "absent" else ""
@@ -1747,21 +1776,61 @@ def approval_lookup(data: dict, key_path: tuple[str, ...]) -> tuple[str, object]
     return (("present", cur[key_path[-1]]) if key_path[-1] in cur else ("missing", None))
 
 
-def _receipt_installed_values(receipt_file: Path) -> dict[str, object]:
-    """``{dotted key: installed value}`` from rig's approval receipt — the values rig itself wrote.
-
-    A managed key still holding the value rig installed is rig-OWNED: when the config's intent
-    changes (omp ``auto_mode: true`` → ``false``: yolo → always-ask) apply converges it, instead of
-    mistaking rig's own prior write for a user-set value and leaving the harness relaxed forever.
-    Unreadable / malformed receipt → empty (every differing value then counts as the user's)."""
+def read_approval_receipt(receipt_file: Path) -> dict:
+    """rig's approval receipt as written (``{}`` when absent, unreadable or malformed — every
+    differing value then counts as the user's). Shared by the writer and drift."""
     try:
         loaded = json.loads(receipt_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    managed = loaded.get("managed") if isinstance(loaded, dict) else None
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def receipt_managed_entries(receipt: dict) -> dict[str, dict]:
+    """``{dotted key: {previous, installed, ...}}`` — the per-key entries of a receipt."""
+    managed = receipt.get("managed")
     if not isinstance(managed, dict):
         return {}
-    return {k: v.get("installed") for k, v in managed.items() if isinstance(v, dict)}
+    return {k: v for k, v in managed.items() if isinstance(v, dict)}
+
+
+def receipt_installed_values(receipt: dict) -> dict[str, object]:
+    """``{dotted key: installed value}`` from rig's approval receipt — the values rig itself wrote.
+
+    A managed key still holding the value rig installed is rig-OWNED: when the config's intent
+    changes (omp ``auto_mode: true`` → ``false``: yolo → always-ask) apply converges it, instead of
+    mistaking rig's own prior write for a user-set value and leaving the harness relaxed forever."""
+    return {k: v.get("installed") for k, v in receipt_managed_entries(receipt).items()}
+
+
+def approval_posture_relaxes(action: Action) -> bool:
+    """True when any desired approval value is the kind's AUTO value (omp ``yolo``) — the only
+    direction the guard interlock exists for. Tightening back to ``always-ask`` must never be
+    blocked by a missing guard belt (that would leave the user stuck in yolo)."""
+    kind = str(action.options.get("kind", ""))
+    spec = HARNESS_MODES.get(kind)
+    if spec is None:
+        return True  # unknown kind: keep the interlock (fail closed)
+    return any(scalar in spec.auto_values for _, scalar in approval_desired_keys(action))
+
+
+def _receipt_entries(missing, keys, prior: dict[str, dict]) -> dict[str, dict]:
+    """The receipt's ``managed`` map for this write. A converged rig-owned key keeps the ORIGINAL
+    pre-rig ``previous`` from the prior receipt (a follow-up deprovision must restore what the user
+    had — an absent key, not rig's own intermediate write); keys that already matched are adopted."""
+    managed: dict[str, dict] = {}
+    for key_path, scalar, previous in missing:
+        dotted = ".".join(key_path)
+        if previous is not None and dotted in prior:  # rig-owned convergence, not a first write
+            previous = prior[dotted].get("previous")
+        managed[dotted] = {"previous": previous, "installed": scalar}
+    # keys that already matched (unmanaged) are ADOPTED into the same receipt — the managed
+    # map must cover every managed key, not just the ones this run changed.
+    for key_path, scalar in keys:
+        dotted = ".".join(key_path)
+        if dotted not in managed:
+            managed[dotted] = {"previous": scalar, "installed": scalar, "adopted": True}
+    return managed
 
 
 def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionResult:
@@ -1785,7 +1854,9 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
         return ActionResult(action, "error", f"approval/{action.item}: {exc}")
     config_file = approval_config_file(action)
 
-    guard_reason = _guard_in_place(action)
+    # interlocked ONLY when relaxing: a tightening write (always-ask) is the safe direction and
+    # must not be refused because the guard belt is missing or drifted
+    guard_reason = _guard_in_place(action) if approval_posture_relaxes(action) else None
     if guard_reason is not None:
         return ActionResult(
             action, "error",
@@ -1812,7 +1883,8 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
         data = loaded or {}
 
     receipt_file = approval_receipt_file(action)
-    rig_installed = _receipt_installed_values(receipt_file)
+    prior_receipt = read_approval_receipt(receipt_file)
+    rig_installed = receipt_installed_values(prior_receipt)
     # (key_path, desired, previous): previous is None for an absent key, else the rig-installed
     # value being converged (the config's intent changed, e.g. auto_mode true → false)
     missing: list[tuple[tuple[str, ...], str, str | None]] = []
@@ -1878,23 +1950,9 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
         shutil.copy2(str(config_file), str(bak))
         backup_identity = str(bak)
         backup_note = f" (backed up prior → {bak})"
-    managed: dict[str, dict] = {}
-    for key_path, scalar, previous in missing:
-        cur = data
-        for seg in key_path[:-1]:
-            nxt = cur.get(seg)
-            if not isinstance(nxt, dict):  # absent or an explicit null — both mean "no parent yet"
-                nxt = {}
-                cur[seg] = nxt
-            cur = nxt
-        cur[key_path[-1]] = scalar
-        managed[".".join(key_path)] = {"previous": previous, "installed": scalar}
-    # keys that already matched (unmanaged) are ADOPTED into the same receipt — the managed
-    # map must cover every managed key, not just the ones this run changed.
-    for key_path, scalar in keys:
-        dotted = ".".join(key_path)
-        if dotted not in managed:
-            managed[dotted] = {"previous": scalar, "installed": scalar, "adopted": True}
+    for key_path, scalar, _previous in missing:
+        _set_nested(data, key_path, scalar)  # an absent or explicit-null parent is created
+    managed = _receipt_entries(missing, keys, receipt_managed_entries(prior_receipt))
     config_file.write_text(
         yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"
     )
@@ -1902,7 +1960,9 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
         "template": 1,
         "kind": str(action.options.get("kind", "")),
         "managed": managed,
-        "backup": backup_identity,
+        # the ORIGINAL pre-rig backup stays the restore point across a convergence (the new
+        # backup taken this run is named in the action detail)
+        "backup": prior_receipt.get("backup") or backup_identity,
     }
     receipt_file.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     receipt_file.chmod(0o600)

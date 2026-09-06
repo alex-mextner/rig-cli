@@ -1412,6 +1412,8 @@ def _check_harness_mode(action: Action, report: DriftReport) -> None:
         report.items.append(DriftItem("missing", "harness", action.item, path, f"{dotted} not set"))
     elif state == "malformed":
         report.items.append(DriftItem("modified", "harness", action.item, path, "harness config file is malformed — fix it by hand"))
+    elif state == "unverifiable":
+        report.items.append(DriftItem("modified", "harness", action.item, path, f"{dotted} cannot be verified: {current}"))
     elif state == "shape":
         report.items.append(DriftItem("modified", "harness", action.item, path, f"{dotted}: '{current}' is not an object — fix it by hand"))
     elif state == "conflict":
@@ -1724,7 +1726,15 @@ def _check_harness_approval(action: Action, report: DriftReport) -> None:
     """
     import yaml  # lazy, like the rest of the config stack
 
-    from .actions.runner import approval_config_file, approval_desired_keys, approval_lookup
+    from .actions.runner import (
+        approval_config_file,
+        approval_desired_keys,
+        approval_lookup,
+        approval_posture_relaxes,
+        approval_receipt_file,
+        read_approval_receipt,
+        receipt_installed_values,
+    )
 
     path = approval_config_file(action)
     if not path.is_file():
@@ -1759,6 +1769,9 @@ def _check_harness_approval(action: Action, report: DriftReport) -> None:
     except ValueError as exc:
         report.items.append(DriftItem("modified", "permissions", action.item, path, str(exc)))
         return
+    # the SAME receipt-ownership decision the writer makes: a key still holding what rig installed
+    # is converged by apply, so status must not tell the user to change it by hand
+    rig_installed = receipt_installed_values(read_approval_receipt(approval_receipt_file(action)))
     for key_path, scalar in keys:
         state, value = approval_lookup(data, key_path)
         dotted = ".".join(key_path)
@@ -1772,6 +1785,12 @@ def _check_harness_approval(action: Action, report: DriftReport) -> None:
                 DriftItem("missing", "permissions", action.item, path,
                           f"approval posture {dotted} not provisioned (apply sets {scalar!r})")
             )
+        elif value != scalar and value is not None and rig_installed.get(dotted) == value:
+            report.items.append(
+                DriftItem("modified", "permissions", action.item, path,
+                          f"{dotted} is {value!r} (rig-installed; config now declares {scalar!r} — "
+                          "apply converges it)")
+            )
         elif value != scalar:
             report.items.append(
                 DriftItem("modified", "permissions", action.item, path,
@@ -1780,7 +1799,7 @@ def _check_harness_approval(action: Action, report: DriftReport) -> None:
             )
     # Correlate the interlock's two halves: a RELAXED posture with the guard belt gone or
     # drifted is the most dangerous combined state — never render it as routine drift.
-    if all(approval_lookup(data, kp)[1] == scalar for kp, scalar in keys):
+    if approval_posture_relaxes(action) and all(approval_lookup(data, kp)[1] == scalar for kp, scalar in keys):
         # the interlock's other half, via the SAME resolver the runner uses — the most
         # dangerous combined state must not depend on the plan's option wiring.
         from .actions.runner import expected_guard_content, resolve_guard_target

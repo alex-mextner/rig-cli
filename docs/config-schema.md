@@ -519,10 +519,14 @@ mode newer than rig's table) with no `auto_mode` declares NO intent for the OTHE
 written for them (a claude-code primary still writes its own `mode:` verbatim; omp's approval action
 keeps its legacy `yolo` posture, see the table), the plan carries an elevated note naming the primary
 kind's real values plus a per-kind "not written" note, and `rig status` lists every affected kind as
-not managed — never a silent tighten to interactive. The raw `mode:` string is written ONLY for a primary `claude-code` (it is a claude-code
-value); every other kind — and an additive `kinds: [claude-code]`, which is pinned to the user-scope
+not managed — never a silent tighten to interactive. The raw `mode:` string is written verbatim ONLY
+for the PRIMARY kind, and only when it is one of that kind's own values (`kind: opencode, mode: deny`
+stays `deny` — the exact override the `mode` row documents — never relaxed to the mapped `ask`; a
+primary `claude-code` writes any `mode:` verbatim, its vocabulary can outgrow rig's table); every
+ADDITIVE kind — including `kinds: [claude-code]`, which is pinned to the user-scope
 `~/.claude/settings.json` like every other additive kind — gets the registry value mapped from the
-intent, never the raw string. With no `auto_mode` and no `mode:`, a non-claude kind is left untouched
+intent, never the raw string (it is the primary harness's value and means nothing to another one).
+With no `auto_mode` and no `mode:`, a non-claude kind is left untouched
 and the plan notes it (an additive kind listed for skill discovery must not get its posture changed
 behind its back). A kind with no such setting (`pi`, `commandcode`) always gets a visible n/a note —
 elevated only when it is the PRIMARY kind and the config set `auto_mode`/`mode:` on it (it asked for

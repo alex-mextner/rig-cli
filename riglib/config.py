@@ -910,10 +910,9 @@ def _validate_harness(h: dict[str, Any]) -> None:
     "no longer supported" message), and a non-bool ``auto_mode``. Every harness
     rig knows a skill/instruction discovery convention for (claude-code, opencode, omp, codex,
     pi, commandcode — :data:`_VALID_HARNESS_KINDS`) is ACCEPTED here: rig provisions its SKILL
-    discovery. The narrower auto/permission-MODE write is only implemented for some of them
-    (claude-code today) and self-skips the rest with a plan note (see plan.py ``_build_harness``)
-    rather than being rejected at validation — so a config can target a harness for skills even
-    where the auto-mode write isn't wired yet.
+    discovery, and the auto/permission-MODE write is keyed off :mod:`riglib.harness_mode` (a kind
+    with no such setting, pi/commandcode, gets a visible plan note — see plan.py ``_build_harness``)
+    rather than being rejected at validation.
     """
     if not isinstance(h, dict):
         raise ConfigError("harness must be a mapping", schema_path="harness")
