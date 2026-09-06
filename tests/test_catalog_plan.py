@@ -730,6 +730,46 @@ def test_plan_claude_primary_additional_codex_provisions_codex_surfaces(
     assert codex_bridge.target == Path(os.path.expanduser("~/.codex/config.toml"))
 
 
+def test_plan_claude_primary_additional_codex_bridge_gets_tg_ctl_fold_in(
+    fake_agent_tools, tmp_path, monkeypatch
+):
+    """The tg-ctl fold-in (tg-cli#308) follows ANY configured codex hook bridge, not only a
+    PRIMARY codex harness: here harness.kind is claude-code with codex as a secondary
+    harness.kinds entry, and the codex bridge still gets tg-ctl's Stop hook — the claude-code
+    bridge does not."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    script = home / ".files" / "bin" / "tg-ctl"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env bun\n", encoding="utf-8")
+    bun = home / "bun-bin" / "bun"
+    bun.parent.mkdir(parents=True)
+    bun.write_text("#!/bin/sh\n", encoding="utf-8")
+    bun.chmod(0o755)
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "harness": {
+                "kind": "claude-code",
+                "kinds": ["codex"],
+                "settings_path": "~/.claude/settings.json",
+                "hook_bridge": {"enabled": True},
+            },
+            "agent_hooks": {"all": True},
+            "tg_ctl": {"bun_path": str(bun)},
+        },
+        tmp_path,
+    )
+
+    plan = build(cfg, cat, project_type="unknown")
+
+    bridges = [a for a in plan.actions if a.kind == "register_hook_bridge"]
+    codex_bridge = next(a for a in bridges if a.options["kind"] == "codex")
+    claude_bridge = next(a for a in bridges if a.options["kind"] == "claude-code")
+    assert codex_bridge.options.get("extra_stop_hooks")
+    assert "extra_stop_hooks" not in claude_bridge.options
+
+
 def test_plan_custom_hook_target_registers_configured_bridges_with_override(
     fake_agent_tools, tmp_path, monkeypatch
 ):

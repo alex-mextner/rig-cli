@@ -42,9 +42,12 @@ belongs in the GLOBAL layer (``~/.config/rig/config.yaml``), like ``harness``/``
 
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # The boot launchd label (macOS). Reverse-DNS per Apple convention; one identity for the plist
 # Label + filename stem so install/drift/remove all key off it. Distinct from the tmux-boot
@@ -58,6 +61,16 @@ STALE_PREDECESSOR_LABEL = "com.ultra.codex-tg-bot"
 # Default tg-ctl install location (HOME-relative; resolved per-machine). The symlink at
 # ~/.files/bin/tg-ctl points at the checked-out Bun script; launchd runs it via bun.
 DEFAULT_TG_CTL_PATH = "~/.files/bin/tg-ctl"
+
+# tg-ctl's Codex Stop usage-telemetry subcommand (`tg-ctl codex-usage-hook`). Folded into rig's
+# own codex hook bridge Stop array in ~/.codex/config.toml (see
+# riglib/plan.py::_build_hook_bridge_for_kind and
+# riglib/actions/runner.py::hook_bridge_entries's `extra_stop_hooks`) instead of tg-ctl writing
+# its own ~/.codex/hooks.json, which otherwise triggers Codex's "loading hooks from both ..."
+# dual-source warning (tg-cli#308). This string MUST agree with tg-cli's own
+# `CODEX_USAGE_HOOK_CMD` subcommand name — tg-ctl's own detection logic greps for it in the
+# rendered config.toml bridge block to decide whether it can stop writing hooks.json.
+CODEX_USAGE_HOOK_SUBCOMMAND = "codex-usage-hook"
 
 # Default tg-cli config dir (honoring $TG_CTL_CONFIG_DIR). The launchd logs land here next to
 # the daemon's own .env/config.yaml so everything tg-ctl is in one place.
@@ -197,4 +210,42 @@ def build_tg_ctl(
         bun_path=resolved_bun,
         tg_ctl_path=_expand_home(tg_ctl_path, home),
         config_dir=_expand_home(config_dir, home),
+    )
+
+
+def codex_usage_hook_command(t: dict[str, Any], *, home: Path) -> str | None:
+    """The Codex ``Stop`` hook command for tg-ctl's usage-telemetry, or ``None`` to fold in nothing.
+
+    Single source of truth for the fold-in (``riglib/plan.py``'s ``_codex_extra_stop_hooks``,
+    tg-cli#308): resolves ``bun_path``/``tg_ctl_path`` through the same :func:`build_tg_ctl` logic
+    the tg-ctl LaunchAgent plist uses, so the folded-in command and the provisioned daemon agree
+    on which binary is "the" tg-ctl. Runs `bun <tg_ctl_path> codex-usage-hook` (the daemon's own
+    ``[bun_path, tg_ctl_path, ...]`` shape) rather than invoking ``tg_ctl_path`` directly, so a
+    custom script lacking the executable bit or a bun shebang still runs.
+
+    Returns ``None`` when the ``tg_ctl`` area is off (``enabled: false``), the fold-in is opted
+    out (``codex_usage_hook: false``), the resolved ``tg_ctl_path`` does not exist yet, or the
+    resolved ``bun_path`` does not exist or is not executable — fail-closed, since a script-only
+    check isn't enough (bun could still be missing, or present but not runnable) and any of
+    these gaps means a Codex Stop hook that fails every single session end. ``tg_ctl_path``
+    itself only needs to exist (not be executable): bun is handed the script as an argument
+    (``bun <tg_ctl_path> ...``), it never execs the script directly.
+    """
+    if t.get("enabled") is False:
+        return None
+    if t.get("codex_usage_hook") is False:
+        return None
+    # Only pass tg_ctl_path when explicitly configured — build_tg_ctl already defaults it to
+    # DEFAULT_TG_CTL_PATH, so re-deriving that default here would be a second place that could
+    # drift from it.
+    overrides: dict[str, str] = {}
+    if t.get("tg_ctl_path"):
+        overrides["tg_ctl_path"] = str(t["tg_ctl_path"])
+    plan = build_tg_ctl(home=home, bun_path=t.get("bun_path"), **overrides)
+    bun_runnable = plan.bun_path.is_file() and os.access(plan.bun_path, os.X_OK)
+    if not plan.tg_ctl_path.is_file() or not bun_runnable:
+        return None
+    return (
+        f"{shlex.quote(str(plan.bun_path))} {shlex.quote(str(plan.tg_ctl_path))} "
+        f"{CODEX_USAGE_HOOK_SUBCOMMAND}"
     )

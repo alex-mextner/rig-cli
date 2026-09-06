@@ -100,6 +100,20 @@ def test_permissions_kind_schema_accepts_null_for_unpinned_fanout():
     assert "fan out" in kind["description"]
 
 
+def test_tg_ctl_codex_usage_hook_schema_accepts_null():
+    # see the Leaf comment in config_schema.py for the full rationale: the schema must accept
+    # the same value the runtime validator does.
+    leaf = config_schema.json_schema()["properties"]["tg_ctl"]["properties"]["codex_usage_hook"]
+    assert leaf["type"] == ["boolean", "null"]
+    assert leaf["default"] is True
+
+
+def test_tg_ctl_codex_usage_hook_null_accepted_by_runtime_validator_too():
+    # the schema-level assertion above is only half the contract — pin the actual validation
+    # pipeline `rig apply` runs through as well, so the two can't silently drift apart again.
+    config.validate({"version": 1, "tg_ctl": {"codex_usage_hook": None}})
+
+
 def test_mcp_items_schema_enforces_structured_item_shape():
     doc = config_schema.json_schema()
     item = doc["properties"]["mcp"]["properties"]["items"]["additionalProperties"]

@@ -16,6 +16,7 @@ machine plist is READ-ONLY and skips when the file is absent.
 from __future__ import annotations
 
 import plistlib
+import shlex
 import sys
 from pathlib import Path
 
@@ -78,6 +79,7 @@ def test_tg_ctl_full_block_accepted():
             "tg_ctl": {
                 "enabled": True,
                 "boot": True,
+                "codex_usage_hook": True,
                 "label": "ai.hyperide.tg-ctl",
                 "bun_path": "/Users/u/.bun/bin/bun",
                 "tg_ctl_path": "~/.files/bin/tg-ctl",
@@ -100,6 +102,16 @@ def test_tg_ctl_enabled_must_be_bool():
 def test_tg_ctl_boot_must_be_bool():
     with pytest.raises(ConfigError):
         validate({"version": 1, "tg_ctl": {"boot": "yes"}})
+
+
+def test_tg_ctl_codex_usage_hook_must_be_bool():
+    with pytest.raises(ConfigError):
+        validate({"version": 1, "tg_ctl": {"codex_usage_hook": "yes"}})
+
+
+def test_tg_ctl_codex_usage_hook_null_is_accepted():
+    """`codex_usage_hook: null` is valid and is NOT treated as opted out (default-on)."""
+    validate({"version": 1, "tg_ctl": {"codex_usage_hook": None}})
 
 
 @pytest.mark.parametrize("key", ["label", "bun_path", "tg_ctl_path", "config_dir"])
@@ -228,6 +240,102 @@ def test_explicit_config_dir_is_honored():
     p = _plan(config_dir="/var/tg")
     assert p.config_dir == Path("/var/tg")
     assert p.out_log_path == Path("/var/tg/launchd.tg-ctl.out.log")
+
+
+# ── codex_usage_hook_command: the Codex Stop fold-in seam (tg-cli#308) ───────────────────
+def _plant_file(path: Path, content: str = "") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _home_with_tg_ctl_script(tmp_path: Path, *, with_bun: bool = True) -> tuple[Path, Path, Path]:
+    """A tmp HOME with a stand-in tg-ctl script (and, by default, a stand-in bun binary) planted
+    at their default paths — never a real absolute system path like ``/opt/homebrew/bin/bun``,
+    which a test must not read or write.
+
+    Returns ``(home, script_path, bun_path)`` so a test can assert on the resolved paths; when
+    ``with_bun`` is False, ``bun_path`` is the path a real bun would live at (not created).
+    """
+    home = tmp_path / "home"
+    script = _plant_file(home / ".files" / "bin" / "tg-ctl", "#!/usr/bin/env bun\n")
+    bun = home / "bun-bin" / "bun"
+    if with_bun:
+        # the fold-in's fail-closed check requires the execute bit, not just existence.
+        _plant_file(bun, "#!/bin/sh\n").chmod(0o755)
+    return home, script, bun
+
+
+def test_codex_usage_hook_command_runs_via_bun_not_the_script_directly(tmp_path):
+    """The rendered command is `bun <tg_ctl_path> codex-usage-hook` — the SAME [bun, script, ...]
+    shape TgCtlPlan.render_plist uses — not the script invoked directly, so a custom script that
+    lacks the executable bit or a bun shebang still runs."""
+    home, script, bun = _home_with_tg_ctl_script(tmp_path)
+    cmd = tg_ctl.codex_usage_hook_command({"bun_path": str(bun)}, home=home)
+    # split rather than a raw string comparison — the real command is per-token shlex-quoted,
+    # so this stays correct even if tmp_path ever contains spaces/shell metacharacters.
+    assert shlex.split(cmd) == [str(bun), str(script), tg_ctl.CODEX_USAGE_HOOK_SUBCOMMAND]
+
+
+def test_codex_usage_hook_command_none_when_tg_ctl_disabled(tmp_path):
+    home, _, bun = _home_with_tg_ctl_script(tmp_path)
+    assert tg_ctl.codex_usage_hook_command({"enabled": False, "bun_path": str(bun)}, home=home) is None
+
+
+def test_codex_usage_hook_command_none_when_codex_usage_hook_disabled(tmp_path):
+    home, _, bun = _home_with_tg_ctl_script(tmp_path)
+    assert (
+        tg_ctl.codex_usage_hook_command({"codex_usage_hook": False, "bun_path": str(bun)}, home=home)
+        is None
+    )
+
+
+def test_codex_usage_hook_command_none_when_script_missing(tmp_path):
+    """Fail-closed: tg-ctl was never installed on this machine (script absent) → no fold-in.
+
+    Without this guard, a machine that never provisioned tg-ctl (or a non-macOS box tg-ctl's
+    own LaunchAgent provisioning no-ops on) would get a Codex Stop hook pointing at a binary
+    that does not exist, firing — and failing — on every single Codex session end.
+    """
+    home = tmp_path / "home"  # no ~/.files/bin/tg-ctl ever created
+    assert tg_ctl.codex_usage_hook_command({}, home=home) is None
+
+
+def test_codex_usage_hook_command_none_when_bun_missing(tmp_path, monkeypatch):
+    """Fail-closed: the tg-ctl script is present but bun itself was never installed → no fold-in.
+
+    The script-only check is not enough: a machine with the tg-ctl script checked out (e.g.
+    dotfiles-synced) but no bun install yet would otherwise get a command pointing at
+    build_tg_ctl's hardcoded ``~/.bun/bin/bun`` fallback, which fails identically to a missing
+    script — every Codex Stop event errors on a binary that doesn't exist.
+
+    Mocks ``which bun`` off (like ``test_bun_path_falls_back_to_home_bun_when_not_on_path``) so
+    this test's verdict does not depend on whether the machine running it happens to have a real
+    bun on PATH.
+    """
+    monkeypatch.setattr(tg_ctl.shutil, "which", lambda name: None)
+    home, _, _bun = _home_with_tg_ctl_script(tmp_path, with_bun=False)
+    assert tg_ctl.codex_usage_hook_command({}, home=home) is None
+
+
+def test_codex_usage_hook_command_none_when_bun_not_executable(tmp_path):
+    """Fail-closed: bun_path exists but is not executable (e.g. mode 0644) → no fold-in.
+
+    A file-existence-only check would pass here and fold in a command that fails with
+    "permission denied" on every single Codex Stop event.
+    """
+    home, _, bun = _home_with_tg_ctl_script(tmp_path, with_bun=False)
+    bun.parent.mkdir(parents=True, exist_ok=True)
+    bun.write_text("#!/bin/sh\n", encoding="utf-8")
+    bun.chmod(0o644)  # present, but not executable
+    assert tg_ctl.codex_usage_hook_command({"bun_path": str(bun)}, home=home) is None
+
+
+def test_codex_usage_hook_command_default_on_with_empty_block(tmp_path):
+    """An absent/empty tg_ctl block still folds in (default-on), once the script exists."""
+    home, _, bun = _home_with_tg_ctl_script(tmp_path)
+    cmd = tg_ctl.codex_usage_hook_command({"bun_path": str(bun)}, home=home)
+    assert cmd is not None and cmd.endswith(tg_ctl.CODEX_USAGE_HOOK_SUBCOMMAND)
 
 
 # ── install (runner) — write + (re)load, idempotent, conflict, stale-predecessor ─────────

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -15,12 +16,15 @@ from riglib.actions import run_plan
 from riglib.actions.runner import (
     SELF_MERGE_CARVE_OUT,
     SELF_MERGE_PERMISSIONS_ALLOW,
+    codex_hook_bridge_block,
     desired_mcp_server_entry,
+    hook_bridge_entries,
 )
+from riglib import tg_ctl as tg_ctl_module
 from riglib.catalog import Catalog
 from riglib.config import LoadedConfig
 from riglib.drift import detect
-from riglib.plan import build
+from riglib.plan import Action, InstallPlan, build
 
 def _user_settings() -> Path:
     # computed per call, NOT a module constant: the autouse fixture monkeypatches HOME per test,
@@ -2448,6 +2452,215 @@ def test_codex_hook_bridge_registers_dispatcher_in_config_toml(fake_agent_tools,
     stop = hooks["Stop"]
     assert "matcher" not in stop[0]
     assert "codex_hook_bridge Stop" in stop[0]["hooks"][0]["command"]
+
+
+# ── codex hook bridge: fold in tg-ctl's Stop usage-telemetry hook (tg-cli#308) ────────
+def _codex_bridge_action(lib_dir: Path, *, extra_stop_hooks=None) -> Action:
+    options = {"kind": "codex", "lib_dir": str(lib_dir), "module": "codex_hook_bridge"}
+    if extra_stop_hooks is not None:
+        options["extra_stop_hooks"] = extra_stop_hooks
+    return Action(
+        kind="register_hook_bridge",
+        category="harness",
+        item="hook-bridge",
+        source=lib_dir,
+        target=lib_dir / "config.toml",
+        options=options,
+    )
+
+
+def test_hook_bridge_entries_appends_extra_stop_hooks(tmp_path):
+    """extra_stop_hooks (codex only) appends AFTER the bridge's own Stop entry."""
+    extra = "/abs/path/tg-ctl codex-usage-hook"
+    action = _codex_bridge_action(tmp_path, extra_stop_hooks=[extra])
+    entries = hook_bridge_entries(action)
+    stop = entries["Stop"]
+    assert len(stop) == 2
+    assert stop[0][0] == "" and "codex_hook_bridge Stop" in stop[0][1]
+    assert stop[1] == ("", extra)
+
+
+def test_hook_bridge_entries_no_extra_stop_hooks_is_unchanged():
+    """Absent/empty extra_stop_hooks regresses to exactly the original single Stop entry."""
+    for options_extra in (None, []):
+        action = _codex_bridge_action(Path("/lib"), extra_stop_hooks=options_extra)
+        stop = hook_bridge_entries(action)["Stop"]
+        assert len(stop) == 1
+        assert stop[0][0] == "" and "codex_hook_bridge Stop" in stop[0][1]
+
+
+def test_codex_hook_bridge_block_renders_two_stop_entries(tmp_path):
+    """The rendered TOML Stop array carries both hook command blocks, like PreToolUse does."""
+    extra = "/abs/path/tg-ctl codex-usage-hook"
+    action = _codex_bridge_action(tmp_path, extra_stop_hooks=[extra])
+    block = codex_hook_bridge_block(action, include_table_header=True)
+    stop_line = next(line for line in block.splitlines() if line.startswith("Stop ="))
+    assert stop_line.count('type = "command"') == 2
+    assert "codex_hook_bridge Stop" in stop_line
+    assert extra in stop_line
+
+
+def _plant_file(path: Path, content: str = "") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _plant_tg_ctl_script(bin_path: Path) -> None:
+    """Create a stand-in tg-ctl script file so the fold-in's fail-closed existence check passes."""
+    _plant_file(bin_path, "#!/usr/bin/env bun\n")
+
+
+def _plant_bun_binary(bin_path: Path) -> None:
+    """Create a stand-in, EXECUTABLE bun binary (the fold-in's fail-closed check requires the
+    execute bit, not just existence) — NEVER a real absolute system path like
+    ``/opt/homebrew/bin/bun``, which a test must not read or write."""
+    _plant_file(bin_path, "#!/bin/sh\n")
+    bin_path.chmod(0o755)
+
+
+def _codex_bridge_plan(
+    fake_agent_tools: Path, tmp_path: Path, *, tg_ctl: dict | None = None,
+    kind: str = "codex", install_tg_ctl_script: bool = True, install_bun: bool = True,
+) -> tuple[InstallPlan, Path, Path]:
+    """Build a hook-bridge plan for the fold-in tests: a fresh repo + (by default) a planted
+    tg-ctl script AND a planted bun binary at the default HOME paths, with an optional
+    `tg_ctl:` config override that already points `bun_path` at the planted binary.
+
+    ``install_tg_ctl_script``/``install_bun`` are independent flags (both default True) — e.g.
+    a custom `tg_ctl_path` test plants its own script elsewhere but still needs a real bun
+    planted at the default path.
+
+    Returns ``(plan, settings_path, bun_path)`` so callers that need to inspect/apply the
+    written file, or override `tg_ctl` while still using the planted bun path, can do so
+    without re-deriving these paths.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = Path(os.path.expanduser("~"))
+    bun_path = home / "bun-bin" / "bun"
+    if install_tg_ctl_script:
+        _plant_tg_ctl_script(home / ".files" / "bin" / "tg-ctl")
+    if install_bun:
+        _plant_bun_binary(bun_path)
+    rel = Path(".codex") / "config.toml" if kind == "codex" else Path(".claude") / "settings.json"
+    settings = repo / rel
+    cfg = _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind=kind,
+                       hook_bridge={"enabled": True})
+    cfg.data["tg_ctl"] = {"bun_path": str(bun_path), **(tg_ctl or {})}
+    cat = Catalog.scan(str(fake_agent_tools))
+    return build(cfg, cat, project_type="unknown"), settings, bun_path
+
+
+def _codex_bridge_action_from(plan: InstallPlan):
+    return next(a for a in plan.actions if a.kind == "register_hook_bridge")
+
+
+def test_plan_codex_hook_bridge_folds_in_tg_ctl_default(fake_agent_tools, tmp_path):
+    """With no tg_ctl: block (default) and tg-ctl actually installed, the bridge action gets
+    a `bun <tg_ctl_path> codex-usage-hook` command (not the script invoked directly)."""
+    plan, _, bun_path = _codex_bridge_plan(fake_agent_tools, tmp_path)
+    home = Path(os.path.expanduser("~"))
+    script = home / ".files" / "bin" / "tg-ctl"
+    [cmd] = _codex_bridge_action_from(plan).options.get("extra_stop_hooks")
+    # split rather than a raw string comparison — the real command is per-token shlex-quoted,
+    # so this stays correct even if tmp_path ever contains spaces/shell metacharacters.
+    assert shlex.split(cmd) == [str(bun_path), str(script), tg_ctl_module.CODEX_USAGE_HOOK_SUBCOMMAND]
+
+
+def test_plan_codex_hook_bridge_no_fold_when_tg_ctl_not_installed(fake_agent_tools, tmp_path):
+    """No tg-ctl script on disk (never installed / non-macOS machine) → fail-closed, no fold-in.
+
+    Without this guard, a machine that never provisioned tg-ctl would still get a Codex Stop
+    hook pointing at a binary that does not exist, firing (and failing) every session end.
+    """
+    plan, _, _bun = _codex_bridge_plan(
+        fake_agent_tools, tmp_path, install_tg_ctl_script=False, install_bun=False,
+    )
+    assert not _codex_bridge_action_from(plan).options.get("extra_stop_hooks")
+
+
+def test_plan_codex_hook_bridge_no_fold_when_bun_not_installed(fake_agent_tools, tmp_path, monkeypatch):
+    """tg-ctl script present but bun itself absent → fail-closed, no fold-in: checking only the
+    script is not enough.
+
+    Mocks ``which bun`` off so this test's verdict does not depend on whether the machine
+    running it happens to have a real bun on PATH.
+    """
+    monkeypatch.setattr(tg_ctl_module.shutil, "which", lambda name: None)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = Path(os.path.expanduser("~"))
+    _plant_tg_ctl_script(home / ".files" / "bin" / "tg-ctl")  # script present, bun NOT planted
+    settings = repo / ".codex" / "config.toml"
+    cfg = _bridge_cfg(repo, fake_agent_tools, settings_path=settings, kind="codex",
+                       hook_bridge={"enabled": True})
+    cat = Catalog.scan(str(fake_agent_tools))
+    plan = build(cfg, cat, project_type="unknown")
+    assert not _codex_bridge_action_from(plan).options.get("extra_stop_hooks")
+
+
+def test_plan_codex_hook_bridge_no_fold_when_tg_ctl_disabled(fake_agent_tools, tmp_path):
+    """tg_ctl.enabled: false → the tg_ctl area itself is off, so nothing is folded in."""
+    plan, _, _bun = _codex_bridge_plan(fake_agent_tools, tmp_path, tg_ctl={"enabled": False})
+    assert not _codex_bridge_action_from(plan).options.get("extra_stop_hooks")
+
+
+def test_plan_codex_hook_bridge_folds_in_regardless_of_boot(fake_agent_tools, tmp_path):
+    """tg_ctl.boot: false still folds in — the fold-in only needs the tg-ctl script + bun on
+    disk, not the daemon itself set to auto-start."""
+    plan, _, _bun = _codex_bridge_plan(fake_agent_tools, tmp_path, tg_ctl={"boot": False})
+    assert _codex_bridge_action_from(plan).options.get("extra_stop_hooks")
+
+
+def test_plan_codex_hook_bridge_no_fold_when_codex_usage_hook_disabled(fake_agent_tools, tmp_path):
+    """tg_ctl.codex_usage_hook: false opts out of ONLY the fold-in; the daemon stays enabled."""
+    plan, _, _bun = _codex_bridge_plan(fake_agent_tools, tmp_path, tg_ctl={"codex_usage_hook": False})
+    assert not _codex_bridge_action_from(plan).options.get("extra_stop_hooks")
+
+
+def test_plan_non_codex_hook_bridge_never_folds_in_tg_ctl(fake_agent_tools, tmp_path):
+    """A non-codex harness (claude-code) with a fully-configured tg_ctl block gets NO
+    extra_stop_hooks — the fold-in is codex-only, documented as "no effect on non-codex
+    harnesses" (docs/config-schema.md)."""
+    plan, _, _bun = _codex_bridge_plan(
+        fake_agent_tools, tmp_path, kind="claude-code",
+        tg_ctl={"enabled": True, "codex_usage_hook": True},
+    )
+    assert not _codex_bridge_action_from(plan).options.get("extra_stop_hooks")
+
+
+def test_plan_codex_hook_bridge_uses_custom_tg_ctl_path(fake_agent_tools, tmp_path):
+    """tg_ctl.tg_ctl_path overrides the default binary path used in the folded-in command."""
+    custom = tmp_path / "custom" / "tg-ctl"
+    _plant_tg_ctl_script(custom)
+    plan, _, bun_path = _codex_bridge_plan(
+        fake_agent_tools, tmp_path, install_tg_ctl_script=False, install_bun=True,
+        tg_ctl={"tg_ctl_path": str(custom)},
+    )
+    [cmd] = _codex_bridge_action_from(plan).options.get("extra_stop_hooks")
+    assert shlex.split(cmd) == [str(bun_path), str(custom), tg_ctl_module.CODEX_USAGE_HOOK_SUBCOMMAND]
+
+
+def test_codex_hook_bridge_with_tg_ctl_fold_in_idempotent_reapply(fake_agent_tools, tmp_path):
+    """A second apply with the tg-ctl Stop hook folded in is a no-op (drift-free)."""
+    plan, settings, _bun = _codex_bridge_plan(fake_agent_tools, tmp_path)
+    first = run_plan(plan)
+    assert not first.errors, [r.detail for r in first.errors]
+    data = _read_toml(settings)
+    stop = data["hooks"]["Stop"]
+    assert len(stop) == 2
+    assert "codex_hook_bridge Stop" in stop[0]["hooks"][0]["command"]
+    assert tg_ctl_module.CODEX_USAGE_HOOK_SUBCOMMAND in stop[1]["hooks"][0]["command"]
+
+    before = detect(plan)
+    assert not any(i.item == "hook-bridge" for i in before.items), [i.detail for i in before.items]
+
+    second = run_plan(plan)
+    res = _bridge_results(second)
+    assert res and all(r.status == "skipped" for r in res), [r.detail for r in res]
+
+    after = detect(plan)
+    assert not any(i.item == "hook-bridge" for i in after.items), [i.detail for i in after.items]
 
 
 def test_opencode_hook_bridge_links_plugin(fake_agent_tools, tmp_path):

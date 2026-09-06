@@ -411,6 +411,13 @@ AREAS: tuple[Area, ...] = (
                  "Provision the tg-ctl inbound daemon. GLOBAL-only (one per machine) — never written to a repo rig.yaml."),
             _opt("tg_ctl.boot", KIND_BOOL, True,
                  "Auto-start the daemon at login via a launchd boot agent (macOS). Off = install but do not boot."),
+            _opt("tg_ctl.codex_usage_hook", KIND_BOOL, True,
+                 "Fold tg-ctl's Codex Stop usage-telemetry hook (`tg-ctl codex-usage-hook`) into rig's own "
+                 "codex hook bridge Stop array in ~/.codex/config.toml, instead of tg-ctl writing its own "
+                 "~/.codex/hooks.json — avoids Codex's 'loading hooks from both ...' dual-source warning "
+                 "(tg-cli#308). Only applies to a codex hook bridge (harness.kind: codex, or codex "
+                 "listed in harness.kinds). Off = leave tg-ctl to manage its own hooks.json "
+                 "independently."),
         ),
     ),
     Area(

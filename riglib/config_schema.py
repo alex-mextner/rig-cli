@@ -1113,6 +1113,18 @@ _TG_CTL_BLOCK = Block(
     leaves={
         "enabled": Leaf("boolean", "provision the tg-ctl LaunchAgent", default=True),
         "boot": Leaf("boolean", "write + load the boot agent", default=True),
+        "codex_usage_hook": Leaf(
+            # nullable: `_validate_tg_ctl` accepts an explicit `codex_usage_hook: null` as
+            # default-on (matching how `enabled`/`codex_usage_hook` are both checked with
+            # `is False`, not truthiness) — the schema must accept the same value the runtime
+            # validator does, or an editor/schema-validator would reject a config `rig apply`
+            # itself accepts.
+            ("boolean", "null"),
+            "fold tg-ctl's Codex Stop usage-telemetry hook into rig's own codex hook bridge "
+            "in ~/.codex/config.toml instead of tg-ctl writing its own ~/.codex/hooks.json "
+            "(tg-cli#308)",
+            default=True,
+        ),
         "label": Leaf("string", "launchd Label / plist filename stem", default="ai.hyperide.tg-ctl"),
         "bun_path": Leaf("string", "the bun binary"),
         "tg_ctl_path": Leaf("string", "the tg-ctl Bun script", default="~/.files/bin/tg-ctl"),
