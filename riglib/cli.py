@@ -2601,6 +2601,18 @@ def _handle_core_bare(do_fix: bool) -> bool:
     return unfixed
 
 
+def _doctor_repo_root() -> Path:
+    """The enclosing repo root so a ``rig doctor`` run from a SUBDIR still reads the repo's
+    ``rig.yaml`` layer: the nearest ancestor carrying a ``.git`` (a directory for a primary
+    checkout, a FILE for a linked worktree). No git subprocess — stdlib only, and the cwd itself
+    outside any repo."""
+    cwd = Path.cwd()
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return cwd
+
+
 _CONFIG_DIR_ROLE_TEXT = {
     "default": "default (no CLAUDE_CONFIG_DIR)",
     "env": "CLAUDE_CONFIG_DIR (this shell)",
@@ -2637,13 +2649,13 @@ def _print_claude_config_dirs() -> list:
     from .claude_config_dirs import CONFIG_DIR_ENV, config_dir_gaps, doctor_config_dirs
     from .config import load_harness_fan_out
 
-    rows = doctor_config_dirs(harness=load_harness_fan_out(Path.cwd()))
-    if len(rows) < 2:
+    rows = doctor_config_dirs(harness=load_harness_fan_out(_doctor_repo_root()))
+    gaps = config_dir_gaps(rows)
+    if len(rows) < 2 and not gaps:
         return []
     print(_bold(f"\n  ▸ claude config dirs — what an interactive `claude` loads ({CONFIG_DIR_ENV}):"))
     for row in rows:
         _print_config_dir_row(row)
-    gaps = config_dir_gaps(rows)
     for gap in gaps:
         print(f"      {_err('✗')} {gap.what}")
         print(f"        {_ok('fix:')} {gap.fix}")

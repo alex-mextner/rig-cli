@@ -417,3 +417,83 @@ def test_fan_out_labels_are_unique_on_collision(tmp_path):
     assert len(labels) == len(set(labels)), labels
     assert labels[1] == "shared" and labels[2] == str(b)
     assert labels[3] == "account-2" and labels[4] == str(home / ".claude-accounts" / "account-2" / "settings.json")
+
+
+# ── PR review threads (rig-cli#374) ──────────────────────────────────────────────────────────
+def test_fan_out_keys_readable_without_pyyaml():
+    # `rig doctor` is documented to run with zero third-party imports — the two fan-out keys
+    # must come out of a config file even when PyYAML is absent (flow list, block list, bool)
+    from riglib.config import _fan_out_keys_without_yaml
+
+    flow = "skills:\n  enabled: true\nharness:\n  kind: claude-code\n  settings_paths: ['~/a/settings.json', \"~/b/settings.json\"]  # x\n  discover_config_dirs: false\nmcp:\n  enabled: false\n"
+    assert _fan_out_keys_without_yaml(flow) == {
+        "settings_paths": ["~/a/settings.json", "~/b/settings.json"],
+        "discover_config_dirs": False,
+    }
+    block = "harness:\n  settings_paths:\n    - ~/a/settings.json\n    - '~/b/settings.json'\n  hook_bridge:\n    enabled: true\n  discover_config_dirs: true\n"
+    assert _fan_out_keys_without_yaml(block) == {
+        "settings_paths": ["~/a/settings.json", "~/b/settings.json"],
+        "discover_config_dirs": True,
+    }
+    assert _fan_out_keys_without_yaml("skills:\n  known: [x]\n") == {}
+
+
+def test_load_harness_fan_out_falls_back_when_pyyaml_is_missing(tmp_path, monkeypatch):
+    from riglib import config as config_module
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    gcfg = home / ".config" / "rig" / "config.yaml"
+    gcfg.parent.mkdir(parents=True)
+    gcfg.write_text("harness:\n  discover_config_dirs: false\n  settings_paths: [~/x/settings.json]\n")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def no_yaml(path):
+        raise ImportError("No module named 'yaml'")
+
+    monkeypatch.setattr(config_module, "read_yaml_file", no_yaml)
+    assert load_harness_fan_out(repo) == {"discover_config_dirs": False, "settings_paths": ["~/x/settings.json"]}
+
+
+def test_cmd_doctor_reads_the_repo_layer_from_a_subdirectory(tmp_path, monkeypatch, capsys):
+    import subprocess
+
+    home = _fake_home(tmp_path, ("account-0",))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    _write_settings(home / ".claude" / "settings.json", bridge=True, mode="auto")
+    _write_settings(home / ".claude-accounts" / "account-0" / "settings.json", bridge=False, mode=None)
+    repo = tmp_path / "repo"
+    (repo / "sub" / "dir").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "rig.yaml").write_text("harness:\n  discover_config_dirs: false\n")
+    from riglib import doctor as doctor_module
+    from riglib.cli import main
+
+    monkeypatch.setattr(doctor_module, "DEPENDENCIES", [])
+    monkeypatch.chdir(repo / "sub" / "dir")
+    main(["doctor"])
+    out = capsys.readouterr().out
+    assert "discover_config_dirs: false" in out, out  # the repo-root rig.yaml opt-out was honoured
+
+
+def test_doctor_malformed_default_settings_is_a_gap_even_alone(tmp_path, monkeypatch, capsys):
+    home = _fake_home(tmp_path, ())
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    (home / ".claude" / "settings.json").write_text("{not json")
+    rows = doctor_config_dirs(home, {})
+    gaps = config_dir_gaps(rows)
+    assert len(gaps) == 1 and gaps[0].row.role == "default" and "malformed" in gaps[0].what
+    from riglib import doctor as doctor_module
+    from riglib.cli import main
+
+    monkeypatch.setattr(doctor_module, "DEPENDENCIES", [])
+    monkeypatch.chdir(tmp_path)
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == errors.EXIT_DRIFT, out
+    assert "malformed" in out and "repair the JSON" in out

@@ -284,6 +284,14 @@ _GAP_FIX = {
     ROLE_UNMANAGED_ACCOUNT: "set harness.discover_config_dirs: true (or add {settings} to harness.settings_paths), then rig apply commit",
 }
 _GAP_FIX_MANAGED = "run `rig apply commit` in a rig-managed repo to fan the hooks out"
+_GAP_FIX_MALFORMED = (
+    "repair the JSON (or move the file aside), then run `rig apply commit` — apply merges into "
+    "the file, it cannot rewrite one it cannot parse"
+)
+
+
+def _malformed_what(row: ConfigDirStatus) -> str:
+    return f"{row.settings} is malformed JSON — a session there loads no hooks"
 
 
 def config_dir_gaps(rows: list[ConfigDirStatus]) -> list[ConfigDirGap]:
@@ -292,16 +300,21 @@ def config_dir_gaps(rows: list[ConfigDirStatus]) -> list[ConfigDirGap]:
     Without a loaded config the default dir (``~/.claude``) is the reference for "does rig
     manage this machine": ONLY a ``cc_hook_bridge`` hook there proves it (a ``defaultMode``
     or an allowlist can be hand-set by anyone, so they never count as the rig signature). A
-    malformed ``settings.json`` is always a gap — that session loads no hooks at all.
+    malformed ``settings.json`` — the default dir's included — is always a gap: that session
+    loads no hooks at all.
     """
     if not rows:
         return []
     ref = rows[0]
     gaps: list[ConfigDirGap] = []
+    if ref.malformed:
+        # the default dir is the reference for the bridge check, but a malformed file there is a
+        # gap in its own right: a bare `claude` loads no hooks and `rig apply` cannot merge into it
+        gaps.append(ConfigDirGap(ref, _malformed_what(ref), _GAP_FIX_MALFORMED))
     for row in rows[1:]:
         fix = _GAP_FIX.get(row.role, _GAP_FIX_MANAGED).format(settings=row.settings)
         if row.malformed:
-            gaps.append(ConfigDirGap(row, f"{row.settings} is malformed JSON — a session there loads no hooks", fix))
+            gaps.append(ConfigDirGap(row, _malformed_what(row), _GAP_FIX_MALFORMED))
         elif ref.bridge_hooks and not row.bridge_hooks:
             what = (
                 f"{row.settings} has 0 rig hook-bridge hooks ({ref.settings} has {ref.bridge_hooks}) "
