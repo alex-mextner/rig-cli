@@ -868,8 +868,28 @@ async function loadDrift() {{
       return '<div class="drift-item"><span class="drift-dir missing">missing target</span>' +
         esc(m.what) + '<div>' + esc(m.why) + '</div><div class="plan-target">fix: ' + esc(m.fix) + '</div></div>';
     }}).join('');
-    if (!rows && !missing) {{ body.innerHTML = '<div class="in-sync">✓ in sync — config and disk agree</div>'; return; }}
-    body.innerHTML = missing + rows;
+    // known items (rig-cli#357): on disk, not rig-managed, origin named -- informational, never
+    // drift. Rendered under their own heading so a clean scope with tool-installed skills still
+    // reads as in sync (the payload's `in_sync` ignores them, and so must this panel).
+    function knownRow(k) {{
+      var where = k.kept ? esc(k.container) : esc(k.category) + '/' + esc(k.name);
+      var who = !k.kept && k.by && k.by !== k.name ? ' (by ' + esc(k.by) + ')' : '';
+      return '<div class="drift-item"><span class="drift-dir known">' + (k.kept ? 'kept' : 'known') + '</span>' +
+        where + (k.kept ? ': ' + esc(k.name) : '') + who +
+        '<div class="plan-target">' + esc(k.label) + ' — ' + esc(k.target) + '</div></div>';
+    }}
+    // the CLI's two headings: placed items vs permission additions (never removed)
+    var placed = (data.known || []).filter(function(k) {{ return !k.kept; }});
+    var kept = (data.known || []).filter(function(k) {{ return k.kept; }});
+    var knownBlock = '';
+    if (placed.length) {{
+      knownBlock += '<div class="in-sync">known, not managed by rig (' + placed.length + ') — informational, not drift</div>' + placed.map(knownRow).join('');
+    }}
+    if (kept.length) {{
+      knownBlock += '<div class="in-sync">your additions, kept (' + kept.length + ') — beyond the rig baseline; rig never removes them</div>' + kept.map(knownRow).join('');
+    }}
+    if (!rows && !missing) {{ body.innerHTML = '<div class="in-sync">✓ in sync — config and disk agree</div>' + knownBlock; return; }}
+    body.innerHTML = missing + rows + knownBlock;
     // pre-existing drift (declared but never applied, or applied then hand-edited away) must
     // offer the SAME apply entry point an edit does -- previously the CTA only appeared right
     // after a successful edit, so a scope with drift on first load / tab switch had no way to

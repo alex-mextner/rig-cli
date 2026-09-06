@@ -1084,12 +1084,13 @@ def test_drift_reports_user_extras_and_apply_never_deletes(fake_agent_tools, tmp
     data["permissions"]["deny"].append("Bash(shutdown:*)")
     settings.write_text(json.dumps(data), encoding="utf-8")
     rep = detect(plan)
-    extras = [d for d in rep.by_direction("extra") if d.category == "permissions"]
-    # allow extras are SUMMARIZED into one item (the live list is hundreds of entries — a
-    # per-entry dump would drown status); deny/ask extras are per-entry (small + loud)
-    allow_extras = [d for d in extras if "permissions.allow" in d.detail]
-    assert len(allow_extras) == 1 and "2" in allow_extras[0].detail
-    assert any("Bash(shutdown:*)" in d.detail and "permissions.deny" in d.detail for d in extras)
+    # since rig-cli#357 user extras are KNOWN ("your additions, kept"), not drift: per entry, each
+    # naming its container, so status can group them into one line per container
+    assert not [d for d in rep.by_direction("extra") if d.category == "permissions"]
+    kept = {k.name: k.container for k in rep.known if k.category == "permissions"}
+    assert kept["Bash(kubectl:*)"] == "claude-code:permissions.allow"
+    assert kept["Bash(docker ps:*)"] == "claude-code:permissions.allow"
+    assert kept["Bash(shutdown:*)"] == "claude-code:permissions.deny"
     # extras are report-only: nothing is missing, and a re-apply STILL never deletes them
     assert not [d for d in rep.by_direction("missing") if d.category == "permissions"]
     run_plan(plan)
@@ -1109,9 +1110,11 @@ def test_explicit_empty_deny_keeps_container_managed(fake_agent_tools, tmp_path)
     plan2 = build(_cfg(repo, fake_agent_tools, settings, tools=["git"], deny=[], ask=[]),
                   cat, project_type="unknown")
     rep = detect(plan2)
-    deny_extras = [d for d in rep.by_direction("extra")
-                   if d.category == "permissions" and "permissions.deny" in d.detail]
-    assert len(deny_extras) == len(DEFAULT_RULES["claude-code"]["deny"])  # per-entry, all visible
+    # per-entry, all visible — as KNOWN "baseline rules your config turned off, kept" (rig-cli#357)
+    deny_kept = [k for k in rep.known
+                 if k.category == "permissions" and k.container == "claude-code:permissions.deny"]
+    assert len(deny_kept) == len(DEFAULT_RULES["claude-code"]["deny"])
+    assert not [d for d in rep.by_direction("extra") if d.category == "permissions"]
     report = run_plan(plan2)
     assert all(r.status == "skipped" for r in _perm_results(report))  # nothing to add
     data = json.loads(settings.read_text(encoding="utf-8"))
@@ -1177,8 +1180,9 @@ def test_opencode_deny_ask_drift_missing_then_converged_and_extras_once(fake_age
     data = json.loads(settings.read_text(encoding="utf-8"))
     data["permission"]["bash"]["frobnicate *"] = "allow"
     settings.write_text(json.dumps(data), encoding="utf-8")
-    extras = [d for d in detect(plan).by_direction("extra") if d.category == "permissions"]
-    assert len(extras) == 1 and "beyond the rig-managed baseline" in extras[0].detail
+    kept = [k for k in detect(plan).known if k.category == "permissions"]
+    assert len(kept) == 1 and kept[0].name == "frobnicate *"
+    assert not [d for d in detect(plan).by_direction("extra") if d.category == "permissions"]
 
 
 def test_opencode_force_push_deny_over_blocks_force_with_lease_documented():

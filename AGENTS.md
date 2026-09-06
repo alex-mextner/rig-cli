@@ -124,7 +124,14 @@ bare `rig config-web` prints help, never launches.
   add an "is rig.yaml optional?" flag. Global config lives at `~/.config/rig/config.yaml`;
   per-repo `rig.yaml` overrides it; scope is by location, never a flag.
 - **Drift is surfaced both ways, never silently reconciled.** `rig apply` converges
-  config→disk only. `disk→config` extras are reported, never auto-deleted.
+  config→disk only. `disk→config` extras are reported, never auto-deleted. An extra whose ORIGIN
+  rig can name is a "known" item, not drift (`riglib/provenance.py`, rig-cli#357): a skill with an
+  `.installed-by` marker / a `.blurbs/<name>.md` blurb / an ecosystem-tool name / a `skills.known`
+  entry / a catalog item another repo's config selects; a hook descriptor with an `installed_by`
+  key or under `agent_hooks.known`; a workflow whose stem is not a catalog CI slot (the repo's own);
+  a permission entry beyond the baseline (always "kept", origin named). Known items print under
+  their own dim heading and never touch the exit code. Never widen that set to hide REAL drift —
+  an unknown-origin skill and an undeclared catalog gate workflow must stay drift.
 - **User-visible UI work needs acceptance proof before it is reported as done.** For
   every portal/app change, keep a request-derived interaction checklist, verify the
   running app with browser automation plus at least one screenshot for visual changes,

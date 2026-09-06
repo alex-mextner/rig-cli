@@ -157,10 +157,26 @@ def compute_scope_drift(scope_plan: ScopePlan) -> dict[str, Any]:
     missing_targets = [
         {"what": m.what, "why": m.why, "fix": m.fix} for m in dead_targets
     ]
+    # on-disk items rig can PLACE but does not manage (rig-cli#357) — informational, never drift,
+    # so they do not touch ``in_sync``; exposed so the panel can list them under their own heading.
+    from .provenance import KIND_LABELS, PERMISSION_KINDS
+
+    known = [
+        {
+            "category": k.category, "item": k.item, "target": str(k.target), "kind": k.kind,
+            "name": k.name, "by": k.by, "container": k.container,
+            # the same two headings the CLI renders: permission entries beyond the baseline are
+            # "your additions, kept", everything else "known, not managed by rig"
+            "kept": k.kind in PERMISSION_KINDS,
+            "label": KIND_LABELS[k.kind],
+        }
+        for k in report.known
+    ]
     return {
         "scope": scope_plan.scope.id,
         "in_sync": report.in_sync and not dead_targets,
         "items": items,
+        "known": known,
         "missing_targets": missing_targets,
     }
 

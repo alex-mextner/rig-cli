@@ -9,6 +9,9 @@
 
 version: 1
 
+# l1/lang[/framework] — selects the by-stack skills; rig detects backend/python for this repo.
+stack: backend/python
+
 defaults:
   skills_target: ~/.agents/skills
   hooks_target: ~/.claude/hooks

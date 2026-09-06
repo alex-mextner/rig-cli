@@ -193,6 +193,7 @@ skills:
 | `universal.disable` / `universal.enable` | list[str] | `[]` | deltas on `all` |
 | `by_type.enable` | list[str] | the detected project type | which `by-type/<kind>` bundles to install whole |
 | `by_type.items.<by-type/kind/name>.enabled` | bool | inherited | per-skill override |
+| `known` | list[str] | `[]` | skill dir names on disk that rig does NOT manage (hand-installed packs) — `rig status` reports them as known, not as drift. See [Provenance](#provenance). |
 
 If `by_type.enable` is empty and the detected project type is known, that type's bundle is
 auto-pulled.
@@ -267,6 +268,10 @@ agent_hooks:
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | install this hook |
 | `on_error` | `open`/`closed` | descriptor's value | fail policy (security = closed) |
+
+| Block key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `known` | list[str] | `[]` | hook ids (or full descriptor stems) another installer wrote into the hooks dir — reported as known, not drift. See [Provenance](#provenance). |
 
 The install action always writes an **absolute** `cmd` (rewriting the
 `/ABSOLUTE/PATH/TO/...` placeholder to the script's real path in the agent-tools checkout),
@@ -358,6 +363,10 @@ ci:
 | `variant` | str | — | e.g. codeql `selfgate` selects `workflow-selfgate.yml` |
 | `install_to` / `gh_alias` | path/bool | — | ship-specific (it is a client command). `gh_alias: true` sets the `gh ship` alias to the **portable dispatcher** (same body the `ship_delegator` area writes — see below), NOT a `~/bin/ship` copy path, so the two provisioning paths never conflict. |
 
+| Block key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `known` | list[str] | `[]` | workflow file stems this repo owns that happen to collide with a catalog slot name (a home-grown `tests.yml`) — reported as known, not drift. A workflow whose stem is NOT a catalog slot is always the repo's own and needs no declaration. See [Provenance](#provenance). |
+
 `target: export-only` records the choices without writing files (an agent applies later or
 a non-GitHub CI uses each slot's `*.sh`).
 
@@ -394,6 +403,10 @@ existing differing entry unless `defaults.on_conflict: overwrite`.
 | `args` | list[str] | shell-split from `command` | when present, use `command` exactly and this argv exactly |
 | `env` | map[str,str] | omitted | non-empty environment map written into the MCP server entry |
 
+| Block key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `known` | list[str] | `[]` | MCP server names registered by something other than rig — reported as known, not drift. See [Provenance](#provenance). |
+
 Compatibility: if `args` is omitted, rig keeps the legacy behavior and parses `command` as a
 shell-like string, so `node server.js --foo` becomes `{"command":"node","args":["server.js","--foo"]}`.
 If `args` is present, `command` is the executable value exactly, allowing paths such as
@@ -401,6 +414,48 @@ If `args` is present, `command` is the executable value exactly, allowing paths 
 Do not put arguments or shell syntax into `command` when `args` is present:
 use `command: "node"` with `args: ["server.js", "--foo"]`, not
 `command: "node server.js"` with `args: ["--foo"]`.
+
+---
+
+## Provenance
+
+`rig status` scans the **shared** target locations — `~/.agents/skills`, `~/.claude/hooks`,
+`.github/workflows`, the MCP registry — for items on disk that the config does not declare. Those
+places legitimately hold things rig never wrote, so rig first tries to **name the origin** of each
+undeclared item; only an item it cannot place is reported as drift. Placed items print under a dim
+"known, not managed by rig" heading (and permission entries beyond the rig baseline under "your
+additions, kept"); they never count as drift, never change the exit code, and are never deleted.
+
+### The marker contract (for tool installers)
+
+An installer that writes into a rig-scanned location records itself so rig can place its files:
+
+| What it writes | The marker |
+| --- | --- |
+| a skill dir `<skills>/<name>/` | a one-line file `<skills>/<name>/.installed-by` naming the tool (`tg`, `review`, …) |
+| an agent-hook descriptor `<hooks>/<id>.<point>.json` | a top-level `"installed_by": "<tool>"` key in the descriptor JSON (the `agents-hooks/v1` runner ignores keys it does not know) |
+
+`rig install-skill` / `rig daily install-skill` write the skill marker themselves. Until every
+ecosystem installer does, rig also honours the SessionStart blurb `<skills>/.blurbs/<name>.md` that
+`<tool> install-skill` already writes, plus a shipped allowlist of the ecosystem CLIs' own skill
+names (`riglib/provenance.py`). Skills installed with the third-party `skills` CLI (`npx skills
+add <owner>/<repo>`) need no marker either: rig reads the lockfile that CLI keeps next to the
+skills dir (`~/.agents/.skill-lock.json` for the default target) and names the source repo.
+
+### How an undeclared item is classified
+
+| Item | Known (informational) when … | Otherwise |
+| --- | --- | --- |
+| skill named after a **catalog** item | `skills.known` (your own pack under that name) → byte-identical to the catalog source (the skills dir is machine-wide, the plan per-repo, so another repo's by-type/by-stack apply legitimately put it there). Catalog names are rig's namespace: no installer marker can vouch for one | drift: a stale copy from an older catalog, or foreign content under a catalog name |
+| any other skill | `.installed-by` marker → `.blurbs/<name>.md` → the `skills` CLI lockfile (`<skills>/../.skill-lock.json`, written by `npx skills add`) → shipped ecosystem allowlist → `skills.known` | drift: unknown origin — declare it under `skills.known` or remove it |
+| agent-hook descriptor with a **catalog** hook id | `agent_hooks.known` → its `cmd` runs a script inside that catalog hook's directory (rig-installed for another repo) | drift: a catalog id running something else, whatever `installed_by` claims |
+| any other agent-hook descriptor | `installed_by` key → shipped agent-tools ops-installer list → `agent_hooks.known` (by id or full `<id>.<point>` stem) | drift: unknown origin |
+| CI workflow | `ci.known` → a stem that is NOT a catalog CI slot (the repo's own workflow) | drift: a catalog gate on disk that this config does not enable (a rig orphan) |
+| MCP server | `mcp.known` | drift |
+| permission entry beyond the baseline | always "kept": a former rig default (`gh`/`git`/`uv`/`bun`, rig-cli#41 → #165), a baseline deny/ask rule the config turned off, or a hand-added entry — rig never removes any of them | — |
+
+Real drift keeps its signal: an unknown-origin skill, an undeclared catalog gate workflow, or a
+hand-mangled permission container still exits with the drift code.
 
 ---
 
