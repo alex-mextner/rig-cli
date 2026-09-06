@@ -35,13 +35,13 @@ from .github_ghas import GITHUB_GHAS_DEFAULTS
 from .github_merge import GITHUB_MERGE_DEFAULTS
 from .github_ruleset import CI_GATE_CHECK_CONTEXTS, GITHUB_RULESET_DEFAULTS
 from .harness_skills import HARNESS_SKILL_DIRS as _HARNESS_SKILL_DIRS
-from .provenance import KNOWN_CATEGORIES, known_names_from_config
 from .harness_skills import codex_user_path as _codex_user_path
 from .harness_skills import instruction_file_for as _instruction_file_for
 from .harness_skills import native_skills_dir_for as _native_skills_dir_for
 from .harness_skills import omp_user_path as _omp_user_path
 from .harness_skills import skill_dir_for as _skill_dir_for
 from .paths import expand_user_path as _expand_user_path
+from .provenance import KNOWN_CATEGORIES, known_names_from_config
 from . import project_tools
 
 

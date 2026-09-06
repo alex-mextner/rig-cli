@@ -355,6 +355,25 @@ def test_page_html_escapes_drift_and_plan_interpolation(tmp_path, fake_agent_too
     assert 'data-key="' + "' + esc(a.key) + '" in page
 
 
+def test_page_known_panel_groups_caps_and_escapes(tmp_path, fake_agent_tools, monkeypatch):
+    """The known-items panel renders ONE row per (container/category, origin) with the names
+    capped -- the CLI's `_print_known_groups` shape -- never one row per entry: a kept allowlist
+    runs to hundreds of entries and a per-entry dump would flood the panel (found in review).
+    Structural pin like the esc() test above; the JS itself needs a browser.
+    """
+    from riglib.cli import _KNOWN_NAMES_SHOWN
+
+    repo = _isolated_repo(tmp_path, fake_agent_tools, monkeypatch)
+    app = cw.ConfigWebApp(repo_root=repo)
+    page = app.render_page().decode()
+
+    assert "function knownGroups(" in page
+    assert f"var KNOWN_NAMES_SHOWN = {_KNOWN_NAMES_SHOWN};" in page
+    assert "knownGroups(placed)" in page and "knownGroups(kept)" in page
+    assert "esc(g.where)" in page and "esc(g.label)" in page and "esc(shown)" in page
+    assert "function knownRow(" not in page
+
+
 def test_global_edit_not_blocked_by_broken_home_directory_rigyaml(tmp_path, fake_agent_tools, monkeypatch):
     """A Global-tab edit's GATE 2 must load $HOME's GLOBAL layer alone (include_repo=False).
 

@@ -1667,6 +1667,12 @@ def _report_permission_extras(action: Action, ps, extras: list[str], config_file
 
     Per entry, every role: the renderer groups a container's entries into one line (and caps a long
     allowlist), so the per-entry shape no longer risks drowning ``rig status``.
+
+    Adversarial reading, on purpose: a rogue writer appending ``Bash(curl:*)`` to the allow list is
+    NOT caught here — and was not before either: allow extras were one summarized count line
+    (``153 entries beyond the baseline``), where one more entry is invisible. A rogue deny/ask
+    entry only ever tightens the policy. The permission file's integrity is not a drift question;
+    the baseline rig DOES assert (missing/modified baseline entries) stays drift above.
     """
     from .permissions import DEFAULT_RULES, RETIRED_DEFAULT_TOOLS, desired_entries, harness_supported
 

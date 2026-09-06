@@ -457,6 +457,17 @@ skills dir (`~/.agents/.skill-lock.json` for the default target) and names the s
 Real drift keeps its signal: an unknown-origin skill, an undeclared catalog gate workflow, or a
 hand-mangled permission container still exits with the drift code.
 
+### Where a `known` list lives
+
+The `<category>.known` lists cascade like every other list in the config: a repo `rig.yaml` list
+**replaces** the global one (it is not merged). So keep the list for a machine-wide location —
+`skills.known`, `agent_hooks.known` — in the global `~/.config/rig/config.yaml`; a repo-level
+`skills.known` would drop the global entries for that repo and resurface them as drift. `ci.known`
+names files in the repo's own `.github/workflows`, so it belongs in that repo's `rig.yaml`.
+
+A marker is a claim, not a grant: it only changes what `rig status` prints. rig never manages,
+writes or removes a known item, and a catalog-named dir is never vouched for by a marker.
+
 ---
 
 ## `mode`

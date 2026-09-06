@@ -41,7 +41,16 @@ other name is checked in this order:
 5. ``skills.known`` (config) — packs the user installed by hand, declared once.
 
 Otherwise the skill is drift: not in the catalog, no marker, not declared — of unknown origin; the
-user declares it under ``skills.known`` or removes it.
+user declares it under ``skills.known`` or removes it. Note the asymmetry: markers are refused for
+CATALOG names (rig's own namespace, where a spoof would hide a stale/foreign copy of something rig
+manages), but a marker DOES vouch for any other name — a rogue skill can write its own
+``.installed-by``. That is the accepted trade: rig never manages those dirs, so "known" only
+changes what ``rig status`` prints, never what rig writes or removes; the marker names a
+suspect, it does not grant anything.
+
+The ``<category>.known`` lists cascade like every list in the config (a repo list REPLACES the
+global one, ``riglib.config._deep_merge``), so the list for a MACHINE-WIDE dir (skills, agent
+hooks) belongs in the global config; ``ci.known`` is per-repo by nature.
 
 Agent-hook descriptors (``<hooks>/<id>.<point>.json``). A CATALOG hook id is rig's namespace the
 same way: a descriptor wearing one is either under ``agent_hooks.known`` or its ``cmd`` must run
@@ -318,7 +327,13 @@ def _cmd_inside(cmd: object, source_dir: Path) -> bool:
 
 
 def workflow_provenance(stem: str, *, known: set[str], catalog: dict[str, tuple[Path, ...]] | None) -> Provenance | None:
-    """Classify an undeclared workflow file by its stem — see the module docstring."""
+    """Classify an undeclared workflow file by its stem — see the module docstring.
+
+    Sound because the runner writes every catalog gate as ``<slot>.yml`` regardless of which
+    source file (``workflow.yml`` / ``workflow-<variant>.yml``) it copies
+    (``riglib/actions/runner.py::_do_install_ci``) — so "stem is a catalog leaf" is exactly
+    "rig could have written this file".
+    """
     if stem in known:
         return Provenance(KIND_CONFIG_KNOWN)
     if catalog is not None and stem not in catalog:

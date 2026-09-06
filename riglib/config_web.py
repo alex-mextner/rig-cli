@@ -871,22 +871,38 @@ async function loadDrift() {{
     // known items (rig-cli#357): on disk, not rig-managed, origin named -- informational, never
     // drift. Rendered under their own heading so a clean scope with tool-installed skills still
     // reads as in sync (the payload's `in_sync` ignores them, and so must this panel).
-    function knownRow(k) {{
-      var where = k.kept ? esc(k.container) : esc(k.category) + '/' + esc(k.name);
-      var who = !k.kept && k.by && k.by !== k.name ? ' (by ' + esc(k.by) + ')' : '';
-      return '<div class="drift-item"><span class="drift-dir known">' + (k.kept ? 'kept' : 'known') + '</span>' +
-        where + (k.kept ? ': ' + esc(k.name) : '') + who +
-        '<div class="plan-target">' + esc(k.label) + ' — ' + esc(k.target) + '</div></div>';
+    // One row per (container-or-category, origin label) with the member names joined and capped
+    // -- the SAME shape the CLI prints (`_print_known_groups`, `_KNOWN_NAMES_SHOWN`): a kept
+    // allowlist runs to hundreds of entries, and one <div> per entry would flood the panel.
+    var KNOWN_NAMES_SHOWN = 12;
+    function knownName(k) {{
+      return !k.kept && k.by && k.by !== k.name ? k.name + ' (by ' + k.by + ')' : k.name;
+    }}
+    function knownGroups(list) {{
+      var groups = {{}}, order = [];
+      list.forEach(function(k) {{
+        var where = k.kept ? k.container : k.category;
+        var key = where + '\u0000' + k.label;
+        if (!groups[key]) {{ groups[key] = {{where: where, label: k.label, kept: k.kept, names: []}}; order.push(key); }}
+        groups[key].names.push(knownName(k));
+      }});
+      return order.map(function(key) {{
+        var g = groups[key];
+        var shown = g.names.slice(0, KNOWN_NAMES_SHOWN).join(', ');
+        if (g.names.length > KNOWN_NAMES_SHOWN) {{ shown += ' … and ' + (g.names.length - KNOWN_NAMES_SHOWN) + ' more'; }}
+        return '<div class="drift-item"><span class="drift-dir known">' + (g.kept ? 'kept' : 'known') + '</span>' +
+          esc(g.where) + ' (' + g.names.length + ')<div class="plan-target">' + esc(g.label) + '</div><div>' + esc(shown) + '</div></div>';
+      }}).join('');
     }}
     // the CLI's two headings: placed items vs permission additions (never removed)
     var placed = (data.known || []).filter(function(k) {{ return !k.kept; }});
     var kept = (data.known || []).filter(function(k) {{ return k.kept; }});
     var knownBlock = '';
     if (placed.length) {{
-      knownBlock += '<div class="in-sync">known, not managed by rig (' + placed.length + ') — informational, not drift</div>' + placed.map(knownRow).join('');
+      knownBlock += '<div class="in-sync">known, not managed by rig (' + placed.length + ') — informational, not drift</div>' + knownGroups(placed);
     }}
     if (kept.length) {{
-      knownBlock += '<div class="in-sync">your additions, kept (' + kept.length + ') — beyond the rig baseline; rig never removes them</div>' + kept.map(knownRow).join('');
+      knownBlock += '<div class="in-sync">your additions, kept (' + kept.length + ') — beyond the rig baseline; rig never removes them</div>' + knownGroups(kept);
     }}
     if (!rows && !missing) {{ body.innerHTML = '<div class="in-sync">✓ in sync — config and disk agree</div>' + knownBlock; return; }}
     body.innerHTML = missing + rows + knownBlock;

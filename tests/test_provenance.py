@@ -310,6 +310,18 @@ def test_hook_listed_in_agent_hooks_known_by_full_descriptor_stem(fake_agent_too
     assert _known(report, "agent_hooks")["house-hook.pre-bash"].kind == KIND_CONFIG_KNOWN
 
 
+def test_agent_hooks_known_by_full_stem_leaves_the_sibling_point_as_drift(fake_agent_tools, tmp_path):
+    # claiming `<id>.<point>` names ONE descriptor: a sibling point of the same hook id that the
+    # config did not claim is still of unknown origin (found in review)
+    repo, plan = _applied(fake_agent_tools, tmp_path, agent_hooks={"known": ["house-hook.pre-bash"]})
+    _plant_hook(repo / "hooks-out", "house-hook")
+    sibling = repo / "hooks-out" / "house-hook.pre-write.json"
+    sibling.write_text(json.dumps({"id": "house-hook", "point": "pre-write", "cmd": "/x"}), encoding="utf-8")
+    report = detect(plan)
+    assert _hook_extras(report) == ["house-hook.pre-write"]
+    assert list(_known(report, "agent_hooks")) == ["house-hook.pre-bash"]
+
+
 def test_unknown_origin_hook_is_still_drift(fake_agent_tools, tmp_path):
     repo, plan = _applied(fake_agent_tools, tmp_path)
     _plant_hook(repo / "hooks-out", "rogue-hook")
