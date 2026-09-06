@@ -692,3 +692,20 @@ def test_hand_committed_repo_known_list_replaces_global_for_that_repo(tmp_path, 
     )
     assert known_names_from_config(config.load(repo_a))["mcp"] == {"foo"}
     assert known_names_from_config(config.load(repo_b))["mcp"] == {"bar"}  # foo is NOT known in b
+
+
+def test_wizard_warns_when_a_repo_level_list_shadows_the_global_known_list(tmp_path, monkeypatch):
+    import yaml
+
+    repo = _make_repo(tmp_path)
+    (repo / "rig.yaml").write_text("version: 1\nskills:\n  known: [repo-pack]\n", encoding="utf-8")
+    gdir = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
+    lines: list[str] = []
+    answers = iter([_index_of("skills.known"), "swiftui-pro", "q", "n"])
+    setup_wizard.run_setup(repo, apply_fn=lambda _root: 0, input_fn=lambda _p: next(answers), out=lines.append)
+    joined = "\n".join(lines)
+    assert "shadow" in joined and "rig.yaml" in joined and "repo-pack" in joined
+    # still routed GLOBAL; the repo file is never touched
+    assert yaml.safe_load((gdir / "rig" / "config.yaml").read_text())["skills"]["known"] == ["swiftui-pro"]
+    assert yaml.safe_load((repo / "rig.yaml").read_text())["skills"]["known"] == ["repo-pack"]

@@ -223,6 +223,7 @@ def run_setup(
             out(f"  {opt.key}   (writes {opt.layer} → {path})")
             out(f"    {opt.hint}")
             out(f"    current: {_fmt_value(current)}")
+            _warn_if_shadowed(opt, repo_yaml, out)
             prompt = _value_prompt(opt)
             raw = input_fn(prompt).strip()
             if raw == "":
@@ -272,6 +273,24 @@ def run_setup(
     if pending_apply:
         out("  changes saved to config; run `rig apply commit` to converge.")
     return 0
+
+
+def _warn_if_shadowed(opt: schema.Option, repo_yaml: Path, out: Callable[[str], None]) -> None:
+    """Say so when the committed repo file ALSO sets a GLOBAL option's key.
+
+    A repo-level list REPLACES the global one for that repo, so the edit (routed to the global
+    file) would look like a silent no-op here — rig never deletes the repo entry itself.
+    """
+    from .config import ConfigError
+
+    if opt.layer != schema.GLOBAL:
+        return
+    try:
+        repo_value = schema.get_path(load_layer_config(repo_yaml), opt.key)
+    except (schema.KeyError_, ConfigError):
+        return
+    out(f"    note: {repo_yaml} also sets {opt.key} = {_fmt_value(repo_value)} — that repo value "
+        "shadows the global one for this repo; remove it by hand for this edit to take effect here.")
 
 
 def _validate_layer(data: dict[str, Any]) -> None:

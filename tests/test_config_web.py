@@ -1214,3 +1214,24 @@ def test_global_tab_page_renders_the_mixed_areas_end_to_end(tmp_path, fake_agent
     # the repo tab still renders the whole skills area, the known field badged global
     repo_page = app.render_page(str(repo.resolve())).decode()
     assert 'data-key="skills.enabled"' in repo_page and 'data-key="skills.known"' in repo_page
+
+
+def test_repo_tab_flags_a_known_list_shadowed_by_a_repo_level_value(tmp_path):
+    # a hand-committed repo-level skills.known REPLACES the global list for this repo; the repo
+    # tab renders that repo value yet routes an edit to the global file — say so on the field,
+    # or the edit looks like a silent no-op (Codex P2 on PR #378).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_repo_config(repo, "version: 1\nskills:\n  known: [repo-pack]\n")
+    model = cw.build_model(repo)
+    fields = {f.key: f for a in model.areas for f in a.fields}
+    assert fields["skills.known"].shadowed_by == str(repo / "rig.yaml")
+    assert fields["skills.known"].value == ["repo-pack"]  # the effective (repo) value still shows
+    assert fields["agent_hooks.known"].shadowed_by is None  # no repo entry → no note
+    assert fields["skills.enabled"].shadowed_by is None  # a REPO option is never "shadowed"
+    page = cw.areas_fragment(model)
+    assert "shadowed" in page and "repo-pack" in page
+    # the Global tab reads the global layer alone — nothing shadows it there
+    gmodel = cw.build_model(repo, global_only=True)
+    gfields = {f.key: f for a in gmodel.areas for f in a.fields}
+    assert gfields["skills.known"].shadowed_by is None

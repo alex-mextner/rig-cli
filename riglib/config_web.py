@@ -186,6 +186,11 @@ class FieldView:
     hint: str
     choices: tuple[str, ...]
     layer: str  # GLOBAL / REPO — the file an edit to THIS field is written to
+    # The repo file that ALSO sets this GLOBAL option's key on a repo tab (``None`` otherwise).
+    # A hand-committed repo-level list REPLACES the global one for that repo, so the field shows
+    # the repo value while an edit lands in the global file — the page says so instead of letting
+    # the edit look like a silent no-op (rig never deletes the repo entry itself).
+    shadowed_by: str | None = None
 
     @property
     def layer_file(self) -> str:
@@ -246,10 +251,19 @@ def build_model(repo_root: Path, *, global_only: bool = False) -> ConfigModel:
     :func:`riglib.config_web_plan.build_scope_plan` for why plan == view is load-bearing there.
     """
     loaded = cfg.load(repo_root, include_repo=not global_only)
+    repo_path = cfg.repo_config_path(repo_root)
+    # the repo layer ALONE (already parsed successfully by cfg.load above), to flag a GLOBAL
+    # option whose key the committed repo file also sets — see FieldView.shadowed_by.
+    repo_layer = cfg.read_yaml_file(repo_path) if not global_only and repo_path.is_file() else {}
     areas = [
         view
         for area in schema.AREAS
-        if (view := _area_view(area, loaded.data, global_only=global_only)) is not None
+        if (
+            view := _area_view(
+                area, loaded.data, global_only=global_only, repo_layer=repo_layer, repo_path=repo_path
+            )
+        )
+        is not None
     ]
     return ConfigModel(
         areas=tuple(areas),
@@ -262,7 +276,14 @@ def build_model(repo_root: Path, *, global_only: bool = False) -> ConfigModel:
     )
 
 
-def _area_view(area: schema.Area, merged: dict[str, Any], *, global_only: bool) -> AreaView | None:
+def _area_view(
+    area: schema.Area,
+    merged: dict[str, Any],
+    *,
+    global_only: bool,
+    repo_layer: dict[str, Any],
+    repo_path: Path,
+) -> AreaView | None:
     """Project one registry area for the page; ``None`` when it has nothing to show on this tab.
 
     Filters by each OPTION's writable layer, not the area's (an area can be MIXED — see
@@ -282,6 +303,7 @@ def _area_view(area: schema.Area, merged: dict[str, Any], *, global_only: bool) 
             hint=opt.hint,
             choices=opt.choices,
             layer=opt.layer,
+            shadowed_by=_shadowing_repo_file(opt, repo_layer, repo_path),
         )
         for opt in options
     )
@@ -292,6 +314,19 @@ def _area_view(area: schema.Area, merged: dict[str, Any], *, global_only: bool) 
         layer=GLOBAL if global_only else area.layer,
         fields=fields,
     )
+
+
+def _shadowing_repo_file(
+    option: schema.Option, repo_layer: dict[str, Any], repo_path: Path
+) -> str | None:
+    """``repo_path`` when the committed repo file ALSO sets a GLOBAL option's key (else ``None``)."""
+    if option.layer != GLOBAL or not repo_layer:
+        return None
+    try:
+        schema.get_path(repo_layer, option.key)
+    except schema.KeyError_:
+        return None
+    return str(repo_path)
 
 
 # ── the edit write (routed to the owning layer, fail-closed) ────────────────────────────────
@@ -560,12 +595,21 @@ def _field_row(f: FieldView) -> str:
     default_note = (
         "" if is_default else f' · default <code>{html.escape(_fmt_value(f.default))}</code>'
     )
+    shadow_note = (
+        f'<div class="hint shadow">shadowed: <code>{html.escape(f.shadowed_by)}</code> also sets '
+        f'this key (<code>{html.escape(_fmt_value(f.value))}</code>), and a repo value REPLACES '
+        'the global one for this repo — an edit here lands in the global file and takes effect '
+        'here only once that repo entry is removed by hand.</div>'
+        if f.shadowed_by
+        else ""
+    )
     return (
         '<div class="field">'
         f'<div class="field-head"><code class="key">{html.escape(f.key)}</code>'
         f'{_layer_badge(f.layer)}'
         f'<span class="ctl">{_field_control(f)}</span></div>'
         f'<div class="hint">{html.escape(f.hint)}{default_note}</div>'
+        f'{shadow_note}'
         '</div>'
     )
 
