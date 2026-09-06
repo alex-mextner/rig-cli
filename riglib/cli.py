@@ -19,6 +19,7 @@ Subcommands:
     rig usage    Claude token/cost usage across accounts (hypothetical cost at list price)
     rig evolve   local project evolution portal (git histogram + code treemap)
     rig codex    safe Codex maintenance helpers
+    rig worktree create/remove/gc — the standardized .worktrees/<name> agent-worktree lifecycle
 """
 
 from __future__ import annotations
@@ -554,11 +555,19 @@ def _add_codex_parser(sub: "argparse._SubParsersAction") -> None:
 
 
 def _add_worktree_parser(sub: "argparse._SubParsersAction") -> None:
-    """`rig worktree create`/`remove` — the standardized ``.worktrees/<name>`` agent-worktree lifecycle."""
-    wp = sub.add_parser("worktree", help="create/remove a standardized agent worktree under .worktrees/")
+    """`rig worktree create`/`remove`/`gc` — the standardized ``.worktrees/<name>`` agent-worktree
+    lifecycle. Each subcommand's own argparse registration is split into its own helper below —
+    the table of help/description/epilog text for three subcommands made this one long enough to
+    warrant it."""
+    wp = sub.add_parser("worktree", help="create/remove/gc a standardized agent worktree under .worktrees/")
     wp.set_defaults(_worktree_parser=wp)
-    wsub = wp.add_subparsers(dest="worktree_command", metavar="<create|remove>")
+    wsub = wp.add_subparsers(dest="worktree_command", metavar="<create|remove|gc>")
+    _add_worktree_create_subparser(wsub)
+    _add_worktree_remove_subparser(wsub)
+    _add_worktree_gc_subparser(wsub)
 
+
+def _add_worktree_create_subparser(wsub: "argparse._SubParsersAction") -> None:
     wc = wsub.add_parser(
         "create",
         help="create a linked worktree at .worktrees/<name> and register it in .git/info/exclude",
@@ -583,6 +592,8 @@ def _add_worktree_parser(sub: "argparse._SubParsersAction") -> None:
         help="base ref/commit to branch from (default: git's own default, the current HEAD)",
     )
 
+
+def _add_worktree_remove_subparser(wsub: "argparse._SubParsersAction") -> None:
     wr = wsub.add_parser(
         "remove",
         help="remove a linked worktree at .worktrees/<name> and delete its branch",
@@ -607,6 +618,45 @@ def _add_worktree_parser(sub: "argparse._SubParsersAction") -> None:
     )
     wr.add_argument("name", help="worktree directory name under .worktrees/ to remove")
     wr.add_argument("-C", "--cwd", default=".", help="repo root (default: cwd)")
+
+
+def _add_worktree_gc_subparser(wsub: "argparse._SubParsersAction") -> None:
+    wg = wsub.add_parser(
+        "gc",
+        help="classify every worktree of a repo and remove the safe classes (merged/closed PR, "
+        "pruned); report the rest",
+        description="List every worktree `git` knows about for a repo (any physical location — "
+        "not just the standardized .worktrees/<name>), classify each as live/prunable/dirty/"
+        "merged/closed/no-pr-stale/active, and remove only merged/closed/prunable ones (plus "
+        "no-pr-stale with --include-stale). Report-only unless --yes; --dry-run always forces a "
+        "report even with --yes, mirroring `rig apply --dry-run`.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="exit codes:\n"
+        "  0    success (report printed; some repos may have had nothing to do)\n"
+        "  1    git worktree list timed out or hit an unexpected runtime error\n"
+        "  2    a repo path was rejected, git worktree list failed, or a planned removal\n"
+        "       failed outright (the `git worktree remove`/`branch -D` call itself, or the\n"
+        "       pre-removal recheck) — see the report for which entry and why\n"
+        "  6    the given/discovered repo is not a git repository\n"
+        "  127  git is not installed",
+    )
+    wg.add_argument(
+        "--repo", default=None,
+        help="repo path to gc (default: every rig-managed repo in the repository registry)",
+    )
+    wg.add_argument("--dry-run", action="store_true", help="force a report even if --yes is also passed")
+    wg.add_argument(
+        "--yes", action="store_true",
+        help="actually remove merged/closed/prunable worktrees (bare gc alone only reports)",
+    )
+    wg.add_argument(
+        "--older-than-days", type=int, default=14,
+        help="age threshold in days for the no-pr-stale classification (default: 14)",
+    )
+    wg.add_argument(
+        "--include-stale", action="store_true",
+        help="also remove no-pr-stale worktrees when --yes is set (never removed on its own)",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -994,6 +1044,8 @@ def cmd_worktree(args: argparse.Namespace) -> int:
         return _cmd_worktree_create(args)
     if args.worktree_command == "remove":
         return _cmd_worktree_remove(args)
+    if args.worktree_command == "gc":
+        return _cmd_worktree_gc(args)
     args._worktree_parser.print_help()
     return 2
 
@@ -1057,6 +1109,149 @@ def _cmd_worktree_remove(args: argparse.Namespace) -> int:
 
     print(_ok(result.message))
     return 0
+
+
+def _resolve_gc_repo_roots(repo_arg: str | None) -> tuple[list[Path], int]:
+    """``(repo_roots, exit_code)``. An EMPTY ``repo_roots`` means there is nothing left to
+    process — ``exit_code`` is 0 for a genuine no-op (e.g. an empty registry, already reported)
+    or non-zero for a hard failure (bad ``--repo``, unreadable registry). A NON-empty
+    ``repo_roots`` can still carry a non-zero ``exit_code`` — the registry fan-out skips and
+    reports any entry with an invalid path individually (see below) without dropping the OTHER,
+    valid entries; the caller must fold that code into its own aggregate rather than treat it as
+    an abort signal.
+
+    ``--repo`` given: resolve it exactly like `worktree create`/`remove`'s ``-C`` (same git-repo
+    preflight, same exit codes). ``--repo`` omitted: fan out to every repo the machine-local
+    :mod:`riglib.repository_registry` already knows about — the SAME multi-repo discovery `rig
+    config-web` uses, per this repo's own AGENTS.md; gc does not invent a second one.
+
+    Checked with ``is not None``, NOT truthiness — a review-caught gap: `if repo_arg:` treats an
+    EXPLICIT empty string (`--repo ''`, or a shell variable used for `--repo` that happened to be
+    unset/empty) the SAME as "omitted", silently taking the machine-wide destructive registry
+    fan-out instead of the single-repo path the caller actually asked for. An empty string is
+    handed to `_resolve_worktree_repo_env` like any other explicit value, so it fails the same way
+    any other bad path would (`Path("").resolve()` resolves to the current directory, which the
+    usual git-repo preflight then validates or rejects on its own terms) — never silently widened
+    to "every repo".
+    """
+    if repo_arg is not None:
+        env, exit_code = _resolve_worktree_repo_env(repo_arg)
+        if env is None:
+            return [], exit_code
+        return [env.repo_root], 0
+
+    from .repository_registry import RegistryError, RepositoryRegistry
+
+    from . import errors as errors_module
+
+    try:
+        registry = RepositoryRegistry.load()
+    except RegistryError as exc:
+        print(_err(f"error: {exc}"))
+        return [], 2
+    try:
+        entries = registry.select()
+    except TypeError as exc:
+        # `select()` sorts by `entry.path` (and, for a root filter, wraps it in `Path(...)`) —
+        # review-caught (Codex, round 22): a hand-edited/corrupted registry carrying a non-string
+        # `path` on ANY entry (`RepositoryRegistry.load()` only type-checks the tag arrays, per
+        # its own docstring) makes that comparison/conversion raise `TypeError` for the WHOLE
+        # call, before this function's own per-entry path validation below ever gets a chance to
+        # skip just the one bad row. Fixing `select()` itself is out of scope here (shared code
+        # used by every registry consumer, not something this ticket owns) — degrade the same way
+        # an unreadable registry file already does, rather than letting the exception escape as an
+        # unhandled crash.
+        print(_err(f"error: repository registry is malformed ({exc}) — pass --repo <path> "
+                    "directly, or fix/regenerate the registry"))
+        return [], errors_module.EXIT_NOT_A_REPO
+    if not entries:
+        print(_warn(
+            "no rig-managed repositories found in the registry — pass --repo <path>, or run "
+            "`python -m riglib.repository_registry discover --root <dir> --write` to populate it"
+        ))
+        return [], 0
+
+    repo_roots: list[Path] = []
+    worst_code = 0
+    for entry in entries:
+        # A structurally-valid JSON registry can still carry a non-string or empty `path` (a
+        # hand-edited/corrupted registry file, same class `RepositoryRegistry.load()` only
+        # type-checks the tag arrays for — see `riglib/config_web_scopes.py`'s identical guard) —
+        # review-caught (Codex, round 22): `Path(None)` raised `TypeError` before ANY valid repo
+        # was processed, aborting the whole fan-out; `Path("")` resolves to the CURRENT DIRECTORY,
+        # which could then run a destructive `--yes` fan-out against whatever unrelated repo `rig`
+        # happens to be invoked from — never validated as the actually-registered repo. Skip and
+        # report per-entry, don't crash or silently widen to "wherever this process's cwd is".
+        if not isinstance(entry.path, str) or not entry.path:
+            print(_warn(f"registry entry {entry.id!r} has an invalid path ({entry.path!r}) — skipped"))
+            worst_code = max(worst_code, errors_module.EXIT_NOT_A_REPO)
+            continue
+        repo_roots.append(Path(entry.path))
+    return repo_roots, worst_code
+
+
+def _run_worktree_gc_for_repo(args: argparse.Namespace, repo_root: Path) -> int:
+    from . import errors as errors_module
+    from . import worktree_gc
+
+    # Re-preflight EVERY repo_root through the same git-installed/is-a-repo check `--repo` itself
+    # goes through — load-bearing for the registry fan-out path (`--repo` omitted): a stale/
+    # hand-edited registry entry pointing at a non-repo or a since-deleted path would otherwise
+    # reach `git worktree list` directly and surface as a generic exit 2, not the documented exit
+    # 6/127 the CLI epilog promises for "the given/discovered repo is not a git repository" /
+    # "git is not installed" (a real cross-file consistency gap a review round caught).
+    env, exit_code = _resolve_worktree_repo_env(str(repo_root))
+    if env is None:
+        return exit_code
+
+    try:
+        report = worktree_gc.run_gc(
+            env.repo_root,
+            dry_run=args.dry_run,
+            yes=args.yes,
+            include_stale=args.include_stale,
+            older_than_days=args.older_than_days,
+        )
+    except worktree_gc.WorktreeGcError as exc:
+        print(_err(f"error: {repo_root}: {exc}"))
+        return exc.exit_code
+    except Exception as exc:  # noqa: BLE001 - deliberately broad, see below
+        # `run_gc` reaches filesystem/subprocess calls beyond its own documented
+        # `WorktreeGcError` (e.g. a `PermissionError` from `Path.exists()`/`is_symlink()` on a
+        # directory whose permissions changed underneath it, or a `RuntimeError` from `.resolve()`
+        # hitting a symlink loop). Catching only `WorktreeGcError` here would let ANY of those
+        # abort the WHOLE multi-repo registry fan-out — one unreadable repo silently skipping
+        # every repo after it in the loop, directly contradicting this module's own "one entry's
+        # failure must not skip the rest" contract (review-caught). Degrade to a reported,
+        # per-repo failure instead.
+        print(_err(f"error: {repo_root}: unexpected failure: {exc}"))
+        return errors_module.EXIT_INTERNAL
+
+    print(worktree_gc.render_report(report))
+
+    if any(entry.remove_error for entry in report.entries):
+        return errors_module.EXIT_CONFIG
+    return 0
+
+
+def _cmd_worktree_gc(args: argparse.Namespace) -> int:
+    if args.older_than_days <= 0:
+        print(_err(f"error: --older-than-days must be positive, got {args.older_than_days}"))
+        return 2
+
+    repo_roots, exit_code = _resolve_gc_repo_roots(args.repo)
+    if not repo_roots:
+        # `exit_code` alone can no longer gate this: a registry fan-out with SOME invalid entries
+        # returns a non-zero `exit_code` (folded into the aggregate below) ALONGSIDE non-empty
+        # `repo_roots` for the entries that were fine — only an EMPTY result (every existing
+        # failure path already returns one) means there is truly nothing left to process.
+        return exit_code
+
+    worst_exit_code = exit_code
+    for repo_root in repo_roots:
+        rc = _run_worktree_gc_for_repo(args, repo_root)
+        worst_exit_code = max(worst_exit_code, rc)
+    return worst_exit_code
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -1851,6 +2046,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     _print_schedule_status(effective_plan, report)
     _print_tg_ctl_status(effective_plan, report)
     _print_tmux_autosave_status(effective_plan)
+    if env.is_git_repo:
+        _print_stale_worktree_status(env.repo_root)
 
     # missing-target: a hook command in the harness settings.json that points at a file gone
     # from disk (the dead-rtk-hook case) surfaces PROACTIVELY here, before it bites at runtime
@@ -2103,6 +2300,38 @@ def _print_tg_ctl_status(plan, report) -> None:
         drifted = [d for d in report.items if d.category == "tg_ctl" and d.direction != "extra"]
         state = _warn(f"drifted ({drifted[0].detail})") if drifted else _ok("installed")
     print(f"\n  [GLOBAL] tg-ctl inbound daemon: {state}  " + _dim(f"(launchd boot agent, '{tg.boot_label}')"))
+
+
+def _print_stale_worktree_status(repo_root: Path) -> None:
+    """Reuse `worktree_gc`'s classifier (dry-run, no removal, no disk-size walk) to report a
+    one-line stale-worktree summary for the current repo.
+
+    Best-effort by design: `rig status` must stay usable even when the underlying checks can't
+    run (no `gh` auth, no network, `pgrep`/`lsof` unavailable, a repo with a huge worktree list
+    timing out) — a failure here is swallowed, not surfaced as a status error, mirroring the same
+    resilience-over-completeness call `_read_rig_metadata` makes in repository_registry.py.
+
+    `RIG_STATUS_SKIP_WORKTREE_GC=1` skips this check entirely (mirrors the `RIG_*_DRY_RUN`
+    opt-outs for other live/network side effects, e.g. `RIG_TMUX_DRY_RUN`) — a repo with linked
+    worktrees still pays for one `gh pr list` + one `pgrep`/`lsof` snapshot even after the
+    per-worktree batching fix, and a fully offline/no-`gh` environment may want to skip that
+    outright rather than rely on the best-effort degrade-and-warn path.
+    """
+    if _os.environ.get("RIG_STATUS_SKIP_WORKTREE_GC"):
+        return
+    from . import worktree_gc
+
+    try:
+        counts = worktree_gc.stale_worktree_counts(repo_root)
+    except Exception:
+        return
+    stale_total = sum(counts.get(c, 0) for c in worktree_gc.STALE_CLASSIFICATIONS)
+    if stale_total == 0:
+        return
+    breakdown = ", ".join(
+        f"{counts[c]} {c}" for c in worktree_gc.STALE_CLASSIFICATIONS_ORDERED if counts.get(c)
+    )
+    print(_warn(f"  {stale_total} stale worktree(s) ({breakdown}) — run `rig worktree gc` to review"))
 
 
 def _print_tmux_autosave_status(plan) -> None:
