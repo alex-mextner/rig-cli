@@ -40,6 +40,7 @@ from .layers import REPO as _REPO
 
 if TYPE_CHECKING:
     from .detect import Environment
+    from .schema import Option
 
 # ── tiny output helpers (no color dep; honor NO_COLOR) ───────────────────────────
 import os as _os
@@ -2810,14 +2811,35 @@ def _cmd_config_get(args: argparse.Namespace) -> int:
     return 0
 
 
+def _global_layer_refusal(option: "Option | None", category: str) -> str | None:
+    """The reason a repo-local `config set` of this key is refused, or ``None`` when it is allowed.
+
+    Same precedence as :attr:`riglib.schema.Option.layer` (the property the wizard and
+    config-web route by): a registered option decides by ITS layer (a per-option override
+    wins over its category, rig-cli#372); an unregistered key falls back to the category.
+    One helper decides BOTH the gate and its wording, so they can't drift apart.
+    """
+    from .layers import GLOBAL
+    from .schema import writable_layer_for_category
+
+    if option is not None:
+        if option.layer != GLOBAL:
+            return None
+        if writable_layer_for_category(category) == GLOBAL:
+            return f"`{category}` is a global-only config block"
+        return f"`{option.key}` is a global-only option"
+    if writable_layer_for_category(category) == GLOBAL:
+        return f"`{category}` is a global-only config block"
+    return None
+
+
 def _cmd_config_set(args: argparse.Namespace) -> int:
     from .actions import run_plan
     from .catalog import CatalogError
     from .config import ConfigError, canonical_dot_path, coerce_scalar, set_path, validate
-    from .layers import GLOBAL
     from .plan import PlanError
     from .schema import coerce as coerce_option
-    from .schema import option_for_key, writable_layer_for_category
+    from .schema import option_for_key
     from .state import SetupState
 
     try:
@@ -2831,8 +2853,10 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         return 2
 
     category = config_path.split(".", 1)[0]
-    if not args.is_global and writable_layer_for_category(category) == GLOBAL:
-        print(_err(f"error: `{category}` is a global-only config block; use `--global`."), file=sys.stderr)
+    option = option_for_key(config_path)
+    refusal = None if args.is_global else _global_layer_refusal(option, category)
+    if refusal is not None:
+        print(_err(f"error: {refusal}; use `--global`."), file=sys.stderr)
         print(_dim("  global-only settings are written to ~/.config/rig/config.yaml, never ./rig.yaml."),
               file=sys.stderr)
         return 2
@@ -2860,7 +2884,6 @@ def _cmd_config_set(args: argparse.Namespace) -> int:
         # drop any legacy `scope` already in the file (mirrors config.load): we re-serialize the
         # whole file, so leaving it would re-emit a key the schema no longer recognizes.
         data.pop("scope", None)
-        option = option_for_key(config_path)
         if option is not None:
             try:
                 value = coerce_option(option, args.value)

@@ -22,7 +22,10 @@ Each option names a top-level category (``skills``, ``ci``, ``harness`` …). Th
 resolved through :func:`riglib.layers.layer_for_category` — GLOBAL options are written to
 ``~/.config/rig/config.yaml`` and REPO options to the repo's ``rig.yaml``. The wizard NEVER
 writes a GLOBAL-only block (``gitignore``, ``tg_ctl``, the dispatcher, the harness, …) into the
-committed repo file — that is the documented footgun this routing prevents.
+committed repo file — that is the documented footgun this routing prevents. A single option can
+override its category's layer (``Option.layer_override``, rig-cli#372): the machine-wide
+``skills.known`` / ``agent_hooks.known`` / ``mcp.known`` lists are GLOBAL inside their otherwise
+repo-writable areas, so every editing surface routes by ``Option.layer``, never by the area alone.
 
 Stdlib-only (the repo import rule): no yaml/textual here; the wizard imports yaml lazily.
 """
@@ -97,10 +100,21 @@ class Option:
     choices: tuple[str, ...] = field(default_factory=tuple)
     items_enum: tuple[str, ...] = field(default_factory=tuple)
     null_tokens: tuple[str, ...] = ("", "null", "none", "~", "unset")
+    # Per-option WRITABLE-layer override (rig-cli#372). ``None`` = inherit the category's layer
+    # (:func:`writable_layer_for_category`). Set to GLOBAL for an option whose VALUE describes a
+    # machine-wide location even though its category is repo-writable — the ``skills.known`` /
+    # ``agent_hooks.known`` / ``mcp.known`` lists: the list cascade REPLACES the global list, so
+    # a repo-level copy would hide the global entries and resurface them as drift for that repo.
+    layer_override: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
             raise ValueError(f"Option {self.key!r}: unknown kind {self.kind!r}")
+        if self.layer_override is not None and self.layer_override not in (GLOBAL, REPO):
+            raise ValueError(
+                f"Option {self.key!r}: layer override must be {GLOBAL!r} or {REPO!r}, "
+                f"got {self.layer_override!r}"
+            )
         if self.kind == KIND_ENUM and not self.choices:
             raise ValueError(f"Option {self.key!r}: enum kind requires choices")
         if self.key.split(".", 1)[0] != self.category:
@@ -115,8 +129,12 @@ class Option:
         This is the WRITABLE layer (where the edit is persisted), not the status-display layer —
         see :func:`writable_layer_for_category`. The wizard shows this tag so the user knows which
         file an edit lands in, and routes the write by it (keeping global-only blocks out of the
-        committed repo rig.yaml).
+        committed repo rig.yaml). A per-option ``layer_override`` wins over the category's layer
+        — every editing surface (wizard, config-web, `config set`) must route by THIS property,
+        never by the area's layer alone.
         """
+        if self.layer_override is not None:
+            return self.layer_override
         return writable_layer_for_category(self.category)
 
     @property
@@ -143,6 +161,16 @@ class Area:
     def status_layer(self) -> str:
         return layer_for_category(self.category)
 
+    def options_for_layer(self, layer: str) -> tuple[Option, ...]:
+        """The subset of this area's options whose WRITABLE layer is ``layer``.
+
+        An area can be MIXED (rig-cli#372): the ``skills`` area is repo-writable, but its
+        ``skills.known`` option is GLOBAL. A surface that renders one layer (the config-web
+        Global tab) filters by this, not by :attr:`layer`, so a mixed area shows its global
+        options there and only its repo options on a repo tab.
+        """
+        return tuple(o for o in self.options if o.layer == layer)
+
 
 def _opt(
     key: str,
@@ -152,6 +180,7 @@ def _opt(
     choices: tuple[str, ...] = (),
     items_enum: tuple[str, ...] = (),
     null_tokens: tuple[str, ...] = ("", "null", "none", "~", "unset"),
+    layer_override: str | None = None,
 ) -> Option:
     return Option(
         key=key,
@@ -162,6 +191,7 @@ def _opt(
         choices=choices,
         items_enum=items_enum,
         null_tokens=null_tokens,
+        layer_override=layer_override,
     )
 
 
@@ -194,8 +224,9 @@ AREAS: tuple[Area, ...] = (
             _opt("skills.known", KIND_LIST, [],
                  "Skill dir names on disk that rig does NOT manage (hand-installed packs) — `rig status` "
                  "reports them as known, not as drift. Comma-separated. The skills dir is machine-wide, "
-                 "so keep this list in the GLOBAL config (rig config set --global skills.known …): a "
-                 "repo-level list replaces the global one. See docs/config-schema.md#provenance."),
+                 "so this list lives in the GLOBAL config (rig config set --global skills.known …): a "
+                 "repo-level list replaces the global one. See docs/config-schema.md#provenance.",
+                 layer_override=GLOBAL),
         ),
     ),
     Area(
@@ -232,8 +263,9 @@ AREAS: tuple[Area, ...] = (
             _opt("agent_hooks.known", KIND_LIST, [],
                  "Hook ids (or full `<id>.<point>` descriptor stems) another installer wrote into the "
                  "hooks dir — `rig status` reports them as known, not as drift. Comma-separated; the "
-                 "hooks dir is machine-wide, so keep it in the GLOBAL config. See "
-                 "docs/config-schema.md#provenance."),
+                 "hooks dir is machine-wide, so this list lives in the GLOBAL config. See "
+                 "docs/config-schema.md#provenance.",
+                 layer_override=GLOBAL),
         ),
     ),
     Area(
@@ -266,7 +298,11 @@ AREAS: tuple[Area, ...] = (
                  "Register MCP servers into the harness MCP config (idempotent merge by server name)."),
             _opt("mcp.known", KIND_LIST, [],
                  "MCP server names registered by something other than rig — `rig status` reports "
-                 "them as known, not as drift. Comma-separated. See docs/config-schema.md#provenance."),
+                 "them as known, not as drift. Comma-separated; the default MCP config "
+                 "(~/.claude/mcp) is machine-wide, so this list lives in the GLOBAL config. A repo "
+                 "that pins its own repo-local mcp.target can commit a repo-level mcp.known by hand "
+                 "(it replaces the global list for that repo). See docs/config-schema.md#provenance.",
+                 layer_override=GLOBAL),
         ),
     ),
     Area(

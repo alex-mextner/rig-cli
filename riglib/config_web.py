@@ -228,53 +228,29 @@ def build_model(repo_root: Path, *, global_only: bool = False) -> ConfigModel:
 
     ``global_only=True`` is the Global scope tab (rig-cli#310): loads ``~/.config/rig/config.yaml``
     ALONE via ``cfg.load(repo_root, include_repo=False)`` — no repo overlay — and renders only the
-    areas whose WRITABLE layer is GLOBAL (:attr:`~riglib.schema.Area.layer`, i.e.
-    ``schema.writable_layer_for_category`` — the machine-wide-only categories the scaffold never
-    writes into a committed repo file: gitignore/spotlight/tg_ctl/tmux/mode). ``repo_root`` is
-    still required as the loader's anchor even though its repo layer is skipped.
+    OPTIONS whose WRITABLE layer is GLOBAL (:attr:`~riglib.schema.Option.layer`): the
+    machine-wide-only categories the scaffold never writes into a committed repo file
+    (gitignore/spotlight/tg_ctl/tmux/mode) plus the per-option GLOBAL overrides inside
+    repo-writable areas (``skills.known`` / ``agent_hooks.known`` / ``mcp.known``, rig-cli#372 —
+    see :func:`_area_view`). ``repo_root`` is still required as the loader's anchor even though
+    its repo layer is skipped. NOTE: the Global tab's PLAN and DRIFT panel stay restricted to the
+    global-only CATEGORIES (:func:`riglib.config_web_plan.build_scope_plan` /
+    ``compute_scope_drift``) — a known-list edit changes what is *known*, not what is applied,
+    and widening the drift scan to the skills/hooks/MCP dirs would flood that tab with every
+    REPO-tab-installed item (the very reason the restriction exists). The provenance effect of
+    the edit is visible on each REPO tab's drift panel, where those dirs are scanned.
 
-    KNOWN, PRE-EXISTING design tension (flagged in review, not new here): this VIEW model uses
-    the WRITABLE layer (narrow — only gitignore/spotlight/tg_ctl/tmux/mode), while
-    :func:`riglib.config_web_plan.build_scope_plan`'s Global-scope PLAN filter uses the broader
-    STATUS layer (:func:`riglib.layers.layer_for_category`, which also counts skills/agent_hooks/
-    harness/permissions/models/git_hooks/env/tools as GLOBAL — they're machine-wide ARTIFACTS
-    even though the scaffold writes their VALUE into the committed repo file). So a repo's
-    ``harness.auto_mode`` can appear as an ``apply_harness`` action in the Global tab's plan/apply
-    without a matching field in the Global tab's VIEW to edit it from. This is the SAME
-    distinction ``riglib/schema.py`` already documents and ``rig status`` already exhibits for a
-    non-git cwd (it shows global-artifact drift there too, with no repo layer to edit from either)
-    — config-web inherits it rather than introduces it. Not resolved here: reconciling the two
-    layer classifications into one is a real design decision (which is more surprising: hiding
-    settings the Global tab CAN reconcile, or offering to reconcile settings it can't show?), left
-    for a follow-up rather than decided unilaterally in this pass.
+    The Global tab's VIEW, PLAN and DRIFT all use the WRITABLE-layer classification (never the
+    broader STATUS layer of :func:`riglib.layers.layer_for_category`): the view filters by
+    ``Option.layer``, the plan/drift by :func:`riglib.schema.global_only_categories` — see
+    :func:`riglib.config_web_plan.build_scope_plan` for why plan == view is load-bearing there.
     """
     loaded = cfg.load(repo_root, include_repo=not global_only)
-    merged = loaded.data
-    areas: list[AreaView] = []
-    for area in schema.AREAS:
-        if global_only and area.layer != GLOBAL:
-            continue
-        fields = tuple(
-            FieldView(
-                key=opt.key,
-                kind=opt.kind,
-                value=schema.effective_value(opt, merged),
-                default=opt.default,
-                hint=opt.hint,
-                choices=opt.choices,
-                layer=opt.layer,
-            )
-            for opt in area.options
-        )
-        areas.append(
-            AreaView(
-                category=area.category,
-                title=area.title,
-                blurb=area.blurb,
-                layer=area.layer,
-                fields=fields,
-            )
-        )
+    areas = [
+        view
+        for area in schema.AREAS
+        if (view := _area_view(area, loaded.data, global_only=global_only)) is not None
+    ]
     return ConfigModel(
         areas=tuple(areas),
         repo_root=repo_root,
@@ -283,6 +259,38 @@ def build_model(repo_root: Path, *, global_only: bool = False) -> ConfigModel:
         global_present=cfg.global_config_path().is_file(),
         repo_present=cfg.repo_config_path(repo_root).is_file(),
         global_only=global_only,
+    )
+
+
+def _area_view(area: schema.Area, merged: dict[str, Any], *, global_only: bool) -> AreaView | None:
+    """Project one registry area for the page; ``None`` when it has nothing to show on this tab.
+
+    Filters by each OPTION's writable layer, not the area's (an area can be MIXED — see
+    :meth:`riglib.schema.Area.options_for_layer`). On the Global tab only the GLOBAL options
+    render and the section badge says GLOBAL (matching the fields under it); a repo tab renders
+    every option, each field carrying its own layer badge.
+    """
+    options = area.options_for_layer(GLOBAL) if global_only else area.options
+    if not options:
+        return None
+    fields = tuple(
+        FieldView(
+            key=opt.key,
+            kind=opt.kind,
+            value=schema.effective_value(opt, merged),
+            default=opt.default,
+            hint=opt.hint,
+            choices=opt.choices,
+            layer=opt.layer,
+        )
+        for opt in options
+    )
+    return AreaView(
+        category=area.category,
+        title=area.title,
+        blurb=area.blurb,
+        layer=GLOBAL if global_only else area.layer,
+        fields=fields,
     )
 
 

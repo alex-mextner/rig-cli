@@ -142,7 +142,9 @@ def render_state(loaded_data: dict[str, Any], *, color: Callable[[str, str], str
             shown = _fmt_value(val)
             mark = _c("32", "on") if val is True else (_c("2", "off") if val is False else _c("36", shown))
             leaf = opt.key.split(".", 1)[1] if "." in opt.key else opt.key
-            lines.append(f"    {leaf:<28} {mark}")
+            # an option routed to a different layer than its area gets its own tag (Option.layer).
+            own_tag = "" if opt.layer == area.layer else f"  {_c('2', f'[{opt.layer}]')}"
+            lines.append(f"    {leaf:<28} {mark}{own_tag}")
             lines.append(f"      {_c('2', opt.hint)}")
         lines.append("")
     return "\n".join(lines)
