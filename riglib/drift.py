@@ -207,7 +207,12 @@ def scan_missing_targets(settings_paths: list[Path] | None = None) -> list:
     line (``missing <kind>: <path>``) so the same dead target isn't reported twice.
     """
     if settings_paths is None:
-        settings_paths = [Path(os.path.expanduser("~/.claude/settings.json"))]
+        # the doctor case: the HOME default PLUS every claude-rotate account dir — the files the
+        # DEFAULT fan-out manages (rig-cli#368). Filesystem-only, never the shell's
+        # CLAUDE_CONFIG_DIR, so the scan is deterministic; doctor inventories the env dir separately.
+        from .claude_config_dirs import managed_settings_files
+
+        settings_paths = managed_settings_files()
     findings: list = []
     seen: set[str] = set()
     for settings in settings_paths:

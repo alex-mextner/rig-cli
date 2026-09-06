@@ -907,6 +907,119 @@ def _validate_by_stack_items(bs: Any) -> None:
             )
 
 
+def _harness_block(path: Path) -> Any:
+    """The ``harness`` mapping of one config file — via PyYAML when present, else a stdlib
+    fallback that reads ONLY the two fan-out keys. ``rig doctor`` is documented to run with zero
+    third-party imports, so a missing PyYAML must not make it blind to a configured opt-out."""
+    try:
+        return read_yaml_file(path).get("harness")
+    except ImportError:
+        return _fan_out_keys_without_yaml(path.read_text(encoding="utf-8"))
+
+
+def _yaml_scalar(raw: str) -> Any:
+    text = raw.split("#", 1)[0].strip().strip("'\"")
+    if text.lower() in ("true", "false"):
+        return text.lower() == "true"
+    return text
+
+
+def _fan_out_keys_without_yaml(text: str) -> dict[str, Any]:
+    """Extract ``harness.settings_paths`` / ``harness.discover_config_dirs`` with the stdlib only.
+
+    Understands the shapes ``rig setup`` / ``config set`` write and the docs show: a top-level
+    ``harness:`` block, ``discover_config_dirs: <bool>``, and ``settings_paths`` as a flow list
+    (``[a, b]``) or a block list (``- a``). Anything else is ignored (the caller falls back to
+    the defaults for that key) — never a parse error.
+    """
+    out: dict[str, Any] = {}
+    in_harness = False
+    paths: list[str] | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line[0].isspace():
+            in_harness = stripped.rstrip(":") == "harness" and stripped.endswith(":")
+            paths = None
+            continue
+        if not in_harness:
+            continue
+        if paths is not None and stripped.startswith("- "):
+            paths.append(str(_yaml_scalar(stripped[2:])))
+            continue
+        paths = None
+        key, sep, value = stripped.partition(":")
+        if not sep or line.startswith("    "):
+            continue
+        key = key.strip()
+        if key == "discover_config_dirs":
+            out[key] = _yaml_scalar(value)
+        elif key == "settings_paths":
+            flow = value.split("#", 1)[0].strip()
+            if flow.startswith("[") and flow.endswith("]"):
+                out[key] = [str(_yaml_scalar(v)) for v in flow[1:-1].split(",") if v.strip()]
+            else:
+                paths = out.setdefault(key, [])
+    return out
+
+
+def load_harness_fan_out(repo_root: Path) -> dict[str, Any]:
+    """The effective ``harness`` fan-out keys (``settings_paths``, ``discover_config_dirs``) — LENIENT.
+
+    For ``rig doctor``, which loads no config: read the global layer and the repo's ``rig.yaml``
+    (when present), merge only the ``harness`` block and validate only the two fan-out keys.
+    Without PyYAML the two keys are read by a stdlib fallback (:func:`_fan_out_keys_without_yaml`).
+    Any failure — an unreadable file, a config that fails validation elsewhere (a stale key
+    another rig version added) — yields ``{}``: the built-in defaults, so doctor never goes
+    blind because the rest of the config is broken.
+    """
+    harness: dict[str, Any] = {}
+    for path in (global_config_path(), repo_root / "rig.yaml"):
+        if not path.is_file():
+            continue
+        try:
+            block = _harness_block(path)
+        except (ConfigError, OSError):
+            return {}
+        if isinstance(block, dict):
+            harness = _deep_merge(harness, block)
+    fan_out = {k: harness[k] for k in ("settings_paths", "discover_config_dirs") if k in harness}
+    try:
+        _validate_harness_fan_out(fan_out)
+    except ConfigError:
+        return {}
+    return fan_out
+
+
+def _validate_harness_fan_out(h: dict[str, Any]) -> None:
+    """Validate the claude-rotate fan-out keys (rig-cli#368): ``settings_paths`` + ``discover_config_dirs``.
+
+    ``settings_paths`` lists EXTRA user-scope ``settings.json`` files the claude-code write reaches
+    (each must be a ``.json`` path); ``discover_config_dirs`` (bool, default true) toggles the
+    automatic ``~/.claude-accounts/account-*`` discovery. Fail closed on any other shape.
+    """
+    paths = h.get("settings_paths")
+    if paths is not None:
+        if not isinstance(paths, list) or not all(isinstance(p, str) and p for p in paths):
+            raise ConfigError(
+                f"harness.settings_paths must be a list of non-empty strings, got {paths!r}",
+                schema_path="harness.settings_paths",
+            )
+        for p in paths:
+            if not p.endswith(".json"):
+                raise ConfigError(
+                    f"harness.settings_paths entries must end in .json (claude-code settings files), got {p!r}",
+                    schema_path="harness.settings_paths",
+                )
+    discover = h.get("discover_config_dirs")
+    if discover is not None and not isinstance(discover, bool):
+        raise ConfigError(
+            f"harness.discover_config_dirs must be a bool, got {discover!r}",
+            schema_path="harness.discover_config_dirs",
+        )
+
+
 def _validate_harness(h: dict[str, Any]) -> None:
     """Validate the ``harness`` block — the agent harness's skill + auto/permission provisioning.
 
@@ -981,6 +1094,7 @@ def _validate_harness(h: dict[str, Any]) -> None:
             f"harness.auto_mode must be a bool, got {auto_mode!r}",
             schema_path="harness.auto_mode",
         )
+    _validate_harness_fan_out(h)
     # self_merge gates a security-sensitive global carve-out; plan.py coerces it via bool(...),
     # so a non-bool like the string "false" would read truthy and ENABLE what the user meant to
     # disable. Fail closed, mirroring auto_mode.

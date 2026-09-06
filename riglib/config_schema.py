@@ -454,6 +454,20 @@ _HARNESS_BLOCK = Block(
             "string",
             "override the per-harness settings/config/plugin path; absent means rig uses the harness-specific default",
         ),
+        "settings_paths": Leaf(
+            "array",
+            "EXTRA claude-code user-scope settings.json files the auto-mode/permissions/hook-bridge "
+            "writes also reach (each a .json path); only honored when the primary target is "
+            "~/.claude/settings.json",
+            items_type="string",
+        ),
+        "discover_config_dirs": Leaf(
+            "boolean",
+            "auto-discover every ~/.claude-accounts/account-*/ (claude-rotate) config dir and treat its "
+            "settings.json as a managed target alongside ~/.claude/settings.json — a `claude` started "
+            "with CLAUDE_CONFIG_DIR reads ONLY that dir's settings, so without this no rig hook runs there",
+            default=True,
+        ),
     },
     nested={
         "hook_bridge": Block(

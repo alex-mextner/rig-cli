@@ -722,6 +722,18 @@
           "type": "string",
           "description": "override the per-harness settings/config/plugin path; absent means rig uses the harness-specific default"
         },
+        "settings_paths": {
+          "type": "array",
+          "description": "EXTRA claude-code user-scope settings.json files the auto-mode/permissions/hook-bridge writes also reach (each a .json path); only honored when the primary target is ~/.claude/settings.json",
+          "items": {
+            "type": "string"
+          }
+        },
+        "discover_config_dirs": {
+          "type": "boolean",
+          "description": "auto-discover every ~/.claude-accounts/account-*/ (claude-rotate) config dir and treat its settings.json as a managed target alongside ~/.claude/settings.json — a `claude` started with CLAUDE_CONFIG_DIR reads ONLY that dir's settings, so without this no rig hook runs there",
+          "default": true
+        },
         "hook_bridge": {
           "type": "object",
           "description": "wire the agents-hooks/v1 dispatcher into the supported harness config.",
