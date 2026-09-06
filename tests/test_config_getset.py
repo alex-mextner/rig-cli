@@ -940,3 +940,62 @@ def test_cli_config_no_subcommand_errors(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert rc == 2
     assert "get or set" in out
+
+
+@pytest.mark.parametrize("path", ["skills.known", "agent_hooks.known", "mcp.known"])
+def test_cli_set_rejects_global_layer_known_list_without_global_flag(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply, path
+):
+    """The known-lists for machine-wide dirs are GLOBAL-layer OPTIONS inside REPO-writable
+    categories (rig-cli#372): `config set` must route by the option's layer, not the category's."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    repo = tmp_path / "repo"
+    rig = repo / "rig.yaml"
+    _w(rig, f"version: 1\nagent_tools_source: {fake_agent_tools}\n")
+
+    rc = main(["config", "set", path, "swiftui-pro", "-C", str(repo), "--commit"])
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "global-only" in captured.err and "use `--global`" in captured.err
+    import yaml
+
+    assert path.split(".", 1)[0] not in yaml.safe_load(rig.read_text(encoding="utf-8"))
+    assert not (tmp_path / "xdg" / "rig" / "config.yaml").exists()
+    assert _mock_apply == []
+
+
+def test_cli_set_ci_known_is_repo_local(tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    repo = tmp_path / "repo"
+    rig = repo / "rig.yaml"
+    _w(rig, f"version: 1\nagent_tools_source: {fake_agent_tools}\n")
+
+    rc = main(["config", "set", "ci.known", "tests", "-C", str(repo), "--commit"])
+
+    import yaml
+
+    assert rc == 0, capsys.readouterr().err
+    assert yaml.safe_load(rig.read_text(encoding="utf-8"))["ci"]["known"] == ["tests"]
+
+
+@pytest.mark.parametrize("path", ["skills.known", "agent_hooks.known", "mcp.known"])
+def test_cli_set_global_known_list_round_trips_into_global_config(
+    tmp_path, capsys, fake_agent_tools, monkeypatch, _mock_apply, path
+):
+    # the remedy the rejection message points at must actually work for a GLOBAL option that
+    # lives inside a REPO-writable category (no symmetric "repo block, drop --global" guard).
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    repo = tmp_path / "repo"
+    rig = repo / "rig.yaml"
+    _w(rig, f"version: 1\nagent_tools_source: {fake_agent_tools}\n")
+
+    rc = main(["config", "set", path, "swiftui-pro, my-pack", "-C", str(repo), "--global", "--commit"])
+
+    import yaml
+
+    assert rc == 0, capsys.readouterr().err
+    category, leaf = path.split(".", 1)
+    gdata = yaml.safe_load((tmp_path / "xdg" / "rig" / "config.yaml").read_text(encoding="utf-8"))
+    assert gdata[category][leaf] == ["swiftui-pro", "my-pack"]
+    assert "known" not in yaml.safe_load(rig.read_text(encoding="utf-8")).get(category, {})

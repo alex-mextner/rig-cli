@@ -1033,10 +1033,13 @@ def test_build_model_global_only_omits_repo_layer_areas(tmp_path, monkeypatch):
 
     model = cw.build_model(repo, global_only=True)
     cats = {a.category for a in model.areas}
-    # only the writable-GLOBAL categories (schema._GLOBAL_ONLY_CATEGORIES)
-    assert cats <= {"gitignore", "spotlight", "tg_ctl", "tmux", "mode"}
+    # the writable-GLOBAL categories (schema._GLOBAL_ONLY_CATEGORIES) plus the areas carrying a
+    # per-option GLOBAL override (the machine-wide known-lists, rig-cli#372) — nothing else
+    assert cats <= {"gitignore", "spotlight", "tg_ctl", "tmux", "mode", "skills", "agent_hooks", "mcp"}
     assert "harness" not in cats
-    assert "skills" not in cats
+    assert "ci" not in cats
+    # every field shown on the Global tab is GLOBAL-writable — a repo-layer option never leaks in
+    assert all(f.layer == GLOBAL for a in model.areas for f in a.fields)
     assert model.global_only is True
 
 
@@ -1063,3 +1066,172 @@ def test_build_model_global_only_never_reads_repo_rigyaml(tmp_path, monkeypatch)
     (repo / "rig.yaml").write_text("not: [valid: yaml: at all", encoding="utf-8")
     model = cw.build_model(repo, global_only=True)  # must not raise
     assert model.global_only is True
+
+
+# -- per-option layer override: known-lists on the Global tab (rig-cli#372) -------------------
+def test_build_model_global_only_shows_the_global_known_lists(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    model = cw.build_model(repo, global_only=True)
+    by_cat = {a.category: a for a in model.areas}
+    for cat in ("skills", "agent_hooks", "mcp"):
+        area = by_cat[cat]
+        assert [f.key for f in area.fields] == [f"{cat}.known"], cat  # ONLY the global option
+        assert area.fields[0].layer == GLOBAL
+        assert area.layer == GLOBAL  # the section badge matches the fields it shows here
+    assert "ci" not in by_cat  # ci.known is repo-layer
+    assert "harness" not in by_cat
+
+
+def test_build_model_repo_scope_tags_known_list_global_inside_repo_area(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_repo_config(repo, "version: 1\n")
+    model = cw.build_model(repo)
+    skills = next(a for a in model.areas if a.category == "skills")
+    assert skills.layer == REPO
+    fields = {f.key: f for f in skills.fields}
+    assert fields["skills.known"].layer == GLOBAL
+    assert fields["skills.enabled"].layer == REPO
+    assert "ci.known" in {f.key for a in model.areas for f in a.fields}
+
+
+def test_apply_edit_skills_known_writes_global_and_keeps_global_entry_known(tmp_path, fake_agent_tools):
+    """The ticket's failure: global skills.known=[swiftui-pro], an edit through the config-web must
+    NOT write a repo list (which would replace the global one and resurface swiftui-pro as drift)."""
+    from riglib.catalog import Catalog
+    from riglib.drift import detect
+    from riglib.plan import build
+
+    repo = tmp_path / "repo"
+    skills_out = tmp_path / "skills-out"
+    _editable_repo(
+        repo, fake_agent_tools,
+        f"defaults:\n  skills_target: {skills_out}\n  hooks_target: {tmp_path / 'hooks-out'}\n"
+        f"  ci_target: {repo / '.github/workflows'}\n  mcp_target: {tmp_path / 'mcp-out'}\n"
+        f"skills:\n  harness_skill_dir: {tmp_path / 'harness-skills'}\n",
+    )
+    gpath = cfg.global_config_path()
+    gpath.parent.mkdir(parents=True, exist_ok=True)
+    gpath.write_text("version: 1\nskills:\n  known: [swiftui-pro]\n", encoding="utf-8")
+
+    result = cw.apply_edit(repo, "skills.known", "swiftui-pro, my-pack")
+
+    assert result["layer"] == GLOBAL and result["file"] == str(gpath)
+    assert cfg.read_yaml_file(gpath)["skills"]["known"] == ["swiftui-pro", "my-pack"]
+    assert "known" not in cfg.read_yaml_file(repo / "rig.yaml").get("skills", {})
+    # end to end: the planted machine-wide skill is KNOWN for this repo, not extra drift
+    (skills_out / "swiftui-pro").mkdir(parents=True)
+    (skills_out / "swiftui-pro" / "SKILL.md").write_text("# swiftui-pro\n", encoding="utf-8")
+    plan = build(cfg.load(repo), Catalog.scan(str(fake_agent_tools)), project_type="unknown")
+    report = detect(plan)
+    assert "swiftui-pro" not in [i.item for i in report.by_direction("extra") if i.category == "skills"]
+    assert "swiftui-pro" in {k.name for k in report.known if k.category == "skills"}
+
+
+@pytest.mark.parametrize("key", ["skills.known", "agent_hooks.known", "mcp.known"])
+def test_apply_edit_every_machine_wide_known_list_writes_global(tmp_path, fake_agent_tools, key):
+    repo = tmp_path / "repo"
+    _editable_repo(repo, fake_agent_tools)
+    result = cw.apply_edit(repo, key, "foo, bar")
+    assert result["layer"] == GLOBAL
+    category, leaf = key.split(".", 1)
+    assert cfg.read_yaml_file(cfg.global_config_path())[category][leaf] == ["foo", "bar"]
+    assert leaf not in cfg.read_yaml_file(repo / "rig.yaml").get(category, {})
+
+
+def test_apply_edit_ci_known_stays_in_repo_file(tmp_path, fake_agent_tools):
+    repo = tmp_path / "repo"
+    _editable_repo(repo, fake_agent_tools)
+    result = cw.apply_edit(repo, "ci.known", "tests")
+    assert result["layer"] == REPO
+    assert cfg.read_yaml_file(repo / "rig.yaml")["ci"]["known"] == ["tests"]
+    assert not cfg.global_config_path().exists()
+
+
+def test_app_handle_edit_global_scope_routes_by_option_layer(tmp_path, fake_agent_tools, monkeypatch):
+    from riglib.config_web_scopes import GLOBAL_SCOPE_ID
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    repo = tmp_path / "repo"
+    _editable_repo(repo, fake_agent_tools)
+    app = cw.ConfigWebApp(repo_root=repo)
+    code, body = app.handle_edit({"key": "skills.known", "value": "swiftui-pro", "scope": GLOBAL_SCOPE_ID})
+    assert code == 200, body
+    assert body["layer"] == GLOBAL
+    assert cfg.read_yaml_file(cfg.global_config_path())["skills"]["known"] == ["swiftui-pro"]
+    assert "skills" not in cfg.read_yaml_file(repo / "rig.yaml")
+    # a repo-layer option in the SAME category is still refused on the Global tab
+    code, body = app.handle_edit({"key": "skills.enabled", "value": "false", "scope": GLOBAL_SCOPE_ID})
+    assert code == 400 and "repo-layer option" in body["error"]
+    code, body = app.handle_edit({"key": "ci.known", "value": "tests", "scope": GLOBAL_SCOPE_ID})
+    assert code == 400 and "repo-layer option" in body["error"]
+
+
+@pytest.mark.parametrize("key", ["skills.known", "agent_hooks.known", "mcp.known"])
+def test_app_handle_edit_repo_scope_routes_known_list_to_global(tmp_path, fake_agent_tools, key):
+    # the repo tab RENDERS the field (badged global) — editing it there must route to the global
+    # config, never 400 on a rendered field and never write the committed repo file.
+    repo = tmp_path / "repo"
+    _editable_repo(repo, fake_agent_tools)
+    app = cw.ConfigWebApp(repo_root=repo)
+    code, body = app.handle_edit({"key": key, "value": "foo", "scope": str(repo.resolve())})
+    assert code == 200, body
+    assert body["layer"] == GLOBAL and body["file"] == str(cfg.global_config_path())
+    category, leaf = key.split(".", 1)
+    assert cfg.read_yaml_file(cfg.global_config_path())[category][leaf] == ["foo"]
+    assert category not in cfg.read_yaml_file(repo / "rig.yaml")
+
+
+def test_global_tab_page_renders_the_mixed_areas_end_to_end(tmp_path, fake_agent_tools, monkeypatch):
+    # the FULL page + the tab-switch fragment through the real template with the now-MIXED areas
+    # (skills/agent_hooks/mcp carrying only their global .known field) — never a template error.
+    from riglib.config_web_scopes import GLOBAL_SCOPE_ID
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    repo = tmp_path / "repo"
+    _editable_repo(repo, fake_agent_tools)
+    app = cw.ConfigWebApp(repo_root=repo)
+    page = app.render_page(GLOBAL_SCOPE_ID).decode()
+    for key in ("skills.known", "agent_hooks.known", "mcp.known", "tg_ctl.enabled"):
+        assert f'data-key="{key}"' in page, key
+    for key in ("skills.enabled", "ci.known", "harness.auto_mode"):
+        assert f'data-key="{key}"' not in page, key
+    code, body = app.handle_scope_fragment(GLOBAL_SCOPE_ID)
+    assert code == 200, body
+    assert 'data-key="skills.known"' in body["html"] and 'data-key="skills.enabled"' not in body["html"]
+    # the repo tab still renders the whole skills area, the known field badged global
+    repo_page = app.render_page(str(repo.resolve())).decode()
+    assert 'data-key="skills.enabled"' in repo_page and 'data-key="skills.known"' in repo_page
+
+
+def test_repo_tab_flags_a_known_list_shadowed_by_a_repo_level_value(tmp_path):
+    # a hand-committed repo-level skills.known REPLACES the global list for this repo; the repo
+    # tab renders that repo value yet routes an edit to the global file — say so on the field,
+    # or the edit looks like a silent no-op (Codex P2 on PR #378).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_repo_config(repo, "version: 1\nskills:\n  known: [repo-pack]\n")
+    model = cw.build_model(repo)
+    fields = {f.key: f for a in model.areas for f in a.fields}
+    assert fields["skills.known"].shadowed_by == str(repo / "rig.yaml")
+    assert fields["skills.known"].value == ["repo-pack"]  # the effective (repo) value still shows
+    assert fields["agent_hooks.known"].shadowed_by is None  # no repo entry → no note
+    assert fields["skills.enabled"].shadowed_by is None  # a REPO option is never "shadowed"
+    page = cw.areas_fragment(model)
+    assert "shadowed" in page and "repo-pack" in page
+    # the Global tab reads the global layer alone — nothing shadows it there
+    gmodel = cw.build_model(repo, global_only=True)
+    gfields = {f.key: f for a in gmodel.areas for f in a.fields}
+    assert gfields["skills.known"].shadowed_by is None

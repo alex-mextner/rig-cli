@@ -142,7 +142,9 @@ def render_state(loaded_data: dict[str, Any], *, color: Callable[[str, str], str
             shown = _fmt_value(val)
             mark = _c("32", "on") if val is True else (_c("2", "off") if val is False else _c("36", shown))
             leaf = opt.key.split(".", 1)[1] if "." in opt.key else opt.key
-            lines.append(f"    {leaf:<28} {mark}")
+            # an option routed to a different layer than its area gets its own tag (Option.layer).
+            own_tag = "" if opt.layer == area.layer else f"  {_c('2', f'[{opt.layer}]')}"
+            lines.append(f"    {leaf:<28} {mark}{own_tag}")
             lines.append(f"      {_c('2', opt.hint)}")
         lines.append("")
     return "\n".join(lines)
@@ -221,6 +223,7 @@ def run_setup(
             out(f"  {opt.key}   (writes {opt.layer} → {path})")
             out(f"    {opt.hint}")
             out(f"    current: {_fmt_value(current)}")
+            _warn_if_shadowed(opt, repo_yaml, out)
             prompt = _value_prompt(opt)
             raw = input_fn(prompt).strip()
             if raw == "":
@@ -270,6 +273,24 @@ def run_setup(
     if pending_apply:
         out("  changes saved to config; run `rig apply commit` to converge.")
     return 0
+
+
+def _warn_if_shadowed(opt: schema.Option, repo_yaml: Path, out: Callable[[str], None]) -> None:
+    """Say so when the committed repo file ALSO sets a GLOBAL option's key.
+
+    A repo-level list REPLACES the global one for that repo, so the edit (routed to the global
+    file) would look like a silent no-op here — rig never deletes the repo entry itself.
+    """
+    from .config import ConfigError
+
+    if opt.layer != schema.GLOBAL:
+        return
+    try:
+        repo_value = schema.get_path(load_layer_config(repo_yaml), opt.key)
+    except (schema.KeyError_, ConfigError):
+        return
+    out(f"    note: {repo_yaml} also sets {opt.key} = {_fmt_value(repo_value)} — that repo value "
+        "shadows the global one for this repo; remove it by hand for this edit to take effect here.")
 
 
 def _validate_layer(data: dict[str, Any]) -> None:

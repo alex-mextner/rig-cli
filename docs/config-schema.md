@@ -193,7 +193,7 @@ skills:
 | `universal.disable` / `universal.enable` | list[str] | `[]` | deltas on `all` |
 | `by_type.enable` | list[str] | the detected project type | which `by-type/<kind>` bundles to install whole |
 | `by_type.items.<by-type/kind/name>.enabled` | bool | inherited | per-skill override |
-| `known` | list[str] | `[]` | skill dir names on disk that rig does NOT manage (hand-installed packs) — `rig status` reports them as known, not as drift. See [Provenance](#provenance). |
+| `known` | list[str] | `[]` | skill dir names on disk that rig does NOT manage (hand-installed packs) — `rig status` reports them as known, not as drift. GLOBAL-layer (the skills dir is machine-wide): the wizard / config-web / `config set --global` write it to `~/.config/rig/config.yaml`. See [Provenance](#provenance). |
 
 If `by_type.enable` is empty and the detected project type is known, that type's bundle is
 auto-pulled.
@@ -271,7 +271,7 @@ agent_hooks:
 
 | Block key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `known` | list[str] | `[]` | hook ids (or full descriptor stems) another installer wrote into the hooks dir — reported as known, not drift. See [Provenance](#provenance). |
+| `known` | list[str] | `[]` | hook ids (or full descriptor stems) another installer wrote into the hooks dir — reported as known, not drift. GLOBAL-layer (the hooks dir is machine-wide). See [Provenance](#provenance). |
 
 The install action always writes an **absolute** `cmd` (rewriting the
 `/ABSOLUTE/PATH/TO/...` placeholder to the script's real path in the agent-tools checkout),
@@ -405,7 +405,7 @@ existing differing entry unless `defaults.on_conflict: overwrite`.
 
 | Block key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `known` | list[str] | `[]` | MCP server names registered by something other than rig — reported as known, not drift. See [Provenance](#provenance). |
+| `known` | list[str] | `[]` | MCP server names registered by something other than rig — reported as known, not drift. GLOBAL-layer (the MCP config is machine-wide). See [Provenance](#provenance). |
 
 Compatibility: if `args` is omitted, rig keeps the legacy behavior and parses `command` as a
 shell-like string, so `node server.js --foo` becomes `{"command":"node","args":["server.js","--foo"]}`.
@@ -460,10 +460,23 @@ hand-mangled permission container still exits with the drift code.
 ### Where a `known` list lives
 
 The `<category>.known` lists cascade like every other list in the config: a repo `rig.yaml` list
-**replaces** the global one (it is not merged). So keep the list for a machine-wide location —
-`skills.known`, `agent_hooks.known` — in the global `~/.config/rig/config.yaml`; a repo-level
-`skills.known` would drop the global entries for that repo and resurface them as drift. `ci.known`
-names files in the repo's own `.github/workflows`, so it belongs in that repo's `rig.yaml`.
+**replaces** the global one (it is not merged). So the list for a machine-wide location —
+`skills.known`, `agent_hooks.known`, `mcp.known` — lives in the global `~/.config/rig/config.yaml`;
+a repo-level `skills.known` would drop the global entries for that repo and resurface them as
+drift. `ci.known` names files in the repo's own `.github/workflows`, so it belongs in that repo's
+`rig.yaml`.
+
+Every editing surface routes these three by that rule (rig-cli#372): the option registry
+(`riglib/schema.py`) marks them GLOBAL-layer inside their otherwise repo-writable areas, so
+`rig setup` and the config-web write them to the global config (the config-web Global tab shows
+exactly these three under skills / agent-hooks / MCP), and `rig config set skills.known …` without
+`--global` is refused the same way a global-only block is. A list that is ALREADY committed in a
+repo `rig.yaml` keeps shadowing the global one until you remove it from the repo file by hand —
+rig never migrates or deletes config. That replace-semantics is also the escape hatch for a repo
+whose target is NOT the machine-wide default (a repo-local `mcp.target: .agent/mcp.json`, say):
+commit a repo-level `mcp.known` by hand in that repo's `rig.yaml`, and the global list no longer
+applies there — so a server the global list vouches for is still drift in that repo unless the
+repo list names it too.
 
 A marker is a claim, not a grant: it changes what `rig status` prints **and its exit code** (a
 marker-bearing item is no longer drift, so a rogue skill that writes its own `.installed-by` is

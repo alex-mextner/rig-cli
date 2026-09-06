@@ -186,6 +186,11 @@ class FieldView:
     hint: str
     choices: tuple[str, ...]
     layer: str  # GLOBAL / REPO — the file an edit to THIS field is written to
+    # The repo file that ALSO sets this GLOBAL option's key on a repo tab (``None`` otherwise).
+    # A hand-committed repo-level list REPLACES the global one for that repo, so the field shows
+    # the repo value while an edit lands in the global file — the page says so instead of letting
+    # the edit look like a silent no-op (rig never deletes the repo entry itself).
+    shadowed_by: str | None = None
 
     @property
     def layer_file(self) -> str:
@@ -228,53 +233,38 @@ def build_model(repo_root: Path, *, global_only: bool = False) -> ConfigModel:
 
     ``global_only=True`` is the Global scope tab (rig-cli#310): loads ``~/.config/rig/config.yaml``
     ALONE via ``cfg.load(repo_root, include_repo=False)`` — no repo overlay — and renders only the
-    areas whose WRITABLE layer is GLOBAL (:attr:`~riglib.schema.Area.layer`, i.e.
-    ``schema.writable_layer_for_category`` — the machine-wide-only categories the scaffold never
-    writes into a committed repo file: gitignore/spotlight/tg_ctl/tmux/mode). ``repo_root`` is
-    still required as the loader's anchor even though its repo layer is skipped.
+    OPTIONS whose WRITABLE layer is GLOBAL (:attr:`~riglib.schema.Option.layer`): the
+    machine-wide-only categories the scaffold never writes into a committed repo file
+    (gitignore/spotlight/tg_ctl/tmux/mode) plus the per-option GLOBAL overrides inside
+    repo-writable areas (``skills.known`` / ``agent_hooks.known`` / ``mcp.known``, rig-cli#372 —
+    see :func:`_area_view`). ``repo_root`` is still required as the loader's anchor even though
+    its repo layer is skipped. NOTE: the Global tab's PLAN and DRIFT panel stay restricted to the
+    global-only CATEGORIES (:func:`riglib.config_web_plan.build_scope_plan` /
+    ``compute_scope_drift``) — a known-list edit changes what is *known*, not what is applied,
+    and widening the drift scan to the skills/hooks/MCP dirs would flood that tab with every
+    REPO-tab-installed item (the very reason the restriction exists). The provenance effect of
+    the edit is visible on each REPO tab's drift panel, where those dirs are scanned.
 
-    KNOWN, PRE-EXISTING design tension (flagged in review, not new here): this VIEW model uses
-    the WRITABLE layer (narrow — only gitignore/spotlight/tg_ctl/tmux/mode), while
-    :func:`riglib.config_web_plan.build_scope_plan`'s Global-scope PLAN filter uses the broader
-    STATUS layer (:func:`riglib.layers.layer_for_category`, which also counts skills/agent_hooks/
-    harness/permissions/models/git_hooks/env/tools as GLOBAL — they're machine-wide ARTIFACTS
-    even though the scaffold writes their VALUE into the committed repo file). So a repo's
-    ``harness.auto_mode`` can appear as an ``apply_harness`` action in the Global tab's plan/apply
-    without a matching field in the Global tab's VIEW to edit it from. This is the SAME
-    distinction ``riglib/schema.py`` already documents and ``rig status`` already exhibits for a
-    non-git cwd (it shows global-artifact drift there too, with no repo layer to edit from either)
-    — config-web inherits it rather than introduces it. Not resolved here: reconciling the two
-    layer classifications into one is a real design decision (which is more surprising: hiding
-    settings the Global tab CAN reconcile, or offering to reconcile settings it can't show?), left
-    for a follow-up rather than decided unilaterally in this pass.
+    The Global tab's VIEW, PLAN and DRIFT all use the WRITABLE-layer classification (never the
+    broader STATUS layer of :func:`riglib.layers.layer_for_category`): the view filters by
+    ``Option.layer``, the plan/drift by :func:`riglib.schema.global_only_categories` — see
+    :func:`riglib.config_web_plan.build_scope_plan` for why plan == view is load-bearing there.
     """
     loaded = cfg.load(repo_root, include_repo=not global_only)
-    merged = loaded.data
-    areas: list[AreaView] = []
-    for area in schema.AREAS:
-        if global_only and area.layer != GLOBAL:
-            continue
-        fields = tuple(
-            FieldView(
-                key=opt.key,
-                kind=opt.kind,
-                value=schema.effective_value(opt, merged),
-                default=opt.default,
-                hint=opt.hint,
-                choices=opt.choices,
-                layer=opt.layer,
-            )
-            for opt in area.options
-        )
-        areas.append(
-            AreaView(
-                category=area.category,
-                title=area.title,
-                blurb=area.blurb,
-                layer=area.layer,
-                fields=fields,
+    repo_path = cfg.repo_config_path(repo_root)
+    # the repo layer ALONE (already parsed successfully by cfg.load above), to flag a GLOBAL
+    # option whose key the committed repo file also sets — see FieldView.shadowed_by.
+    repo_layer = cfg.read_yaml_file(repo_path) if not global_only and repo_path.is_file() else {}
+    areas = [
+        view
+        for area in schema.AREAS
+        if (
+            view := _area_view(
+                area, loaded.data, global_only=global_only, repo_layer=repo_layer, repo_path=repo_path
             )
         )
+        is not None
+    ]
     return ConfigModel(
         areas=tuple(areas),
         repo_root=repo_root,
@@ -284,6 +274,59 @@ def build_model(repo_root: Path, *, global_only: bool = False) -> ConfigModel:
         repo_present=cfg.repo_config_path(repo_root).is_file(),
         global_only=global_only,
     )
+
+
+def _area_view(
+    area: schema.Area,
+    merged: dict[str, Any],
+    *,
+    global_only: bool,
+    repo_layer: dict[str, Any],
+    repo_path: Path,
+) -> AreaView | None:
+    """Project one registry area for the page; ``None`` when it has nothing to show on this tab.
+
+    Filters by each OPTION's writable layer, not the area's (an area can be MIXED — see
+    :meth:`riglib.schema.Area.options_for_layer`). On the Global tab only the GLOBAL options
+    render and the section badge says GLOBAL (matching the fields under it); a repo tab renders
+    every option, each field carrying its own layer badge.
+    """
+    options = area.options_for_layer(GLOBAL) if global_only else area.options
+    if not options:
+        return None
+    fields = tuple(
+        FieldView(
+            key=opt.key,
+            kind=opt.kind,
+            value=schema.effective_value(opt, merged),
+            default=opt.default,
+            hint=opt.hint,
+            choices=opt.choices,
+            layer=opt.layer,
+            shadowed_by=_shadowing_repo_file(opt, repo_layer, repo_path),
+        )
+        for opt in options
+    )
+    return AreaView(
+        category=area.category,
+        title=area.title,
+        blurb=area.blurb,
+        layer=GLOBAL if global_only else area.layer,
+        fields=fields,
+    )
+
+
+def _shadowing_repo_file(
+    option: schema.Option, repo_layer: dict[str, Any], repo_path: Path
+) -> str | None:
+    """``repo_path`` when the committed repo file ALSO sets a GLOBAL option's key (else ``None``)."""
+    if option.layer != GLOBAL or not repo_layer:
+        return None
+    try:
+        schema.get_path(repo_layer, option.key)
+    except schema.KeyError_:
+        return None
+    return str(repo_path)
 
 
 # ── the edit write (routed to the owning layer, fail-closed) ────────────────────────────────
@@ -552,12 +595,21 @@ def _field_row(f: FieldView) -> str:
     default_note = (
         "" if is_default else f' · default <code>{html.escape(_fmt_value(f.default))}</code>'
     )
+    shadow_note = (
+        f'<div class="hint shadow">shadowed: <code>{html.escape(f.shadowed_by)}</code> also sets '
+        f'this key (<code>{html.escape(_fmt_value(f.value))}</code>), and a repo value REPLACES '
+        'the global one for this repo — an edit here lands in the global file and takes effect '
+        'here only once that repo entry is removed by hand.</div>'
+        if f.shadowed_by
+        else ""
+    )
     return (
         '<div class="field">'
         f'<div class="field-head"><code class="key">{html.escape(f.key)}</code>'
         f'{_layer_badge(f.layer)}'
         f'<span class="ctl">{_field_control(f)}</span></div>'
         f'<div class="hint">{html.escape(f.hint)}{default_note}</div>'
+        f'{shadow_note}'
         '</div>'
     )
 

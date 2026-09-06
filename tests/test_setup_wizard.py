@@ -594,3 +594,118 @@ def test_load_layer_config_empty_file_is_empty_layer(tmp_path):
     p.write_text("", encoding="utf-8")
     assert setup_wizard.load_layer_config(p) == {}
     assert setup_wizard.load_layer_config(tmp_path / "absent.yaml") == {}  # absent → {}
+
+
+# ── per-option layer override: the machine-wide known-lists route GLOBAL (rig-cli#372) ─────
+def test_known_lists_route_global_except_ci():
+    # skills/agent_hooks/mcp dirs are machine-wide: their `.known` list must NEVER be written into
+    # a committed repo rig.yaml (the list cascade REPLACES the global one, hiding it as drift).
+    for key in ("skills.known", "agent_hooks.known", "mcp.known"):
+        opt = schema.option_for_key(key)
+        assert opt is not None, key
+        assert opt.layer == schema.GLOBAL, key
+        # the AREA (category) stays REPO-writable — only this one option is overridden.
+        assert schema.area_for_category(opt.category).layer == schema.REPO
+        assert schema.writable_layer_for_category(opt.category) == schema.REPO
+    # ci.known names files in the repo's own .github/workflows — it stays in the repo file.
+    assert schema.option_for_key("ci.known").layer == schema.REPO
+
+
+def test_option_layer_override_must_be_a_known_layer():
+    with pytest.raises(ValueError, match="layer"):
+        schema.Option(key="skills.x", category="skills", kind=schema.KIND_STR, default=None,
+                      hint="h", layer_override="nope")
+
+
+def test_area_options_for_layer_splits_mixed_area():
+    skills = schema.area_for_category("skills")
+    assert [o.key for o in skills.options_for_layer(schema.GLOBAL)] == ["skills.known"]
+    assert "skills.known" not in [o.key for o in skills.options_for_layer(schema.REPO)]
+    assert skills.options_for_layer(schema.REPO)  # the rest of the area is still repo-writable
+
+
+def test_render_state_tags_an_option_whose_layer_differs_from_its_area():
+    rendered = setup_wizard.render_state({})
+    known_line = next(line for line in rendered.splitlines() if line.strip().startswith("known") and "GLOBAL" in line)
+    assert "[GLOBAL]" in known_line
+    # a plain repo option in a repo area carries no per-option tag (the area tag covers it)
+    enabled_line = next(line for line in rendered.splitlines() if line.strip().startswith("enabled"))
+    assert "[REPO]" not in enabled_line and "[GLOBAL]" not in enabled_line
+
+
+def test_wizard_edits_skills_known_into_global_config_never_repo(tmp_path, monkeypatch):
+    """A global `skills.known` entry + a wizard edit of skills.known must write the GLOBAL file
+    only, so the globally declared skill stays known for this repo (rig-cli#372)."""
+    import yaml
+
+    from riglib.provenance import known_names_from_config
+
+    repo = _make_repo(tmp_path)
+    gdir = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
+    gpath = gdir / "rig" / "config.yaml"
+    gpath.parent.mkdir(parents=True)
+    gpath.write_text("version: 1\nskills:\n  known: [swiftui-pro]\n", encoding="utf-8")
+    answers = iter([_index_of("skills.known"), "swiftui-pro, my-pack", "q", "n"])
+    setup_wizard.run_setup(
+        repo, apply_fn=lambda _root: 0, input_fn=lambda _prompt: next(answers), out=lambda _s: None
+    )
+    assert yaml.safe_load(gpath.read_text())["skills"]["known"] == ["swiftui-pro", "my-pack"]
+    repo_data = yaml.safe_load((repo / "rig.yaml").read_text())
+    assert "known" not in repo_data.get("skills", {})
+    # the cascade seen by THIS repo still carries the global entry — never re-surfaced as drift
+    assert known_names_from_config(config.load(repo))["skills"] == {"swiftui-pro", "my-pack"}
+
+
+def test_wizard_edits_ci_known_into_repo_config(tmp_path, monkeypatch):
+    import yaml
+
+    repo = _make_repo(tmp_path)
+    gdir = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
+    answers = iter([_index_of("ci.known"), "tests", "q", "n"])
+    setup_wizard.run_setup(
+        repo, apply_fn=lambda _root: 0, input_fn=lambda _prompt: next(answers), out=lambda _s: None
+    )
+    assert yaml.safe_load((repo / "rig.yaml").read_text())["ci"]["known"] == ["tests"]
+    assert not (gdir / "rig" / "config.yaml").exists()
+
+
+def test_hand_committed_repo_known_list_replaces_global_for_that_repo(tmp_path, monkeypatch):
+    """The escape hatch for a repo with its own repo-local mcp.target: a repo-level mcp.known
+    committed by hand REPLACES the global list for that repo (the documented cascade), so a server
+    the global list vouches for is not silently known there — the editors never write it, but the
+    loader still honours it."""
+    from riglib.provenance import known_names_from_config
+
+    gdir = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
+    gpath = gdir / "rig" / "config.yaml"
+    gpath.parent.mkdir(parents=True)
+    gpath.write_text("version: 1\nmcp:\n  known: [foo]\n", encoding="utf-8")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    repo_a = _make_repo(tmp_path / "a")
+    repo_b = _make_repo(tmp_path / "b")
+    (repo_b / "rig.yaml").write_text(
+        "version: 1\nmcp:\n  target: .agent/mcp.json\n  known: [bar]\n", encoding="utf-8"
+    )
+    assert known_names_from_config(config.load(repo_a))["mcp"] == {"foo"}
+    assert known_names_from_config(config.load(repo_b))["mcp"] == {"bar"}  # foo is NOT known in b
+
+
+def test_wizard_warns_when_a_repo_level_list_shadows_the_global_known_list(tmp_path, monkeypatch):
+    import yaml
+
+    repo = _make_repo(tmp_path)
+    (repo / "rig.yaml").write_text("version: 1\nskills:\n  known: [repo-pack]\n", encoding="utf-8")
+    gdir = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(gdir))
+    lines: list[str] = []
+    answers = iter([_index_of("skills.known"), "swiftui-pro", "q", "n"])
+    setup_wizard.run_setup(repo, apply_fn=lambda _root: 0, input_fn=lambda _p: next(answers), out=lines.append)
+    joined = "\n".join(lines)
+    assert "shadow" in joined and "rig.yaml" in joined and "repo-pack" in joined
+    # still routed GLOBAL; the repo file is never touched
+    assert yaml.safe_load((gdir / "rig" / "config.yaml").read_text())["skills"]["known"] == ["swiftui-pro"]
+    assert yaml.safe_load((repo / "rig.yaml").read_text())["skills"]["known"] == ["repo-pack"]
