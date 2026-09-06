@@ -997,24 +997,125 @@ def test_process_cwd_does_not_truncate_a_path_containing_a_unicode_line_separato
     assert result == Path(weird_path)
 
 
-# ── liveness snapshot fails CLOSED (untrusted) on a partial lsof failure ────────────
-def test_live_process_cwds_fails_closed_when_a_matched_pid_cwd_is_unknown(monkeypatch):
-    """Review finding: if `pgrep` matches a pid but `lsof` can't determine ITS cwd (permission,
-    timeout, or a transient failure — indistinguishable from a process that just exited), the
-    WHOLE snapshot must become untrusted (`None`), not silently drop that one pid and report a
-    partial (and therefore falsely "confirmed empty") result."""
+# ── liveness snapshot: a pid that EXITED mid-scan is "not live"; a live pid lsof can't read
+# still fails CLOSED (GH-353) ────────────────────────────────────────────────────────────
+def _fake_kill_probe(monkeypatch, alive: dict[str, bool]) -> list[str]:
+    """Monkeypatch `os.kill` as a SIGNAL-0 probe only: records every probed pid, raises
+    `ProcessLookupError` for pids `alive` maps to False. Asserts `sig == 0` — a fake accepting
+    any signal would let a regression that actually SIGNALS an agent process pass unnoticed."""
+    probed: list[str] = []
+
+    def fake_kill(pid, sig):
+        assert sig == 0, f"liveness probe must send signal 0, not {sig}"
+        probed.append(str(pid))
+        if not alive[str(pid)]:
+            raise ProcessLookupError(f"pid {pid} is gone")
+
+    monkeypatch.setattr(worktree_gc.os, "kill", fake_kill)
+    return probed
+
+
+def test_live_process_cwds_skips_a_pid_that_exited_between_pgrep_and_lsof(tmp_path, monkeypatch, capsys):
+    """GH-353: a pid matched by `pgrep` whose `lsof` lookup then fails BECAUSE THE PROCESS EXITED
+    in between is, by definition, not live — it must be skipped (`continue`), NOT poison the whole
+    snapshot to "untrusted → every worktree is live". Observed live: a dry run over ~/xp reported 4
+    removable entries while a pass minutes later reported 8 — the difference was exactly the repos
+    a since-exited agent pid had been marked "live" for. Two pids, so the test proves the loop
+    CONTINUES past the dead one and still records the live one (a single-pid case can't tell
+    "skipped" from "returned early with only the own cwd")."""
+    real_run = subprocess.run
+    live_cwd = tmp_path / "live-agent-wt"
+    live_cwd.mkdir()
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[0] == "pgrep":
+            return subprocess.CompletedProcess(cmd, 0, stdout="123\n456\n", stderr="")
+        if cmd[0] == "lsof":
+            pid = cmd[cmd.index("-p") + 1]
+            if pid == "123":  # exited between pgrep and lsof
+                return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"")
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"p456\nn{live_cwd}\n".encode(), stderr=b"")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    probed = _fake_kill_probe(monkeypatch, {"123": False})
+
+    result = worktree_gc._live_process_cwds()
+
+    assert result is not None, "a vanished pid must not degrade the snapshot to untrusted"
+    assert live_cwd.resolve() in result, "the loop must continue past the dead pid to the live one"
+    assert len(result) == 2  # own cwd + the live agent's cwd; nothing recorded for pid 123
+    assert probed == ["123"], "only the pid whose lsof failed is probed; a resolved cwd needs none"
+    assert "worktree-gc: warning" not in capsys.readouterr().err
+
+
+def test_live_process_cwds_fails_closed_when_a_live_pid_cwd_is_unknown(monkeypatch, capsys):
+    """The fail-safe direction is KEPT for genuine uncertainty: `pgrep` matched a pid, `lsof`
+    failed for it, and the signal-0 probe says the process is STILL RUNNING (permission problem,
+    lsof timeout, a transient failure). A real agent may be sitting in a worktree we can't see —
+    the WHOLE snapshot becomes untrusted (`None`) and the degradation is reported on stderr, not
+    silently dropped as a partial (falsely "confirmed empty") result."""
     real_run = subprocess.run
 
     def fake_run(cmd, *args, **kwargs):
         if cmd[0] == "pgrep":
             return subprocess.CompletedProcess(cmd, 0, stdout="123\n", stderr="")
         if cmd[0] == "lsof":
-            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")  # lsof failed for pid 123
+            return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"")  # lsof failed for pid 123
         return real_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    probed = _fake_kill_probe(monkeypatch, {"123": True})
 
     assert worktree_gc._live_process_cwds() is None
+    assert probed == ["123"]
+    err = capsys.readouterr().err
+    assert "worktree-gc: warning" in err
+    assert "123" in err and "still running" in err
+
+
+def test_live_process_cwds_fails_closed_when_lsof_is_missing_for_a_live_pid(monkeypatch, capsys):
+    """`lsof` not installed at all (`OSError` out of `subprocess.run`) for a pid that IS alive:
+    nothing about that pid's cwd is knowable, so the snapshot must still degrade to untrusted —
+    the probe only downgrades a failure when the pid itself is gone."""
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[0] == "pgrep":
+            return subprocess.CompletedProcess(cmd, 0, stdout="123\n", stderr="")
+        if cmd[0] == "lsof":
+            raise FileNotFoundError("lsof: command not found")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _fake_kill_probe(monkeypatch, {"123": True})
+
+    assert worktree_gc._live_process_cwds() is None
+    assert "worktree-gc: warning" in capsys.readouterr().err
+
+
+def test_live_process_cwds_probe_permission_error_still_fails_closed(monkeypatch, capsys):
+    """`os.kill(pid, 0)` raising `PermissionError` means the process EXISTS (we just may not
+    signal it) — that is the "alive, cwd unknown" case, never "vanished". Only `ProcessLookupError`
+    (ESRCH) downgrades an lsof failure to "not live"."""
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[0] == "pgrep":
+            return subprocess.CompletedProcess(cmd, 0, stdout="123\n", stderr="")
+        if cmd[0] == "lsof":
+            return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"")
+        return real_run(cmd, *args, **kwargs)
+
+    def fake_kill(pid, sig):
+        assert sig == 0
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(worktree_gc.os, "kill", fake_kill)
+
+    assert worktree_gc._live_process_cwds() is None
+    assert "worktree-gc: warning" in capsys.readouterr().err
 
 
 def test_live_process_cwds_untrusted_snapshot_warns_on_stderr(monkeypatch, capsys):

@@ -395,8 +395,8 @@ def _process_cwd(pid: str) -> Path | None:
     """``lsof`` output is captured as RAW BYTES (not ``text=True``) — a process cwd'd in a
     directory whose name isn't valid UTF-8 would otherwise raise an uncaught
     ``UnicodeDecodeError`` out of ``subprocess.run`` itself, crashing `rig worktree gc` entirely
-    instead of just failing this one pid's lookup (its caller already treats that as "couldn't
-    determine" and fails safe).
+    instead of just failing this one pid's lookup (its caller then probes whether the pid is even
+    still alive — see :func:`_pid_vanished` — and fails safe only when it is).
 
     Decoded with ``surrogateescape``, NOT :func:`_decode`'s ``replace`` — deliberately, and load-
     bearing: this path gets compared (via ``relative_to`` in :func:`_liveness_check_from_snapshot`)
@@ -442,13 +442,19 @@ def _live_process_cwds() -> list[Path] | None:
     anywhere near them. Scoping to the caller's own uid loses nothing: `lsof` can't read another
     user's cwd anyway, so a foreign match could never have contributed a real answer.
 
-    A matched pid whose ``lsof`` lookup fails poisons the WHOLE snapshot to ``None`` rather than
-    being silently dropped — a process that exited between ``pgrep`` and ``lsof`` looks identical
-    to ``lsof`` itself being unavailable/denied/timing out for that one pid, and only the former is
-    safe to treat as "not relevant". Silently dropping it (the earlier, review-caught version of
-    this function) could make a real live agent's cwd vanish from the snapshot while `pgrep` still
-    proves an agent process exists — exactly the "confirmed not live" false negative this whole
-    liveness check exists to prevent, in exchange for occasionally over-protecting one worktree.
+    A matched pid whose ``lsof`` lookup fails is disambiguated with a signal-0 probe
+    (:func:`_pid_vanished`): if the process EXITED between ``pgrep`` and ``lsof`` it is, by
+    definition, not live — it is skipped and the scan continues (GH-353: before this probe, a
+    pid that exited mid-scan poisoned the whole snapshot, and a dry run over ~/xp on a busy machine
+    under-reported the removable set by exactly the repos a since-dead pid had marked "live").
+    Any OTHER failure for a pid that is still running — ``lsof`` unavailable, denied, timing out —
+    still poisons the WHOLE snapshot to ``None`` rather than being silently dropped: a real live
+    agent's cwd vanishing from the snapshot while ``pgrep`` proves the process exists is exactly
+    the "confirmed not live" false negative this check exists to prevent, worth occasionally
+    over-protecting every worktree for one run. Two residual cases resolve in that same safe
+    direction and need no handling: the pid-reuse race (the pid dies AND an unrelated process
+    takes the number before the probe) and an exited-but-unreaped zombie (signal 0 still succeeds
+    on a zombie) — both read as "alive" → untrusted → over-protect, never as "not live".
 
     A ``None`` return is reported LOUDLY (stderr) here, once per degraded snapshot, rather than
     silently — every worktree is about to be classified `live` with a reason that CLAIMS a running
@@ -487,9 +493,28 @@ def _live_process_cwds() -> list[Path] | None:
     for pid in (p for p in pgrep.stdout.split() if p.isdigit()):
         cwd = _process_cwd(pid)
         if cwd is None:
-            return _report_liveness_snapshot_untrusted(f"could not determine cwd of matched pid {pid}")
+            if _pid_vanished(pid):
+                continue  # exited between pgrep and lsof — by definition not live (GH-353)
+            return _report_liveness_snapshot_untrusted(
+                f"matched pid {pid} is still running but its cwd could not be determined"
+            )
         cwds.append(cwd.resolve())
     return cwds
+
+
+def _pid_vanished(pid: str) -> bool:
+    """True only when ``pid`` provably no longer exists (``os.kill(pid, 0)`` → ``ProcessLookupError``,
+    i.e. ESRCH). Signal 0 delivers nothing — it is the POSIX existence probe. Every other outcome
+    (the probe succeeds; ``PermissionError``/EPERM, which means the process exists but isn't ours
+    to signal; any other ``OSError``) is "still alive as far as we can tell" → ``False``, so the
+    caller keeps failing SAFE toward "live". Only the vanished case is downgraded."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _report_liveness_snapshot_untrusted(reason: str) -> None:
