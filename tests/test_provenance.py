@@ -724,3 +724,18 @@ def test_config_web_drift_payload_lists_known_items_and_stays_in_sync(fake_agent
     assert drift["in_sync"] is True
     assert [k["name"] for k in drift["known"]] == ["tg"]
     assert drift["known"][0]["kind"] == KIND_ECOSYSTEM
+
+
+def test_known_lists_are_editable_options_in_the_registry():
+    """`rig status` tells the user to declare an item under `<category>.known`; that remedy must
+    be reachable through the supported editing surfaces (`rig setup`, `rig config set`, config-web's
+    apply_edit), which all go through the option registry (found in review, PR #369)."""
+    from riglib import schema
+    from riglib.provenance import KNOWN_CATEGORIES
+
+    for category in KNOWN_CATEGORIES:
+        option = schema.option_for_key(f"{category}.known")
+        assert option is not None, f"{category}.known missing from riglib/schema.py"
+        assert option.kind == schema.KIND_LIST and option.default == []
+        assert schema.coerce(option, "swiftui-pro, ios-testing") == ["swiftui-pro", "ios-testing"]
+        assert schema.coerce(option, "") == []
