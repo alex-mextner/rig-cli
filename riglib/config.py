@@ -1591,6 +1591,12 @@ OPENCODE_HOOK_BRIDGE_EXCLUDE_COMMENT = (
 )
 OPENCODE_HOOK_BRIDGE_PLUGIN_NAME = "zz-agent-tools-hook-bridge.js"
 
+# rig provisions the omp hook bridge as a user-level symlink (or, with a custom hooks_dir,
+# a small wrapper) into omp's auto-discovered ``extensions/`` dir — parallel to the opencode
+# plugin above, but ``.ts`` (omp natively loads TypeScript extension modules, and this name
+# keeps the same "zz-" late-load convention the guard extension and the opencode plugin use).
+OMP_HOOK_BRIDGE_EXTENSION_NAME = "zz-agent-tools-hook-bridge.ts"
+
 
 # ── agent worktree convention (`rig worktree create`) ───────────────────────────────
 # rig standardizes WHERE a new agent/harness worktree lands: ``<repo>/.worktrees/<name>`` — a

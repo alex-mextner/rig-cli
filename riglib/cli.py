@@ -786,7 +786,11 @@ _NOTE_ATTENTION_MARKERS = (
     "not wired",
     "no allowlist to provision",
     "no rig auto",  # "has no rig auto/permission-mode writer yet"
-    "no supported agents-hooks bridge",
+    # NOTE: no dedicated entry for riglib.plan.HOOK_BRIDGE_NO_SUPPORT_PHRASE — its note text is
+    # always prefixed "hook_bridge: skipped", which the "skipped" marker above already matches.
+    # A second, re-typed substring of that constant here would be exactly the desync risk this
+    # module's own docstring warns about (a wording tweak in plan.py silently stops matching);
+    # not duplicating the phrase is the fix, not importing plan.py into this stdlib-only module.
 )
 
 
@@ -820,6 +824,26 @@ def _print_notes(notes: list[str], *, expand: bool = False) -> None:
         if m:
             parts.append(f"{m} need attention")
         print(_dim(f"  notes: {', '.join(parts)} — --notes to expand"))
+
+
+def _print_hook_bridge_coverage_gaps(plan) -> None:
+    """`rig status` call-out for a harness kind with ZERO agents-hooks bridge coverage.
+
+    ``rig apply`` builds this note unconditionally now (rig-cli#342's silent-skip fix): every
+    configured/default harness kind with no known bridge surface (currently pi/commandcode) gets
+    a "hook_bridge: skipped — kind '<kind>' has no supported agents-hooks bridge yet" plan note
+    on EVERY build, not only when the user explicitly opted in with ``hook_bridge.enabled:
+    true``. Without this, that note was only ever visible via ``rig apply``/``rig apply info`` —
+    ``rig status`` is the surface the acceptance criterion actually names, so it must say it too.
+    """
+    from .plan import HOOK_BRIDGE_NO_SUPPORT_PHRASE
+
+    gaps = [n for n in plan.notes if HOOK_BRIDGE_NO_SUPPORT_PHRASE in n]
+    if not gaps:
+        return
+    print()
+    for note in gaps:
+        print(f"  {_warn('⚠')} {note}")
 
 
 def _print_plan(
@@ -1844,6 +1868,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     # is already in the report from detect(). Printed FIRST so it is the headline, with the richer
     # per-area detail lines (schedule cron time, tg-ctl launchd label) following it.
     _render_area_summary(effective_plan, report, env, extra_configured_actions=dropped_ship_delegator)
+
+    # A harness kind with zero agents-hooks bridge coverage (currently pi/commandcode) has NO
+    # register_hook_bridge action at all, so the area summary line above can only say
+    # "not configured" — indistinguishable from a harness block the user simply never touched.
+    # `rig apply commit`/`rig apply info` already surface the underlying
+    # "hook_bridge: skipped — kind '<kind>' has no supported agents-hooks bridge yet" plan note
+    # (unconditionally, since rig-cli#342); `rig status` must say it too — the acceptance
+    # criterion is this exact surface, not just the apply preview. Only the coverage-gap notes
+    # print here (never every informational note): this is a targeted call-out, not `_print_notes`.
+    _print_hook_bridge_coverage_gaps(effective_plan)
 
     # richer detail for two GLOBAL areas the summary counts but can't fully describe: the
     # model-freshness schedule (the daily cron time) and the tg-ctl inbound daemon (its launchd

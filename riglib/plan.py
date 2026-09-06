@@ -26,6 +26,7 @@ from .config import (
     GITIGNORE_DEFAULT_ENTRIES,
     GITIGNORE_DEFAULT_EXCLUDESFILE,
     LoadedConfig,
+    OMP_HOOK_BRIDGE_EXTENSION_NAME,
     OPENCODE_HOOK_BRIDGE_PLUGIN_NAME,
 )
 from .github_actions import GITHUB_ACTIONS_DEFAULTS
@@ -37,6 +38,7 @@ from .harness_skills import HARNESS_SKILL_DIRS as _HARNESS_SKILL_DIRS
 from .harness_skills import codex_user_path as _codex_user_path
 from .harness_skills import instruction_file_for as _instruction_file_for
 from .harness_skills import native_skills_dir_for as _native_skills_dir_for
+from .harness_skills import omp_user_path as _omp_user_path
 from .harness_skills import skill_dir_for as _skill_dir_for
 from .paths import expand_user_path as _expand_user_path
 from . import project_tools
@@ -62,6 +64,11 @@ _HARNESS_AGENT_HOOK_TARGETS = {
     "claude-code": "~/.claude/hooks",
     "codex": "~/.codex/hooks",
     "opencode": "~/.config/opencode/hooks",
+    # omp deliberately has NO entry here: unlike codex (whose literal baseline below is a real,
+    # separate consumer — the RIG_CODEX_HOME divergence check), omp has no divergence-detection
+    # block that reads a static baseline, so a dict entry would be a second, unenforced source
+    # of truth that could silently drift from omp_user_path("hooks")'s own resolution. The
+    # dynamic special-case in _agent_hooks_target_for_kind below is the ONLY source.
 }
 _DEFAULTS_KEY = {
     "skills": "skills_target",
@@ -87,11 +94,21 @@ _DEFAULTS_KEY = {
 _DEFAULT_HARNESS_KIND = "claude-code"
 _AUTONOMOUS_DEFAULT_ALLOW_RULES = ("Bash(dev:*)", "Bash(review:*)", "Bash(task:*)")
 
+# The exact substring `rig apply`'s note-attention classifier (riglib.cli._NOTE_ATTENTION_MARKERS)
+# and `rig status`'s dedicated coverage-gap call-out (riglib.cli._print_hook_bridge_coverage_gaps)
+# both match against — ONE literal, so a future wording tweak here can't silently desync the two
+# consumers (they'd import this constant instead of re-typing the phrase).
+HOOK_BRIDGE_NO_SUPPORT_PHRASE = "has no supported agents-hooks bridge yet"
+
 
 def _agent_hooks_target_for_kind(kind: str) -> str | None:
     """The unexpanded descriptor dir for a harness kind."""
     if kind == "codex":
         return _codex_user_path("hooks")
+    if kind == "omp":
+        # dynamic like codex: honors PI_CODING_AGENT_DIR (full override) / PI_CONFIG_DIR
+        # (renames the .omp config-root dirname) via the one omp_agent_root() resolver.
+        return _omp_user_path("hooks")
     return _HARNESS_AGENT_HOOK_TARGETS.get(kind)
 
 
@@ -1446,6 +1463,11 @@ _HOOK_BRIDGE_HARNESSES = {
         "settings": f".opencode/plugins/{OPENCODE_HOOK_BRIDGE_PLUGIN_NAME}",
         "format": "opencode-plugin",
     },
+    "omp": {
+        "module": "omp_hook_bridge",
+        "settings": f"~/.omp/agent/extensions/{OMP_HOOK_BRIDGE_EXTENSION_NAME}",
+        "format": "omp-extension",
+    },
 }
 
 
@@ -1455,6 +1477,10 @@ def _hook_bridge_spec_for_kind(kind: str) -> dict[str, str] | None:
         return None
     if kind == "codex":
         return {**spec, "settings": _codex_user_path("config.toml")}
+    if kind == "omp":
+        # dynamic like codex: the extensions dir lives under the resolved omp agent root, not
+        # the literal ``~/.omp/agent`` placeholder above.
+        return {**spec, "settings": _omp_user_path(f"extensions/{OMP_HOOK_BRIDGE_EXTENSION_NAME}")}
     return spec
 
 
@@ -1501,18 +1527,27 @@ def _build_hook_bridge_for_kind(
     hooks_dir: Path | None = None,
 ) -> None:
     bridge_cfg = h.get("hook_bridge")
+    # The explicit opt-out check runs FIRST, before the "no known bridge surface" branch below —
+    # an explicit `hook_bridge.enabled: false` is a documented key with documented semantics
+    # (quiet the bridge entirely), and it must stay honored even for a kind with no bridge at
+    # all. Ordering it AFTER the unconditional gap note (an earlier version of this function
+    # did) made that opt-out dead code for pi/commandcode: bridge_spec is None returns before
+    # the enabled-False branch is ever reached, so a user who already knows pi/commandcode has
+    # no bridge and deliberately silenced it would get nagged on every build with no way to
+    # suppress it (review-cli caught this regression on rig-cli#342).
+    if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is False:
+        return
     bridge_spec = _hook_bridge_spec_for_kind(kind)
     if bridge_spec is None:
         # Reaching this branch means the harness has skill/instruction discovery but no known
-        # hook bridge surface yet (currently pi/commandcode). If a config EXPLICITLY
-        # asked for the bridge on such a kind, say it is not wired; the default-on case stays
-        # quiet.
-        if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is True:
-            plan.notes.append(
-                f"hook_bridge: skipped — kind '{kind}' has no supported agents-hooks bridge yet"
-            )
-        return
-    if isinstance(bridge_cfg, dict) and bridge_cfg.get("enabled") is False:
+        # hook bridge surface yet (currently pi/commandcode). Surfaced UNCONDITIONALLY whenever
+        # the user has NOT explicitly opted out above — a real coverage gap the user should see
+        # on every plan build, not only when they thought to ask for a bridge that does not
+        # exist. (Silently staying quiet unless hook_bridge.enabled: true was explicitly set let
+        # this gap hide forever for anyone who never tried opting in — rig-cli#337/#342.)
+        plan.notes.append(
+            f"hook_bridge: skipped — kind '{kind}' {HOOK_BRIDGE_NO_SUPPORT_PHRASE}"
+        )
         return
     lib_dir = catalog.source / "lib"
     # Fail-CLOSED: never wire a harness-config command that would error at runtime. The
@@ -1526,6 +1561,8 @@ def _build_hook_bridge_for_kind(
     bridge_required = [bridge_dir / "dispatch.py", bridge_dir / "__main__.py"]
     if bridge_format == "opencode-plugin":
         bridge_required.append(bridge_dir / "plugin.js")
+    if bridge_format == "omp-extension":
+        bridge_required.append(bridge_dir / "extension.ts")
     bridge_missing = [p.name for p in bridge_required if not p.is_file()]
     if bridge_missing:
         plan.notes.append(
@@ -1539,10 +1576,11 @@ def _build_hook_bridge_for_kind(
     expected_suffix = {
         "toml": ".toml",
         "opencode-plugin": ".js",
+        "omp-extension": ".ts",
     }.get(bridge_format, ".json")
     actual_suffix = Path(str(settings_path)).suffix
     if (
-        bridge_format in {"toml", "opencode-plugin"}
+        bridge_format in {"toml", "opencode-plugin", "omp-extension"}
         and explicit_settings_path
         and actual_suffix
         and actual_suffix != expected_suffix
@@ -1569,6 +1607,15 @@ def _build_hook_bridge_for_kind(
         baseline_codex_hooks_dir = _expand(_HARNESS_AGENT_HOOK_TARGETS["codex"], config.repo_root)
         if not _same_dir(codex_hooks_dir, baseline_codex_hooks_dir):
             effective_hooks_dir = codex_hooks_dir
+    # NOTE: omp deliberately has NO equivalent divergence block here, unlike codex above. The
+    # divergence exists for codex because ``RIG_CODEX_HOME`` is a rig-owned env var the codex
+    # dispatcher does not know about on its own — without threading it through explicitly, rig
+    # would write descriptors to the RIG_CODEX_HOME-resolved dir while the dispatcher kept
+    # reading the literal ~/.codex/hooks default, a real mismatch. omp's dispatcher instead
+    # PORTS rig's own ``omp_agent_root()`` precedence verbatim (``PI_CODING_AGENT_DIR`` /
+    # ``PI_CONFIG_DIR``, see lib/omp_hook_bridge/dispatch.py's ``_omp_agent_root()``), so it
+    # independently resolves the SAME directory rig writes descriptors to with no override
+    # needed — baking one in here would only turn a plain symlink into an unnecessary wrapper.
     if effective_hooks_dir is not None:
         options["hooks_dir"] = str(effective_hooks_dir)
     if isinstance(bridge_cfg, dict) and bridge_cfg.get("python"):

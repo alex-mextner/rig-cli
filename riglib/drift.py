@@ -58,6 +58,7 @@ from .actions.runner import (
     hook_bridge_settings_file,
     managed_bridge_hook_in_sync,
     merge_codex_hook_bridge_toml,
+    omp_hook_bridge_extension_target,
     opencode_hook_bridge_plugin_target,
     desired_mcp_server_entry,
     permissions_settings_file,
@@ -1834,6 +1835,9 @@ def _check_hook_bridge(action: Action, report: DriftReport) -> None:
     if hook_bridge_format(action) == "opencode-plugin":
         _check_opencode_hook_bridge(action, config_file, report)
         return
+    if hook_bridge_format(action) == "omp-extension":
+        _check_omp_hook_bridge(action, config_file, report)
+        return
     if not config_file.is_file():
         report.items.append(
             DriftItem("missing", "harness", action.item, config_file, "harness settings file not written")
@@ -1965,6 +1969,82 @@ def _check_opencode_hook_bridge(action: Action, config_file: Path, report: Drift
         report.items.append(
             DriftItem("modified", "harness", action.item, config_file,
                       "legacy global opencode hook bridge symlink still present")
+        )
+
+
+def _check_omp_hook_bridge(action: Action, config_file: Path, report: DriftReport) -> None:
+    """Flag drift for the omp extension symlink/wrapper — simpler than opencode's: no
+    repo-local git-exclude reconciliation and no legacy predecessor to detect (the omp bridge
+    is new; every install is user-level from day one)."""
+    extension_path, dest = omp_hook_bridge_extension_target(action)
+    # local import matching _check_opencode_hook_bridge's own established pattern just above
+    # (it locally imports the same class of runner helpers rather than hoisting them to the
+    # module-level import block) — consistency with the sibling function, not a new anti-pattern.
+    from .actions.runner import (
+        _link_targets_itself,
+        _same_link_dest,
+        omp_hook_bridge_uses_wrapper,
+        omp_hook_bridge_wrapper_text,
+    )
+
+    if _link_targets_itself(extension_path, dest) and dest.is_file():
+        # source == target with the real extension present: the runner skips unconditionally
+        # here too — see the parallel comment in _check_opencode_hook_bridge for why this must
+        # read as in-sync rather than forever-drifting.
+        return
+
+    if omp_hook_bridge_uses_wrapper(action):
+        if not extension_path.is_file() or extension_path.is_symlink():
+            if extension_path.exists() or extension_path.is_symlink():
+                report.items.append(
+                    DriftItem("modified", "harness", action.item, config_file,
+                              "omp hook bridge wrapper is not a regular file")
+                )
+            else:
+                report.items.append(
+                    DriftItem("missing", "harness", action.item, config_file,
+                              "omp hook bridge wrapper not written")
+                )
+            return
+        try:
+            text = extension_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            report.items.append(
+                DriftItem("modified", "harness", action.item, config_file,
+                          f"omp hook bridge wrapper unreadable: {exc}")
+            )
+            return
+        if text != omp_hook_bridge_wrapper_text(action):
+            report.items.append(
+                DriftItem("modified", "harness", action.item, config_file,
+                          "omp hook bridge wrapper differs from config")
+            )
+        return
+
+    if not extension_path.is_symlink():
+        if extension_path.exists():
+            report.items.append(
+                DriftItem("modified", "harness", action.item, config_file,
+                          "omp hook bridge extension is a real file (apply will replace it)")
+            )
+        else:
+            report.items.append(
+                DriftItem("missing", "harness", action.item, config_file,
+                          "omp hook bridge extension not linked")
+            )
+        return
+    try:
+        current = extension_path.readlink()
+    except OSError as exc:
+        report.items.append(
+            DriftItem("modified", "harness", action.item, config_file,
+                      f"omp hook bridge symlink unreadable: {exc}")
+        )
+        return
+    if not _same_link_dest(extension_path, current, dest):
+        report.items.append(
+            DriftItem("modified", "harness", action.item, config_file,
+                      f"omp hook bridge extension points elsewhere, expected → {dest}")
         )
 
 

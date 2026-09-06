@@ -139,8 +139,9 @@ ACTION_TAGS: dict[str, ActionTag] = {
     ),
     "register_hook_bridge": _tag(
         "register_hook_bridge", "installs_hook", AUDIENCE_AGENT,
-        "Registers the Claude Code hook bridge into another harness's own config (opencode "
-        "plugin / codex TOML) so a Claude Code hook fires under that harness too.",
+        "Registers the shared agents-hooks/v1 bridge into another harness's own config "
+        "(opencode plugin, codex TOML block, or omp extension symlink) so the same installed "
+        "hook descriptors fire under that harness too.",
     ),
     "provision_schedule": _tag(
         "provision_schedule", "starts_reloads_service", AUDIENCE_BOTH,
