@@ -114,6 +114,18 @@ bare `rig config-web` prints help, never launches.
   it). A kind with NO such setting (pi/commandcode) is in `HARNESS_MODE_NA` with the reason and is
   surfaced as a VISIBLE note in `rig apply info` + a per-kind line in `rig status` — never a silent
   skip. Add a harness there, never a scattered key literal.
+- **Claude Code config-dir discovery is one registry: `riglib/claude_config_dirs.py`.** Claude
+  Code reads its user-scope `settings.json` from `$CLAUDE_CONFIG_DIR` when set; the `claude-rotate`
+  launcher starts every interactive session with `CLAUDE_CONFIG_DIR=~/.claude-accounts/account-N`,
+  so a write to `~/.claude/settings.json` alone leaves those sessions with ZERO rig hooks while
+  `rig status` stays green (rig-cli#368). Every claude-code user-scope write (`apply_harness`,
+  `provision_permissions`, the JSON `register_hook_bridge`) therefore emits ONE action PER target
+  from `fan_out_settings`: the primary + `harness.settings_paths` + every discovered
+  `~/.claude-accounts/account-*` dir (`harness.discover_config_dirs: false` opts out). Fan-out
+  items are labelled `<kind>@account-N` so drift names WHICH file. A repo-local (project-scope)
+  primary is never fanned out. `rig doctor` inventories the same targets plus the shell's
+  `CLAUDE_CONFIG_DIR` and exits 3 with a per-dir fix when one lacks the hook bridge. Discovery is
+  filesystem-only (deterministic plans / config-web fingerprints); the env var is doctor-only.
 - **Per-harness skill/instruction discovery is one registry: `riglib/harness_skills.py`.** It
   maps `harness.kind` to one or more discovery surfaces: skills directories (claude-code →
   `~/.claude/skills`, codex → `~/.codex/skills`; rig symlinks each skill in via a

@@ -86,6 +86,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .claude_config_dirs import account_sort_key
 from .errors import ConfigError
 
 # ── pricing ──────────────────────────────────────────────────────────────────────────
@@ -229,17 +230,6 @@ def _resolve_home(home: Path | None) -> Path:
     return home if home is not None else Path(os.path.expanduser("~"))
 
 
-def _account_sort_key(account_dir: Path) -> tuple[int, str]:
-    """Natural-sort ``account-N`` by the numeric suffix, not lexically — a plain
-    ``sorted()`` on directory names would order ``account-10`` before ``account-2`` once a
-    machine accumulates a 10th rotated account, which is real nondeterminism in
-    ``accounts_scanned``, a field of the documented "stable" JSON contract. A non-numeric
-    or missing suffix sorts after every numeric one, so this can't raise on an unexpected
-    directory name."""
-    suffix = account_dir.name.removeprefix("account-")
-    return (1, account_dir.name) if not suffix.isdigit() else (0, f"{int(suffix):020d}")
-
-
 def resolve_account_roots(home: Path | None = None) -> list[tuple[str, Path]]:
     """``[("default", ~/.claude/projects), ("account-0", ~/.claude-accounts/account-0/projects), ...]``
     — only roots that actually exist on disk. Globs ``account-*`` rather than hardcoding a
@@ -252,7 +242,7 @@ def resolve_account_roots(home: Path | None = None) -> list[tuple[str, Path]]:
         roots.append(("default", default_root))
     accounts_dir = home / ".claude-accounts"
     if accounts_dir.is_dir():
-        for account_dir in sorted(accounts_dir.glob("account-*"), key=_account_sort_key):
+        for account_dir in sorted(accounts_dir.glob("account-*"), key=account_sort_key):
             projects = account_dir / "projects"
             if projects.is_dir():
                 roots.append((account_dir.name, projects))

@@ -907,6 +907,61 @@ def _validate_by_stack_items(bs: Any) -> None:
             )
 
 
+def load_harness_fan_out(repo_root: Path) -> dict[str, Any]:
+    """The effective ``harness`` fan-out keys (``settings_paths``, ``discover_config_dirs``) — LENIENT.
+
+    For ``rig doctor``, which loads no config: read the global layer and the repo's ``rig.yaml``
+    (when present), merge only the ``harness`` block and validate only the two fan-out keys. Any
+    failure — no PyYAML, an unreadable file, a config that fails validation elsewhere (a stale
+    key another rig version added) — yields ``{}``: the built-in defaults, so doctor never
+    goes blind because the rest of the config is broken.
+    """
+    harness: dict[str, Any] = {}
+    for path in (global_config_path(), repo_root / "rig.yaml"):
+        if not path.is_file():
+            continue
+        try:
+            block = read_yaml_file(path).get("harness")
+        except (ConfigError, ImportError, OSError):
+            return {}
+        if isinstance(block, dict):
+            harness = _deep_merge(harness, block)
+    fan_out = {k: harness[k] for k in ("settings_paths", "discover_config_dirs") if k in harness}
+    try:
+        _validate_harness_fan_out(fan_out)
+    except ConfigError:
+        return {}
+    return fan_out
+
+
+def _validate_harness_fan_out(h: dict[str, Any]) -> None:
+    """Validate the claude-rotate fan-out keys (rig-cli#368): ``settings_paths`` + ``discover_config_dirs``.
+
+    ``settings_paths`` lists EXTRA user-scope ``settings.json`` files the claude-code write reaches
+    (each must be a ``.json`` path); ``discover_config_dirs`` (bool, default true) toggles the
+    automatic ``~/.claude-accounts/account-*`` discovery. Fail closed on any other shape.
+    """
+    paths = h.get("settings_paths")
+    if paths is not None:
+        if not isinstance(paths, list) or not all(isinstance(p, str) and p for p in paths):
+            raise ConfigError(
+                f"harness.settings_paths must be a list of non-empty strings, got {paths!r}",
+                schema_path="harness.settings_paths",
+            )
+        for p in paths:
+            if not p.endswith(".json"):
+                raise ConfigError(
+                    f"harness.settings_paths entries must end in .json (claude-code settings files), got {p!r}",
+                    schema_path="harness.settings_paths",
+                )
+    discover = h.get("discover_config_dirs")
+    if discover is not None and not isinstance(discover, bool):
+        raise ConfigError(
+            f"harness.discover_config_dirs must be a bool, got {discover!r}",
+            schema_path="harness.discover_config_dirs",
+        )
+
+
 def _validate_harness(h: dict[str, Any]) -> None:
     """Validate the ``harness`` block — the agent harness's skill + auto/permission provisioning.
 
@@ -981,6 +1036,7 @@ def _validate_harness(h: dict[str, Any]) -> None:
             f"harness.auto_mode must be a bool, got {auto_mode!r}",
             schema_path="harness.auto_mode",
         )
+    _validate_harness_fan_out(h)
     # self_merge gates a security-sensitive global carve-out; plan.py coerces it via bool(...),
     # so a non-bool like the string "false" would read truthy and ENABLE what the user meant to
     # disable. Fail closed, mirroring auto_mode.
