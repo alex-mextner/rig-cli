@@ -44,9 +44,10 @@ Otherwise the skill is drift: not in the catalog, no marker, not declared — of
 user declares it under ``skills.known`` or removes it. Note the asymmetry: markers are refused for
 CATALOG names (rig's own namespace, where a spoof would hide a stale/foreign copy of something rig
 manages), but a marker DOES vouch for any other name — a rogue skill can write its own
-``.installed-by``. That is the accepted trade: rig never manages those dirs, so "known" only
-changes what ``rig status`` prints, never what rig writes or removes; the marker names a
-suspect, it does not grant anything.
+``.installed-by``. That is the accepted trade, and it is NOT merely cosmetic: a marker moves the
+item out of drift, so ``rig status`` exits 0 instead of the drift code — anything keyed off that
+exit code (CI, monitoring) is silenced for a marker-bearing rogue skill. What a marker never
+changes is what rig WRITES or REMOVES (nothing, for a known item); it grants no permission.
 
 The ``<category>.known`` lists cascade like every list in the config (a repo list REPLACES the
 global one, ``riglib.config._deep_merge``), so the list for a MACHINE-WIDE dir (skills, agent
@@ -131,6 +132,11 @@ KIND_DISABLED_BASELINE = "disabled-baseline"
 KIND_USER_EXTRA = "user-extra"
 
 PERMISSION_KINDS: frozenset[str] = frozenset({KIND_RETIRED_DEFAULT, KIND_DISABLED_BASELINE, KIND_USER_EXTRA})
+
+# How many names a grouped known line shows before "… and N more" — the ONE constant `rig status`
+# (`riglib.cli._print_known_groups`) and the config-web known panel both render with; a
+# hand-grown allowlist can run to hundreds of entries and the line must stay one line.
+KNOWN_NAMES_SHOWN = 12
 
 # One human sentence per kind — the group heading `rig status` prints, followed by the names.
 KIND_LABELS: dict[str, str] = {

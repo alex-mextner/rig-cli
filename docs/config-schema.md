@@ -465,8 +465,11 @@ The `<category>.known` lists cascade like every other list in the config: a repo
 `skills.known` would drop the global entries for that repo and resurface them as drift. `ci.known`
 names files in the repo's own `.github/workflows`, so it belongs in that repo's `rig.yaml`.
 
-A marker is a claim, not a grant: it only changes what `rig status` prints. rig never manages,
-writes or removes a known item, and a catalog-named dir is never vouched for by a marker.
+A marker is a claim, not a grant: it changes what `rig status` prints **and its exit code** (a
+marker-bearing item is no longer drift, so a rogue skill that writes its own `.installed-by` is
+not caught by the status exit code — the accepted trade for a directory rig does not manage). It
+never changes what rig writes or removes (nothing, for a known item), and a catalog-named dir is
+never vouched for by a marker.
 
 ---
 

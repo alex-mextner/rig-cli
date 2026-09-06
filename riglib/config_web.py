@@ -90,6 +90,7 @@ from . import config as cfg
 from . import schema
 from .config_web_plan import ApplyJobStore
 from .layers import GLOBAL, REPO
+from .provenance import KNOWN_NAMES_SHOWN
 
 # The interface (host + the rendered title) is shared by the HTTP server and the tests, so it is
 # defined once. Localhost-only by invariant — see the module docstring.
@@ -874,7 +875,7 @@ async function loadDrift() {{
     // One row per (container-or-category, origin label) with the member names joined and capped
     // -- the SAME shape the CLI prints (`_print_known_groups`, `_KNOWN_NAMES_SHOWN`): a kept
     // allowlist runs to hundreds of entries, and one <div> per entry would flood the panel.
-    var KNOWN_NAMES_SHOWN = 12;
+    var KNOWN_NAMES_SHOWN = {KNOWN_NAMES_SHOWN};
     function knownName(k) {{
       return !k.kept && k.by && k.by !== k.name ? k.name + ' (by ' + k.by + ')' : k.name;
     }}
@@ -882,7 +883,7 @@ async function loadDrift() {{
       var groups = {{}}, order = [];
       list.forEach(function(k) {{
         var where = k.kept ? k.container : k.category;
-        var key = where + '\u0000' + k.label;
+        var key = where + ' :: ' + k.label;
         if (!groups[key]) {{ groups[key] = {{where: where, label: k.label, kept: k.kept, names: []}}; order.push(key); }}
         groups[key].names.push(knownName(k));
       }});

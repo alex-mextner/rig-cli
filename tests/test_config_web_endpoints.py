@@ -361,7 +361,7 @@ def test_page_known_panel_groups_caps_and_escapes(tmp_path, fake_agent_tools, mo
     runs to hundreds of entries and a per-entry dump would flood the panel (found in review).
     Structural pin like the esc() test above; the JS itself needs a browser.
     """
-    from riglib.cli import _KNOWN_NAMES_SHOWN
+    from riglib.provenance import KNOWN_NAMES_SHOWN as _KNOWN_NAMES_SHOWN
 
     repo = _isolated_repo(tmp_path, fake_agent_tools, monkeypatch)
     app = cw.ConfigWebApp(repo_root=repo)

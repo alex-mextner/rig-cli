@@ -2309,9 +2309,7 @@ def _render_drift_by_layer(report, loaded, env) -> None:
                 print(f"      {_warn('▸')} {d.category}/{d.item}: {d.detail}  {_dim('[' + str(d.target) + '; ' + src + ']')}")
 
 
-# how many names a grouped known line prints before "… and N more" (a hand-grown allowlist can
-# run to hundreds of entries; the line must stay one line).
-_KNOWN_NAMES_SHOWN = 12
+from .provenance import KNOWN_NAMES_SHOWN as _KNOWN_NAMES_SHOWN
 
 
 def _render_known_by_layer(report, loaded, env) -> None:
