@@ -172,6 +172,14 @@ def omp_agent_root() -> str:
     return "~/.omp/agent"
 
 
+def omp_user_path(name: str) -> str:
+    """Return an unexpanded path under omp's agent root — the omp analog of
+    :func:`codex_user_path`, so every call site that needs a path under the resolved omp agent
+    dir (hooks, extensions) shares ONE join instead of inlining ``f"{omp_agent_root()}/..."``
+    in more than one place and risking the two drifting apart."""
+    return f"{omp_agent_root().rstrip('/')}/{name.lstrip('/')}"
+
+
 def codex_config_root(home: Path | None = None) -> Path:
     """Codex's user config root as a concrete path.
 

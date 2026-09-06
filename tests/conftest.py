@@ -395,6 +395,23 @@ def fake_agent_tools(tmp_path: Path) -> Path:
         "export const AgentToolsHookBridge = async () => ({ hooksDirAtImport });\n",
     )
 
+    # the omp_hook_bridge dispatcher is loaded by omp as a native TS extension module that
+    # shells into the Python bridge package — the same shape as opencode_hook_bridge above,
+    # but the browser-facing carrier is `extension.ts` (omp natively loads TypeScript) rather
+    # than `plugin.js`, and the env var it reads is OMP_HOOKS_DIR (not OPENCODE_HOOKS_DIR).
+    _write(root / "lib" / "omp_hook_bridge" / "__init__.py", "")
+    _write(
+        root / "lib" / "omp_hook_bridge" / "__main__.py",
+        "import sys\nfrom .dispatch import main\nraise SystemExit(main(sys.argv[1:]))\n",
+    )
+    _write(root / "lib" / "omp_hook_bridge" / "dispatch.py", "def main(argv=None):\n    return 0\n")
+    _write(
+        root / "lib" / "omp_hook_bridge" / "extension.ts",
+        "const hooksDirAtImport = process.env.OMP_HOOKS_DIR || '';\n"
+        "const pythonAtImport = process.env.OMP_HOOK_BRIDGE_PYTHON || 'python3';\n"
+        "export default function (pi) { return { hooksDirAtImport, pythonAtImport }; }\n",
+    )
+
     return root
 
 

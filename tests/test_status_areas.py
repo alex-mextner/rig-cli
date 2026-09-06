@@ -555,6 +555,34 @@ def test_status_area_summary_harness_drift_not_false_in_sync(
     assert "not configured" not in harness_line.lower()
 
 
+# ── zero hook-bridge coverage on a supported-skills-only kind is ALWAYS surfaced (rig-cli#342) ──
+def test_status_reports_zero_hook_bridge_coverage_without_explicit_enable(
+    tmp_path, capsys, fake_agent_tools, monkeypatch
+):
+    """A harness kind with genuinely no agents-hooks bridge (pi/commandcode) has NO
+    register_hook_bridge action, so the area-summary line alone can't distinguish "no coverage"
+    from "harness just isn't configured". `rig status` must call this out explicitly — and on
+    EVERY run, not only when the user tried opting in with `hook_bridge.enabled: true` (the
+    silent-skip bug rig-cli#342/rig-cli#337 set out to fix)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
+    monkeypatch.setenv("RIG_AGENT_TOOLS_SOURCE", str(fake_agent_tools))
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "rig.yaml").write_text(
+        f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
+        "skills: {enabled: false}\nagent_hooks: {all: true}\nmcp: {enabled: false}\n"
+        "git_hooks: {dispatcher: {enabled: false}}\nci: {enabled: false}\n"
+        "agents_md: {enabled: false}\ngitignore: {enabled: false}\n"
+        "harness: {enabled: true, kind: pi}\n",  # no hook_bridge block at all
+        encoding="utf-8",
+    )
+    main(["status", "-C", str(repo)])
+    out = capsys.readouterr().out
+
+    from riglib.plan import HOOK_BRIDGE_NO_SUPPORT_PHRASE
+
+    assert f"kind 'pi' {HOOK_BRIDGE_NO_SUPPORT_PHRASE}" in out
+
+
 # ── a MODIFIED-on-disk item counts as config→disk drift (not just "missing") ───────
 def test_status_area_summary_counts_modified_items(tmp_path, capsys, fake_agent_tools, monkeypatch):
     """A declared item PRESENT on disk but CHANGED is config→disk drift too (direction

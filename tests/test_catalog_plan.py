@@ -1272,6 +1272,120 @@ def test_plan_opencode_agent_hooks_default_to_opencode_hooks(fake_agent_tools, t
     assert resolve_category_target(cfg, "agent_hooks") == expected
 
 
+def test_plan_omp_hook_bridge_emitted_with_harness(fake_agent_tools, tmp_path, monkeypatch):
+    import os
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"harness": {"kind": "omp", "hook_bridge": {"enabled": True}}}, tmp_path)
+    a = _bridge_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.options["kind"] == "omp"
+    assert a.options["module"] == "omp_hook_bridge"
+    assert a.options["format"] == "omp-extension"
+    assert a.options["lib_dir"] == str(fake_agent_tools / "lib")
+    assert a.target == Path(
+        os.path.expanduser("~/.omp/agent/extensions/zz-agent-tools-hook-bridge.ts")
+    )
+
+
+def test_plan_omp_hook_bridge_honors_settings_path_and_python(fake_agent_tools, tmp_path):
+    import os
+
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"harness": {"kind": "omp", "settings_path": "~/.omp/agent/extensions/custom.ts",
+                     "hook_bridge": {"enabled": True, "python": "/opt/py/bin/python3"}}},
+        tmp_path,
+    )
+    a = _bridge_action(build(cfg, cat, project_type="unknown"))
+    assert a is not None
+    assert a.target == Path(os.path.expanduser("~/.omp/agent/extensions/custom.ts"))
+    assert a.options["python"] == "/opt/py/bin/python3"
+
+
+def test_plan_omp_hook_bridge_skips_wrong_settings_path_format(fake_agent_tools, tmp_path):
+    settings = tmp_path / "omp-extensions" / "bridge.js"
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {"harness": {"kind": "omp", "settings_path": str(settings),
+                     "hook_bridge": {"enabled": True}}},
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    assert _bridge_action(plan) is None
+    assert any("expects a .ts settings_path" in n and str(settings) in n for n in plan.notes), plan.notes
+
+
+def test_plan_omp_hook_bridge_skipped_when_dispatcher_absent(fake_agent_tools, tmp_path):
+    """Fail-closed for omp too: never symlink a broken/incomplete bridge extension."""
+    (fake_agent_tools / "lib" / "omp_hook_bridge" / "extension.ts").unlink()
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg({"harness": {"kind": "omp", "hook_bridge": {"enabled": True}}}, tmp_path)
+    plan = build(cfg, cat, project_type="unknown")
+    assert _bridge_action(plan) is None
+    assert any("omp_hook_bridge" in n and "extension.ts" in n for n in plan.notes), plan.notes
+
+
+def test_plan_omp_agent_hooks_default_to_omp_hooks(fake_agent_tools, tmp_path, monkeypatch):
+    import os
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "skills": {"enabled": False},
+            "agent_hooks": {"all": True},
+            "ci": {"enabled": False},
+            "mcp": {"enabled": False},
+            "harness": {"kind": "omp"},
+        },
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    hook_actions = [a for a in plan.actions if a.kind == "install_agent_hook"]
+    assert hook_actions
+    expected = home / ".omp" / "agent" / "hooks"
+    assert {a.target for a in hook_actions} == {expected}
+    assert resolve_category_target(cfg, "agent_hooks") == expected
+
+
+def test_plan_omp_agent_hooks_follow_pi_coding_agent_dir(fake_agent_tools, tmp_path, monkeypatch):
+    """PI_CODING_AGENT_DIR is a full override of the omp agent root — both hooks and the bridge
+    extension must follow it.
+
+    Unlike codex's ``RIG_CODEX_HOME`` (a rig-owned env var the codex dispatcher does not know
+    about, so rig must thread it through as an explicit ``hooks_dir`` bridge option), omp's own
+    dispatcher PORTS rig's ``omp_agent_root()`` precedence verbatim
+    (lib/omp_hook_bridge/dispatch.py's ``_omp_agent_root()``) — it independently resolves the
+    SAME ``PI_CODING_AGENT_DIR``-relative dir at runtime, with no override needed. So the bridge
+    action must NOT carry a ``hooks_dir`` option here: baking one in would only turn the plain
+    symlink into an unnecessary wrapper (see the plan.py comment next to the codex-only
+    divergence block).
+    """
+    home = tmp_path / "home"
+    override = tmp_path / "custom-omp-agent"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(override))
+    cat = Catalog.scan(str(fake_agent_tools))
+    cfg = _cfg(
+        {
+            "harness": {"kind": "omp", "hook_bridge": {"enabled": True}},
+            "agent_hooks": {"all": True},
+        },
+        tmp_path,
+    )
+    plan = build(cfg, cat, project_type="unknown")
+    hook_targets = {a.target for a in plan.actions if a.kind == "install_agent_hook"}
+    assert hook_targets == {override / "hooks"}
+    bridge = _bridge_action(plan)
+    assert bridge is not None
+    assert bridge.target == override / "extensions" / "zz-agent-tools-hook-bridge.ts"
+    assert "hooks_dir" not in bridge.options
+
+
 def test_plan_codex_bridge_does_not_wire_pre_agent_yet(fake_agent_tools, tmp_path):
     from riglib.actions.runner import hook_bridge_entries
 

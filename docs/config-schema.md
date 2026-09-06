@@ -504,9 +504,9 @@ harness:
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `self_merge` | bool | `true` | auto-mode self-merge unblock. `true` adds the ship allow rules (`Bash(gh ship:*)`, `Bash(*/pr-ship.sh:*)`, `Bash(*/ship.sh:*)`) to `permissions.allow` so the auto-mode Bash gate stops vetoing `gh ship`, AND appends a `$defaults`-preserving carve-out to `autoMode.allow` clearing the Merge-Without-Review + Self-Approval soft blocks for the agent's OWN PRs. Effective only under auto-mode; inert otherwise. The `Bash(gh pr merge:*)` deny and every other classifier rule — notably the anti-exfil hard rule — stay (`gh ship` is still the only merge path) |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
-| `settings_path` | path | `.claude/settings.json` for Claude auto/mode writes; `~/.codex/config.toml` (or `$RIG_CODEX_HOME/config.toml`) for the Codex hook bridge; `.opencode/plugins/zz-agent-tools-hook-bridge.js` for the opencode hook bridge | the settings/config file/plugin to converge. If overridden, point it at the harness's native format (JSON for Claude, TOML for Codex, JS plugin for opencode). A suffixed path is treated as the file; a suffixless path is treated as a directory containing the native settings/plugin filename |
-| `hook_bridge.enabled` | bool | `true` | wire the harness bridge dispatcher so installed agent-hooks actually fire (`cc_hook_bridge` for Claude, `codex_hook_bridge` for Codex, `opencode_hook_bridge` for opencode) |
-| `hook_bridge.python` | str | `python3` | the Python interpreter the dispatcher command runs under |
+| `settings_path` | path | `.claude/settings.json` for Claude auto/mode writes; `~/.codex/config.toml` (or `$RIG_CODEX_HOME/config.toml`) for the Codex hook bridge; `.opencode/plugins/zz-agent-tools-hook-bridge.js` for the opencode hook bridge; `~/.omp/agent/extensions/zz-agent-tools-hook-bridge.ts` (or `$PI_CODING_AGENT_DIR`/`$PI_CONFIG_DIR`-relative) for the omp hook bridge | the settings/config file/plugin/extension to converge. If overridden, point it at the harness's native format (JSON for Claude, TOML for Codex, JS plugin for opencode, TS extension for omp). A suffixed path is treated as the file; a suffixless path is treated as a directory containing the native settings/plugin/extension filename |
+| `hook_bridge.enabled` | bool | `true` | wire the harness bridge dispatcher so installed agent-hooks actually fire (`cc_hook_bridge` for Claude, `codex_hook_bridge` for Codex, `opencode_hook_bridge` for opencode, `omp_hook_bridge` for omp) |
+| `hook_bridge.python` | str | `python3` | the Python interpreter the dispatcher command runs under. For `kind: omp` there is no shell command to inline it into — a custom value instead forces the wrapper module (see below) and sets `OMP_HOOK_BRIDGE_PYTHON`, which `extension.ts` reads before falling back to a bare `python3` |
 
 **What gets written.** For `kind: claude-code`, rig merges `permissions.defaultMode` into
 the settings JSON — `auto_mode: true` → `bypassPermissions` (auto-accepts every tool call),
@@ -576,18 +576,36 @@ enabled), `rig apply` registers the matching dispatcher from `agent-tools/lib`:
   opencode bridge plugin. The plugin dispatches `tool.execute.before` for `bash`, `edit`, `write`, `apply_patch`,
   and `task`, plus `tool.execute.after` for write tools. A custom opencode `settings_path` must
   end in `.js`.
+- `kind: omp` symlinks `omp_hook_bridge/extension.ts` into
+  `~/.omp/agent/extensions/zz-agent-tools-hook-bridge.ts` (or `settings_path`) — omp's built-in
+  extension loader auto-discovers every `.ts`/`.js` module under `extensions/`, so no separate
+  registration step is needed. The DEFAULT target is a **user-level** path under the resolved
+  omp agent root; like Codex's and opencode's own `settings_path`, an explicit override can
+  point anywhere, including inside a repo — but unlike opencode's DEFAULT repo-local plugin
+  path, rig does **not** auto-exclude an omp override that lands inside a repo from git (that
+  convention is specific to opencode's own default, not a general rule), and there is no legacy
+  predecessor to clean up (this bridge is new). The extension dispatches omp's
+  `tool_call` (pre-execution) for `bash`/`edit`/`write`/`apply_patch`/`notebook`/`task`, and
+  `tool_result` (post-execution, log-only) for the write tools — shelling into the Python
+  dispatcher exactly like the opencode plugin does. A custom omp `settings_path` must end in
+  `.ts`.
 
 Claude and Codex bridge commands run `PYTHONPATH=<agent-tools>/lib python3 -m <bridge_module>
-<Event>` from the harness config; opencode loads the JS plugin, which shells into the Python
-bridge with the same `PYTHONPATH`. The merge/symlink is idempotent and preserves unrelated
-config; `rig status` reports the bridge as missing/stale drift if a managed hook is absent or
-points at an old checkout. Pi, CommandCode, and omp still skip the bridge with a note when
-explicitly enabled.
+<Event>` from the harness config; opencode and omp load their respective JS/TS module, which
+shells into the Python bridge with the same `PYTHONPATH`. The merge/symlink is idempotent and
+preserves unrelated config; `rig status` reports the bridge as missing/stale drift if a managed
+hook is absent or points at an old checkout. Pi and CommandCode still skip the bridge with a
+note — surfaced on every plan build, not only when `hook_bridge.enabled: true` is set explicitly,
+since a harness with zero agents-hooks coverage is a real gap the user should always see.
 
 When `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one custom
 directory, rig still registers the configured supported bridges and passes that descriptor dir to
-the dispatcher. Claude/Codex receive the override in their managed hook command; opencode gets a
-small managed wrapper plugin that sets `OPENCODE_HOOKS_DIR` before delegating to the stock bridge.
+the dispatcher. Claude/Codex receive the override in their managed hook command; opencode and omp
+each get a small managed wrapper module (`.js`/`.ts`) that sets `OPENCODE_HOOKS_DIR` /
+`OMP_HOOKS_DIR` respectively before delegating to the stock bridge. omp also forces this same
+wrapper (setting `OMP_HOOK_BRIDGE_PYTHON` alongside `OMP_HOOKS_DIR`, or alone) whenever
+`hook_bridge.python` is configured — a plain symlink has no shell command to inline the
+interpreter into, so without the wrapper the setting would be silently ignored.
 
 For Codex, the bridge also converges global hook feature flags that would make the managed hook
 block inert: `[features] hooks = false`, top-level `features.hooks = false`, and the deprecated
