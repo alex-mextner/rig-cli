@@ -103,13 +103,17 @@ bare `rig config-web` prints help, never launches.
   `plan.build` + `actions.run_plan`. Never fork the executor for the TUI. If you add a
   capability, add it to the headless engine first and let the wizard call it.
 - **Harness auto-mode is provisioned through the reconciler, like every other target.** The
-  `harness:` block flows config → `plan.build` (one `apply_harness` action) → `run_plan`
-  (`actions/runner.py::_do_apply_harness`), writing only the managed permission key into the
-  harness settings JSON, idempotent + backup-on-conflict, with drift surfaced by `rig
-  status`. Recommend `auto_mode: true` by default — it is safe *because* the agent-hook
-  guards (incl. `block-raw-pr-merge`, `block-reset-hard`) are installed in the same apply.
-  The auto/permission-MODE write is claude-code-only today; a kind without a mode-writer
-  self-skips with a plan note.
+  `harness:` block flows config → `plan.build` (one `apply_harness` action PER configured kind —
+  primary + `harness.kinds`) → `run_plan` (`actions/runner.py::_do_apply_harness`), writing only
+  the managed permission key into the harness's own config, idempotent + backup-on-conflict, with
+  drift surfaced by `rig status`. Recommend `auto_mode: true` by default — it is safe *because*
+  the agent-hook guards (incl. `block-raw-pr-merge`, `block-reset-hard`) are installed in the same
+  apply. **The per-kind mode key is one registry: `riglib/harness_mode.py`** (claude-code
+  `permissions.defaultMode`; codex `approvals_reviewer` in `config.toml`; opencode `permission."*"`;
+  omp `tools.approvalMode` — owned by the permissions approval action, the harness plan only notes
+  it). A kind with NO such setting (pi/commandcode) is in `HARNESS_MODE_NA` with the reason and is
+  surfaced as a VISIBLE note in `rig apply info` + a per-kind line in `rig status` — never a silent
+  skip. Add a harness there, never a scattered key literal.
 - **Per-harness skill/instruction discovery is one registry: `riglib/harness_skills.py`.** It
   maps `harness.kind` to one or more discovery surfaces: skills directories (claude-code →
   `~/.claude/skills`, codex → `~/.codex/skills`; rig symlinks each skill in via a

@@ -90,17 +90,20 @@ def test_codex_update_cli_returns_nonzero_after_rollback(capsys, monkeypatch):
     assert "rolled back" in out
 
 
-def test_codex_update_cli_missing_updater_returns_127(tmp_path, capsys):
+def test_codex_update_cli_missing_updater_returns_127(tmp_path, capsys, monkeypatch):
+    # The subject is the exit code of a MISSING updater, not the health probe of the live binary.
+    # The probe is stubbed: a real bash fake under a sub-second `--probe-timeout` is load-dependent
+    # (three process spawns raced a 0.5s timer and lost whenever the suite ran next to other work).
+    from riglib import codex_update
+
     live = tmp_path / "codex"
-    live.write_text(
-        "#!/usr/bin/env bash\n"
-        "case \"${1:-}\" in\n"
-        "  --version) echo 'codex-cli test' ;;\n"
-        "  --help) echo 'help' ;;\n"
-        "  completion) echo '#compdef codex' ;;\n"
-        "esac\n"
-    )
+    live.write_text("#!/usr/bin/env bash\nexit 0\n")
     live.chmod(0o755)
+    monkeypatch.setattr(
+        codex_update,
+        "probe_codex",
+        lambda path, *, timeout_s: codex_update.ProbeResult(True, "codex-cli test", "probes passed"),
+    )
     missing = tmp_path / "missing-updater"
 
     rc = main(

@@ -382,6 +382,9 @@ class HarnessApproval:
 # omp: approvalMode made EXPLICIT so the posture is declarative and drift-checkable. Parity
 # with claude-code is auto_mode:true + the guard belt — NOT a prompt-per-bash floor (owner
 # decision, rig-cli#202): the guard extension is the enforcement layer; the YAML is posture.
+# The ``yolo`` here is the LEGACY default only: the plan overrides it per the harness auto intent
+# (``riglib.harness_mode`` — ``harness.auto_mode: false`` → ``always-ask``), carried on the action as
+# ``options["mode_value"]``. This action is the ONE owner of ``tools.approvalMode`` (rig-cli#355).
 HARNESS_APPROVAL: dict[str, HarnessApproval] = {
     "omp": HarnessApproval(
         kind="omp",

@@ -91,9 +91,9 @@ _VALID_AUTONOMOUS_UNTIL = {"clean", "budget", "manual"}
 # (opencode, omp), and the INSTRUCTION-FILE harnesses (pi, commandcode). A
 # ``harness.kind`` in this set is ACCEPTED: rig can
 # provision skill discovery (and, for the supported kinds, the auto-mode write / allowlist)
-# for it. The single source of truth is :mod:`riglib.harness_skills`. The narrower
-# auto-mode-write capability is gated separately in plan.py (``_HARNESS_SETTINGS``) — a kind
-# accepted here but not auto-mode-capable self-skips that write with a plan note, not a crash.
+# for it. The single source of truth is :mod:`riglib.harness_skills`. The auto-mode WRITE is
+# keyed off :mod:`riglib.harness_mode` — a kind with no such setting (pi/commandcode) gets a
+# visible plan note, not a crash.
 _VALID_HARNESS_KINDS = set(_KNOWN_HARNESS_KINDS)
 # No kind is "reserved + rejected" any longer — every documented kind is now provisionable for
 # skills. Kept as an (empty) set so the validator's reserved-kind branch stays well-defined.
@@ -914,10 +914,9 @@ def _validate_harness(h: dict[str, Any]) -> None:
     "no longer supported" message), and a non-bool ``auto_mode``. Every harness
     rig knows a skill/instruction discovery convention for (claude-code, opencode, omp, codex,
     pi, commandcode — :data:`_VALID_HARNESS_KINDS`) is ACCEPTED here: rig provisions its SKILL
-    discovery. The narrower auto/permission-MODE write is only implemented for some of them
-    (claude-code today) and self-skips the rest with a plan note (see plan.py ``_build_harness``)
-    rather than being rejected at validation — so a config can target a harness for skills even
-    where the auto-mode write isn't wired yet.
+    discovery, and the auto/permission-MODE write is keyed off :mod:`riglib.harness_mode` (a kind
+    with no such setting, pi/commandcode, gets a visible plan note — see plan.py ``_build_harness``)
+    rather than being rejected at validation.
     """
     if not isinstance(h, dict):
         raise ConfigError("harness must be a mapping", schema_path="harness")

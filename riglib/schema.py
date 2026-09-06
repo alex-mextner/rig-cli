@@ -276,7 +276,9 @@ AREAS: tuple[Area, ...] = (
                  "Provision the harness permission setting. Off = leave the harness config alone."),
             _opt("harness.auto_mode", KIND_BOOL, True,
                  "Auto-accept tool calls (the agent runs autonomously). SAFE because the agent-hook "
-                 "guards above catch the dangerous calls first. Off = interactive permission prompts."),
+                 "guards above catch the dangerous calls first. Off = interactive permission prompts. "
+                 "Written per harness kind (claude-code permissions.defaultMode, codex approvals_reviewer, "
+                 "opencode permission.*, omp tools.approvalMode); pi/commandcode have no such setting."),
             _opt("harness.self_merge", KIND_BOOL, True,
                  "Let the agent self-merge a PR it authored in the session's starting repo via "
                  "`gh ship`. Adds the ship allow rules (`Bash(gh ship:*)`, `Bash(*/pr-ship.sh:*)`, "
@@ -289,7 +291,8 @@ AREAS: tuple[Area, ...] = (
             _opt("harness.kinds", KIND_LIST, [],
                  "Additional harnesses to provision alongside harness.kind, comma-separated "
                  "(e.g. codex,opencode). Additional harnesses get skill discovery, agent-hook "
-                 "descriptors, supported hook bridges, and supported permissions allowlists. If "
+                 "descriptors, supported hook bridges, supported permissions allowlists, and their "
+                 "own auto-mode key (same auto intent as harness.kind). If "
                  "agent_hooks.target pins one explicit descriptor target, supported bridges are "
                  "registered with a descriptor-dir override.",
                  items_enum=_HARNESS_KIND_CHOICES),

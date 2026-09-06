@@ -418,8 +418,9 @@ _HARNESS_BLOCK = Block(
             "string",
             "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode/omp; "
             "instruction-file: pi/commandcode; codex is also instruction-file via AGENTS.md). "
-            "The auto/permission-MODE write is "
-            "claude-code-only today; other kinds still get their skill discovery provisioned.",
+            "Every kind gets its own auto/permission-mode key written (claude-code permissions.defaultMode, "
+            "codex approvals_reviewer, opencode permission.*, omp tools.approvalMode via the permissions "
+            "approval action); pi/commandcode have no such setting and get a visible n/a note.",
             enum=_HARNESS_KIND_ENUM,
             default="claude-code",
         ),
@@ -427,13 +428,18 @@ _HARNESS_BLOCK = Block(
             "array",
             "additional harnesses to provision alongside harness.kind. Use this when one machine "
             "runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, "
-            "while additional kinds get skill discovery, agent-hook descriptors, and any supported "
-            "hook bridge. If agent_hooks.target pins descriptors to one explicit target, supported "
+            "while additional kinds get skill discovery, agent-hook descriptors, any supported "
+            "hook bridge, and their own auto-mode key (same auto intent). If agent_hooks.target pins descriptors to one explicit target, supported "
             "bridges are registered with a descriptor-dir override.",
             items_type="string",
             items_enum=_HARNESS_KIND_ENUM,
         ),
-        "auto_mode": Leaf("boolean", "true → auto-accept tool calls; false → interactive", default=True),
+        "auto_mode": Leaf(
+            "boolean",
+            "true → auto-accept tool calls; false → interactive — written per harness kind. A pinned "
+            "mode: the primary kind knows overrides it (mode: auto means auto for every configured kind).",
+            default=True,
+        ),
         "self_merge": Leaf(
             "boolean",
             "true → add the ship allow rules (Bash(gh ship:*), Bash(*/pr-ship.sh:*), Bash(*/ship.sh:*)) "

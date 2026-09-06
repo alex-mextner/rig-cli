@@ -556,7 +556,7 @@ harness:
   enabled: true
   kind: claude-code            # skills-dir: claude-code | codex · native: opencode | omp · instruction-file: pi | commandcode
   # kinds: [codex]             # optional additional harnesses to provision alongside kind
-  auto_mode: true              # true → auto-accept tool calls; false → interactive prompts (claude-code write only)
+  auto_mode: true              # true → auto-accept tool calls; false → interactive prompts (written per harness kind — see the table below)
   self_merge: true             # auto-mode: let the agent self-merge its OWN PRs via gh ship (permissions.allow ship rules + autoMode.allow carve-out)
   # mode: bypassPermissions    # optional: pin the exact mode value (overrides the auto_mode map)
   # settings_path: .claude/settings.json   # where to write (repo-local default; committed)
@@ -568,8 +568,8 @@ harness:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | provision the harness setting (set `false` to leave the harness config untouched) |
-| `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`, `omp`) auto-loads `~/.agents/skills`; instruction-file (`pi`, `commandcode`) get their skill discovery via `AGENTS.md`. The auto/permission-MODE write below is `claude-code`-only today; other kinds still get skill discovery |
-| `kinds` | list | `[]` | additional harnesses to provision alongside `kind`. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, supported hook bridges, and supported permissions allowlists. `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one explicit target; supported bridges stay registered with a descriptor-dir override |
+| `kind` | enum | `claude-code` | which harness to provision. Skills-dir (`claude-code`, `codex`) get per-skill symlinks; native-discovery (`opencode`, `omp`) auto-loads `~/.agents/skills`; instruction-file (`pi`, `commandcode`) get their skill discovery via `AGENTS.md`. Every kind also gets its OWN auto/permission-mode key written (the per-harness table below); `pi`/`commandcode` have no such setting and get a visible n/a note |
+| `kinds` | list | `[]` | additional harnesses to provision alongside `kind`. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, supported hook bridges, supported permissions allowlists, AND their own auto-mode key (same auto intent as the primary kind). `agent_hooks.target` or a non-legacy `defaults.hooks_target` pins descriptors to one explicit target; supported bridges stay registered with a descriptor-dir override |
 | `auto_mode` | bool | `false` (scaffold writes `true`) | `true` = auto-accept; maps to the harness's non-interactive permission value |
 | `self_merge` | bool | `true` | auto-mode self-merge unblock. `true` adds the ship allow rules (`Bash(gh ship:*)`, `Bash(*/pr-ship.sh:*)`, `Bash(*/ship.sh:*)`) to `permissions.allow` so the auto-mode Bash gate stops vetoing `gh ship`, AND appends a `$defaults`-preserving carve-out to `autoMode.allow` clearing the Merge-Without-Review + Self-Approval soft blocks for the agent's OWN PRs. Effective only under auto-mode; inert otherwise. The `Bash(gh pr merge:*)` deny and every other classifier rule — notably the anti-exfil hard rule — stay (`gh ship` is still the only merge path) |
 | `mode` | str | — | pin the exact permission value (e.g. `acceptEdits`), overriding the `auto_mode` mapping |
@@ -577,13 +577,54 @@ harness:
 | `hook_bridge.enabled` | bool | `true` | wire the harness bridge dispatcher so installed agent-hooks actually fire (`cc_hook_bridge` for Claude, `codex_hook_bridge` for Codex, `opencode_hook_bridge` for opencode, `omp_hook_bridge` for omp) |
 | `hook_bridge.python` | str | `python3` | the Python interpreter the dispatcher command runs under. For `kind: omp` there is no shell command to inline it into — a custom value instead forces the wrapper module (see below) and sets `OMP_HOOK_BRIDGE_PYTHON`, which `extension.ts` reads before falling back to a bare `python3` |
 
-**What gets written.** For `kind: claude-code`, rig merges `permissions.defaultMode` into
-the settings JSON — `auto_mode: true` → `bypassPermissions` (auto-accepts every tool call),
-`auto_mode: false` → `default` (interactive prompts). Only that one key is touched; every
-other setting in the file is preserved. The write is **idempotent** (a re-apply with the
-same value is a no-op) and **backup-noted** (a differing prior value is backed up per
-`defaults.on_conflict` before converging). `rig status` reports drift if the on-disk value
-no longer matches the config.
+**What gets written, per harness kind.** The auto intent is a pinned `mode:` the PRIMARY kind
+knows (auto: claude-code `auto` / `bypassPermissions` / `dontAsk`, codex `auto_review`, opencode
+`allow`, omp `yolo`; interactive: claude-code `default` / `acceptEdits` / `plan`, codex `user`,
+opencode `ask` / `deny`, omp `always-ask` / `write`) — it is the exact value claude-code has always
+written verbatim, overriding `auto_mode`, so every kind follows the same precedence; without a known
+`mode:`, `auto_mode` decides — and that one intent then applies to EVERY configured kind. A `mode:`
+the primary kind does not know (a claude-code value pasted onto a `kind: codex` block, or a claude-code
+mode newer than rig's table) with no `auto_mode` declares NO intent for the OTHER kinds: nothing is
+written for them (a claude-code primary still writes its own `mode:` verbatim; omp's approval action
+keeps its legacy `yolo` posture, see the table), the plan carries an elevated note naming the primary
+kind's real values plus a per-kind "not written" note, and `rig status` lists every affected kind as
+not managed — never a silent tighten to interactive. The raw `mode:` string is written verbatim ONLY
+for the PRIMARY kind, and only when it is one of that kind's own values (`kind: opencode, mode: deny`
+stays `deny` — the exact override the `mode` row documents — never relaxed to the mapped `ask`; a
+primary `claude-code` writes any `mode:` verbatim, its vocabulary can outgrow rig's table); every
+ADDITIVE kind — including `kinds: [claude-code]`, which is pinned to the user-scope
+`~/.claude/settings.json` like every other additive kind — gets the registry value mapped from the
+intent, never the raw string (it is the primary harness's value and means nothing to another one).
+With no `auto_mode` and no `mode:`, a non-claude kind is left untouched
+and the plan notes it (an additive kind listed for skill discovery must not get its posture changed
+behind its back). A kind with no such setting (`pi`, `commandcode`) always gets a visible n/a note —
+elevated only when it is the PRIMARY kind and the config set `auto_mode`/`mode:` on it (it asked for
+something rig cannot write); an additive `kinds: [pi]` listed for skill discovery is informational. omp's key is owned by the permissions approval action; whether that
+action is really in the plan (permissions enabled AND omp among its kinds) decides the note — "written
+by the approval action" vs an elevated "skipped". The registry is `riglib/harness_mode.py` — one entry
+per kind, researched against each harness's own docs/CLI:
+
+| Kind | File (user scope, per machine) | Key | auto | interactive |
+| --- | --- | --- | --- | --- |
+| `claude-code` | `~/.claude/settings.json` (`auto` only; other modes → `.claude/settings.json`) | `permissions.defaultMode` | `auto` (classifier-mediated auto-approve) | `default` |
+| `codex` | `~/.codex/config.toml` (or `$RIG_CODEX_HOME/config.toml`) | `approvals_reviewer` (root key) | `auto_review` — eligible approval prompts go to Codex's reviewer subagent, the analog of claude-code's classifier `auto` | `user` (codex's default) |
+| `opencode` | `~/.config/opencode/opencode.json` | `permission."*"` (the documented global default every tool inherits; opencode's `--auto` flag is runtime-only, no config key) | `allow` | `ask` (prompts for everything not covered by a per-tool rule — the rig-managed `permission.bash` allowlist still applies) |
+| `omp` | `~/.omp/agent/config.yml` | `tools.approvalMode` — written by the **permissions approval action** (guard-interlocked, receipt-tracked; one owner of the key). A value rig itself installed (per the receipt) is converged when the intent changes; a user-set value is left untouched (drift visible). With `permissions.enabled: false` nothing writes it and the plan says so | `yolo` | `always-ask` (an unspecified intent keeps `yolo`, the rig-cli#202 posture) |
+| `pi`, `commandcode` | — | n/a: no documented approval/auto-mode setting (their deny/ask intent is the advisory `AGENTS.md` block) — recorded in `HARNESS_MODE_NA` and printed as a visible note by `rig apply info` and a per-kind line in `rig status` | — | — |
+
+codex: rig deliberately does NOT touch `approval_policy` / `sandbox_mode`. `approval_policy = "never"`
+would auto-REJECT escalations (network, outside the workspace), so `gh`/`git push`/`tg` fail fast
+under the default `workspace-write` sandbox unless the sandbox network flag is also flipped — a
+sandbox change rig must not make silently. Set those by hand if you want a sandbox-less codex.
+
+Only the one managed key is touched; every other setting in the file is preserved (codex's TOML is
+edited as text — the root key is upserted before the first `[table]`, comments kept). The write is
+**idempotent** (a re-apply with the same value is a no-op) and **backup-noted** (a rewritten prior
+file is backed up per `defaults.on_conflict` before converging; a value rig cannot rewrite as a plain
+string — a TOML inline table, a mis-shaped parent — is left untouched and reported; a codex
+`config.toml` that does not parse is an error, never edited). `rig status`
+reports drift if the on-disk value no longer matches the config, and prints a `harness auto-mode per
+kind` block naming the key/file/value (or the n/a reason) for every configured kind.
 
 **Self-merge unblock (`self_merge`, auto-mode only).** When `auto_mode` resolves to the
 `auto` classifier mode and `self_merge` is `true` (the default), rig provisions **two** additive,
@@ -611,16 +652,6 @@ anti-exfil hard rule. It is **inert without auto-mode** (the classifier runs onl
 is configured. Set `self_merge: false` to keep the gate/soft block (the agent asks before merging
 its own PR). An agent cannot write these to its own live settings (that trips the Self-Modification
 soft block) — run `rig apply` yourself to activate it.
-
-**Auto-mode write is claude-code-only (for now).** `kind: opencode` (and `codex`/
-`pi`/`commandcode`/`omp`) are now **accepted** — rig provisions their **skill discovery** (see
-[Harness skill discovery](#harness-skill-discovery-why-harness_link)). But the auto/permission-
-**mode** write is still implemented only for `claude-code`. If you set `auto_mode`/`mode` on a
-kind without a mode-writer yet, rig **skips that write and says so** in a plan note (its skills
-are still provisioned) rather than silently doing nothing — set the mode in the harness's own
-config for now. opencode expresses the same intent through a `permission` block in its
-`opencode.json` (`"permission": { "edit": "allow", "bash": "allow" }` for auto-accept, vs
-`"ask"` for interactive); wiring that write is tracked separately.
 
 **The hook bridge (`hook_bridge`).** Harnesses only run hooks declared in their own config; they
 do not execute the `agents-hooks/v1` descriptors directly. Without a bridge, installed

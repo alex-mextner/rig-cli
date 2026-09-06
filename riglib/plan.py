@@ -40,6 +40,19 @@ from .harness_skills import instruction_file_for as _instruction_file_for
 from .harness_skills import native_skills_dir_for as _native_skills_dir_for
 from .harness_skills import omp_user_path as _omp_user_path
 from .harness_skills import skill_dir_for as _skill_dir_for
+from .harness_mode import (
+    HARNESS_MODES,
+    WRITER_APPROVAL,
+    delegated_note,
+    harness_auto_intent,
+    mode_is_known,
+    mode_value_for,
+    resolved_mode_value,
+    na_note,
+    undeclared_note,
+    unknown_mode_kind_note,
+    unknown_mode_note,
+)
 from .paths import expand_user_path as _expand_user_path
 from .provenance import KNOWN_CATEGORIES, known_names_from_config
 from . import project_tools
@@ -870,6 +883,7 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     _build_permissions(config, plan)
     _build_execpolicy(config, plan)
     _build_guard_policy(config, plan)
+    _build_harness_delegated_notes(config, plan)
 
     # ── hook bridge (make agents-hooks/v1 descriptors FIRE in the harness) ─────────
     _build_hook_bridge(config, catalog, plan)
@@ -922,55 +936,172 @@ def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknow
     return plan
 
 
-# Per-harness settings file. NON-auto modes are written to the repo's PROJECT settings
+# claude-code's PROJECT settings file: a NON-auto mode on the PRIMARY kind is written here
 # (committed, travels with the repo). `auto` is special: Claude Code IGNORES
 # `permissions.defaultMode: auto` from project/local settings (v2.1.142+) and honors it ONLY
-# from the user's machine settings — so auto-mode is provisioned per-MACHINE, not per-repo.
+# from the user's machine settings — so auto-mode is provisioned per-MACHINE, not per-repo. The
+# user-scope file and the auto/interactive VALUES come from the one registry
+# (``riglib.harness_mode.HARNESS_MODES["claude-code"]``): `auto` (research preview) auto-approves
+# WITH a safety classifier — preferred over `bypassPermissions` (which skips every check;
+# container/VM only). `default` restores prompts. Pin `harness.mode: bypassPermissions` to opt
+# back into full bypass (non-qualifying account / container) — that value IS committable at
+# project scope.
 _HARNESS_SETTINGS = {
     "claude-code": ".claude/settings.json",
-}
-_HARNESS_AUTO_USER_SETTINGS = {
-    "claude-code": "~/.claude/settings.json",
-}
-# The permission-mode value each harness uses for auto-accept, keyed by (kind, auto_mode).
-# claude-code: `auto` (research preview) auto-approves WITH a safety classifier — preferred
-# over `bypassPermissions` (which skips every check; container/VM only). `default` restores
-# prompts. Pin `harness.mode: bypassPermissions` to opt back into full bypass (non-qualifying
-# account / container) — that value IS committable at project scope.
-_HARNESS_AUTO_MODE = {
-    "claude-code": {True: "auto", False: "default"},
 }
 
 
 def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
-    """Plan the harness auto/permission write, if a ``harness`` block is present.
+    """Plan the auto/permission-mode write for EVERY configured harness kind.
 
-    No harness block → no action (rig leaves the harness config untouched). With a block,
-    one ``apply_harness`` action carries the resolved settings file + the permission-mode
-    key/value to merge. The plan stays pure; the merge happens in ``actions/``.
+    No harness block → no action (rig leaves the harness config untouched). With a block, the
+    primary ``kind`` AND each additive ``kinds`` entry is routed through the per-kind registry
+    (:mod:`riglib.harness_mode`): claude-code keeps its dedicated writer (project-vs-user settings
+    file, self-merge); codex/opencode get a generic ``apply_harness`` write of their own key; omp's
+    key is owned by the permissions approval action (a note points at it); pi/commandcode have no
+    such setting and get a VISIBLE n/a note. The plan stays pure; the merge happens in ``actions/``.
     """
+    h = _enabled_harness_block(config)
+    if h is None:
+        return
+    primary = str(h.get("kind", _DEFAULT_HARNESS_KIND))
+    mode = h.get("mode")
+    # Resolved ONCE here and handed to every per-kind builder — a builder re-deriving it from the
+    # raw block would disagree with this one in the unknown-mode case ("not declared" while
+    # ``mode:`` IS set) and `rig status` would print the contradiction.
+    intent = harness_auto_intent(h, primary)
+    # A `mode:` the primary kind does not know (and no auto_mode to decide): no other kind can
+    # follow it — an unknown string must not become a silent tighten to interactive (or a silent
+    # nothing) for the kind set. A claude-code PRIMARY still writes its own `mode:` verbatim (the
+    # user owns that string, and claude-code's vocabulary can outgrow the registry).
+    unknown_mode = intent is None and bool(mode) and not mode_is_known(primary, mode)
+    kinds = _configured_harness_kinds(config)
+    if unknown_mode and any(k in HARNESS_MODES and not (k == primary == "claude-code") for k in kinds):
+        plan.notes.append(unknown_mode_note(primary, mode))
+    for kind in kinds:
+        spec = HARNESS_MODES.get(kind)
+        if spec is None:
+            # elevated only when the N/A kind is the PRIMARY and something was asked of it; an
+            # additive `kinds: [pi]` next to `auto_mode: true` is the documented skills-only
+            # listing and must not raise an alarm on every apply
+            asked = kind == primary and (h.get("auto_mode") is not None or bool(mode))
+            plan.notes.append(na_note(kind, declared=asked))
+        elif spec.writer == WRITER_APPROVAL:
+            continue  # noted by _build_harness_delegated_notes once the approval builder has run
+        elif kind == primary == "claude-code":
+            _build_harness_claude_code(config, plan, h, kind)
+        elif unknown_mode:
+            # the primary (non-claude) kind and every additive kind alike: nothing is written
+            plan.notes.append(unknown_mode_kind_note(kind, primary, mode))
+        elif kind == "claude-code":
+            block = _claude_code_block(h, kind, primary, intent)
+            if block is None:
+                plan.notes.append(undeclared_note(kind))
+            else:
+                _build_harness_claude_code(config, plan, block, kind)
+        else:
+            _build_harness_mode_for_kind(config, plan, kind, intent, primary=primary, mode=mode)
+
+
+def _enabled_harness_block(config: LoadedConfig) -> dict[str, Any] | None:
+    """The ``harness:`` block when present and not ``enabled: false``, else ``None``."""
     h = config.data.get("harness")
-    if not isinstance(h, dict) or not h:
+    if not isinstance(h, dict) or not h or h.get("enabled") is False:
+        return None
+    return h
+
+
+def _build_harness_delegated_notes(config: LoadedConfig, plan: InstallPlan) -> None:
+    """Note, for every configured kind whose mode key is owned by the permissions approval action,
+    whether the plan ACTUALLY carries that action — read off ``plan.actions`` after
+    ``_build_guard_policy`` ran, never re-derived from its gate (a re-prediction that drifts from
+    the real gate would claim "written by the approval action" while nothing writes it, and the
+    kind would fall off ``rig status`` — the silent gap rig-cli#355 exists to close)."""
+    if _enabled_harness_block(config) is None:
         return
-    if h.get("enabled") is False:
+    for kind in _configured_harness_kinds(config):
+        spec = HARNESS_MODES.get(kind)
+        if spec is None or spec.writer != WRITER_APPROVAL:
+            continue
+        written = any(
+            a.kind == "provision_harness_approval" and str(a.options.get("kind", "")) == kind
+            for a in plan.actions
+        )
+        plan.notes.append(delegated_note(kind, written=written))
+
+
+def _claude_code_block(h: dict[str, Any], kind: str, primary: str, intent: bool | None) -> dict[str, Any] | None:
+    """The harness block the claude-code writer sees — or ``None`` when nothing should be written.
+
+    As the PRIMARY kind it is the block itself (``mode:`` / ``settings_path`` are claude-code
+    values there; an undeclared intent keeps the legacy ``default`` write). As an ADDITIVE kind
+    (``kind: opencode, kinds: [claude-code]``) the block's ``mode:``/``settings_path`` belong to the
+    primary harness and must not leak: claude-code then gets only the inferred boolean intent
+    (plus ``self_merge``), and an UNDECLARED intent means no write at all — the same rule as every
+    other additive kind (a skills-only listing must not change the posture behind the user's back).
+    The write is pinned to the USER-scope file either way: auto-mode is a per-machine posture for
+    every additive kind, so an interactive intent must not land in the committed project settings.
+    """
+    if kind == primary:
+        return h
+    if intent is None:
+        return None
+    reduced: dict[str, Any] = {"auto_mode": intent, "settings_path": HARNESS_MODES[kind].settings_path()}
+    if "self_merge" in h:
+        reduced["self_merge"] = h["self_merge"]
+    return reduced
+
+
+def _build_harness_mode_for_kind(
+    config: LoadedConfig, plan: InstallPlan, kind: str, intent: bool | None, *, primary: str, mode: object,
+) -> None:
+    """One generic ``apply_harness`` write of ``kind``'s own mode key (codex/opencode).
+
+    The value follows the harness auto ``intent`` resolved by :func:`_build_harness` (``auto_mode``,
+    else inferred from a pinned ``mode:`` via the primary kind's ``auto_values``) — except that the
+    PRIMARY kind's own known ``mode:`` is written verbatim (``kind: opencode, mode: deny`` must stay
+    ``deny``, not relax to ``ask``; see :func:`resolved_mode_value`). No declared intent → no write
+    (an informational note instead). The target is always the kind's user-scope file from the registry.
+    """
+    spec = HARNESS_MODES[kind]
+    if intent is None:
+        # no auto_mode / mode declared: a skills-only additive kind (`kinds: [opencode]`) must not
+        # have its posture tightened to the interactive value behind its back — write nothing, say so.
+        plan.notes.append(undeclared_note(kind))
         return
-    kind = str(h.get("kind", "claude-code"))
-    if kind not in _HARNESS_SETTINGS:
-        # The config schema now ACCEPTS opencode/codex/pi/commandcode (rig provisions their
-        # SKILL discovery), but the auto/permission-MODE write is only implemented for the kinds in
-        # ``_HARNESS_SETTINGS`` (claude-code today). Skip the auto-mode write for the others — but
-        # say so, so a config that set ``auto_mode``/``mode`` on such a kind isn't a silent no-op.
-        if h.get("auto_mode") is not None or h.get("mode"):
-            plan.notes.append(
-                f"harness: auto-mode write skipped — kind '{kind}' has no rig auto/permission-mode "
-                "writer yet (its skills are still provisioned; set the mode in the harness's own "
-                "config for now)"
-            )
-        return
+    # An ADDITIVE kind never gets the raw ``mode:`` string: it is the primary harness's value
+    # (claude-code's ``acceptEdits``, opencode's ``deny``) and would be an invalid setting here — it
+    # only feeds the intent inference above. The primary's own known value is the documented override.
+    mode_value = resolved_mode_value(kind, primary, mode, intent)
+    # ALWAYS the kind's user-scope file: auto-mode is a per-MACHINE posture (the same reason the
+    # claude-code ``auto`` write is user-scope only). ``harness.settings_path`` is NOT consulted here —
+    # it is the hook-bridge / claude settings override (for opencode it names a .js PLUGIN), never
+    # the mode file.
+    settings_path = spec.settings_path()
+    plan.actions.append(
+        Action(
+            kind="apply_harness",
+            category="harness",
+            item=kind,
+            source=config.repo_root,  # no carrier in agent-tools; anchor on the repo
+            target=_expand(str(settings_path), config.repo_root),
+            options={
+                "kind": kind,
+                "auto_mode": bool(intent),
+                "mode_value": mode_value,
+                "format": spec.format,
+            },
+        )
+    )
+
+
+def _build_harness_claude_code(config: LoadedConfig, plan: InstallPlan, h: dict[str, Any], kind: str) -> None:
+    """The claude-code writer: ``permissions.defaultMode`` + the self-merge unblock."""
+    spec = HARNESS_MODES[kind]
     auto_mode = bool(h.get("auto_mode", False))
     # an explicit `mode:` override wins over the auto_mode → mode mapping (lets a config pin
     # e.g. `acceptEdits` instead of full bypass while staying non-interactive for edits).
-    mode_value = h.get("mode") or _HARNESS_AUTO_MODE[kind][auto_mode]
+    mode_value = h.get("mode") or spec.values[auto_mode]
     # The self-merge classifier carve-out (default ON) is EFFECTIVE only under `auto` — the
     # auto-mode classifier is the only mode that runs the soft-block rules, and its config lives
     # in the user-scope settings (same file the `auto` mode write targets). It is safe precisely
@@ -982,7 +1113,7 @@ def _build_harness(config: LoadedConfig, plan: InstallPlan) -> None:
     if h.get("settings_path"):
         settings_path = h["settings_path"]
     elif mode_value == "auto":
-        settings_path = _HARNESS_AUTO_USER_SETTINGS[kind]
+        settings_path = spec.settings_path()
     else:
         settings_path = _HARNESS_SETTINGS[kind]
     plan.actions.append(
@@ -1271,7 +1402,7 @@ def _build_guard_policy(config: LoadedConfig, plan: InstallPlan) -> None:
             # The approval posture relaxes the harness to auto-approve — it may ONLY land
             # when the guard belt for the same kind is in place (the runner re-verifies the
             # guard target's content before writing; see the action handler).
-            options: dict[str, Any] = {"kind": kind}
+            options: dict[str, Any] = {"kind": kind, "mode_value": _approval_mode_value(config, kind)}
             if guard_target is not None:
                 options["guard_target"] = str(guard_target)
             plan.actions.append(
@@ -1298,6 +1429,20 @@ def _build_guard_policy(config: LoadedConfig, plan: InstallPlan) -> None:
                     options={"kind": kind},
                 )
             )
+
+
+def _approval_mode_value(config: LoadedConfig, kind: str) -> str:
+    """The approval-posture value for ``kind`` — follows the harness auto intent when the harness
+    block configures ``kind``; otherwise (no block, ``enabled: false``, or ``kind`` not among the
+    configured harness kinds) the legacy relaxed posture (yolo, rig-cli#202 owner decision) — a
+    foreign harness's ``auto_mode: false`` must not flip a kind it never declared."""
+    h = _enabled_harness_block(config)
+    if h is None or kind not in _configured_harness_kinds(config):
+        return mode_value_for(kind, None, legacy_intent=True)
+    primary = str(h.get("kind") or _DEFAULT_HARNESS_KIND)
+    intent = harness_auto_intent(h, primary)
+    # a primary omp's own pinned mode (``write``) is honoured verbatim, like every primary kind
+    return resolved_mode_value(kind, primary, h.get("mode"), intent, legacy_intent=True)
 
 
 def _permissions_kinds(config: LoadedConfig, p: dict[str, Any]) -> list[str]:

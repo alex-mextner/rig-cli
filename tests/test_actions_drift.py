@@ -996,14 +996,11 @@ def test_two_native_kinds_sharing_one_root_do_not_duplicate_links(
     assert not report.errors, [r.detail for r in report.errors]
 
 
-@pytest.mark.parametrize("kind", ["opencode", "codex", "pi", "commandcode", "omp"])
-def test_auto_mode_on_non_claude_kind_skips_write_with_note(fake_agent_tools, tmp_path, kind):
-    """A kind with no auto/permission-MODE writer self-skips the write — but says so, not silently.
-
-    The schema now accepts these kinds (for skill provisioning); the auto-mode WRITE is
-    claude-code-only. Setting ``auto_mode`` on such a kind must NOT emit an ``apply_harness``
-    action AND must leave a note, so the request is never a silent no-op (the failure mode this
-    PR set out to remove).
+@pytest.mark.parametrize("kind", ["pi", "commandcode"])
+def test_auto_mode_on_na_kind_records_visible_note(fake_agent_tools, tmp_path, kind):
+    """A kind with NO auto/permission-mode setting at all (pi/commandcode) emits no write — but a
+    VISIBLE n/a note naming the reason, so the request is never a silent no-op. The kinds that
+    used to self-skip here (codex/opencode/omp) now get a real write — see tests/test_harness_mode.py.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1012,7 +1009,7 @@ def test_auto_mode_on_non_claude_kind_skips_write_with_note(fake_agent_tools, tm
     cat = Catalog.scan(str(fake_agent_tools))
     plan = build(cfg, cat, project_type="unknown")
     assert not [a for a in plan.actions if a.kind == "apply_harness"], f"{kind}: unexpected write"
-    assert any("auto-mode write skipped" in n and kind in n for n in plan.notes), plan.notes
+    assert any("no auto/permission-mode setting" in n and kind in n for n in plan.notes), plan.notes
 
 
 @pytest.mark.parametrize("kind", ["pi", "commandcode"])
