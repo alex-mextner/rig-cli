@@ -2095,14 +2095,18 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"      {_dim('why:')} {f.why}")
             print(f"      {_ok('fix:')} {f.fix}")
 
-    if report.in_sync and not dead_targets:
-        print(_ok("\n  in sync — config and disk agree"))
-        return 0
-
-    if not report.in_sync:
+    # KNOWN items (on disk, not rig-managed, origin named) are informational: printed AFTER the
+    # problems, on a clean machine too, and never part of the exit-code decision (rig-cli#357).
+    if report.in_sync:
+        _render_known_by_layer(report, loaded, env)
+        if not dead_targets:
+            print(_ok(f"\n  in sync — config and disk agree{_known_summary_note(report)}"))
+            return 0
+    else:
         # render the full drift report whenever there IS drift — the user must SEE every problem,
         # regardless of which exit code we ultimately surface below.
         _render_drift_by_layer(report, loaded, env)
+        _render_known_by_layer(report, loaded, env)
         # LOUD reassurance: apply NEVER deletes on-disk-not-declared items. A user must not fear
         # `rig apply` will nuke a hand-added skill (it won't — extras are surfaced, never removed).
         print()
@@ -2189,6 +2193,15 @@ def _area_state_line(area, plan, report, extra_configured_actions=()) -> str:
         1 for d in report.by_direction("extra")
         if area_matches_drift(area, d.category, d.item, d.direction)
     )
+    # on-disk items rig can place but does not manage (rig-cli#357): shown as a count next to the
+    # state, never folded into the drift counts (they are informational, not drift). A known item
+    # is by construction a disk-side extra (the scanners file it from the same walk that yields
+    # `extra` drift), so the drift matcher's `extra` routing applies to it verbatim.
+    known = sum(
+        1 for k in report.known if area_matches_drift(area, k.category, k.item, "extra")
+    )
+    known_what = "your additions, kept" if area.key == "permissions" else "known, not rig-managed"
+    known_note = _dim(f"  ({known} {known_what})") if known else ""
 
     # tg_ctl off Darwin: the provisioner is a no-op so detect() finds no drift even though nothing
     # installed → render "unsupported" instead of a false "in sync". But ONLY when there really is
@@ -2200,10 +2213,13 @@ def _area_state_line(area, plan, report, extra_configured_actions=()) -> str:
         if not _on_darwin():
             return _dim("unsupported (macOS-only; no-op off darwin)")
 
+    # an area the config turns OFF stays "not configured" even when the machine-wide target holds
+    # known items (the extras scan runs regardless of configured actions) — "in sync" would claim a
+    # reconciliation that never happens; the known count still shows beside it.
     if not configured and missing == 0 and extra == 0:
-        return _dim("not configured")
+        return _dim("not configured") + known_note
     if missing == 0 and extra == 0:
-        return _ok("in sync")
+        return _ok("in sync") + known_note
     parts = []
     if missing:
         # "missing/modified" because the count folds both directions of config→disk drift: a
@@ -2212,7 +2228,7 @@ def _area_state_line(area, plan, report, extra_configured_actions=()) -> str:
         parts.append(f"{missing} declared-but-missing/modified")
     if extra:
         parts.append(f"{extra} on-disk-not-declared")
-    return _warn(f"drift ({', '.join(parts)})")
+    return _warn(f"drift ({', '.join(parts)})") + known_note
 
 
 def _render_area_summary(plan, report, env, extra_configured_actions=()) -> None:
@@ -2291,6 +2307,76 @@ def _render_drift_by_layer(report, loaded, env) -> None:
             for d in ext:
                 src = _declaring_config(d.category, loaded)
                 print(f"      {_warn('▸')} {d.category}/{d.item}: {d.detail}  {_dim('[' + str(d.target) + '; ' + src + ']')}")
+
+
+from .provenance import KNOWN_NAMES_SHOWN as _KNOWN_NAMES_SHOWN
+
+
+def _render_known_by_layer(report, loaded, env) -> None:
+    """Render the KNOWN items (rig-cli#357) grouped by layer, then by origin — one line per group.
+
+    Two headings per layer: "known, not managed by rig" (skills / hooks / workflows / MCP entries
+    whose origin rig can name) and "your additions, kept" (permission entries beyond the rig
+    baseline). Both are informational — printed dim, never counted as drift, never part of the
+    exit code — so a clean machine with 40 tool-installed skills reads as clean, not as 40 drift.
+    """
+    from .layers import GLOBAL, REPO, layer_for_category
+
+    buckets: dict[str, dict[str, list]] = {GLOBAL: {"placed": [], "kept": []}, REPO: {"placed": [], "kept": []}}
+    for k in report.known_placed:
+        buckets[layer_for_category(k.category)]["placed"].append(k)
+    for k in report.known_kept:
+        buckets[layer_for_category(k.category)]["kept"].append(k)
+    for layer in (GLOBAL, REPO):
+        placed, kept = buckets[layer]["placed"], buckets[layer]["kept"]
+        if not (placed or kept) or (layer == REPO and not env.is_git_repo):
+            continue
+        print()
+        print(_bold(f"  {_LAYER_HEADERS[layer]}"))
+        if placed:
+            print(_dim(f"    known, not managed by rig ({len(placed)}) — informational, not drift:"))
+            _print_known_groups(placed, loaded)
+        if kept:
+            print(_dim(f"    your additions, kept ({len(kept)}) — beyond the rig baseline; rig never removes them:"))
+            _print_known_groups(kept, loaded)
+
+
+def _print_known_groups(items: list, loaded) -> None:
+    """One line per (category, origin kind[, permission container]) with the member names joined."""
+    from .provenance import KIND_CONFIG_KNOWN, KIND_LABELS
+
+    groups: dict[tuple[str, str, str], list] = {}
+    for k in items:
+        # permission entries carry the list they sit in (`claude-code:permissions.deny`, …) and
+        # print under it — the other categories group per origin only
+        groups.setdefault((k.category, k.kind, k.container), []).append(k)
+    for (category, kind, container), members in groups.items():
+        names = [_known_name(k) for k in members]
+        shown = ", ".join(names[:_KNOWN_NAMES_SHOWN])
+        if len(names) > _KNOWN_NAMES_SHOWN:
+            shown += f" … and {len(names) - _KNOWN_NAMES_SHOWN} more"
+        where = container or category
+        label = KIND_LABELS[kind]
+        if kind == KIND_CONFIG_KNOWN:
+            label += f" ({category}.known in {_declaring_config(category, loaded)})"
+        print(f"      {_dim('▸')} {where} ({len(members)}) {label}: {shown}")
+
+
+def _known_summary_note(report) -> str:
+    """The parenthetical after "in sync": known-not-managed and kept-additions counted apart."""
+    kept = len(report.known_kept)
+    placed = len(report.known_placed)
+    parts = []
+    if placed:
+        parts.append(f"{placed} known item{'s' if placed != 1 else ''} not managed by rig")
+    if kept:
+        parts.append(f"{kept} permission addition{'s' if kept != 1 else ''} kept")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _known_name(k) -> str:
+    """The display name of a known item; names the installer when it differs from the item."""
+    return f"{k.name} (by {k.by})" if k.by and k.by != k.name else k.name
 
 
 def _print_schedule_status(plan, report) -> None:

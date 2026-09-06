@@ -72,6 +72,12 @@ DEFAULT_ECOSYSTEM_TOOLS: tuple[str, ...] = (
 )
 DEFAULT_EXTERNAL_TOOLS: tuple[str, ...] = ("rg", "jq", "gitleaks")
 DEFAULT_TOOLS: tuple[str, ...] = DEFAULT_ECOSYSTEM_TOOLS + DEFAULT_EXTERNAL_TOOLS
+# Tools rig USED to pre-allow by default (rig-cli#41) and deliberately stopped (rig-cli#165, the
+# "raw process-control / package-manager / git-hosting tools are absent" policy above). rig never
+# removes an allow entry, so a machine provisioned between those two releases still carries their
+# rendered entries — `rig status` names them as former rig defaults (kept), not as user drift
+# (rig-cli#357). NEVER re-added to the desired set; this tuple exists only to name the origin.
+RETIRED_DEFAULT_TOOLS: tuple[str, ...] = ("gh", "git", "uv", "bun")
 
 
 def _render_claude_code(tool: str) -> str:

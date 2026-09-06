@@ -237,6 +237,12 @@ _SKILLS_BLOCK = Block(
         "enabled": Leaf("boolean", "install skills at all", default=True),
         "target": Leaf("string", "where SKILL.md dirs are copied", default="~/.agents/skills"),
         "all": Leaf("boolean", "enable all skills (opt-out)", default=True),
+        "known": Leaf(
+            "array",
+            "hand-installed skill dir names on disk that rig does NOT manage but should report as known (informational), "
+            "not as drift — see docs/config-schema.md#provenance",
+            items_type="string",
+        ),
         "harness_link": Leaf(
             "boolean",
             "also symlink each installed skill into the harness discovery dir",
@@ -291,6 +297,12 @@ _AGENT_HOOKS_BLOCK = Block(
             enum=("claude-code", "generic"),
         ),
         "all": Leaf("boolean", "install all guard hooks", default=True),
+        "known": Leaf(
+            "array",
+            "hook ids (or full descriptor stems) another installer wrote on disk that rig does NOT manage but should report as known (informational), "
+            "not as drift — see docs/config-schema.md#provenance",
+            items_type="string",
+        ),
         # Two RUNTIME behaviour knobs read BY the installed hooks from this committed rig.yaml
         # (rig apply does not consume them — the hook scripts parse agent_hooks.<key> at fire
         # time). They live here so the strict validator/schema accept them per-repo.
@@ -355,6 +367,12 @@ _CI_BLOCK = Block(
         "enabled": Leaf("boolean", "install CI gate workflows", default=True),
         "target": Leaf("string", "workflows dir, or `export-only`", default=".github/workflows"),
         "all": Leaf("boolean", "install every gate (vs per-item)", default=False),
+        "known": Leaf(
+            "array",
+            "workflow file stems this repo owns that collide with a catalog slot name on disk that rig does NOT manage but should report as known (informational), "
+            "not as drift — see docs/config-schema.md#provenance",
+            items_type="string",
+        ),
     },
     open_map="items",
     open_map_doc="per-gate overrides (enabled / tier / variant / …) keyed by gate name",
@@ -380,6 +398,12 @@ _MCP_BLOCK = Block(
     leaves={
         "enabled": Leaf("boolean", "register MCP servers", default=True),
         "target": Leaf("string", "MCP config dir, file, or `export-only`", default="~/.claude/mcp"),
+        "known": Leaf(
+            "array",
+            "MCP server names registered by something other than rig on disk that rig does NOT manage but should report as known (informational), "
+            "not as drift — see docs/config-schema.md#provenance",
+            items_type="string",
+        ),
     },
     open_map="items",
     open_map_doc="per-server overrides (command / args / env / server / enabled) keyed by server name",

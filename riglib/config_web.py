@@ -90,6 +90,7 @@ from . import config as cfg
 from . import schema
 from .config_web_plan import ApplyJobStore
 from .layers import GLOBAL, REPO
+from .provenance import KNOWN_NAMES_SHOWN
 
 # The interface (host + the rendered title) is shared by the HTTP server and the tests, so it is
 # defined once. Localhost-only by invariant — see the module docstring.
@@ -868,8 +869,44 @@ async function loadDrift() {{
       return '<div class="drift-item"><span class="drift-dir missing">missing target</span>' +
         esc(m.what) + '<div>' + esc(m.why) + '</div><div class="plan-target">fix: ' + esc(m.fix) + '</div></div>';
     }}).join('');
-    if (!rows && !missing) {{ body.innerHTML = '<div class="in-sync">✓ in sync — config and disk agree</div>'; return; }}
-    body.innerHTML = missing + rows;
+    // known items (rig-cli#357): on disk, not rig-managed, origin named -- informational, never
+    // drift. Rendered under their own heading so a clean scope with tool-installed skills still
+    // reads as in sync (the payload's `in_sync` ignores them, and so must this panel).
+    // One row per (container-or-category, origin label) with the member names joined and capped
+    // -- the SAME shape the CLI prints (`_print_known_groups`, `_KNOWN_NAMES_SHOWN`): a kept
+    // allowlist runs to hundreds of entries, and one <div> per entry would flood the panel.
+    var KNOWN_NAMES_SHOWN = {KNOWN_NAMES_SHOWN};
+    function knownName(k) {{
+      return !k.kept && k.by && k.by !== k.name ? k.name + ' (by ' + k.by + ')' : k.name;
+    }}
+    function knownGroups(list) {{
+      var groups = {{}}, order = [];
+      list.forEach(function(k) {{
+        var where = k.kept ? k.container : k.category;
+        var key = where + ' :: ' + k.label;
+        if (!groups[key]) {{ groups[key] = {{where: where, label: k.label, kept: k.kept, names: []}}; order.push(key); }}
+        groups[key].names.push(knownName(k));
+      }});
+      return order.map(function(key) {{
+        var g = groups[key];
+        var shown = g.names.slice(0, KNOWN_NAMES_SHOWN).join(', ');
+        if (g.names.length > KNOWN_NAMES_SHOWN) {{ shown += ' … and ' + (g.names.length - KNOWN_NAMES_SHOWN) + ' more'; }}
+        return '<div class="drift-item"><span class="drift-dir known">' + (g.kept ? 'kept' : 'known') + '</span>' +
+          esc(g.where) + ' (' + g.names.length + ')<div class="plan-target">' + esc(g.label) + '</div><div>' + esc(shown) + '</div></div>';
+      }}).join('');
+    }}
+    // the CLI's two headings: placed items vs permission additions (never removed)
+    var placed = (data.known || []).filter(function(k) {{ return !k.kept; }});
+    var kept = (data.known || []).filter(function(k) {{ return k.kept; }});
+    var knownBlock = '';
+    if (placed.length) {{
+      knownBlock += '<div class="in-sync">known, not managed by rig (' + placed.length + ') — informational, not drift</div>' + knownGroups(placed);
+    }}
+    if (kept.length) {{
+      knownBlock += '<div class="in-sync">your additions, kept (' + kept.length + ') — beyond the rig baseline; rig never removes them</div>' + knownGroups(kept);
+    }}
+    if (!rows && !missing) {{ body.innerHTML = '<div class="in-sync">✓ in sync — config and disk agree</div>' + knownBlock; return; }}
+    body.innerHTML = missing + rows + knownBlock;
     // pre-existing drift (declared but never applied, or applied then hand-edited away) must
     // offer the SAME apply entry point an edit does -- previously the CTA only appeared right
     // after a successful edit, so a scope with drift on first load / tab switch had no way to

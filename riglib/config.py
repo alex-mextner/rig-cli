@@ -690,6 +690,7 @@ def _validate_ci(ci: dict[str, Any]) -> None:
     _check_bool(ci, "enabled", "ci.enabled")
     _check_str(ci, "target", "ci.target")
     _check_bool(ci, "all", "ci.all")
+    _check_str_list(ci, "known", "ci.known")
     items = ci.get("items", {})
     if not isinstance(items, dict):
         raise ConfigError("ci.items must be a mapping", schema_path="ci.items")
@@ -729,6 +730,7 @@ def _validate_agent_hooks(ah: dict[str, Any]) -> None:
     # would pass the validator but violate the schema). See tests/test_workflow_guard_knobs.py.
     _check_bool(ah, "worktree_only", "agent_hooks.worktree_only")
     _check_bool(ah, "orchestrator_only", "agent_hooks.orchestrator_only")
+    _check_str_list(ah, "known", "agent_hooks.known")
     items = ah.get("items", {})
     if not isinstance(items, dict):
         raise ConfigError("agent_hooks.items must be a mapping", schema_path="agent_hooks.items")
@@ -762,6 +764,7 @@ def _validate_mcp(mcp: dict[str, Any]) -> None:
     target = mcp.get("target")
     if target is not None and not isinstance(target, str):
         raise ConfigError(f"mcp.target must be a string, got {target!r}", schema_path="mcp.target")
+    _check_str_list(mcp, "known", "mcp.known")
     items = mcp.get("items", {})
     if not isinstance(items, dict):
         raise ConfigError("mcp.items must be a mapping", schema_path="mcp.items")
@@ -854,6 +857,7 @@ def _validate_skills(sk: dict[str, Any]) -> None:
     _check_bool(sk, "enabled", "skills.enabled")
     _check_str(sk, "target", "skills.target")
     _check_bool(sk, "all", "skills.all")
+    _check_str_list(sk, "known", "skills.known")
     harness_link = sk.get("harness_link")
     if harness_link is not None and not isinstance(harness_link, bool):
         raise ConfigError(

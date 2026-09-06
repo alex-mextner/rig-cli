@@ -88,6 +88,18 @@ from .github_ruleset import DEFAULT_RULESET_NAME
 from .layers import GLOBAL, layer_for_category
 from .missing_target import scan_settings_hooks
 from .plan import Action, InstallPlan
+from .provenance import (
+    KIND_DISABLED_BASELINE,
+    KIND_RETIRED_DEFAULT,
+    KIND_USER_EXTRA,
+    PERMISSION_KINDS,
+    hook_provenance,
+    mcp_provenance,
+    skill_provenance,
+    undeclared_hook_detail,
+    undeclared_skill_detail,
+    workflow_provenance,
+)
 from . import project_tools
 from .tg_ctl import STALE_PREDECESSOR_LABEL
 
@@ -107,12 +119,44 @@ class DriftItem:
 
 
 @dataclass
+class KnownItem:
+    """An on-disk item rig does NOT manage but CAN place (rig-cli#357) — informational, never drift.
+
+    ``kind`` is a :mod:`riglib.provenance` grouping key (``KIND_LABELS`` names it for the user),
+    ``by`` the installer it names (empty when the kind carries none), ``name`` the display label
+    (the skill/hook/workflow name, or the permission entry itself). ``container`` is set for a
+    ``permissions`` item only: the list the entry sits in, ``<harness kind>:<dotted key path>``
+    (``claude-code:permissions.deny``), which the renderer groups by. Kept OUT of
+    :attr:`DriftReport.items` so ``in_sync``, the drift exit code and the area counts never see it.
+    """
+
+    category: str
+    item: str
+    target: Path
+    kind: str
+    name: str
+    by: str = ""
+    container: str = ""
+
+
+@dataclass
 class DriftReport:
     items: list[DriftItem] = field(default_factory=list)
+    known: list[KnownItem] = field(default_factory=list)
 
     @property
     def in_sync(self) -> bool:
         return not self.items
+
+    @property
+    def known_placed(self) -> list[KnownItem]:
+        """Known items whose origin is another installer / the config / the repo — "not managed by rig"."""
+        return [k for k in self.known if k.kind not in PERMISSION_KINDS]
+
+    @property
+    def known_kept(self) -> list[KnownItem]:
+        """Permission entries beyond the rig baseline — "your additions, kept"."""
+        return [k for k in self.known if k.kind in PERMISSION_KINDS]
 
     def by_direction(self, direction: str) -> list[DriftItem]:
         return [i for i in self.items if i.direction == direction]
@@ -244,7 +288,8 @@ def compute_drift_report(
         for action in plan.actions:
             (global_actions if is_global_action(action) else repo_actions).append(action)
         effective_plan = InstallPlan(
-            actions=global_actions, on_conflict=plan.on_conflict, notes=plan.notes
+            actions=global_actions, on_conflict=plan.on_conflict, notes=plan.notes,
+            catalog_items=plan.catalog_items, known_names=plan.known_names,
         )
         # ship_delegator carries the GLOBAL ship_env (machine env file) check, and apply does
         # NOT drop repo actions outside git — it still reconciles that file. Remember the dropped
@@ -389,8 +434,16 @@ def detect(
     CI actions, but undeclared workflows on disk are still drift; an MCP config with no
     declared servers should still surface undeclared entries). The caller passes the
     resolved category targets so the extras scan is complete.
+
+    ``plan.known_names`` (the ``<category>.known`` config lists) and ``plan.catalog_items`` let
+    the extras scanners file an undeclared item under :attr:`DriftReport.known` (an origin rig
+    can name — informational) instead of as drift. See :mod:`riglib.provenance`.
     """
     report = DriftReport()
+    # getattr: callers hand in duck-typed plan stand-ins (an object with just ``actions``) — no
+    # catalog / config knowledge then, the conservative reading (everything undeclared is drift).
+    known = getattr(plan, "known_names", None) or {}
+    catalog = getattr(plan, "catalog_items", None) or {}
     declared_skill_dirs: dict[Path, set[str]] = {d: set() for d in (scan_skill_dirs or [])}
     declared_ci_dirs: dict[Path, set[str]] = {d: set() for d in (scan_ci_dirs or [])}
     declared_mcp: dict[Path, set[str]] = {f: set() for f in (scan_mcp_files or [])}
@@ -486,31 +539,44 @@ def detect(
         elif action.kind == "provision_spotlight":
             _check_spotlight(action, report)
 
-    _extras_skills(declared_skill_dirs, report)
-    _extras_ci(declared_ci_dirs, report)
-    _extras_mcp(declared_mcp, report)
-    _extras_hooks(declared_hook_dirs, report)
+    _extras_skills(declared_skill_dirs, report, known.get("skills", set()), catalog.get("skills"))
+    _extras_ci(declared_ci_dirs, report, known.get("ci", set()), catalog.get("ci"))
+    _extras_mcp(declared_mcp, report, known.get("mcp", set()))
+    _extras_hooks(declared_hook_dirs, report, known.get("agent_hooks", set()), catalog.get("agent_hooks"))
     return report
 
 
-def _extras_hooks(declared_hook_dirs: dict[Path, set[str]], report: DriftReport) -> None:
+def _extras_hooks(
+    declared_hook_dirs: dict[Path, set[str]], report: DriftReport, known: set[str], catalog: dict[str, tuple[Path, ...]] | None,
+) -> None:
     """Flag agent-hook descriptors on disk (``*.json``) not declared in config.
 
     Dispatcher *fragments* are intentionally NOT flagged: ``global-hooks.d`` is a shared
     drop-in namespace where other tools' fragments legitimately coexist, so undeclared
-    fragments there are expected, not drift.
+    fragments there are expected, not drift. A descriptor another installer marked, an
+    agent-tools ops-installer hook, or one listed under ``agent_hooks.known`` is filed as known.
     """
     for hook_dir, declared in declared_hook_dirs.items():
         if not hook_dir.is_dir():
             continue
         for entry in sorted(hook_dir.glob("*.json")):
-            if entry.name not in declared:
+            if entry.name in declared:
+                continue
+            prov = hook_provenance(entry, known=known, catalog=catalog)
+            if prov is not None:
+                report.known.append(KnownItem("agent_hooks", entry.stem, entry, prov.kind, entry.stem, prov.by))
+            else:
                 report.items.append(
-                    DriftItem("extra", "agent_hooks", entry.stem, entry, "hook descriptor on disk but not declared in config")
+                    DriftItem("extra", "agent_hooks", entry.stem, entry, undeclared_hook_detail(entry, catalog))
                 )
 
 
-def _extras_skills(declared_skill_dirs: dict[Path, set[str]], report: DriftReport) -> None:
+def _extras_skills(
+    declared_skill_dirs: dict[Path, set[str]], report: DriftReport, known: set[str], catalog: dict[str, tuple[Path, ...]] | None,
+) -> None:
+    """Flag skill dirs on disk not declared in config; a skill whose origin rig can name (an
+    installer marker / blurb, the ecosystem allowlist, ``skills.known``, a catalog item another
+    repo's config selects) is filed as known."""
     for skills_dir, declared in declared_skill_dirs.items():
         if not skills_dir.is_dir():
             continue
@@ -519,13 +585,23 @@ def _extras_skills(declared_skill_dirs: dict[Path, set[str]], report: DriftRepor
                 continue
             if entry.name in declared:
                 continue
-            if (entry / "SKILL.md").is_file():  # only flag things that look like skills
+            if not (entry / "SKILL.md").is_file():  # only flag things that look like skills
+                continue
+            prov = skill_provenance(entry, skills_dir, known=known, catalog=catalog)
+            if prov is not None:
+                report.known.append(KnownItem("skills", entry.name, entry, prov.kind, entry.name, prov.by))
+            else:
                 report.items.append(
-                    DriftItem("extra", "skills", entry.name, entry, "installed on disk but not declared in config")
+                    DriftItem("extra", "skills", entry.name, entry, undeclared_skill_detail(entry.name, catalog))
                 )
 
 
-def _extras_ci(declared_ci_dirs: dict[Path, set[str]], report: DriftReport) -> None:
+def _extras_ci(
+    declared_ci_dirs: dict[Path, set[str]], report: DriftReport, known: set[str], catalog: dict[str, tuple[Path, ...]] | None,
+) -> None:
+    """Flag workflow files not declared in config. Only a workflow named after a catalog CI slot
+    can be a rig orphan; any other stem is the repository's own workflow (known). Without catalog
+    knowledge (a hand-built plan) every undeclared workflow stays drift."""
     for wf_dir, declared in declared_ci_dirs.items():
         if not wf_dir.is_dir():
             continue
@@ -534,12 +610,16 @@ def _extras_ci(declared_ci_dirs: dict[Path, set[str]], report: DriftReport) -> N
                 continue
             if entry.name in declared:
                 continue
-            report.items.append(
-                DriftItem("extra", "ci", entry.stem, entry, "workflow on disk but not declared in config")
-            )
+            prov = workflow_provenance(entry.stem, known=known, catalog=catalog)
+            if prov is not None:
+                report.known.append(KnownItem("ci", entry.stem, entry, prov.kind, entry.name))
+            else:
+                report.items.append(
+                    DriftItem("extra", "ci", entry.stem, entry, "workflow on disk but not declared in config")
+                )
 
 
-def _extras_mcp(declared_mcp: dict[Path, set[str]], report: DriftReport) -> None:
+def _extras_mcp(declared_mcp: dict[Path, set[str]], report: DriftReport, known: set[str]) -> None:
     for cf, declared in declared_mcp.items():
         if not cf.is_file():
             continue
@@ -551,7 +631,12 @@ def _extras_mcp(declared_mcp: dict[Path, set[str]], report: DriftReport) -> None
         if not isinstance(servers, dict):
             continue
         for name in sorted(servers):
-            if name not in declared:
+            if name in declared:
+                continue
+            prov = mcp_provenance(name, known=known)
+            if prov is not None:
+                report.known.append(KnownItem("mcp", name, cf, prov.kind, name))
+            else:
                 report.items.append(
                     DriftItem("extra", "mcp", name, cf, "MCP entry registered but not declared in config")
                 )
@@ -1569,31 +1654,54 @@ def _check_permission_entries(action: Action, ps, node, config_file: Path, repor
 
 
 def _report_permission_extras(action: Action, ps, extras: list[str], config_file: Path, report: DriftReport) -> None:
-    """User entries beyond the rig baseline — REPORTED as drift-extras, NEVER deleted (rig-cli#100).
+    """Entries beyond the rig baseline — filed as KNOWN ("your additions, kept"), NEVER deleted.
 
-    The reporting shape differs by role on purpose:
-    - ``allow`` extras are SUMMARIZED into one item with a count — the live allowlist accumulates
-      hundreds of hand-approved "don't ask again" entries, and a per-entry dump would drown
-      ``rig status``. The remedy is named in the item: adopt via ``permissions.allow`` or prune
-      by hand.
-    - ``deny``/``ask`` extras are PER-ENTRY — those lists are small, and a rule someone slipped
-      into deny/ask is a semantically loud event worth naming individually.
+    rig never removes a permission entry (rig-cli#100), and since rig-cli#357 it no longer counts
+    one as drift either: rig writes nothing it does not count as its own, so an entry beyond the
+    baseline is by construction the user's — or a rule rig itself once wrote and stopped asserting
+    — a fact to show, not a problem to fix. Each entry names its origin:
+
+    - a former rig default tool (:data:`riglib.permissions.RETIRED_DEFAULT_TOOLS`, rig-cli#41→#165),
+    - a baseline deny/ask rule the config turned off (``deny: []`` / ``ask: []``),
+    - anything else: a hand-added entry.
+
+    Per entry, every role: the renderer groups a container's entries into one line (and caps a long
+    allowlist), so the per-entry shape no longer risks drowning ``rig status``.
+
+    Adversarial reading, on purpose: a rogue writer appending ``Bash(curl:*)`` to the allow list is
+    NOT caught here — and was not before either: allow extras were one summarized count line
+    (``153 entries beyond the baseline``), where one more entry is invisible. A rogue deny/ask
+    entry only ever tightens the policy. The permission file's integrity is not a drift question;
+    the baseline rig DOES assert (missing/modified baseline entries) stays drift above.
     """
+    from .permissions import DEFAULT_RULES, RETIRED_DEFAULT_TOOLS, desired_entries, harness_supported
+
     if not extras:
         return
     dotted = ".".join(ps.key_path)
-    if ps.role == "allow":
-        n = len(extras)
-        report.items.append(
-            DriftItem("extra", "permissions", action.item, config_file,
-                      f"{n} entr{'y' if n == 1 else 'ies'} in {dotted} beyond the rig-managed baseline "
-                      "(rig never removes — adopt via permissions.allow in the config, or prune by hand)")
-        )
-        return
+    harness_kind = action.item
+    rules = DEFAULT_RULES.get(harness_kind, {})
+    # Origin lookups are scoped to the container: an ARRAY container (claude-code) holds ONE role,
+    # so only that role's baseline (and, for allow, the retired defaults) can explain an entry; an
+    # OBJECT container (opencode's shared permission.bash) holds every role's keys, so all of them
+    # can. Without the scoping a deny-list entry that merely spells an ask-baseline rule would be
+    # mislabelled "baseline rule your config turned off" instead of a hand-added entry.
+    roles = (ps.role,) if ps.container == "array" else tuple(rules)
+    retired: set[str] = set()
+    if harness_supported(harness_kind) and (ps.container != "array" or ps.role == "allow"):
+        retired.update(desired_entries(harness_kind, list(RETIRED_DEFAULT_TOOLS)))
+    baseline: set[str] = set()
+    for role in roles:
+        baseline.update(rules.get(role, ()))
     for entry in extras:
-        report.items.append(
-            DriftItem("extra", "permissions", action.item, config_file,
-                      f"'{entry}' in {dotted} but not in the rig-managed baseline (rig never removes it)")
+        if entry in retired:
+            origin = KIND_RETIRED_DEFAULT
+        elif entry in baseline:
+            origin = KIND_DISABLED_BASELINE
+        else:
+            origin = KIND_USER_EXTRA
+        report.known.append(
+            KnownItem("permissions", entry, config_file, origin, entry, container=f"{harness_kind}:{dotted}")
         )
 
 

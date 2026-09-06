@@ -482,10 +482,13 @@ def test_drift_extra_workflow_detected(fake_agent_tools, tmp_path):
     cat = Catalog.scan(str(fake_agent_tools))
     plan = build(_full_cfg(repo, fake_agent_tools), cat, project_type="cli")
     run_plan(plan)
-    (repo / ".github/workflows/manual.yml").write_text("name: manual\n", encoding="utf-8")
+    # an undeclared CATALOG gate left on disk (leftover-grep is a slot this config does not enable)
+    # is a rig orphan → drift. A non-slot workflow would be the repo's own (known, not drift —
+    # see tests/test_provenance.py).
+    (repo / ".github/workflows/leftover-grep.yml").write_text("name: leftover-grep\n", encoding="utf-8")
     report = detect(plan)
     extras = report.by_direction("extra")
-    assert any(i.category == "ci" and i.item == "manual" for i in extras), [(i.category, i.item) for i in extras]
+    assert any(i.category == "ci" and i.item == "leftover-grep" for i in extras), [(i.category, i.item) for i in extras]
 
 
 def test_drift_ship_content_modified(fake_agent_tools, tmp_path):
@@ -1833,8 +1836,11 @@ def test_self_merge_ship_rules_drift_missing_then_synced(fake_agent_tools, tmp_p
     cat = Catalog.scan(str(fake_agent_tools))
     plan = build(_auto_harness_cfg(repo, fake_agent_tools), cat, project_type="unknown")
     run_plan(plan)
-    # a clean apply produces no permissions "extra" drift for the rig-written ship rules
-    assert not [x for x in detect(plan).items if x.category == "permissions" and x.direction == "extra"]
+    # a clean apply produces no permissions "extra" drift (nor a kept-addition line) for the
+    # rig-written ship rules
+    rep = detect(plan)
+    assert not [x for x in rep.items if x.category == "permissions" and x.direction == "extra"]
+    assert not [k for k in rep.known if k.category == "permissions"]
 
     data = json.loads(_user_settings().read_text(encoding="utf-8"))
     data["permissions"]["allow"] = [r for r in data["permissions"]["allow"] if r not in SELF_MERGE_PERMISSIONS_ALLOW]
@@ -1937,8 +1943,11 @@ def test_self_merge_off_stray_ship_rules_reported_as_extra(fake_agent_tools, tmp
     data = json.loads(_user_settings().read_text(encoding="utf-8"))
     data["permissions"]["allow"] = [*data["permissions"].get("allow", []), *SELF_MERGE_PERMISSIONS_ALLOW]
     _user_settings().write_text(json.dumps(data), encoding="utf-8")
-    extras = [x for x in detect(plan).items if x.category == "permissions" and x.direction == "extra"]
-    assert extras, "stray ship rules under self_merge:false must surface as permissions extras"
+    # since rig-cli#357 permission extras are filed as KNOWN ("your additions, kept") rather than
+    # drift — but they must still SURFACE (never silently suppressed as rig-owned).
+    kept = [k for k in detect(plan).known if k.category == "permissions"]
+    assert {k.name for k in kept} >= set(SELF_MERGE_PERMISSIONS_ALLOW), \
+        "stray ship rules under self_merge:false must surface as kept permission additions"
 
 
 def test_self_merge_no_ship_rules_when_skip_leaves_non_auto_mode(fake_agent_tools, tmp_path):

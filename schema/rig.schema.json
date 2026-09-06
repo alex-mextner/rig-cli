@@ -207,6 +207,13 @@
           "description": "enable all skills (opt-out)",
           "default": true
         },
+        "known": {
+          "type": "array",
+          "description": "hand-installed skill dir names on disk that rig does NOT manage but should report as known (informational), not as drift — see docs/config-schema.md#provenance",
+          "items": {
+            "type": "string"
+          }
+        },
         "harness_link": {
           "type": "boolean",
           "description": "also symlink each installed skill into the harness discovery dir",
@@ -321,6 +328,13 @@
           "description": "install all guard hooks",
           "default": true
         },
+        "known": {
+          "type": "array",
+          "description": "hook ids (or full descriptor stems) another installer wrote on disk that rig does NOT manage but should report as known (informational), not as drift — see docs/config-schema.md#provenance",
+          "items": {
+            "type": "string"
+          }
+        },
         "worktree_only": {
           "type": "boolean",
           "description": "enforce the worktree-only workflow: gates TWO hooks. worktree-only-writes DENIES an Edit/Write while the checkout sits on the default branch (main/master); pin-primary-worktree DENIES a git checkout/switch that would move the repo's PRIMARY worktree onto anything but the default branch. Opt-IN, default OFF — a repo that works directly on main (e.g. 3d-cli) leaves it off and is never blocked. No self-service env bypass — each hook has its OWN hatch var: a deliberate one-off Edit/Write on main is requested via RIG_HATCH_REQUEST_WORKTREE_ONLY_WRITES=\"<justification>\"; a one-off git checkout/switch in the primary checkout via RIG_HATCH_REQUEST_PIN_PRIMARY_WORKTREE=\"<justification>\" (both: tg approval, deny-by-default; bare 1 rejected). (Alex tg#5742, tg#6462/tg#6477.)",
@@ -406,6 +420,13 @@
           "description": "install every gate (vs per-item)",
           "default": false
         },
+        "known": {
+          "type": "array",
+          "description": "workflow file stems this repo owns that collide with a catalog slot name on disk that rig does NOT manage but should report as known (informational), not as drift — see docs/config-schema.md#provenance",
+          "items": {
+            "type": "string"
+          }
+        },
         "items": {
           "type": "object",
           "description": "per-gate overrides (enabled / tier / variant / …) keyed by gate name",
@@ -429,6 +450,13 @@
           "type": "string",
           "description": "MCP config dir, file, or `export-only`",
           "default": "~/.claude/mcp"
+        },
+        "known": {
+          "type": "array",
+          "description": "MCP server names registered by something other than rig on disk that rig does NOT manage but should report as known (informational), not as drift — see docs/config-schema.md#provenance",
+          "items": {
+            "type": "string"
+          }
         },
         "items": {
           "type": "object",

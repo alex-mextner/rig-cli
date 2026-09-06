@@ -41,6 +41,7 @@ from .harness_skills import native_skills_dir_for as _native_skills_dir_for
 from .harness_skills import omp_user_path as _omp_user_path
 from .harness_skills import skill_dir_for as _skill_dir_for
 from .paths import expand_user_path as _expand_user_path
+from .provenance import KNOWN_CATEGORIES, known_names_from_config
 from . import project_tools
 
 
@@ -136,6 +137,20 @@ class InstallPlan:
     actions: list[Action] = field(default_factory=list)
     on_conflict: str = "backup"
     notes: list[str] = field(default_factory=list)
+    # Every catalog item per extras-scanned category (skills / agent_hooks / ci / mcp), keyed by
+    # the on-disk leaf name (`by-type/cli/lazy-imports` → `lazy-imports`) → EVERY source path
+    # carrying that leaf (two namespaces may share one — `by-type/cli/x` and `by-stack/…/x` — and
+    # the on-disk dir is named by the leaf alone), so drift can tell "rig could have written this"
+    # (a catalog orphan, or a rig-installed item another repo's config selects — verified against
+    # the source content) from "rig has no opinion on this" (a repo's own workflow → known).
+    # ``None`` = no catalog knowledge (a hand-built plan): the scanners then treat every
+    # undeclared item as drift, the conservative reading. Filled by :func:`build`. See
+    # :mod:`riglib.provenance`.
+    catalog_items: dict[str, dict[str, tuple[Path, ...]]] | None = None
+    # The `<category>.known` config lists (see :func:`riglib.provenance.known_names_from_config`),
+    # the user's side of the same classification. Carried on the plan so `detect` has ONE input
+    # channel for provenance (catalog + config), not a kwarg only some callers remember to pass.
+    known_names: dict[str, set[str]] | None = None
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -653,9 +668,21 @@ def _plan_agent_hooks(plan: InstallPlan, config: LoadedConfig, catalog: Catalog)
                 )
 
 
+def _catalog_by_leaf(catalog: Catalog, category: str) -> dict[str, tuple[Path, ...]]:
+    """Catalog item source paths grouped by on-disk leaf name (see ``InstallPlan.catalog_items``)."""
+    out: dict[str, list[Path]] = {}
+    for item in catalog.by_category(category):
+        out.setdefault(item.name.rsplit("/", 1)[-1], []).append(item.path)
+    return {leaf: tuple(paths) for leaf, paths in out.items()}
+
+
 def build(config: LoadedConfig, catalog: Catalog, *, project_type: str = "unknown") -> InstallPlan:
     """Build the ordered :class:`InstallPlan` from config + catalog."""
-    plan = InstallPlan(on_conflict=str(config.defaults.get("on_conflict", "backup")))
+    plan = InstallPlan(
+        on_conflict=str(config.defaults.get("on_conflict", "backup")),
+        catalog_items={c: _catalog_by_leaf(catalog, c) for c in KNOWN_CATEGORIES},
+        known_names=known_names_from_config(config),
+    )
     _validate_item_names(config, catalog)
 
     # ── skills ───────────────────────────────────────────────────────────────────

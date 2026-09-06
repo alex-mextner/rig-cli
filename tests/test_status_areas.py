@@ -381,7 +381,7 @@ def test_status_area_summary_ci_extra_routes_to_ci_not_ship(
     repo = _git_repo(tmp_path / "repo")
     # an undeclared workflow on disk while ci is enabled-but-empty → a ci EXTRA (disk→config).
     (repo / ".github" / "workflows").mkdir(parents=True)
-    (repo / ".github" / "workflows" / "rogue.yml").write_text("name: rogue\n", encoding="utf-8")
+    (repo / ".github" / "workflows" / "codeql.yml").write_text("name: codeql\n", encoding="utf-8")
     (repo / "rig.yaml").write_text(
         f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"

@@ -191,6 +191,11 @@ AREAS: tuple[Area, ...] = (
             _opt("skills.harness_link", KIND_BOOL, True,
                  "Symlink each installed skill into the harness discovery dir (~/.claude/skills) "
                  "so the Skill tool actually lists it — a skill in ~/.agents/skills alone is invisible."),
+            _opt("skills.known", KIND_LIST, [],
+                 "Skill dir names on disk that rig does NOT manage (hand-installed packs) — `rig status` "
+                 "reports them as known, not as drift. Comma-separated. The skills dir is machine-wide, "
+                 "so keep this list in the GLOBAL config (rig config set --global skills.known …): a "
+                 "repo-level list replaces the global one. See docs/config-schema.md#provenance."),
         ),
     ),
     Area(
@@ -224,6 +229,11 @@ AREAS: tuple[Area, ...] = (
                  "self-service env bypass; a one-off is requested via "
                  "RIG_HATCH_REQUEST_ORCHESTRATOR_STAYS_THIN=\"<justification>\" (tg approval, "
                  "deny-by-default; bare 1 rejected)."),
+            _opt("agent_hooks.known", KIND_LIST, [],
+                 "Hook ids (or full `<id>.<point>` descriptor stems) another installer wrote into the "
+                 "hooks dir — `rig status` reports them as known, not as drift. Comma-separated; the "
+                 "hooks dir is machine-wide, so keep it in the GLOBAL config. See "
+                 "docs/config-schema.md#provenance."),
         ),
     ),
     Area(
@@ -242,6 +252,11 @@ AREAS: tuple[Area, ...] = (
         (
             _opt("ci.enabled", KIND_BOOL, True,
                  "Install CI gate workflows under .github/workflows. Off = write no CI files."),
+            _opt("ci.known", KIND_LIST, [],
+                 "Workflow file stems this repo owns that collide with a catalog slot name (a "
+                 "home-grown tests.yml) — `rig status` reports them as known, not as drift. A workflow "
+                 "whose stem is NOT a catalog slot needs no declaration. Comma-separated. See "
+                 "docs/config-schema.md#provenance."),
         ),
     ),
     Area(
@@ -249,6 +264,9 @@ AREAS: tuple[Area, ...] = (
         (
             _opt("mcp.enabled", KIND_BOOL, True,
                  "Register MCP servers into the harness MCP config (idempotent merge by server name)."),
+            _opt("mcp.known", KIND_LIST, [],
+                 "MCP server names registered by something other than rig — `rig status` reports "
+                 "them as known, not as drift. Comma-separated. See docs/config-schema.md#provenance."),
         ),
     ),
     Area(

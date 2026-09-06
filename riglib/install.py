@@ -85,8 +85,26 @@ def install_named_skill(name: str, skill_md: str) -> int:
     else:
         target.write_text(skill_md, encoding="utf-8")
         print(f"{name}: wrote skill → {target}")
+    _write_installed_by_marker(skills_dir, SKILL_NAME)
     _link_into_harnesses(name, skills_dir)
     return 0
+
+
+def _write_installed_by_marker(installed_skill_dir: Path, installer: str) -> None:
+    """Record who wrote this skill (the ``.installed-by`` provenance contract, rig-cli#357).
+
+    ``rig status`` reads the marker to file an undeclared skill as "installed by <tool>" instead of
+    as drift — rig dogfoods the contract it asks every ecosystem installer to follow (see
+    :mod:`riglib.provenance`). Written only when ABSENT: an existing marker — even another tool's —
+    is left alone, so re-running ``rig install-skill`` over an identical SKILL.md never silently
+    reassigns provenance to rig.
+    """
+    from .provenance import INSTALLED_BY_MARKER
+
+    marker = installed_skill_dir / INSTALLED_BY_MARKER
+    if marker.is_file():
+        return
+    marker.write_text(installer + "\n", encoding="utf-8")
 
 
 def _link_into_harnesses(name: str, installed_skill_dir: Path) -> None:

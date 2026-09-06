@@ -319,7 +319,7 @@ def test_status_groups_drift_by_layer_with_provenance(tmp_path, capsys, fake_age
     repo = _git_repo(tmp_path / "repo")
     # an undeclared CI workflow on disk → a REPO-layer extra
     (repo / ".github" / "workflows").mkdir(parents=True)
-    (repo / ".github" / "workflows" / "rogue.yml").write_text("name: rogue\n", encoding="utf-8")
+    (repo / ".github" / "workflows" / "codeql.yml").write_text("name: codeql\n", encoding="utf-8")
     cfg = repo / "rig.yaml"
     cfg.write_text(
         f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
@@ -334,7 +334,7 @@ def test_status_groups_drift_by_layer_with_provenance(tmp_path, capsys, fake_age
     # only printed when there IS global drift — HOME is isolated here, so there is none.
     assert "REPO — this repository" in out
     # the CI extra is reported and names the declaring REPO config file (provenance)
-    assert "rogue" in out
+    assert "codeql" in out
     assert str(cfg) in out  # provenance: which config file declares this layer
 
 
@@ -373,7 +373,7 @@ def test_status_extras_never_deleted_reassurance_is_loud(tmp_path, capsys, fake_
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-global"))
     repo = _git_repo(tmp_path / "repo")
     (repo / ".github" / "workflows").mkdir(parents=True)
-    (repo / ".github" / "workflows" / "rogue.yml").write_text("name: rogue\n", encoding="utf-8")
+    (repo / ".github" / "workflows" / "codeql.yml").write_text("name: codeql\n", encoding="utf-8")
     cfg = repo / "rig.yaml"
     cfg.write_text(
         f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
@@ -447,7 +447,7 @@ def test_status_missing_target_outranks_drift(tmp_path, capsys, fake_agent_tools
     repo = _git_repo(tmp_path / "repo")
     # REPO-layer drift: an undeclared CI workflow on disk while ci is enabled-but-empty.
     (repo / ".github" / "workflows").mkdir(parents=True)
-    (repo / ".github" / "workflows" / "rogue.yml").write_text("name: rogue\n", encoding="utf-8")
+    (repo / ".github" / "workflows" / "codeql.yml").write_text("name: codeql\n", encoding="utf-8")
     (repo / "rig.yaml").write_text(
         f"version: 1\nagent_tools_source: {fake_agent_tools}\n"
         "skills: {enabled: false}\nagent_hooks: {enabled: false}\nmcp: {enabled: false}\n"
@@ -461,7 +461,7 @@ def test_status_missing_target_outranks_drift(tmp_path, capsys, fake_agent_tools
     assert rc == errors.EXIT_MISSING_TARGET
     # both problems are surfaced to the user
     assert str(gone) in out  # the dead hook target is printed
-    assert "rogue" in out  # the drift is printed too
+    assert "codeql" in out  # the drift is printed too
     assert "precedence" in out.lower()  # the exit-code precedence is explained
 
 
