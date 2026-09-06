@@ -650,7 +650,7 @@
         },
         "kind": {
           "type": "string",
-          "description": "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode/omp; instruction-file: pi/commandcode; codex is also instruction-file via AGENTS.md). The auto/permission-MODE write is claude-code-only today; other kinds still get their skill discovery provisioned.",
+          "description": "which harness to provision (skills-dir: claude-code/codex; native-discovery: opencode/omp; instruction-file: pi/commandcode; codex is also instruction-file via AGENTS.md). Every kind gets its own auto/permission-mode key written (claude-code permissions.defaultMode, codex approvals_reviewer, opencode permission.*, omp tools.approvalMode via the permissions approval action); pi/commandcode have no such setting and get a visible n/a note.",
           "enum": [
             "claude-code",
             "codex",
@@ -663,7 +663,7 @@
         },
         "kinds": {
           "type": "array",
-          "description": "additional harnesses to provision alongside harness.kind. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, and any supported hook bridge. If agent_hooks.target pins descriptors to one explicit target, supported bridges are registered with a descriptor-dir override.",
+          "description": "additional harnesses to provision alongside harness.kind. Use this when one machine runs multiple harnesses: the primary kind keeps its auto-mode/settings_path behavior, while additional kinds get skill discovery, agent-hook descriptors, any supported hook bridge, and their own auto-mode key (same auto intent). If agent_hooks.target pins descriptors to one explicit target, supported bridges are registered with a descriptor-dir override.",
           "items": {
             "type": "string",
             "enum": [
@@ -678,7 +678,7 @@
         },
         "auto_mode": {
           "type": "boolean",
-          "description": "true → auto-accept tool calls; false → interactive",
+          "description": "true → auto-accept tool calls; false → interactive — written per harness kind. A pinned mode: the primary kind knows overrides it (mode: auto means auto for every configured kind).",
           "default": true
         },
         "self_merge": {

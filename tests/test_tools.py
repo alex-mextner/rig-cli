@@ -429,6 +429,15 @@ def test_no_specs_is_skipped(tmp_path):
 
 
 # ── Codex safe update ─────────────────────────────────────────────────────────────
+# A HANG guard only — the fake binaries answer instantly, so any value works for a healthy run.
+# It is generous on purpose: a sub-second budget races three process spawns against machine load
+# and lost whenever the suite ran next to other work (a load-dependent test is a bug, not a flake).
+_PROBE_TIMEOUT_S = 30.0
+# A hanging fake carries this sentinel; the ``instant_hang`` fixture makes its probe time out at
+# once, so one generous budget serves the healthy binaries and the hang never waits it out.
+_HANG_SENTINEL = "# rig-test: hangs forever"
+
+
 def _write_fake_codex(path: Path, version: str) -> None:
     path.write_text(
         "#!/bin/sh\n"
@@ -444,8 +453,37 @@ def _write_fake_codex(path: Path, version: str) -> None:
 
 
 def _write_hanging_codex(path: Path) -> None:
-    path.write_text("#!/bin/sh\nsleep 30\n")
+    path.write_text(f"#!/bin/sh\n{_HANG_SENTINEL}\nsleep 30\n")
     path.chmod(0o755)
+
+
+@pytest.fixture
+def instant_hang(monkeypatch):
+    """A hanging fake times out INSTANTLY instead of sleeping out the probe budget.
+
+    Every healthy binary stays on the REAL spawn path (``run_bounded``) under the hang-guard budget;
+    only a binary carrying :data:`_HANG_SENTINEL` (symlinks followed) short-circuits to a timed-out
+    result. Two things made the real sleep a bug, not a flake: the probe budget bounded the healthy
+    original's spawns AND the candidate's hang with ONE number, so under machine load the healthy
+    probes lost the race; and each hanging test waited the budget out. The kill-on-timeout mechanics
+    keep their own test (``test_run_bounded_returns_after_timeout_with_detached_pipe_holder``).
+    """
+    real = codex_update.run_bounded
+
+    def run_or_hang(cmd, *, timeout_s):
+        # the sentinel is matched on the line right after the shebang ONLY: an update script
+        # that writes a hanging fake via a heredoc carries the same text further down and must
+        # still run for real (else the update never happens and the rollback passes vacuously)
+        try:
+            lines = Path(cmd[0]).read_text().splitlines()
+        except (OSError, UnicodeDecodeError):
+            lines = []
+        hangs = len(lines) > 1 and lines[1] == _HANG_SENTINEL
+        if hangs:
+            return codex_update.CommandResult(-9, "", "", timed_out=True)
+        return real(cmd, timeout_s=timeout_s)
+
+    monkeypatch.setattr(codex_update, "run_bounded", run_or_hang)
 
 
 def _write_failing_codex(path: Path) -> None:
@@ -468,7 +506,7 @@ def _write_marker_dependent_codex(path: Path, marker: Path, version: str) -> Non
     path.chmod(0o755)
 
 
-def test_safe_codex_update_rolls_back_hanging_candidate(tmp_path):
+def test_safe_codex_update_rolls_back_hanging_candidate(tmp_path, instant_hang):
     good = tmp_path / "codex-good"
     hanging = tmp_path / "codex-hangs"
     live = tmp_path / "bin" / "codex"
@@ -490,13 +528,13 @@ def test_safe_codex_update_rolls_back_hanging_candidate(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=backup_dir,
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "rolled_back", result.message
     assert live.is_symlink()
     assert live.resolve() == good
-    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+    assert codex_update.probe_codex(live, timeout_s=_PROBE_TIMEOUT_S).ok
     assert "timed out" in result.message
 
 
@@ -521,7 +559,7 @@ def test_safe_codex_update_rolls_back_nonzero_candidate(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "rolled_back", result.message
@@ -529,7 +567,7 @@ def test_safe_codex_update_rolls_back_nonzero_candidate(tmp_path):
     assert "exited 42" in result.message
 
 
-def test_safe_codex_update_restores_missing_original_symlink_target(tmp_path):
+def test_safe_codex_update_restores_missing_original_symlink_target(tmp_path, instant_hang):
     good = tmp_path / "caskroom" / "0.142.4" / "codex"
     hanging = tmp_path / "caskroom" / "0.144.1" / "codex"
     live = tmp_path / "bin" / "codex"
@@ -553,16 +591,16 @@ def test_safe_codex_update_restores_missing_original_symlink_target(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "rolled_back", result.message
     assert live.resolve() == good
     assert good.is_file()
-    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+    assert codex_update.probe_codex(live, timeout_s=_PROBE_TIMEOUT_S).ok
 
 
-def test_safe_codex_update_preserves_intermediate_symlink_on_rollback(tmp_path):
+def test_safe_codex_update_preserves_intermediate_symlink_on_rollback(tmp_path, instant_hang):
     good = tmp_path / "caskroom" / "0.142.4" / "codex"
     hanging = tmp_path / "caskroom" / "0.144.1" / "codex"
     shim = tmp_path / "opt" / "codex"
@@ -589,7 +627,7 @@ def test_safe_codex_update_preserves_intermediate_symlink_on_rollback(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "rolled_back", result.message
@@ -598,10 +636,10 @@ def test_safe_codex_update_preserves_intermediate_symlink_on_rollback(tmp_path):
     assert shim.is_symlink()
     assert shim.readlink() == good
     assert good.is_file()
-    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+    assert codex_update.probe_codex(live, timeout_s=_PROBE_TIMEOUT_S).ok
 
 
-def test_safe_codex_update_restores_retargeted_intermediate_symlink(tmp_path):
+def test_safe_codex_update_restores_retargeted_intermediate_symlink(tmp_path, instant_hang):
     good = tmp_path / "caskroom" / "0.142.4" / "codex"
     hanging = tmp_path / "caskroom" / "0.144.1" / "codex"
     shim = tmp_path / "opt" / "codex"
@@ -627,7 +665,7 @@ def test_safe_codex_update_restores_retargeted_intermediate_symlink(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "rolled_back", result.message
@@ -636,10 +674,10 @@ def test_safe_codex_update_restores_retargeted_intermediate_symlink(tmp_path):
     assert shim.is_symlink()
     assert shim.readlink() == good
     assert live.resolve() == good
-    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+    assert codex_update.probe_codex(live, timeout_s=_PROBE_TIMEOUT_S).ok
 
 
-def test_safe_codex_update_restores_overwritten_original_symlink_target(tmp_path):
+def test_safe_codex_update_restores_overwritten_original_symlink_target(tmp_path, instant_hang):
     good = tmp_path / "caskroom" / "0.142.4" / "codex"
     live = tmp_path / "bin" / "codex"
     good.parent.mkdir(parents=True)
@@ -653,6 +691,7 @@ def test_safe_codex_update_restores_overwritten_original_symlink_target(tmp_path
         "set -euo pipefail\n"
         f"cat > {good} <<'SH'\n"
         "#!/usr/bin/env bash\n"
+        f"{_HANG_SENTINEL}\n"
         "sleep 30\n"
         "SH\n"
         f"chmod +x {good}\n"
@@ -663,16 +702,16 @@ def test_safe_codex_update_restores_overwritten_original_symlink_target(tmp_path
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "rolled_back", result.message
     assert live.resolve() == good
-    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+    assert codex_update.probe_codex(live, timeout_s=_PROBE_TIMEOUT_S).ok
     assert "codex-cli 0.142.4" in good.read_text(encoding="utf-8")
 
 
-def test_safe_codex_update_rolls_back_plain_binary(tmp_path):
+def test_safe_codex_update_rolls_back_plain_binary(tmp_path, instant_hang):
     live = tmp_path / "bin" / "codex"
     live.parent.mkdir()
     _write_fake_codex(live, "0.142.4")
@@ -684,6 +723,7 @@ def test_safe_codex_update_rolls_back_plain_binary(tmp_path):
         "set -euo pipefail\n"
         f"cat > {live} <<'SH'\n"
         "#!/usr/bin/env bash\n"
+        f"{_HANG_SENTINEL}\n"
         "sleep 30\n"
         "SH\n"
         f"chmod +x {live}\n"
@@ -694,12 +734,12 @@ def test_safe_codex_update_rolls_back_plain_binary(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "rolled_back", result.message
     assert not live.is_symlink()
-    assert codex_update.probe_codex(live, timeout_s=1.0).ok
+    assert codex_update.probe_codex(live, timeout_s=_PROBE_TIMEOUT_S).ok
     assert live.stat().st_mode & 0o777 == 0o700
     assert result.backup_path is not None
     assert result.backup_path.stat().st_mode & 0o777 == 0o700
@@ -729,7 +769,7 @@ def test_safe_codex_update_errors_when_restored_codex_is_unhealthy(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "error"
@@ -737,7 +777,7 @@ def test_safe_codex_update_errors_when_restored_codex_is_unhealthy(tmp_path):
     assert result.exit_code == errors.EXIT_CODEX_UPDATE
 
 
-def test_safe_codex_update_reports_current_unhealthy_before_update(tmp_path):
+def test_safe_codex_update_reports_current_unhealthy_before_update(tmp_path, instant_hang):
     live = tmp_path / "bin" / "codex"
     marker = tmp_path / "update-ran"
     live.parent.mkdir()
@@ -751,7 +791,7 @@ def test_safe_codex_update_reports_current_unhealthy_before_update(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=0.1,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "error"
@@ -782,7 +822,7 @@ def test_safe_codex_update_reports_rollback_failure(tmp_path, monkeypatch):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "error"
@@ -806,7 +846,7 @@ def test_safe_codex_update_reports_backup_failure_before_update(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=backup_file,
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "error"
@@ -835,7 +875,7 @@ def test_safe_codex_update_keeps_successful_candidate(tmp_path):
         codex_path=live,
         update_command=[str(update)],
         backup_dir=tmp_path / "backups",
-        probe_timeout_s=1.0,
+        probe_timeout_s=_PROBE_TIMEOUT_S,
     )
 
     assert result.status == "updated", result.message

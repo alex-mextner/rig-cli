@@ -91,9 +91,9 @@ _VALID_AUTONOMOUS_UNTIL = {"clean", "budget", "manual"}
 # (opencode, omp), and the INSTRUCTION-FILE harnesses (pi, commandcode). A
 # ``harness.kind`` in this set is ACCEPTED: rig can
 # provision skill discovery (and, for the supported kinds, the auto-mode write / allowlist)
-# for it. The single source of truth is :mod:`riglib.harness_skills`. The narrower
-# auto-mode-write capability is gated separately in plan.py (``_HARNESS_SETTINGS``) — a kind
-# accepted here but not auto-mode-capable self-skips that write with a plan note, not a crash.
+# for it. The single source of truth is :mod:`riglib.harness_skills`. The auto-mode WRITE is
+# keyed off :mod:`riglib.harness_mode` — a kind with no such setting (pi/commandcode) gets a
+# visible plan note, not a crash.
 _VALID_HARNESS_KINDS = set(_KNOWN_HARNESS_KINDS)
 # No kind is "reserved + rejected" any longer — every documented kind is now provisionable for
 # skills. Kept as an (empty) set so the validator's reserved-kind branch stays well-defined.

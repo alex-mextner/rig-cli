@@ -1336,6 +1336,9 @@ def _check_harness(action: Action, report: DriftReport) -> None:
                (someone flipped auto-mode off, or the harness rewrote it). apply converges.
     Only the single managed key is compared; other settings in the file are irrelevant here.
     """
+    if str(action.options.get("kind", "claude-code")) != "claude-code":
+        _check_harness_mode(action, report)
+        return
     (section, key), value = desired_harness_value(action)
     config_file = harness_settings_file(action)
     if not config_file.is_file():
@@ -1388,6 +1391,33 @@ def _check_harness(action: Action, report: DriftReport) -> None:
                     "self-merge carve-out absent from autoMode.allow (config declares self_merge)",
                 )
             )
+
+
+def _check_harness_mode(action: Action, report: DriftReport) -> None:
+    """Drift for a non-claude kind's mode key — shares the runner's probe so apply and status agree.
+
+    missing  — the harness file or the managed key is absent (apply writes it).
+    modified — the file is malformed / mis-shaped / holds a non-plain value (apply leaves it — a
+               hand fix), or the key carries a different value (apply converges it).
+    """
+    from .actions.runner import desired_harness_mode, harness_mode_probe
+
+    key_path, value = desired_harness_mode(action)
+    dotted = ".".join(key_path)
+    path = action.target
+    state, current = harness_mode_probe(action)
+    if state == "absent":
+        report.items.append(DriftItem("missing", "harness", action.item, path, f"{dotted} not set (harness config file not written)"))
+    elif state == "missing":
+        report.items.append(DriftItem("missing", "harness", action.item, path, f"{dotted} not set"))
+    elif state == "malformed":
+        report.items.append(DriftItem("modified", "harness", action.item, path, "harness config file is malformed — fix it by hand"))
+    elif state == "shape":
+        report.items.append(DriftItem("modified", "harness", action.item, path, f"{dotted}: '{current}' is not an object — fix it by hand"))
+    elif state == "conflict":
+        report.items.append(DriftItem("modified", "harness", action.item, path, f"{current} is not a plain value (rig wants '{value}') — fix it by hand"))
+    elif current != value:
+        report.items.append(DriftItem("modified", "harness", action.item, path, f"{dotted} is '{current}', config declares '{value}'"))
 
 
 def _check_permissions(action: Action, report: DriftReport, *, self_merge_owned: bool = False) -> None:

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import __version__
+from .harness_mode import NA_NOTE_MARKER, harness_mode_rows
 from .layers import GLOBAL as _GLOBAL
 from .layers import REPO as _REPO
 
@@ -835,7 +836,7 @@ _NOTE_ATTENTION_MARKERS = (
     "not provisioned",
     "not wired",
     "no allowlist to provision",
-    "no rig auto",  # "has no rig auto/permission-mode writer yet"
+    NA_NOTE_MARKER,  # harness_mode.na_note (declared): the HARNESS has no such knob (n/a)
     # NOTE: no dedicated entry for riglib.plan.HOOK_BRIDGE_NO_SUPPORT_PHRASE — its note text is
     # always prefixed "hook_bridge: skipped", which the "skipped" marker above already matches.
     # A second, re-typed substring of that constant here would be exactly the desync risk this
@@ -2080,6 +2081,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     _print_schedule_status(effective_plan, report)
     _print_tg_ctl_status(effective_plan, report)
     _print_tmux_autosave_status(effective_plan)
+    _print_harness_mode_status(effective_plan, report)
     if env.is_git_repo:
         _print_stale_worktree_status(env.repo_root)
 
@@ -2366,6 +2368,30 @@ def _print_stale_worktree_status(repo_root: Path) -> None:
         f"{counts[c]} {c}" for c in worktree_gc.STALE_CLASSIFICATIONS_ORDERED if counts.get(c)
     )
     print(_warn(f"  {stale_total} stale worktree(s) ({breakdown}) — run `rig worktree gc` to review"))
+
+
+def _print_harness_mode_status(plan, report) -> None:
+    """One line per configured harness kind: the auto/permission-mode key rig manages (or cannot).
+
+    The harness area summary counts the writes; this names them — which key, which file, which
+    value — and, for a kind with NO such setting (pi/commandcode) or one whose key is owned by the
+    permissions approval action (omp), says so explicitly instead of leaving a silent gap
+    (rig-cli#355: "drift is surfaced, never silently reconciled"). Silent without a harness block.
+    """
+    rows = harness_mode_rows(plan)
+    if not rows:
+        return
+    drifted = {(d.category, d.item) for d in report.items}
+    print(_bold("\n  harness auto-mode per kind:"))
+    for row in rows:
+        if row.value is None:
+            state = _dim(row.note)
+        else:
+            state = f"{row.key} = {row.value!r} in {row.path}"
+            state += "  " + (_err("drift") if (row.category, row.item) in drifted else _ok("in sync"))
+            if row.note:
+                state += _dim(f"  ({row.note})")
+        print(f"    {row.kind:<12} {state}")
 
 
 def _print_tmux_autosave_status(plan) -> None:

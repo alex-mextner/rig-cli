@@ -58,6 +58,7 @@ from ..github_ghas import (
     normalize_security_analysis,
 )
 from ..github_merge import build_merge_body, normalize_merge
+from ..harness_mode import HARNESS_MODES
 from ..github_ruleset import (
     build_ruleset_body,
     find_managed_ruleset,
@@ -934,6 +935,155 @@ def _load_harness_json(
 
 
 def _do_apply_harness(action: Action, on_conflict: str) -> ActionResult:
+    """Write the harness auto/permission mode — claude-code keeps its dedicated writer (self-merge,
+    project-vs-user file); every other kind goes through the generic per-format mode write."""
+    if str(action.options.get("kind", "claude-code")) == "claude-code":
+        return _do_apply_harness_claude_code(action, on_conflict)
+    return _do_apply_harness_mode(action, on_conflict)
+
+
+def desired_harness_mode(action: Action) -> tuple[tuple[str, ...], str]:
+    """``(key_path, value)`` the generic mode write converges to — from the per-kind registry.
+
+    Shared by the writer and drift so both agree on what rig manages for a non-claude kind."""
+    kind = str(action.options.get("kind", "claude-code"))
+    # the plan ALWAYS resolves mode_value; a missing one is a programming error, not a blank write
+    return HARNESS_MODES[kind].key_path, str(action.options["mode_value"])
+
+
+def harness_mode_probe(action: Action) -> tuple[str, object]:
+    """READ-ONLY state of the managed mode key on disk (shared by the writer and drift).
+
+    Returns ``(state, value)`` with state one of ``absent`` (no file), ``malformed`` (unparseable
+    file), ``shape`` (a parent is not an object — value names it), ``conflict`` (a value rig must
+    not rewrite blind, e.g. a TOML inline table), ``missing`` (key not set) or ``present``."""
+    key_path, _ = desired_harness_mode(action)
+    config_file = action.target
+    if not config_file.is_file():
+        return "absent", None
+    fmt = str(action.options.get("format", "json"))
+    try:
+        text = config_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "malformed", None
+    if fmt == "toml":
+        if not _toml_parses(text):
+            return "malformed", None
+        return read_toml_root_key(text, key_path[0])
+    try:
+        data = json.loads(text) if text.strip() else {}  # a touched, empty file is merely missing
+    except ValueError:
+        return "malformed", None
+    if not isinstance(data, dict):
+        return "shape", "<root>"
+    scalar_parent = _scalar_wildcard_parent(data, key_path)
+    if scalar_parent is not None:
+        return "present", scalar_parent
+    state, value = approval_lookup(data, key_path)
+    return state, value
+
+
+def _scalar_wildcard_parent(data: dict, key_path: tuple[str, ...]) -> str | None:
+    """opencode accepts ``"permission": "ask"`` as shorthand for ``{"*": "ask"}`` — for a managed
+    ``<parent>.*`` key a STRING parent is that value, not a shape error. Returns it, else None."""
+    if len(key_path) != 2 or key_path[1] != "*":
+        return None
+    parent = data.get(key_path[0])
+    return parent if isinstance(parent, str) else None
+
+
+def _toml_parses(text: str) -> bool:
+    """True when ``text`` is valid TOML — or when it cannot be checked (Python 3.10 has no
+    ``tomllib``; the ``tomli`` backport is tried next, else the root-key scanner runs unvalidated,
+    as the hook-bridge merge always has). Lazy import: ``tomllib`` is stdlib but absent on 3.10,
+    and never needed for ``rig --help``."""
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover — 3.10 only
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return True
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    return True
+
+
+def _do_apply_harness_mode(action: Action, on_conflict: str) -> ActionResult:
+    """Generic mode write for a non-claude kind: converge ONE key in the harness's own file.
+
+    Idempotent (an equal value is ``skipped``), backup-noted (a differing prior value is backed
+    up under ``on_conflict=backup``, left untouched under ``skip``), never clobbering: a malformed
+    file, a mis-shaped parent or a non-scalar value is reported and left for the user (drift stays
+    visible). Every other key in the file is preserved — JSON is re-serialized (2-space indent, like
+    the other JSON writers), TOML is edited as text (a root key upserted before the first table).
+    """
+    key_path, value = desired_harness_mode(action)
+    dotted = ".".join(key_path)
+    config_file = action.target
+    state, current = harness_mode_probe(action)
+    label = f"harness/{action.item}: {dotted}"
+    if state == "malformed":
+        return ActionResult(action, "error", f"{label}: {config_file} is malformed — fix it by hand; rig never rewrites a config it cannot parse")
+    if state == "shape":
+        return ActionResult(action, "error", f"{label}: '{current}' is not an object in {config_file}")
+    if state == "conflict":
+        return ActionResult(action, "skipped", f"{label}: {current} in {config_file} is not a plain value — left untouched (drift visible)")
+    if state == "present" and current == value:
+        return ActionResult(action, "skipped", f"{label} already '{value}' in {config_file}")
+    if state == "present" and on_conflict == "skip":
+        return ActionResult(action, "skipped", f"{label} is '{current}' (on_conflict=skip), left untouched")
+    fmt = str(action.options.get("format", "json"))
+    if fmt == "toml":
+        merged, conflict = upsert_toml_root_key(config_file.read_text(encoding="utf-8") if state != "absent" else "", key_path[0], value)
+        if conflict:
+            return ActionResult(action, "skipped", f"{label}: {conflict} in {config_file} — left untouched (drift visible)")
+        if not _toml_parses(merged):  # never leave the harness a config it cannot load
+            return ActionResult(action, "error", f"{label}: merged {config_file} would not parse as TOML — left untouched")
+    elif fmt == "json":
+        text = config_file.read_text(encoding="utf-8") if state != "absent" else ""
+        data = json.loads(text) if text.strip() else {}
+        _set_nested(data, key_path, value)
+        merged = json.dumps(data, indent=2) + "\n"
+    else:
+        # only the registry decides a format; a kind whose file rig does not serialize (omp's
+        # yaml is owned by the approval action) must never fall through to the JSON writer
+        raise ValueError(f"harness/{action.item}: no mode writer for format {fmt!r}")
+    backup_note = ""
+    existed = state != "absent"
+    # any rewrite of an EXISTING harness config is backed up under the default policy — like the
+    # codex hook-bridge TOML writer (a hand-maintained file deserves a restore path even for a
+    # key add), not only on a differing prior value.
+    if existed and _should_backup(on_conflict):
+        bak = fsutil.backup_path(config_file)
+        shutil.copy2(str(config_file), str(bak))
+        backup_note = f" (backed up prior → {bak})"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(merged, encoding="utf-8")
+    status = "backed_up" if backup_note else ("updated" if existed else "created")
+    auto = "auto-mode ON" if action.options.get("auto_mode") else "interactive"
+    return ActionResult(action, status, f"{label} → '{value}' ({auto}) in {config_file}{backup_note}")
+
+
+def _set_nested(data: dict, key_path: tuple[str, ...], value: str) -> None:
+    """Set ``key_path`` to ``value``; a STRING parent of a ``*`` key is opencode's scalar shorthand
+    and is expanded to ``{"*": <old>}`` first (the probe already vetted every other shape)."""
+    cur = data
+    for seg in key_path[:-1]:
+        nxt = cur.get(seg)
+        if isinstance(nxt, str) and key_path[-1] == "*":
+            nxt = {"*": nxt}
+            cur[seg] = nxt
+        elif not isinstance(nxt, dict):
+            nxt = {}
+            cur[seg] = nxt
+        cur = nxt
+    cur[key_path[-1]] = value
+
+
+def _do_apply_harness_claude_code(action: Action, on_conflict: str) -> ActionResult:
     """Merge the harness auto/permission mode + self-merge unblock into the settings JSON.
 
     Reconciles three managed things in the one file, all idempotent and additive-safe:
@@ -1565,9 +1715,18 @@ def approval_desired_keys(action: Action) -> tuple[tuple[tuple[str, ...], str], 
 
     kind = str(action.options.get("kind", ""))
     try:
-        return HARNESS_APPROVAL[kind].keys
+        keys = HARNESS_APPROVAL[kind].keys
     except KeyError:
         raise ValueError(f"no approval-posture mechanism for harness kind {kind!r}") from None
+    # The plan resolves the posture value from the harness auto intent (riglib.harness_mode); a
+    # hand-built action without it keeps the registry's legacy value (yolo).
+    mode_value = action.options.get("mode_value")
+    if mode_value is None:
+        return keys
+    # ONE mode key per approval entry — the override below applies the single resolved value
+    if len(keys) != 1:
+        raise ValueError(f"approval posture for {kind!r} manages {len(keys)} keys; mode_value expects exactly one")
+    return ((keys[0][0], str(mode_value)),)
 
 
 def approval_lookup(data: dict, key_path: tuple[str, ...]) -> tuple[str, object]:
@@ -1588,10 +1747,28 @@ def approval_lookup(data: dict, key_path: tuple[str, ...]) -> tuple[str, object]
     return (("present", cur[key_path[-1]]) if key_path[-1] in cur else ("missing", None))
 
 
+def _receipt_installed_values(receipt_file: Path) -> dict[str, object]:
+    """``{dotted key: installed value}`` from rig's approval receipt — the values rig itself wrote.
+
+    A managed key still holding the value rig installed is rig-OWNED: when the config's intent
+    changes (omp ``auto_mode: true`` → ``false``: yolo → always-ask) apply converges it, instead of
+    mistaking rig's own prior write for a user-set value and leaving the harness relaxed forever.
+    Unreadable / malformed receipt → empty (every differing value then counts as the user's)."""
+    try:
+        loaded = json.loads(receipt_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    managed = loaded.get("managed") if isinstance(loaded, dict) else None
+    if not isinstance(managed, dict):
+        return {}
+    return {k: v.get("installed") for k, v in managed.items() if isinstance(v, dict)}
+
+
 def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionResult:
     """Merge the approval posture into the harness config — ADDITIVE, receipt-tracked.
 
-    Sets each managed key ONLY when absent; preserves every sibling key. Writes the sidecar
+    Sets each managed key when absent — or when it still holds the value rig itself installed
+    per the receipt (rig-owned: a changed intent converges it); preserves every sibling key. Writes the sidecar
     receipt (managed paths, previous values, backup identity) — the data a FOLLOW-UP
     deprovision flow restores from (no deprovision action exists yet; the receipt's
     existence also drives the adopt-vs-current idempotency). Never clobbers a differing
@@ -1634,7 +1811,11 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
             )
         data = loaded or {}
 
-    missing: list[tuple[tuple[str, ...], str]] = []
+    receipt_file = approval_receipt_file(action)
+    rig_installed = _receipt_installed_values(receipt_file)
+    # (key_path, desired, previous): previous is None for an absent key, else the rig-installed
+    # value being converged (the config's intent changed, e.g. auto_mode true → false)
+    missing: list[tuple[tuple[str, ...], str, str | None]] = []
     conflicts: list[str] = []
     for key_path, scalar in keys:
         state, value = approval_lookup(data, key_path)
@@ -1642,7 +1823,11 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
         if state == "shape":
             conflicts.append(f"{dotted} parent '{value}' is not an object")
         elif state == "missing":
-            missing.append((key_path, scalar))
+            missing.append((key_path, scalar, None))
+        elif value != scalar and value is not None and rig_installed.get(dotted) == value:
+            # rig-owned: the key still holds what rig installed (an explicit null on disk is
+            # never rig's — it is the user's, a conflict like any other differing value)
+            missing.append((key_path, scalar, str(value)))
         elif value != scalar:
             conflicts.append(f"{dotted} is {value!r} (rig wants {scalar!r})")
 
@@ -1653,7 +1838,6 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
             + "; ".join(conflicts),
         )
 
-    receipt_file = approval_receipt_file(action)
     if not missing:
         if receipt_file.exists():
             return ActionResult(action, "skipped", f"approval/{action.item}: already current in {config_file}")
@@ -1695,7 +1879,7 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
         backup_identity = str(bak)
         backup_note = f" (backed up prior → {bak})"
     managed: dict[str, dict] = {}
-    for key_path, scalar in missing:
+    for key_path, scalar, previous in missing:
         cur = data
         for seg in key_path[:-1]:
             nxt = cur.get(seg)
@@ -1704,7 +1888,7 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
                 cur[seg] = nxt
             cur = nxt
         cur[key_path[-1]] = scalar
-        managed[".".join(key_path)] = {"previous": None, "installed": scalar}
+        managed[".".join(key_path)] = {"previous": previous, "installed": scalar}
     # keys that already matched (unmanaged) are ADOPTED into the same receipt — the managed
     # map must cover every managed key, not just the ones this run changed.
     for key_path, scalar in keys:
@@ -1723,7 +1907,7 @@ def _do_provision_harness_approval(action: Action, on_conflict: str) -> ActionRe
     receipt_file.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     receipt_file.chmod(0o600)
     status = "backed_up" if backup_note else ("updated" if existed else "created")
-    added = ", ".join(".".join(kp) for kp, _ in missing)
+    added = ", ".join(".".join(kp) for kp, _, _ in missing)
     return ActionResult(
         action, status,
         f"approval/{action.item}: set {added} in {config_file}{backup_note} "
@@ -2989,6 +3173,90 @@ def codex_hook_bridge_has_implicit_hooks_table(text: str) -> bool:
         if current_table is None and _toml_key_parts(key.strip())[:1] == ["hooks"]:
             return True
     return False
+
+
+def _toml_root_key_line(text: str, key: str) -> tuple[int, int, str] | None:
+    """Locate ``key = value`` at the TOML ROOT (before any table header) → (start, end, value_code)."""
+    offset = 0
+    value_depth = 0
+    for line in text.splitlines(keepends=True):
+        code = _toml_code_part(line)
+        body = code.strip()
+        if value_depth > 0:
+            value_depth = max(0, value_depth + _toml_value_delta(body))
+        elif body.startswith("[") and body.endswith("]"):
+            return None  # root section ended
+        elif "=" in body:
+            k, v = body.split("=", 1)
+            if _toml_key_parts(k.strip()) == [key]:
+                return offset, offset + len(line), v.strip()
+            value_depth = max(0, _toml_value_delta(v))
+        offset += len(line)
+    return None
+
+
+def _toml_scalar_string(value_code: str) -> str | None:
+    """The str a basic/literal single-line TOML string denotes, else None (not a plain string).
+
+    ``json.loads`` decodes the basic-string escapes — a deliberate shortcut (same one
+    :func:`_toml_key_part` takes): the values here are the plain identifiers rig writes and reads
+    back, not general TOML."""
+    if len(value_code) >= 2 and value_code[0] == value_code[-1] == "'":
+        return value_code[1:-1]
+    if len(value_code) >= 2 and value_code[0] == value_code[-1] == '"':
+        try:
+            loaded = json.loads(value_code)
+        except json.JSONDecodeError:
+            return None
+        return loaded if isinstance(loaded, str) else None
+    return None
+
+
+def read_toml_root_key(text: str, key: str) -> tuple[str, object]:
+    """READ-ONLY probe of a root-level string key: ``("missing"|"present"|"conflict", value)``.
+
+    ``conflict`` carries the raw value code when the key holds something rig must not rewrite as
+    a string (an inline table, array, number, multiline string)."""
+    # only the ROOT section is parsed here — a multiline string inside a later [table] is
+    # irrelevant and must not turn into permanent false drift for the root key.
+    table_offset = _toml_first_table_offset(text)
+    root = text if table_offset is None else text[:table_offset]
+    root_code = "".join(_toml_code_part(line) for line in root.splitlines(keepends=True))
+    if '"""' in root_code or "'''" in root_code:
+        return "conflict", "TOML multiline strings in the root section are unsupported by the root-key merge"
+    found = _toml_root_key_line(text, key)
+    if found is None:
+        return "missing", None
+    _, _, value_code = found
+    scalar = _toml_scalar_string(value_code)
+    if scalar is None:
+        return "conflict", f"{key} = {value_code}"
+    return "present", scalar
+
+
+def upsert_toml_root_key(text: str, key: str, value: str) -> tuple[str, str | None]:
+    """Set ``key = "value"`` in the ROOT section, preserving every other byte of the file.
+
+    An existing root key is rewritten in place (its trailing comment kept); an absent one is
+    appended to the root section — BEFORE the first table header, since a root key placed after
+    a header would belong to that table. Returns ``(merged, conflict)``; on a conflict the text
+    comes back unchanged."""
+    state, current = read_toml_root_key(text, key)
+    if state == "conflict":
+        return text, str(current)
+    rendered = f"{key} = {_toml_string(value)}"
+    if state == "present":
+        start, end, _ = _toml_root_key_line(text, key)  # type: ignore[misc]
+        line = text[start:end]
+        code = _toml_code_part(line)
+        return text[:start] + rendered + line[len(code.rstrip()):] + text[end:], None
+    table_offset = _toml_first_table_offset(text)
+    if table_offset is None:
+        prefix = text.rstrip("\n")
+        return (prefix + "\n" if prefix else "") + rendered + "\n", None
+    prefix = text[:table_offset].rstrip("\n")
+    suffix = text[table_offset:]
+    return (prefix + "\n" if prefix else "") + rendered + "\n\n" + suffix, None
 
 
 def _toml_first_table_offset(text: str) -> int | None:
